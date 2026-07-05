@@ -459,6 +459,18 @@ impl CalibrationPipeline {
         gpu: &GpuContext,
         frames: &[(YuvFrame, YuvFrame)],
     ) -> Result<CalibrationResult, CalibrateError> {
+        self.calibrate_reporting(gpu, frames, None)
+    }
+
+    /// Like [`CalibrationPipeline::calibrate`], but reports per-frame-pair
+    /// progress through `on_frame_progress(done, total)` - see
+    /// [`crate::calibrate_reporting`].
+    pub fn calibrate_reporting(
+        &self,
+        gpu: &GpuContext,
+        frames: &[(YuvFrame, YuvFrame)],
+        on_frame_progress: Option<&mut dyn FnMut(usize, usize, crate::preview::DetectionPreview)>,
+    ) -> Result<CalibrationResult, CalibrateError> {
         let left_params = self.left_params.as_ref().ok_or_else(|| {
             CalibrateError::InvalidConfig(
                 "lens profiles not set - call detect_profiles() or set_profiles() first".into(),
@@ -490,7 +502,14 @@ impl CalibrationPipeline {
             }
         }
 
-        let mut result = crate::calibrate(gpu, frames, left_params, right_params, &config)?;
+        let mut result = crate::calibrate_reporting(
+            gpu,
+            frames,
+            left_params,
+            right_params,
+            &config,
+            on_frame_progress,
+        )?;
         result.calibration.rig_tilt = self.rig_tilt;
         result.calibration.rig_roll = self.rig_roll;
         result.calibration.sync_offset = self.sync_offset_frames;
@@ -517,5 +536,57 @@ impl CalibrationPipeline {
     /// Get right video info.
     pub fn right_info(&self) -> &VideoInfo {
         &self.right_info
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn video_info(name: &str) -> VideoInfo {
+        VideoInfo {
+            path: name.into(),
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+            total_frames: 900,
+        }
+    }
+
+    fn camera_params(fx: f64) -> CameraParams {
+        CameraParams {
+            width: 1920,
+            height: 1080,
+            fx,
+            fy: fx,
+            cx: 960.0,
+            cy: 540.0,
+            d: [0.1, 0.2, 0.3, 0.4],
+        }
+    }
+
+    /// A calibration file's `left_uniforms`/`right_uniforms` are fed into
+    /// the pipeline via `set_profiles` (see `video::calibrate_videos`'s
+    /// `left_params`/`right_params` branch). Auto-calibrate must reuse
+    /// those exact intrinsics rather than re-deriving them - `set_profiles`
+    /// is the only writer of `left_params`/`right_params` on this path
+    /// (unlike `detect_profiles`, it never touches lens-database lookup),
+    /// so the stored values must come back unchanged.
+    #[test]
+    fn set_profiles_preserves_loaded_intrinsics_unchanged() {
+        let mut pipeline = CalibrationPipeline::new(
+            video_info("left.mp4"),
+            video_info("right.mp4"),
+            CalibrationConfig::default(),
+        );
+
+        let left = camera_params(1234.5);
+        let right = camera_params(1250.75);
+        pipeline.set_profiles(left.clone(), right.clone());
+
+        assert_eq!(pipeline.left_params().unwrap().fx, left.fx);
+        assert_eq!(pipeline.left_params().unwrap().d, left.d);
+        assert_eq!(pipeline.right_params().unwrap().fx, right.fx);
+        assert_eq!(pipeline.right_params().unwrap().d, right.d);
     }
 }

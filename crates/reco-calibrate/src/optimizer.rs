@@ -63,11 +63,21 @@ const BOUNDS_5: [(f64, f64); 5] = [
     (-0.3, 0.3), // z_rx: left plane tilt (~17 deg)
 ];
 
-/// Bound for the optional 6th parameter (x_rx, right plane pitch).
+/// Bound for the optional x_rx parameter (right plane pitch).
 const X_RX_BOUND: (f64, f64) = (-0.3, 0.3); // ~17 deg
 
+/// Bound for the optional z_rz parameter (left plane roll).
+const Z_RZ_BOUND: (f64, f64) = (-0.3, 0.3); // ~17 deg
+
 /// Get bounds for the active parameter count.
-fn active_bounds(enable_x_rx: bool, lock_cam_d: bool, lock_z_rx: bool) -> Vec<(f64, f64)> {
+///
+/// Order matches [`unpack_params`]: `[cam_d?, intersect, x_ty, x_rz, z_rx?, x_rx?, z_rz?]`.
+fn active_bounds(
+    enable_x_rx: bool,
+    enable_z_rz: bool,
+    lock_cam_d: bool,
+    lock_z_rx: bool,
+) -> Vec<(f64, f64)> {
     let mut b = if lock_cam_d {
         // Locked cam_d: [intersect, x_ty, x_rz, z_rx]
         BOUNDS_5[1..].to_vec()
@@ -80,6 +90,9 @@ fn active_bounds(enable_x_rx: bool, lock_cam_d: bool, lock_z_rx: bool) -> Vec<(f
     }
     if enable_x_rx {
         b.push(X_RX_BOUND);
+    }
+    if enable_z_rz {
+        b.push(Z_RZ_BOUND);
     }
     b
 }
@@ -125,11 +138,16 @@ const SIMPLEX_PERTURBATION: f64 = 0.10;
 struct CalibrationCost<'a> {
     points: &'a [MatchedPoint],
     sigma: f64,
+    sigma_y: f64,
     bounds: Vec<(f64, f64)>,
     /// When true, cam_d is derived from intersect (cam_d = half_offset).
     lock_cam_d: bool,
     /// When true, z_rx is fixed at 0 (z-plane only translates, no rotation).
     lock_z_rx: bool,
+    /// When true, x_rx (right plane pitch) is a free parameter.
+    enable_x_rx: bool,
+    /// When true, z_rz (left plane roll) is a free parameter.
+    enable_z_rz: bool,
     /// Fraction of worst points to drop (0.0 = no trimming, 0.2 = drop 20%).
     trim_fraction: f64,
 }
@@ -139,21 +157,28 @@ impl CostFunction for CalibrationCost<'_> {
     type Output = f64;
 
     fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
-        let params = match (self.lock_cam_d, self.lock_z_rx) {
-            (true, true) => params_from_vec_locked_no_zrx(p),
-            (true, false) => params_from_vec_locked(p),
-            (false, true) => params_from_vec_no_zrx(p),
-            (false, false) => params_from_vec(p),
-        };
+        let params = unpack_params(
+            p,
+            self.lock_cam_d,
+            self.lock_z_rx,
+            self.enable_x_rx,
+            self.enable_z_rz,
+        );
         let err = if self.trim_fraction > 0.0 {
             geometry::trimmed_seam_weighted_reprojection_error(
                 self.points,
                 &params,
                 self.sigma,
+                self.sigma_y,
                 self.trim_fraction,
             )
         } else {
-            geometry::seam_weighted_reprojection_error(self.points, &params, self.sigma)
+            geometry::seam_weighted_reprojection_error(
+                self.points,
+                &params,
+                self.sigma,
+                self.sigma_y,
+            )
         };
 
         // Quadratic penalty for out-of-bounds parameters.
@@ -165,72 +190,48 @@ impl CostFunction for CalibrationCost<'_> {
 
 /// Convert a parameter vector to [`OptParams`].
 ///
-/// Base order: `[cam_d, intersect, x_ty, x_rz, z_rx]`.
-/// If 6 elements, the 6th is stored in `x_rx` (right plane pitch)
-/// when `enable_x_rx` is set.
-fn params_from_vec(p: &[f64]) -> OptParams {
-    debug_assert!(p.len() >= 5, "need at least 5 params, got {}", p.len());
-    OptParams {
-        cam_d: p[0],
-        intersect: p[1],
-        x_ty: p[2],
-        x_rz: p[3],
-        z_rx: p[4],
-        z_rz: None,
-        x_rx: if p.len() > 5 { Some(p[5]) } else { None },
-    }
-}
+/// Order: `[cam_d?, intersect, x_ty, x_rz, z_rx?, x_rx?, z_rz?]`, where
+/// `cam_d` is omitted when `lock_cam_d` (derived as `0.5 * (1 - intersect)`),
+/// `z_rx` is omitted when `lock_z_rx` (fixed at 0.0), and `x_rx`/`z_rz` are
+/// present only when `enable_x_rx`/`enable_z_rz` are set. This single
+/// unpacker replaces what would otherwise be 8 combinations (2 locks x 2
+/// optional params) of hand-written variants.
+fn unpack_params(
+    p: &[f64],
+    lock_cam_d: bool,
+    lock_z_rx: bool,
+    enable_x_rx: bool,
+    enable_z_rz: bool,
+) -> OptParams {
+    let mut idx = 0;
+    let mut next = || {
+        let v = p[idx];
+        idx += 1;
+        v
+    };
 
-/// Convert a parameter vector to [`OptParams`] with z_rx fixed at 0.
-///
-/// Order: `[cam_d, intersect, x_ty, x_rz]`.
-fn params_from_vec_no_zrx(p: &[f64]) -> OptParams {
-    debug_assert!(p.len() >= 4, "need at least 4 params, got {}", p.len());
-    OptParams {
-        cam_d: p[0],
-        intersect: p[1],
-        x_ty: p[2],
-        x_rz: p[3],
-        z_rx: 0.0,
-        z_rz: None,
-        x_rx: if p.len() > 4 { Some(p[4]) } else { None },
-    }
-}
+    let (cam_d, intersect) = if lock_cam_d {
+        let intersect = next();
+        (0.5 * (1.0 - intersect), intersect)
+    } else {
+        let cam_d = next();
+        let intersect = next();
+        (cam_d, intersect)
+    };
+    let x_ty = next();
+    let x_rz = next();
+    let z_rx = if lock_z_rx { 0.0 } else { next() };
+    let x_rx = enable_x_rx.then(&mut next);
+    let z_rz = enable_z_rz.then(&mut next);
 
-/// Convert a locked parameter vector to [`OptParams`].
-///
-/// cam_d is derived from intersect: `cam_d = 0.5 * (1 - intersect)`.
-/// Order: `[intersect, x_ty, x_rz, z_rx]`.
-/// If 5 elements, the 5th is `x_rx` (right plane pitch).
-fn params_from_vec_locked(p: &[f64]) -> OptParams {
-    debug_assert!(p.len() >= 4, "need at least 4 params, got {}", p.len());
-    let intersect = p[0];
     OptParams {
-        cam_d: 0.5 * (1.0 - intersect),
+        cam_d,
         intersect,
-        x_ty: p[1],
-        x_rz: p[2],
-        z_rx: p[3],
-        z_rz: None,
-        x_rx: if p.len() > 4 { Some(p[4]) } else { None },
-    }
-}
-
-/// Convert a locked parameter vector with z_rx fixed at 0.
-///
-/// cam_d derived from intersect, z_rx = 0.
-/// Order: `[intersect, x_ty, x_rz]`.
-fn params_from_vec_locked_no_zrx(p: &[f64]) -> OptParams {
-    debug_assert!(p.len() >= 3, "need at least 3 params, got {}", p.len());
-    let intersect = p[0];
-    OptParams {
-        cam_d: 0.5 * (1.0 - intersect),
-        intersect,
-        x_ty: p[1],
-        x_rz: p[2],
-        z_rx: 0.0,
-        z_rz: None,
-        x_rx: if p.len() > 3 { Some(p[3]) } else { None },
+        x_ty,
+        x_rz,
+        z_rx,
+        z_rz,
+        x_rx,
     }
 }
 
@@ -313,20 +314,26 @@ impl Optimizer for NelderMeadOptimizer {
         let lock = config.optimizer.lock_cam_d;
         let lock_zrx = config.optimizer.lock_z_rx;
         let enable_xrx = config.optimizer.enable_x_rx;
+        let enable_zrz = config.optimizer.enable_z_rz;
         let max_iters = config.optimizer.max_iters as u64;
-        let bounds = active_bounds(enable_xrx, lock, lock_zrx);
+        let bounds = active_bounds(enable_xrx, enable_zrz, lock, lock_zrx);
         let cost = CalibrationCost {
             points,
             sigma: config.optimizer.seam_sigma,
+            sigma_y: config.optimizer.seam_sigma_y,
             bounds: bounds.clone(),
             lock_cam_d: lock,
             lock_z_rx: lock_zrx,
+            enable_x_rx: enable_xrx,
+            enable_z_rz: enable_zrz,
             trim_fraction: config.optimizer.trim_fraction,
         };
 
         let mut best: Option<(Vec<f64>, f64)> = None;
 
-        // IMU seeds for rotation parameters
+        // IMU seeds for rotation parameters. There's no IMU-derived seed for
+        // z_rz (left plane roll) - no telemetry signal maps to it - so it
+        // always starts at 0.
         let xrx_default = config.imu_xrx_seed.unwrap_or(0.0);
         let zrx_default = config.imu_zrx_seed.unwrap_or(0.0);
 
@@ -357,6 +364,9 @@ impl Optimizer for NelderMeadOptimizer {
             if enable_xrx {
                 start.push(xrx_default);
             }
+            if enable_zrz {
+                start.push(0.0);
+            }
 
             if let Some((p, f)) = run_nelder_mead(&cost, &start, max_iters) {
                 log::debug!("NM start: cost={f:.8}");
@@ -385,6 +395,9 @@ impl Optimizer for NelderMeadOptimizer {
                 if enable_xrx {
                     imu_start.push(xrx_default);
                 }
+                if enable_zrz {
+                    imu_start.push(0.0);
+                }
                 if let Some((p, f)) = run_nelder_mead(&cost, &imu_start, max_iters) {
                     log::debug!("NM IMU-seeded start: cost={f:.8}");
                     if best.as_ref().is_none_or(|(_, r)| f < *r) {
@@ -398,24 +411,15 @@ impl Optimizer for NelderMeadOptimizer {
             max_evals: config.optimizer.max_iters,
         })?;
 
-        let params = match (lock, lock_zrx) {
-            (true, true) => params_from_vec_locked_no_zrx(&best_p),
-            (true, false) => params_from_vec_locked(&best_p),
-            (false, true) => params_from_vec_no_zrx(&best_p),
-            (false, false) => params_from_vec(&best_p),
-        };
+        let params = unpack_params(&best_p, lock, lock_zrx, enable_xrx, enable_zrz);
         let layout = PlaneLayout {
             camera_axis_offset: params.cam_d,
             intersect: params.intersect,
             x_ty: params.x_ty,
             x_rz: params.x_rz,
             z_rx: params.z_rx,
-            x_rx: if enable_xrx {
-                params.x_rx.unwrap_or(0.0)
-            } else {
-                0.0
-            },
-            z_rz: 0.0,
+            x_rx: params.x_rx.unwrap_or(0.0),
+            z_rz: params.z_rz.unwrap_or(0.0),
         };
 
         Ok((layout, best_cost))
@@ -428,9 +432,12 @@ impl Clone for CalibrationCost<'_> {
         Self {
             points: self.points,
             sigma: self.sigma,
+            sigma_y: self.sigma_y,
             bounds: self.bounds.clone(),
             lock_cam_d: self.lock_cam_d,
             lock_z_rx: self.lock_z_rx,
+            enable_x_rx: self.enable_x_rx,
+            enable_z_rz: self.enable_z_rz,
             trim_fraction: self.trim_fraction,
         }
     }
@@ -558,21 +565,21 @@ mod tests {
 
     #[test]
     fn bounds_penalty_zero_inside() {
-        let bounds = active_bounds(false, false, false);
+        let bounds = active_bounds(false, false, false, false);
         let inside = vec![0.225, 0.5, 0.0, 0.0, 0.0];
         assert_abs_diff_eq!(bounds_penalty(&inside, &bounds), 0.0, epsilon = 1e-15);
     }
 
     #[test]
     fn bounds_penalty_nonzero_outside() {
-        let bounds = active_bounds(false, false, false);
+        let bounds = active_bounds(false, false, false, false);
         let outside = vec![0.05, 0.5, 0.0, 0.0, 0.0]; // cam_d below 0.1
         assert!(bounds_penalty(&outside, &bounds) > 0.0);
     }
 
     #[test]
     fn simplex_has_correct_size() {
-        let bounds = active_bounds(false, false, false);
+        let bounds = active_bounds(false, false, false, false);
         let start = STARTS_5[0].to_vec();
         let simplex = build_simplex(&start, &bounds);
         assert_eq!(simplex.len(), 6); // n+1 = 5+1
@@ -590,10 +597,36 @@ mod tests {
 
     #[test]
     fn simplex_6d_with_x_rx() {
-        let bounds = active_bounds(true, false, false);
+        let bounds = active_bounds(true, false, false, false);
         let mut start = STARTS_5[0].to_vec();
         start.push(0.0); // x_rx
         let simplex = build_simplex(&start, &bounds);
         assert_eq!(simplex.len(), 7); // n+1 = 6+1
+    }
+
+    #[test]
+    fn simplex_7d_with_x_rx_and_z_rz() {
+        let bounds = active_bounds(true, true, false, false);
+        let mut start = STARTS_5[0].to_vec();
+        start.push(0.0); // x_rx
+        start.push(0.0); // z_rz
+        let simplex = build_simplex(&start, &bounds);
+        assert_eq!(simplex.len(), 8); // n+1 = 7+1
+    }
+
+    #[test]
+    fn unpack_params_z_rz_only() {
+        let p = vec![0.225, 0.5, 0.0, 0.0, 0.0, 0.01]; // cam_d..z_rx, z_rz
+        let params = unpack_params(&p, false, false, false, true);
+        assert!(params.x_rx.is_none());
+        assert_abs_diff_eq!(params.z_rz.unwrap(), 0.01, epsilon = 1e-15);
+    }
+
+    #[test]
+    fn unpack_params_x_rx_and_z_rz() {
+        let p = vec![0.225, 0.5, 0.0, 0.0, 0.0, 0.02, 0.01]; // .., x_rx, z_rz
+        let params = unpack_params(&p, false, false, true, true);
+        assert_abs_diff_eq!(params.x_rx.unwrap(), 0.02, epsilon = 1e-15);
+        assert_abs_diff_eq!(params.z_rz.unwrap(), 0.01, epsilon = 1e-15);
     }
 }

@@ -391,6 +391,19 @@ impl StitchRenderer {
             CoverageBoundary::from_calibration(self.pipeline.calibration(), &self.pipeline.scene);
     }
 
+    /// Recompute the coverage boundary from the pipeline's current scene.
+    ///
+    /// Needed after [`StitchPipeline::fly_camera`]/`set_camera_position`
+    /// move the virtual camera directly (bypassing `update_calibration`/
+    /// `update_layout`, which are the only other places `coverage` gets
+    /// refreshed) - without this, no-black-edge clamping keeps using the
+    /// boundary computed for the camera's original position, so panning
+    /// while flying looks like it's clamped to where you started.
+    pub fn refresh_coverage(&mut self) {
+        self.coverage =
+            CoverageBoundary::from_calibration(self.pipeline.calibration(), &self.pipeline.scene);
+    }
+
     /// Replace one or both cameras' intrinsics (focal, principal point,
     /// distortion) without rebuilding the pipeline or touching the layout.
     ///

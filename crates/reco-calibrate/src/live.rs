@@ -240,6 +240,8 @@ fn emit_progress(
     on_progress(&CalibrationProgress {
         step,
         detail: detail.into(),
+        fraction: None,
+        preview: None,
     });
 }
 

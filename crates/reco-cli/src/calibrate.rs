@@ -28,12 +28,16 @@ pub fn run_calibrate(
     akaze_threshold: f64,
     lowe_ratio: f64,
     detect_x: f64,
+    detect_max_width: u32,
     detect_y_min: f64,
     detect_y_max: f64,
     lock_cam_d: bool,
     lock_z_rx: bool,
+    enable_x_rx: bool,
+    enable_z_rz: bool,
     trim: f64,
     seam_sigma: f64,
+    seam_sigma_y: f64,
     debug_dir: Option<&str>,
     output: &str,
 ) -> anyhow::Result<()> {
@@ -67,6 +71,7 @@ pub fn run_calibrate(
             threshold: akaze_threshold,
             detect_y_min,
             detect_y_max,
+            detect_max_width,
             ..Default::default()
         },
         matching: reco_calibrate::MatchConfig {
@@ -77,8 +82,11 @@ pub fn run_calibrate(
         optimizer: reco_calibrate::OptimizerConfig {
             lock_cam_d,
             lock_z_rx,
+            enable_x_rx,
+            enable_z_rz,
             trim_fraction: trim,
             seam_sigma,
+            seam_sigma_y,
             ..Default::default()
         },
         ..Default::default()
@@ -175,6 +183,8 @@ pub fn run_calibrate(
     // Debug: save match visualizations
     if let Some(dir) = debug_dir {
         save_match_visualizations(&result, &frame_pairs, dir)?;
+        let points_json = serde_json::to_string_pretty(&result.per_frame)?;
+        std::fs::write(format!("{dir}/matched_points.json"), points_json)?;
     }
 
     Ok(())

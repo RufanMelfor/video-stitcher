@@ -74,6 +74,7 @@ pub mod lens_database;
 pub mod live;
 pub mod optimizer;
 pub mod pipeline;
+pub mod preview;
 mod ransac;
 pub mod sampling;
 pub mod telemetry;
@@ -114,6 +115,11 @@ const FULL_CONFIDENCE_MATCHES: f64 = 50.0;
 /// Takes pre-undistorted RGBA data (from GPU phase) and runs feature
 /// detection, matching, and filtering using the provided trait objects.
 /// This function is thread-safe and called in parallel via rayon.
+///
+/// Always returns an annotated [`preview::DetectionPreview`] alongside the
+/// match result (even on failure) so callers can show *why* a frame didn't
+/// contribute matches (e.g. keypoints found but none inside the overlap
+/// band), not just a final pass/fail count.
 #[allow(clippy::too_many_arguments)]
 fn process_undistorted_pair(
     left_rgba: &[u8],
@@ -127,7 +133,7 @@ fn process_undistorted_pair(
     detector: &dyn traits::FeatureDetector,
     matcher: &dyn traits::FeatureMatcher,
     point_filter: &dyn traits::PointFilter,
-) -> Option<FrameMatches> {
+) -> (Option<FrameMatches>, preview::DetectionPreview) {
     profile_scope!("process_frame");
     let inner = config.matching.spatial_x_inner as f32;
     let y_min = config.akaze.detect_y_min as f32;
@@ -177,12 +183,48 @@ fn process_undistorted_pair(
 
     if kp_left.is_empty() || kp_right.is_empty() {
         log::warn!("frame {frame_idx}: no keypoints in one or both images");
-        return None;
+        let preview = preview::render_detection_preview(
+            left_rgba,
+            lw,
+            lh,
+            &kp_left,
+            &[],
+            &left_region,
+            right_rgba,
+            rw,
+            rh,
+            &kp_right,
+            &[],
+            &right_region,
+        );
+        return (None, preview);
     }
 
     // Match descriptors using the provided matcher
     let raw_matches = matcher.match_features(&desc_left, &desc_right);
     let post_ratio_test = raw_matches.len();
+
+    // Spatial overlap filter (always run, even if raw_matches is already
+    // below min_matches, so the preview can show whatever did survive it).
+    let spatial_matches =
+        filter::spatial_filter(&raw_matches, &kp_left, &kp_right, lw, lh, rw, rh, config);
+    let post_spatial_filter = spatial_matches.len();
+    let survived_left: Vec<usize> = spatial_matches.iter().map(|m| m.left_idx).collect();
+    let survived_right: Vec<usize> = spatial_matches.iter().map(|m| m.right_idx).collect();
+    let preview = preview::render_detection_preview(
+        left_rgba,
+        lw,
+        lh,
+        &kp_left,
+        &survived_left,
+        &left_region,
+        right_rgba,
+        rw,
+        rh,
+        &kp_right,
+        &survived_right,
+        &right_region,
+    );
 
     if raw_matches.len() < config.matching.min_matches {
         log::debug!(
@@ -190,13 +232,8 @@ fn process_undistorted_pair(
             raw_matches.len(),
             config.matching.min_matches
         );
-        return None;
+        return (None, preview);
     }
-
-    // Spatial overlap filter
-    let spatial_matches =
-        filter::spatial_filter(&raw_matches, &kp_left, &kp_right, lw, lh, rw, rh, config);
-    let post_spatial_filter = spatial_matches.len();
 
     // RANSAC outlier rejection
     let inlier_indices = match filter::ransac_filter(&spatial_matches, &kp_left, &kp_right, config)
@@ -204,7 +241,7 @@ fn process_undistorted_pair(
         Ok(indices) => indices,
         Err(e) => {
             log::debug!("frame {frame_idx}: RANSAC failed: {e}");
-            return None;
+            return (None, preview);
         }
     };
     let post_ransac = inlier_indices.len();
@@ -215,7 +252,7 @@ fn process_undistorted_pair(
             post_ransac,
             config.matching.min_matches
         );
-        return None;
+        return (None, preview);
     }
 
     // Normalize surviving matches to plane coordinates.
@@ -249,15 +286,18 @@ fn process_undistorted_pair(
     // Apply the user-provided point filter (e.g. y-disparity rejection)
     let points = point_filter.filter(&points);
 
-    Some(FrameMatches {
-        points,
-        keypoints_left: kp_left.len(),
-        keypoints_right: kp_right.len(),
-        min_descriptors: desc_left.len().min(desc_right.len()),
-        post_ratio_test,
-        post_spatial_filter,
-        post_ransac,
-    })
+    (
+        Some(FrameMatches {
+            points,
+            keypoints_left: kp_left.len(),
+            keypoints_right: kp_right.len(),
+            min_descriptors: desc_left.len().min(desc_right.len()),
+            post_ratio_test,
+            post_spatial_filter,
+            post_ransac,
+        }),
+        preview,
+    )
 }
 
 /// Run the full calibration pipeline with default implementations.
@@ -282,10 +322,31 @@ pub fn calibrate(
     right_params: &CameraParams,
     config: &CalibrationConfig,
 ) -> Result<CalibrationResult, CalibrateError> {
-    let detector = defaults::AkazeDetector::new(config.akaze.threshold);
+    calibrate_reporting(gpu, frames, left_params, right_params, config, None)
+}
+
+/// Like [`calibrate`], but reports per-frame-pair progress through
+/// `on_frame_progress(done, total, preview)` as each pair finishes AKAZE
+/// detect+match - the dominant cost (tens of seconds per pair on 4K
+/// footage). `preview` is an annotated detection image for that frame
+/// pair, useful for live diagnostic display. Pass `None` for the plain
+/// [`calibrate`] behavior.
+pub fn calibrate_reporting(
+    gpu: &GpuContext,
+    frames: &[(YuvFrame, YuvFrame)],
+    left_params: &CameraParams,
+    right_params: &CameraParams,
+    config: &CalibrationConfig,
+    on_frame_progress: Option<&mut dyn FnMut(usize, usize, preview::DetectionPreview)>,
+) -> Result<CalibrationResult, CalibrateError> {
+    let detector = defaults::AkazeDetector::with_border_margin(
+        config.akaze.threshold,
+        30,
+        config.akaze.detect_max_width,
+    );
     let matcher = defaults::HammingMatcher::new(config.matching.lowe_ratio);
     let filter = defaults::NoOpFilter;
-    calibrate_with(
+    calibrate_with_reporting(
         gpu,
         frames,
         left_params,
@@ -294,6 +355,7 @@ pub fn calibrate(
         &detector,
         &matcher,
         &filter,
+        on_frame_progress,
     )
 }
 
@@ -326,6 +388,33 @@ pub fn calibrate_with(
     detector: &dyn traits::FeatureDetector,
     matcher: &dyn traits::FeatureMatcher,
     point_filter: &dyn traits::PointFilter,
+) -> Result<CalibrationResult, CalibrateError> {
+    calibrate_with_reporting(
+        gpu,
+        frames,
+        left_params,
+        right_params,
+        config,
+        detector,
+        matcher,
+        point_filter,
+        None,
+    )
+}
+
+/// Like [`calibrate_with`], but reports per-frame-pair progress. See
+/// [`calibrate_reporting`].
+#[allow(clippy::too_many_arguments)]
+pub fn calibrate_with_reporting(
+    gpu: &GpuContext,
+    frames: &[(YuvFrame, YuvFrame)],
+    left_params: &CameraParams,
+    right_params: &CameraParams,
+    config: &CalibrationConfig,
+    detector: &dyn traits::FeatureDetector,
+    matcher: &dyn traits::FeatureMatcher,
+    point_filter: &dyn traits::PointFilter,
+    mut on_frame_progress: Option<&mut dyn FnMut(usize, usize, preview::DetectionPreview)>,
 ) -> Result<CalibrationResult, CalibrateError> {
     config.validate()?;
 
@@ -370,7 +459,7 @@ pub fn calibrate_with(
             let r = right_undistort.undistort(gpu, &right.y, &right.u, &right.v, right_params);
             (l, r)
         };
-        let result = {
+        let (result, preview) = {
             profile_scope!("akaze_detect_match");
             process_undistorted_pair(
                 &left_rgba,
@@ -388,6 +477,9 @@ pub fn calibrate_with(
         };
         if let Some(fm) = result {
             successful_frames.push(fm);
+        }
+        if let Some(cb) = on_frame_progress.as_deref_mut() {
+            cb(i + 1, frames.len(), preview);
         }
     }
 

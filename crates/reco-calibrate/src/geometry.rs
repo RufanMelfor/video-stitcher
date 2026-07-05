@@ -366,8 +366,17 @@ pub fn per_point_seam_weighted_errors(
     points: &[MatchedPoint],
     params: &OptParams,
     sigma: f64,
+    sigma_y: f64,
 ) -> Vec<f64> {
-    per_point_seam_weighted_errors_full(points, params, &SeamWeightConfig::from_sigma(sigma))
+    per_point_seam_weighted_errors_full(
+        points,
+        params,
+        &SeamWeightConfig {
+            sigma_x: sigma,
+            sigma_y,
+            ..Default::default()
+        },
+    )
 }
 
 fn per_point_seam_weighted_errors_full(
@@ -444,14 +453,16 @@ fn per_point_seam_weighted_errors_full(
 ///    ground features are less reliable)
 ///
 /// The seam position updates dynamically with the current `intersect`
-/// value. The `sigma` parameter controls the horizontal Gaussian width
-/// (seam proximity). Vertical weighting uses a fixed sigma of 0.08.
+/// value. `sigma` controls the horizontal Gaussian width (seam
+/// proximity); `sigma_y` controls the vertical Gaussian width (how much
+/// weight near/far-field points get relative to the image center).
 pub fn seam_weighted_reprojection_error(
     points: &[MatchedPoint],
     params: &OptParams,
     sigma: f64,
+    sigma_y: f64,
 ) -> f64 {
-    per_point_seam_weighted_errors(points, params, sigma)
+    per_point_seam_weighted_errors(points, params, sigma, sigma_y)
         .iter()
         .sum()
 }
@@ -465,12 +476,13 @@ pub fn trimmed_seam_weighted_reprojection_error(
     points: &[MatchedPoint],
     params: &OptParams,
     sigma: f64,
+    sigma_y: f64,
     trim_fraction: f64,
 ) -> f64 {
     if points.is_empty() {
         return 0.0;
     }
-    let mut errors = per_point_seam_weighted_errors(points, params, sigma);
+    let mut errors = per_point_seam_weighted_errors(points, params, sigma, sigma_y);
     errors.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let keep = ((1.0 - trim_fraction) * errors.len() as f64).ceil() as usize;
@@ -722,8 +734,8 @@ mod tests {
         // With any non-zero raw error (which these points have due to
         // geometry), the near-seam point should contribute more because
         // its Gaussian weight is ~1.0 vs ~0 for the far point.
-        let err_near = seam_weighted_reprojection_error(&[near_seam], &params, sigma);
-        let err_far = seam_weighted_reprojection_error(&[far_from_seam], &params, sigma);
+        let err_near = seam_weighted_reprojection_error(&[near_seam], &params, sigma, sigma);
+        let err_far = seam_weighted_reprojection_error(&[far_from_seam], &params, sigma, sigma);
 
         assert!(
             err_near > err_far,

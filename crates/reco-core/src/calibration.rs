@@ -924,8 +924,8 @@ mod tests {
     #[test]
     fn old_calibration_json_without_new_fields_uses_safe_defaults() {
         // A calibration written before lens_correction_amount/blend_width
-        // existed must load with the prior behaviour: full correction (1.0)
-        // and the 0.05 seam, not 0.0/0.0.
+        // existed must load with the prior behaviour: full correction
+        // (1.0) and the 0.05 seam.
         let mut value = serde_json::to_value(valid_cal()).unwrap();
         let obj = value.as_object_mut().unwrap();
         obj.remove("lens_correction_amount");

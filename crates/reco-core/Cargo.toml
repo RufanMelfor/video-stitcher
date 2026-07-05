@@ -13,7 +13,20 @@ readme = "README.md"
 profiling = ["tracing"]
 
 [dependencies]
-wgpu = { version = "28", features = ["vulkan-portability"] }
+# `gles` is omitted: its transitive dependency (khronos_api 3.1.0) has a
+# build-script bug that fails on Windows (uses current_dir() instead of
+# CARGO_MANIFEST_DIR to locate package-relative XML files). RPi5 users who
+# need the GL backend must re-enable it via --features wgpu/gles.
+# FRICTION: tracked in crates/reco-core/FRICTION.md.
+wgpu = { version = "28", default-features = false, features = [
+    "std",
+    "parking_lot",
+    "dx12",
+    "metal",
+    "vulkan",
+    "vulkan-portability",
+    "wgsl",
+] }
 bytemuck = { version = "1", features = ["derive"] }
 nalgebra = "0.35"
 serde = { version = "1", features = ["derive"] }

@@ -32,25 +32,34 @@ pub struct AkazeDetector {
     /// distance of a black pixel (pincushion edge) are rejected.
     /// Set to 0 to disable. Only applies to images wider than 1000px.
     pub border_margin: i32,
+    /// Images wider than this are downscaled before AKAZE detection
+    /// (keypoints are mapped back to full resolution afterward). `0`
+    /// disables the cap entirely, detecting at full source resolution.
+    /// See [`features::DETECT_MAX_WIDTH`] for the built-in default.
+    pub detect_max_width: u32,
 }
 
 impl AkazeDetector {
-    /// Create a new AKAZE detector with the given threshold and default
-    /// border margin (30px).
+    /// Create a new AKAZE detector with the given threshold, default
+    /// border margin (30px), and default detection-width cap
+    /// ([`features::DETECT_MAX_WIDTH`]).
     ///
     /// Recommended: 0.0001 for calibration (sensitive), 0.001 for fast detection.
     pub fn new(threshold: f64) -> Self {
         Self {
             threshold,
             border_margin: 30,
+            detect_max_width: features::DETECT_MAX_WIDTH,
         }
     }
 
-    /// Create a detector with custom threshold and border margin.
-    pub fn with_border_margin(threshold: f64, border_margin: i32) -> Self {
+    /// Create a detector with custom threshold, border margin, and
+    /// detection-width cap (`0` = full resolution, no cap).
+    pub fn with_border_margin(threshold: f64, border_margin: i32, detect_max_width: u32) -> Self {
         Self {
             threshold,
             border_margin,
+            detect_max_width,
         }
     }
 }
@@ -60,6 +69,7 @@ impl Default for AkazeDetector {
         Self {
             threshold: 0.0001,
             border_margin: 30,
+            detect_max_width: features::DETECT_MAX_WIDTH,
         }
     }
 }
@@ -82,6 +92,7 @@ impl FeatureDetector for AkazeDetector {
             max_keypoints,
             self.threshold,
             self.border_margin,
+            self.detect_max_width,
         );
         (kps, descs)
     }
@@ -192,15 +203,18 @@ impl PointFilter for YDisparityFilter {
 pub struct SeamWeightedCost {
     /// Gaussian sigma for seam-proximity weighting.
     pub sigma: f64,
+    /// Gaussian sigma for center-band (vertical) weighting.
+    pub sigma_y: f64,
     /// Fraction of worst points to drop (0.0 = no trimming).
     pub trim_fraction: f64,
 }
 
 impl SeamWeightedCost {
     /// Create a new seam-weighted cost function.
-    pub fn new(sigma: f64, trim_fraction: f64) -> Self {
+    pub fn new(sigma: f64, sigma_y: f64, trim_fraction: f64) -> Self {
         Self {
             sigma,
+            sigma_y,
             trim_fraction,
         }
     }
@@ -210,6 +224,7 @@ impl Default for SeamWeightedCost {
     fn default() -> Self {
         Self {
             sigma: 0.08,
+            sigma_y: 0.08,
             trim_fraction: 0.3,
         }
     }
@@ -222,15 +237,16 @@ impl CostFunction for SeamWeightedCost {
                 points,
                 params,
                 self.sigma,
+                self.sigma_y,
                 self.trim_fraction,
             )
         } else {
-            geometry::seam_weighted_reprojection_error(points, params, self.sigma)
+            geometry::seam_weighted_reprojection_error(points, params, self.sigma, self.sigma_y)
         }
     }
 
     fn per_point_cost(&self, points: &[MatchedPoint], params: &OptParams) -> Vec<f64> {
-        geometry::per_point_seam_weighted_errors(points, params, self.sigma)
+        geometry::per_point_seam_weighted_errors(points, params, self.sigma, self.sigma_y)
     }
 }
 

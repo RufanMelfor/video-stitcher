@@ -232,10 +232,10 @@ fn dji_basin_costs() {
     };
 
     let cost_a = reco_calibrate::geometry::trimmed_seam_weighted_reprojection_error(
-        &points, &params_a, sigma, trim,
+        &points, &params_a, sigma, sigma, trim,
     );
     let cost_b = reco_calibrate::geometry::trimmed_seam_weighted_reprojection_error(
-        &points, &params_b, sigma, trim,
+        &points, &params_b, sigma, sigma, trim,
     );
 
     eprintln!("Basin A (amazing): seam+trim cost = {cost_a:.10}");
