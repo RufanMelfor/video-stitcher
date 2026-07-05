@@ -10,6 +10,8 @@ members = [
     "crates/reco-detect",
     "crates/reco-gui",
     "crates/reco-obs",
+    "crates/reco-stitch-img",
+    "crates/rig-calib",
 ]
 # The `fuzz` subcrate is intentionally out of the workspace because
 # libfuzzer-sys requires nightly-specific compiler flags that would
@@ -36,6 +38,23 @@ tracing-log = "0.2"
 [profile.release]
 strip = true
 lto = "thin"
+
+# Fix khronos_api 3.1.0 build.rs bug on Windows: build script uses current_dir()
+# which is not guaranteed to be the package root. Replaced with CARGO_MANIFEST_DIR.
+[patch.crates-io]
+khronos_api = { path = "vendor/khronos_api" }
+# Patched to inline OUT_DIR-generated private.rs content so Windows Defender
+# cannot block the build-script file writes. Build scripts emit only stdout;
+# the generated module is hardcoded directly in each crate's source.
+serde_core = { path = "vendor/serde_core" }
+serde       = { path = "vendor/serde" }
+thiserror   = { path = "vendor/thiserror" }
+serde_json  = { path = "vendor/serde_json" }
+# naga's build script uses cfg_aliases to emit cfg flags; that binary gets
+# blocked by Defender. Patched to emit the same flags via plain println!.
+naga        = { path = "vendor/naga" }
+# wgpu-hal's build script also uses cfg_aliases. Same Defender-bypass patch.
+wgpu-hal    = { path = "vendor/wgpu-hal" }
 
 # SPIKE: wgpu 28 interop with Slint. Fork removed; if wgpu 28 doesn't
 # have the shaderDrawParameters regression, no patch is needed.
