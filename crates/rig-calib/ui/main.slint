@@ -1,0 +1,1043 @@
+// RIG CALIB - standalone lens + rig calibration tool.
+// Dark theme (configured via build.rs).
+
+import { Button, VerticalBox, HorizontalBox, Slider, ScrollView, CheckBox, LineEdit } from "std-widgets.slint";
+
+/// One labeled slider row for the controls panel.
+component LabeledSlider inherits VerticalLayout {
+    in property <string> label;
+    in property <float> minimum;
+    in property <float> maximum;
+    in-out property <float> value;
+    in property <string> suffix: "";
+    in property <int> decimals: 2;
+    callback changed(float);
+
+    spacing: 2px;
+
+    HorizontalLayout {
+        Text {
+            text: root.label;
+            color: #bbb;
+            font-size: 13px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Text {
+            property <float> scale:
+                root.decimals <= 0 ? 1
+              : root.decimals == 1 ? 10
+              : root.decimals == 2 ? 100
+              : root.decimals == 3 ? 1000
+              : root.decimals == 4 ? 10000
+              : 100000;
+            text: (root.decimals == 0
+                ? round(root.value)
+                : round(root.value * scale) / scale) + root.suffix;
+            color: #888;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+    }
+
+    Slider {
+        minimum: root.minimum;
+        maximum: root.maximum;
+        value <=> root.value;
+        changed(v) => { root.changed(v); }
+    }
+}
+
+/// Collapsible section header with clear hover feedback.
+component SectionHeader inherits Rectangle {
+    in property <string> title;
+    in-out property <bool> expanded: false;
+
+    height: 30px;
+    border-radius: 4px;
+    background: section-touch.has-hover ? #2e2e2e : #1e1e1e;
+
+    section-touch := TouchArea {
+        clicked => { root.expanded = !root.expanded; }
+        mouse-cursor: pointer;
+    }
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: 6px;
+
+        // Expanded/collapsed state marker: filled yellow when open, so an
+        // open panel is unmistakable even from a glance across the whole
+        // stack of section headers.
+        Rectangle {
+            width: 9px;
+            height: 9px;
+            border-radius: 2px;
+            background: root.expanded ? #e8c020 : transparent;
+            border-width: 1px;
+            border-color: root.expanded ? #e8c020 : #555;
+        }
+        Text {
+            text: root.title;
+            color: #eee;
+            font-size: 15px;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
+/// Wraps a control with a hover tooltip: shows `tip` in a small popup
+/// after a brief hover delay, closes as soon as the pointer leaves.
+/// Wrapping (rather than baking hover into every control) keeps this
+/// opt-in per usage site - just wrap `Tip { tip: "..."; <control> }`.
+component Tip inherits TouchArea {
+    in property <string> tip;
+
+    // TouchArea does not auto-size to its children the way a layout
+    // does, so a bare `@children` here would collapse to zero size
+    // inside the surrounding VerticalBox/HorizontalBox. Route the
+    // wrapped content through a real layout and mirror its computed
+    // size back onto this TouchArea (same pattern Slint's own Button
+    // widget uses: binding min/preferred size from an inner layout).
+    inner := VerticalLayout {
+        padding: 0px;
+        spacing: 0px;
+        @children
+    }
+    min-width: inner.min-width;
+    min-height: inner.min-height;
+    preferred-width: inner.preferred-width;
+    preferred-height: inner.preferred-height;
+
+    changed has-hover => {
+        if root.has-hover && root.tip != "" {
+            tip-timer.running = true;
+        } else {
+            tip-timer.running = false;
+            popup.close();
+        }
+    }
+
+    tip-timer := Timer {
+        interval: 3000ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            popup.show();
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0px;
+        y: root.height + 4px;
+        Rectangle {
+            background: #2a2a2a;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: #444;
+            width: tip-text.width + 16px;
+            height: tip-text.height + 12px;
+            tip-text := Text {
+                x: 8px;
+                y: 6px;
+                text: root.tip;
+                color: #eee;
+                font-size: 13px;
+                wrap: word-wrap;
+                width: 220px;
+            }
+        }
+    }
+}
+
+export component CalibrateApp inherits Window {
+    title: "RIG CALIB - Powered by RECO";
+    icon: @image-url("../assets/icon.png");
+    preferred-width: 1280px;
+    preferred-height: 820px;
+    min-width: 720px;
+    min-height: 560px;
+
+    property <color> bg-base: #121212;
+    property <color> bg-panel: #1a1a1a;
+    property <color> bg-bar: #1e1e1e;
+    property <color> bg-preview: #0a0a0a;
+    property <color> bg-card: #242424;
+    property <color> border-subtle: #333;
+    property <color> text-muted: #888;
+    property <color> accent-error: #f88;
+    property <color> accent-warn: #e8a060;
+    property <color> accent-info: #8f8;
+
+    background: bg-base;
+
+    out property <float> preview-area-width: preview-box.width / 1px;
+    out property <float> preview-area-height: preview-box.height / 1px;
+
+    // ── Properties bound from Rust ──
+
+    in-out property <image> preview-frame;
+    in-out property <bool> playing: false;
+    in-out property <bool> files-loaded: false;
+    in-out property <string> left-path: "";
+    in-out property <string> right-path: "";
+    in-out property <string> calibration-path: "";
+    in-out property <string> status-text: "Load left + right videos to begin";
+    in-out property <bool> status-is-error: false;
+    in-out property <int> current-frame: 0;
+    in-out property <int> total-frames: 0;
+    in-out property <string> current-time-text: "0:00";
+    in-out property <string> total-time-text: "0:00";
+    in-out property <float> fps: 0.0;
+    in-out property <bool> calibrating: false;
+    in-out property <string> calibration-step: "";
+    // Fraction (0.0-1.0) of the current calibration step completed, or
+    // -1.0 when the current step has no meaningful fraction (e.g.
+    // probing, sync) - callers should hide the percentage in that case.
+    in-out property <float> calibration-progress: -1.0;
+    in-out property <string> version: "";
+
+    // Camera view state.
+    in-out property <float> yaw: 0.0;
+    in-out property <float> pitch: 0.0;
+    in-out property <float> fov: 75.0;
+    // Free-fly debug camera (F key or the "Fly Camera" button toggles it).
+    in-out property <bool> fly-mode: false;
+
+    // Rig calibration.
+    in-out property <float> blend-width: 0.05;
+    in-out property <float> rig-tilt: 0.0;
+    in-out property <float> rig-roll: 0.0;
+    in-out property <int> sync-offset: 0;
+    in-out property <float> cal-intersect: 0.0;
+    in-out property <float> cal-camera-axis-offset: 0.0;
+    in-out property <float> cal-x-ty: 0.0;
+    in-out property <bool> cal-dirty: false;
+
+    // Auto-calibrate tuning knobs.
+    in-out property <bool> use-imu-seeds: false;
+    // Forces the optimizer to solve the right camera's independent pitch
+    // (x_rx) even without IMU data. Normally x_rx only turns on when the
+    // IMU sees >2 deg differential pitch between cameras; rigs without a
+    // native gyro (e.g. Osmo Action 4) never get that seed, so a real
+    // pitch mismatch between the two lenses would otherwise never be
+    // corrected. Off by default: one more free rotation axis for the
+    // optimizer to fit against ~90 matched points risks overfitting noise
+    // instead of the real rotation, so only enable it if the stitch
+    // visibly needs a rotational nudge.
+    in-out property <bool> force-x-rx: false;
+    // Forces the optimizer to solve the left camera's independent roll
+    // (z_rz). Unlike x_rx there is no IMU signal to auto-detect this and
+    // no auto-enable gate to bypass - it's always off unless checked here.
+    // Off by default for the same overfitting-risk reason as force-x-rx.
+    in-out property <bool> force-z-rz: false;
+    in-out property <int> calibration-frames: 4;
+    in-out property <float> cal-akaze-threshold: 0.0001;
+    // 0.25/0.85 (not the library's raw 0.05/0.95 default): trims sky and
+    // the heavily-warped undistortion edges, which otherwise seed noisy
+    // matches and visibly worsen far-plane alignment (reco-cli's
+    // `calibrate` subcommand uses the same values for the same reason).
+    in-out property <float> cal-detect-y-min: 0.25;
+    in-out property <float> cal-detect-y-max: 0.85;
+    in-out property <float> cal-skip-end-secs: 0.0;
+    // Feature detection normally downscales frames wider than 1920px for
+    // speed (keypoints are mapped back to full resolution afterward).
+    // Enabling this detects at full source resolution instead - slower,
+    // but can improve precision on 4K+ footage.
+    in-out property <bool> cal-full-res-features: false;
+    in-out property <bool> use-constrained-look: true;
+
+    // Lens profile info (populated after auto-calibrate).
+    in-out property <string> lens-left-camera: "";
+    in-out property <string> lens-left-lens: "";
+    in-out property <string> lens-left-source: "";
+    in-out property <string> lens-right-camera: "";
+    in-out property <string> lens-right-lens: "";
+    in-out property <string> lens-right-source: "";
+    in-out property <int> lens-candidates-count: 0;
+    in-out property <bool> lens-info-available: false;
+
+    // Per-camera lens intrinsics.
+    in-out property <float> lens-left-fx: 0.0;
+    in-out property <float> lens-left-fy: 0.0;
+    in-out property <float> lens-left-cx: 0.0;
+    in-out property <float> lens-left-cy: 0.0;
+    in-out property <float> lens-left-k1: 0.0;
+    in-out property <float> lens-left-k2: 0.0;
+    in-out property <float> lens-left-k3: 0.0;
+    in-out property <float> lens-left-k4: 0.0;
+    in-out property <float> lens-right-fx: 0.0;
+    in-out property <float> lens-right-fy: 0.0;
+    in-out property <float> lens-right-cx: 0.0;
+    in-out property <float> lens-right-cy: 0.0;
+    in-out property <float> lens-right-k1: 0.0;
+    in-out property <float> lens-right-k2: 0.0;
+    in-out property <float> lens-right-k3: 0.0;
+    in-out property <float> lens-right-k4: 0.0;
+    in-out property <float> lens-fx-min: 0.0;
+    in-out property <float> lens-fx-max: 0.0;
+    in-out property <float> lens-fy-min: 0.0;
+    in-out property <float> lens-fy-max: 0.0;
+    in-out property <float> lens-cx-min: 0.0;
+    in-out property <float> lens-cx-max: 0.0;
+    in-out property <float> lens-cy-min: 0.0;
+    in-out property <float> lens-cy-max: 0.0;
+    in-out property <float> lens-k-range: 0.3;
+    in-out property <bool> lens-dirty: false;
+    in-out property <string> lens-selected-camera: "left";
+
+    // Lens picker dialog.
+    in-out property <bool> lens-picker-open: false;
+    in-out property <string> lens-search-query: "";
+    in-out property <[string]> lens-search-results: [];
+    in-out property <string> lens-pick-side: "both";
+
+    // Lens preview mode (single-camera flat view).
+    in-out property <bool> lens-preview-active: false;
+    in-out property <string> lens-preview-side: "left";
+    in-out property <float> lens-correction-amount: 1.0;
+
+    // ── Callbacks into Rust ──
+
+    callback pick-left-video();
+    callback pick-right-video();
+    callback pick-calibration();
+    callback clear-calibration();
+    callback auto-calibrate();
+    callback cancel-calibrate();
+    callback toggle-playback();
+    callback step-forward();
+    callback step-backward();
+    callback seek(float);
+    callback seek-relative(float);
+    callback pan(float, float);
+    callback zoom(float);
+    callback reset-view();
+    // Free-fly camera (debug navigation aid): F toggles, WASD/E/C move.
+    // Args to fly-key: key text, pressed, shift-held.
+    callback fly-toggle();
+    callback fly-key(string, bool, bool);
+    callback changed-blend-width(float);
+    callback changed-rig-tilt(float);
+    callback changed-rig-roll(float);
+    callback changed-sync-offset(int);
+    callback changed-cal-intersect(float);
+    callback changed-cal-camera-axis-offset(float);
+    callback changed-cal-x-ty(float);
+    callback save-calibration();
+    callback reset-calibration();
+    callback changed-lens-param();
+    callback reset-lens();
+    callback lens-search-changed(string);
+    callback lens-pick(int, string);
+    callback lens-pick-file();
+    callback changed-lens-preview();
+    callback changed-lens-correction(float);
+    callback changed-constrained-look();
+
+    forward-focus: key-scope;
+    public function refocus() { key-scope.focus(); }
+
+    key-scope := FocusScope {
+        width: 100%;
+        height: 100%;
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if (event.text == " ") { root.toggle-playback(); return accept; }
+            if (event.text == Key.LeftArrow)  { root.pan(-20, 0); return accept; }
+            if (event.text == Key.RightArrow) { root.pan(20, 0);  return accept; }
+            if (event.text == Key.UpArrow)    { root.pan(0, -20); return accept; }
+            if (event.text == Key.DownArrow)  { root.pan(0, 20);  return accept; }
+            if (event.text == "+" || event.text == "=") { root.zoom(-5); return accept; }
+            if (event.text == "-" || event.text == "_") { root.zoom(5);  return accept; }
+            if (event.text == "[") { root.seek-relative(-5); return accept; }
+            if (event.text == "]") { root.seek-relative(5);  return accept; }
+            if (event.text == "r" || event.text == "R") { root.reset-view(); return accept; }
+            // F : toggle free-fly camera (debug navigation aid).
+            if (event.text == "f" || event.text == "F") { root.fly-toggle(); return accept; }
+            // Free-fly movement (no-op in Rust unless fly mode is on).
+            if (event.text == "w" || event.text == "W" || event.text == "a" || event.text == "A"
+                || event.text == "s" || event.text == "S" || event.text == "d" || event.text == "D"
+                || event.text == "e" || event.text == "E" || event.text == "c" || event.text == "C") {
+                root.fly-key(event.text, true, event.modifiers.shift);
+                return accept;
+            }
+            return reject;
+        }
+        key-released(event) => {
+            if (event.text == "w" || event.text == "W" || event.text == "a" || event.text == "A"
+                || event.text == "s" || event.text == "S" || event.text == "d" || event.text == "D"
+                || event.text == "e" || event.text == "E" || event.text == "c" || event.text == "C") {
+                root.fly-key(event.text, false, event.modifiers.shift);
+                return accept;
+            }
+            return reject;
+        }
+
+        VerticalBox {
+            padding: 8px;
+            spacing: 8px;
+
+            // ── Top bar: file pickers + auto-calibrate ──
+            Rectangle {
+                background: root.bg-bar;
+                border-radius: 4px;
+                height: 44px;
+
+                HorizontalBox {
+                    padding: 6px;
+                    spacing: 8px;
+
+                    Tip {
+                        tip: "Choose the left camera's video file.";
+                        Button {
+                            text: root.left-path == "" ? "Load Left…" : root.left-path;
+                            clicked => { root.pick-left-video(); }
+                        }
+                    }
+                    Tip {
+                        tip: "Choose the right camera's video file.";
+                        Button {
+                            text: root.right-path == "" ? "Load Right…" : root.right-path;
+                            clicked => { root.pick-right-video(); }
+                        }
+                    }
+                    Tip {
+                        tip: "Load a saved match.json calibration file.";
+                        Button {
+                            text: root.calibration-path == "" ? "Load Calibration…" : root.calibration-path;
+                            clicked => { root.pick-calibration(); }
+                        }
+                    }
+                    if root.calibration-path != "": Tip {
+                        tip: "Clear the loaded calibration so you can run a fresh Auto-Calibrate.";
+                        Button {
+                            text: "×";
+                            width: 28px;
+                            clicked => { root.clear-calibration(); }
+                        }
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    if root.calibrating: Text {
+                        text: root.calibration-progress >= 0.0
+                            ? root.calibration-step + " - " + round(root.calibration-progress * 100) + "%"
+                            : root.calibration-step;
+                        color: root.text-muted;
+                        vertical-alignment: center;
+                    }
+                    if root.calibrating: Tip {
+                        tip: "Stop the running auto-calibration.";
+                        Button {
+                            text: "Cancel";
+                            clicked => { root.cancel-calibrate(); }
+                        }
+                    }
+                    if !root.calibrating: Tip {
+                        tip: "Automatically find the stitch geometry by matching features between the two videos.";
+                        Button {
+                            text: "Auto-Calibrate";
+                            enabled: root.left-path != "" && root.right-path != "";
+                            clicked => { root.auto-calibrate(); }
+                        }
+                    }
+                    Tip {
+                        tip: "Toggle free-fly debug camera: WASD move, E/C up/down, Shift boost, drag to look. (Same as pressing F.)";
+                        Button {
+                            text: root.fly-mode ? "Fly: ON" : "Fly Camera";
+                            enabled: root.files-loaded;
+                            clicked => { root.fly-toggle(); root.refocus(); }
+                        }
+                    }
+                    Text {
+                        text: root.version;
+                        color: root.text-muted;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // ── Main area: preview + playback | rig/lens panel ──
+            HorizontalLayout {
+                spacing: 8px;
+                vertical-stretch: 1;
+
+                VerticalLayout {
+                    spacing: 6px;
+                    horizontal-stretch: 1;
+
+                    Rectangle {
+                        background: root.bg-preview;
+                        vertical-stretch: 1;
+
+                        if !root.files-loaded && !root.calibrating: VerticalLayout {
+                            alignment: center;
+                            spacing: 8px;
+                            Text {
+                                text: "RIG CALIB";
+                                color: #555;
+                                font-size: 20px;
+                                font-weight: 600;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "1. Load left + right videos\n2. Auto-Calibrate or load a calibration JSON\n3. Fine-tune rig + lens below";
+                                color: #444;
+                                font-size: 15px;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        preview-box := Rectangle {
+                            width: 100%;
+                            height: 100%;
+
+                            if root.files-loaded || root.calibrating: Image {
+                                source: root.preview-frame;
+                                image-fit: contain;
+                                width: 100%;
+                                height: 100%;
+                            }
+
+                            drag := TouchArea {
+                                enabled: root.files-loaded;
+                                property <length> last-x: 0px;
+                                property <length> last-y: 0px;
+
+                                pointer-event(e) => {
+                                    if (e.kind == PointerEventKind.down) {
+                                        self.last-x = self.mouse-x;
+                                        self.last-y = self.mouse-y;
+                                    }
+                                }
+                                moved => {
+                                    if (self.pressed) {
+                                        root.pan(
+                                            (self.mouse-x - self.last-x) / 1px,
+                                            (self.mouse-y - self.last-y) / 1px,
+                                        );
+                                        self.last-x = self.mouse-x;
+                                        self.last-y = self.mouse-y;
+                                    }
+                                }
+                                scroll-event(e) => {
+                                    root.zoom(-e.delta-y / 40px);
+                                    return accept;
+                                }
+                            }
+                        }
+                    }
+
+                    // Playback strip.
+                    HorizontalBox {
+                        height: 36px;
+                        spacing: 6px;
+                        Tip { tip: "Step back one frame."; Button { text: "|<"; enabled: root.files-loaded; clicked => { root.step-backward(); } } }
+                        Tip { tip: "Play or pause."; Button { text: root.playing ? "||" : "▶"; enabled: root.files-loaded; clicked => { root.toggle-playback(); } } }
+                        Tip { tip: "Step forward one frame."; Button { text: ">|"; enabled: root.files-loaded; clicked => { root.step-forward(); } } }
+                        Text {
+                            text: root.current-time-text;
+                            color: root.text-muted;
+                            vertical-alignment: center;
+                        }
+                        Slider {
+                            enabled: root.files-loaded;
+                            horizontal-stretch: 1;
+                            minimum: 0.0;
+                            maximum: root.total-frames == 0 ? 1.0 : 1.0 * root.total-frames;
+                            value: 1.0 * root.current-frame;
+                            changed(val) => {
+                                if root.total-frames > 0 { root.seek(val / root.total-frames); }
+                            }
+                        }
+                        Text {
+                            text: root.total-time-text;
+                            color: root.text-muted;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // Status line (replaces reco-gui's toast stack).
+                    Text {
+                        text: root.status-text;
+                        color: root.status-is-error ? root.accent-error : root.text-muted;
+                        font-size: 13px;
+                    }
+                }
+
+                // ── Right panel: rig calibration + lens correction ──
+                Rectangle {
+                    background: root.bg-panel;
+                    width: 320px;
+
+                    ScrollView {
+                        VerticalBox {
+                            padding: 8px;
+                            spacing: 10px;
+
+                            // Rig calibration section.
+                            rig-header := SectionHeader { title: "Rig calibration"; expanded: true; }
+                            if rig-header.expanded: VerticalBox {
+                                vertical-stretch: 0;
+                                padding: 4px;
+                                spacing: 8px;
+
+                                Tip {
+                                    tip: "Width of the feathered blend at the seam between the two cameras.";
+                                    LabeledSlider {
+                                        label: "Blend width";
+                                        minimum: 0.0; maximum: 0.5; decimals: 3;
+                                        value <=> root.blend-width;
+                                        changed(v) => { root.changed-blend-width(v); }
+                                    }
+                                }
+                                Tip {
+                                    tip: "Forward/backward lean of the camera rig; straightens vertical lines at the panorama edges.";
+                                    LabeledSlider {
+                                        label: "Rig tilt"; suffix: "°";
+                                        minimum: -30.0; maximum: 30.0; decimals: 2;
+                                        value <=> root.rig-tilt;
+                                        changed(v) => { root.changed-rig-tilt(v); }
+                                    }
+                                }
+                                Tip {
+                                    tip: "Side-to-side tilt of the camera rig.";
+                                    LabeledSlider {
+                                        label: "Rig roll"; suffix: "°";
+                                        minimum: -30.0; maximum: 30.0; decimals: 2;
+                                        value <=> root.rig-roll;
+                                        changed(v) => { root.changed-rig-roll(v); }
+                                    }
+                                }
+                                Tip {
+                                    tip: "Frame offset between the two videos, to align them in time.";
+                                    HorizontalBox {
+                                        Text { text: "Sync offset (frames):"; color: #bbb; font-size: 13px; vertical-alignment: center; }
+                                        sync-input := LineEdit {
+                                            text: root.sync-offset;
+                                            width: 60px;
+                                            accepted => { root.sync-offset = self.text.to-float(); root.changed-sync-offset(self.text.to-float()); }
+                                        }
+                                        Button {
+                                            text: "Apply";
+                                            clicked => { root.sync-offset = sync-input.text.to-float(); root.changed-sync-offset(sync-input.text.to-float()); }
+                                        }
+                                    }
+                                }
+                                Tip {
+                                    tip: "Overlap between the two camera planes; controls how much of each image is used.";
+                                    LabeledSlider {
+                                        label: "Intersect";
+                                        minimum: 0.0; maximum: 1.0; decimals: 3;
+                                        value <=> root.cal-intersect;
+                                        changed(v) => { root.changed-cal-intersect(v); }
+                                    }
+                                }
+                                Tip {
+                                    tip: "Distance of the virtual camera from the stitch origin; affects parallax at the seam.";
+                                    LabeledSlider {
+                                        label: "Camera axis offset";
+                                        minimum: -0.6; maximum: 0.6; decimals: 3;
+                                        value <=> root.cal-camera-axis-offset;
+                                        changed(v) => { root.changed-cal-camera-axis-offset(v); }
+                                    }
+                                }
+                                Tip {
+                                    tip: "Vertical alignment correction between the two camera planes.";
+                                    LabeledSlider {
+                                        label: "x_ty";
+                                        minimum: -0.1; maximum: 0.1; decimals: 3;
+                                        value <=> root.cal-x-ty;
+                                        changed(v) => { root.changed-cal-x-ty(v); }
+                                    }
+                                }
+
+                                HorizontalBox {
+                                    Tip {
+                                        tip: "Write the current calibration (rig + lens) to disk.";
+                                        Button {
+                                            text: "Save Calibration";
+                                            enabled: root.cal-dirty || root.lens-dirty;
+                                            clicked => { root.save-calibration(); }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Restore rig calibration values to the last auto-calibrated (or loaded) baseline.";
+                                        Button {
+                                            text: "Reset";
+                                            clicked => { root.reset-calibration(); }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Auto-calibrate tuning section.
+                            tune-header := SectionHeader { title: "Auto-calibrate tuning"; expanded: false; }
+                            if tune-header.expanded: VerticalBox {
+                                vertical-stretch: 0;
+                                padding: 4px;
+                                spacing: 8px;
+
+                                Tip {
+                                    tip: "Number of frame pairs sampled from the footage for calibration. More frames = more accurate but slower.";
+                                    HorizontalBox {
+                                        Text { text: "Frames: " + root.calibration-frames; color: #bbb; font-size: 13px; vertical-alignment: center; horizontal-stretch: 1; }
+                                        Button { text: "-"; clicked => { root.calibration-frames = max(2, root.calibration-frames - 1); } }
+                                        Button { text: "+"; clicked => { root.calibration-frames = min(12, root.calibration-frames + 1); } }
+                                    }
+                                }
+                                Tip {
+                                    tip: "Feature detector sensitivity. Lower = more (weaker) features detected.";
+                                    LabeledSlider {
+                                        label: "AKAZE threshold"; decimals: 5;
+                                        minimum: 0.00001; maximum: 0.001;
+                                        value <=> root.cal-akaze-threshold;
+                                    }
+                                }
+                                Tip {
+                                    tip: "Top edge of the vertical region used for feature detection (fraction of frame height).";
+                                    LabeledSlider {
+                                        label: "Detect Y min";
+                                        minimum: 0.0; maximum: 1.0; decimals: 2;
+                                        value <=> root.cal-detect-y-min;
+                                    }
+                                }
+                                Tip {
+                                    tip: "Bottom edge of the vertical region used for feature detection (fraction of frame height).";
+                                    LabeledSlider {
+                                        label: "Detect Y max";
+                                        minimum: 0.0; maximum: 1.0; decimals: 2;
+                                        value <=> root.cal-detect-y-max;
+                                    }
+                                }
+                                Tip {
+                                    tip: "Seconds to skip at the end of the clip when sampling calibration frames.";
+                                    LabeledSlider {
+                                        label: "Skip end (s)";
+                                        minimum: 0.0; maximum: 30.0; decimals: 1;
+                                        value <=> root.cal-skip-end-secs;
+                                    }
+                                }
+                                Tip {
+                                    tip: "Seed the optimizer with the camera's IMU-derived rotation, if the footage has it.";
+                                    CheckBox {
+                                        text: "Use IMU rotation seeds";
+                                        checked <=> root.use-imu-seeds;
+                                    }
+                                }
+                                Tip {
+                                    tip: "Solve the right camera's independent pitch (x_rx), even without IMU data. Normally only auto-enabled when the IMU detects >2 deg differential pitch - cameras without a native gyro never get that seed. Try this if the two images still look rotated relative to each other after calibrating.";
+                                    CheckBox {
+                                        text: "Force extra rotation fit (x_rx)";
+                                        checked <=> root.force-x-rx;
+                                    }
+                                }
+                                Tip {
+                                    tip: "Solve the left camera's independent roll (z_rz). There's no IMU signal for this angle, so it's always off unless checked here. Try this if the stitch still looks rotated after enabling Force extra rotation fit (x_rx).";
+                                    CheckBox {
+                                        text: "Force extra rotation fit (z_rz)";
+                                        checked <=> root.force-z-rz;
+                                    }
+                                }
+                                Tip {
+                                    tip: "Detect features at full video resolution instead of downscaling to 1920px wide. More precise on 4K+ footage, but slower.";
+                                    CheckBox {
+                                        text: "Full-resolution features (slower)";
+                                        checked <=> root.cal-full-res-features;
+                                    }
+                                }
+                                Tip {
+                                    tip: "Keep the preview view within the stitched region so no black margins are shown.";
+                                    CheckBox {
+                                        text: "Constrain look to coverage";
+                                        checked <=> root.use-constrained-look;
+                                        toggled => { root.changed-constrained-look(); }
+                                    }
+                                }
+                            }
+
+                            // Lens correction section.
+                            lens-header := SectionHeader { title: "Lens correction"; expanded: true; }
+                            if lens-header.expanded: VerticalBox {
+                                vertical-stretch: 0;
+                                padding: 4px;
+                                spacing: 8px;
+
+                                if root.lens-info-available: Rectangle {
+                                    background: root.bg-card;
+                                    border-radius: 4px;
+                                    height: 54px;
+                                    VerticalBox {
+                                        padding: 6px;
+                                        spacing: 2px;
+                                        Text {
+                                            text: "L: " + root.lens-left-camera + " " + root.lens-left-lens + " (" + root.lens-left-source + ")";
+                                            color: #ccc; font-size: 12px;
+                                        }
+                                        Text {
+                                            text: "R: " + root.lens-right-camera + " " + root.lens-right-lens + " (" + root.lens-right-source + ")";
+                                            color: #ccc; font-size: 12px;
+                                        }
+                                    }
+                                }
+
+                                HorizontalBox {
+                                    Text { text: "Editing:"; color: root.text-muted; vertical-alignment: center; }
+                                    Tip {
+                                        tip: "Edit the left camera's lens sliders below.";
+                                        Button {
+                                            text: "Left";
+                                            clicked => { root.lens-selected-camera = "left"; }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Edit the right camera's lens sliders below.";
+                                        Button {
+                                            text: "Right";
+                                            clicked => { root.lens-selected-camera = "right"; }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Edit both cameras' lenses together (mirrors the left sliders to both).";
+                                        Button {
+                                            text: "Both";
+                                            clicked => { root.lens-selected-camera = "both"; }
+                                        }
+                                    }
+                                }
+
+                                HorizontalBox {
+                                    Tip {
+                                        tip: "Search the built-in lens profile database by camera or lens name.";
+                                        LineEdit {
+                                            placeholder-text: "Search lens database…";
+                                            text <=> root.lens-search-query;
+                                            edited(text) => { root.lens-search-changed(text); }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Load a lens profile from a JSON file.";
+                                        Button {
+                                            text: "Load File…";
+                                            clicked => { root.lens-pick-file(); }
+                                        }
+                                    }
+                                }
+                                if root.lens-search-results.length > 0: ScrollView {
+                                    height: 90px;
+                                    VerticalBox {
+                                        padding: 2px;
+                                        spacing: 2px;
+                                        for result[idx] in root.lens-search-results: Button {
+                                            text: result;
+                                            clicked => { root.lens-pick(idx, root.lens-selected-camera); }
+                                        }
+                                    }
+                                }
+
+                                if root.lens-selected-camera == "left" || root.lens-selected-camera == "both": VerticalLayout {
+                                    spacing: 6px;
+                                    Tip {
+                                        tip: "Horizontal focal length in pixels.";
+                                        LabeledSlider {
+                                            label: "fx";
+                                            minimum: root.lens-fx-min; maximum: root.lens-fx-max; decimals: 1;
+                                            value <=> root.lens-left-fx;
+                                            changed(v) => { root.changed-lens-param(); }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Vertical focal length in pixels.";
+                                        LabeledSlider {
+                                            label: "fy";
+                                            minimum: root.lens-fy-min; maximum: root.lens-fy-max; decimals: 1;
+                                            value <=> root.lens-left-fy;
+                                            changed(v) => { root.changed-lens-param(); }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Horizontal optical center in pixels.";
+                                        LabeledSlider {
+                                            label: "cx";
+                                            minimum: root.lens-cx-min; maximum: root.lens-cx-max; decimals: 1;
+                                            value <=> root.lens-left-cx;
+                                            changed(v) => { root.changed-lens-param(); }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Vertical optical center in pixels.";
+                                        LabeledSlider {
+                                            label: "cy";
+                                            minimum: root.lens-cy-min; maximum: root.lens-cy-max; decimals: 1;
+                                            value <=> root.lens-left-cy;
+                                            changed(v) => { root.changed-lens-param(); }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Fisheye distortion coefficient 1 (KB4 model).";
+                                        LabeledSlider {
+                                            label: "k1"; decimals: 4;
+                                            minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                            value <=> root.lens-left-k1;
+                                            changed(v) => { root.changed-lens-param(); }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Fisheye distortion coefficient 2 (KB4 model).";
+                                        LabeledSlider {
+                                            label: "k2"; decimals: 4;
+                                            minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                            value <=> root.lens-left-k2;
+                                            changed(v) => { root.changed-lens-param(); }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Fisheye distortion coefficient 3 (KB4 model).";
+                                        LabeledSlider {
+                                            label: "k3"; decimals: 4;
+                                            minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                            value <=> root.lens-left-k3;
+                                            changed(v) => { root.changed-lens-param(); }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Fisheye distortion coefficient 4 (KB4 model).";
+                                        LabeledSlider {
+                                            label: "k4"; decimals: 4;
+                                            minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                            value <=> root.lens-left-k4;
+                                            changed(v) => { root.changed-lens-param(); }
+                                        }
+                                    }
+                                }
+
+                                if root.lens-selected-camera == "right": VerticalLayout {
+                                    spacing: 6px;
+                                    Tip {
+                                        tip: "Horizontal focal length in pixels.";
+                                        LabeledSlider {
+                                            label: "fx";
+                                            minimum: root.lens-fx-min; maximum: root.lens-fx-max; decimals: 1;
+                                            value <=> root.lens-right-fx;
+                                            changed(v) => { root.changed-lens-param(); }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Vertical focal length in pixels.";
+                                        LabeledSlider {
+                                            label: "fy";
+                                            minimum: root.lens-fy-min; maximum: root.lens-fy-max; decimals: 1;
+                                            value <=> root.lens-right-fy;
+                                            changed(v) => { root.changed-lens-param(); }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Horizontal optical center in pixels.";
+                                        LabeledSlider {
+                                            label: "cx";
+                                            minimum: root.lens-cx-min; maximum: root.lens-cx-max; decimals: 1;
+                                            value <=> root.lens-right-cx;
+                                            changed(v) => { root.changed-lens-param(); }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Vertical optical center in pixels.";
+                                        LabeledSlider {
+                                            label: "cy";
+                                            minimum: root.lens-cy-min; maximum: root.lens-cy-max; decimals: 1;
+                                            value <=> root.lens-right-cy;
+                                            changed(v) => { root.changed-lens-param(); }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Fisheye distortion coefficient 1 (KB4 model).";
+                                        LabeledSlider {
+                                            label: "k1"; decimals: 4;
+                                            minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                            value <=> root.lens-right-k1;
+                                            changed(v) => { root.changed-lens-param(); }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Fisheye distortion coefficient 2 (KB4 model).";
+                                        LabeledSlider {
+                                            label: "k2"; decimals: 4;
+                                            minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                            value <=> root.lens-right-k2;
+                                            changed(v) => { root.changed-lens-param(); }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Fisheye distortion coefficient 3 (KB4 model).";
+                                        LabeledSlider {
+                                            label: "k3"; decimals: 4;
+                                            minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                            value <=> root.lens-right-k3;
+                                            changed(v) => { root.changed-lens-param(); }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Fisheye distortion coefficient 4 (KB4 model).";
+                                        LabeledSlider {
+                                            label: "k4"; decimals: 4;
+                                            minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                            value <=> root.lens-right-k4;
+                                            changed(v) => { root.changed-lens-param(); }
+                                        }
+                                    }
+                                }
+
+                                HorizontalBox {
+                                    Tip {
+                                        tip: "Show one camera's raw/undistorted view instead of the stitched panorama.";
+                                        CheckBox {
+                                            text: "Preview single camera";
+                                            checked <=> root.lens-preview-active;
+                                            toggled => { root.changed-lens-preview(); }
+                                        }
+                                    }
+                                    Tip {
+                                        tip: "Which camera to show in the single-camera preview.";
+                                        Button {
+                                            text: root.lens-preview-side == "left" ? "L" : "R";
+                                            clicked => {
+                                                root.lens-preview-side = root.lens-preview-side == "left" ? "right" : "left";
+                                                root.changed-lens-preview();
+                                            }
+                                        }
+                                    }
+                                }
+                                HorizontalBox {
+                                    Text { text: "Correction:"; color: root.text-muted; vertical-alignment: center; }
+                                    Tip {
+                                        tip: "Toggle lens distortion correction on/off in the preview.";
+                                        Button {
+                                            text: root.lens-correction-amount > 0.5 ? "Corrected" : "Raw";
+                                            clicked => {
+                                                root.lens-correction-amount = root.lens-correction-amount > 0.5 ? 0.0 : 1.0;
+                                                root.changed-lens-correction(root.lens-correction-amount);
+                                            }
+                                        }
+                                    }
+                                }
+                                Tip {
+                                    tip: "Restore lens parameters to the last calibrated baseline.";
+                                    Button {
+                                        text: "Reset Lens";
+                                        clicked => { root.reset-lens(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
