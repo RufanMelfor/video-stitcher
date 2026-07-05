@@ -1,0 +1,194 @@
+RIG-CALIB STITCH ALIGNMENT ISSUE - SUMMARY OF INVESTIGATION AND CHANGES
+========================================================================
+Date: 2026-07-03
+Test footage: PATTERN_TEST/L/PATTERN2_L01.MP4 + R/PATTERN2_R01.MP4
+              (DJI Osmo Action 4, dual side-by-side rig, cone-pattern
+              calibration target laid out along the pitch centerline)
+
+------------------------------------------------------------------------
+1. ORIGINAL REPORT
+------------------------------------------------------------------------
+User ran Auto-Calibrate (AKAZE) in the rig-calib GUI and observed that
+the stitched left/right images did not line up correctly. A separate,
+cosmetic bug was also reported: two small squares next to a section
+header instead of one.
+
+------------------------------------------------------------------------
+2. ROOT CAUSES FOUND
+------------------------------------------------------------------------
+
+2.1 Cosmetic: duplicate square indicator (fixed)
+-------------------------------------------------
+`SectionHeader` in ui/main.slint drew both a filled/empty square AND a
+text glyph ("v"/">" originally "^"/"v" as Unicode triangles) as a second
+expand/collapse indicator. The glyph characters were not present in the
+available font and rendered as a fallback "missing glyph" box - visually
+a second square. Fix: removed the redundant text glyph entirely; only
+the square status indicator remains.
+
+2.2 Real cause of alignment error: AKAZE detection region too wide
+--------------------------------------------------------------------
+rig-calib's Auto-Calibrate used the library's raw default AKAZE
+detection band: y in [0.05, 0.95] of frame height - almost the entire
+frame, including sky and the heavily-warped edges of the fisheye
+undistortion. reco-cli's `calibrate` subcommand already used a tighter,
+deliberately chosen band, y in [0.25, 0.85], specifically to avoid sky
+and undistortion-edge noise - documented in its own --help text - but
+this improvement was never carried over to the rig-calib GUI, which
+still used the library's un-improved default.
+
+Verified numerically on the test footage (RUST_LOG=info, same 4 frame
+pairs, same videos):
+
+  Detection band [0.05, 0.95] (old rig-calib default):
+    total_reproj = 2.994314   angular_error = 1.858781
+
+  Detection band [0.25, 0.85] (reco-cli's proven default):
+    total_reproj = 0.047231   angular_error = 0.668077
+
+That is roughly a 64x worse reprojection error with the wide band -
+visually this showed up as a seam in the sky/clouds and a kink in the
+background fence line, while the near-ground calibration-pattern cones
+still looked fine (the optimizer is weighted toward the seam/near
+plane, so it partially compensates there but not for objects at other
+depths). Notably, the tool's own "confidence" readout stayed at 100%
+in both cases - it does not currently reflect this failure mode.
+
+Fix: rig-calib's default detection band changed from [0.05, 0.95] to
+[0.25, 0.85] to match reco-cli. (ui/main.slint)
+
+2.3 Residual rotation: right camera's independent pitch (x_rx) is
+never solved on cameras without a native gyro
+--------------------------------------------------------------------
+After the above fix, user still perceived the two images needing a
+small relative rotation. Investigation of the placement model
+(PlaneLayout in reco-core/src/calibration.rs) found two rotation
+degrees of freedom beyond the already-solved roll/tilt (xRz, zRx):
+
+  - x_rx: right camera's own pitch
+  - z_rz: left camera's own pitch
+
+x_rx is only added to the optimizer's free parameters when IMU
+telemetry shows a differential pitch > 2 degrees between the two
+cameras (reco-calibrate/src/pipeline.rs, differential_orientation
+check). z_rz is unconditionally hardcoded to 0.0 in the optimizer
+regardless of IMU - it is not currently solvable at all.
+
+DJI Osmo Action 4 footage only exposes a fused orientation quaternion
+stream (CORI-style), not a raw gyroscope sample stream. The pipeline
+detects this (`has_native_gyro = false`) and, as a documented
+deliberate decision, skips IMU-based sync for these cameras because
+quaternion-derived angular velocity (via finite differencing) is too
+noisy for frame-accurate sync. However, the current code ties ALL
+downstream IMU-derived seeding (sync AND rig_tilt/rig_roll AND
+differential_orientation AND the x_rx auto-enable) to that same
+early-return gate (`imu_sync()` in pipeline.rs), even though
+rig_tilt/rig_roll/differential_orientation are low-frequency estimates
+averaged over ~100 samples and are far less sensitive to quaternion
+derivative noise than frame-level sync is. Net effect: on Osmo Action 4
+(and any other camera without raw gyro), x_rx is NEVER solved, even
+when a real physical pitch mismatch exists between the two lenses.
+
+Verified: manually forcing x_rx on (bypassing the IMU gate) on the same
+test footage, the optimizer found a genuine, non-trivial correction:
+
+  xRx = 0.0339 rad (~1.94 degrees) independent right-camera pitch
+
+with total_reproj improving from 0.047231 to 0.045289 and angular_error
+from 0.668077 to 0.653883 (modest numeric improvement; the correction
+itself is the more important result, since it captures a real degree
+of freedom the optimizer previously could not see at all).
+
+Fix (partial - see "Not yet fixed" below): added a manual override so
+the user can force x_rx on regardless of IMU availability:
+  - rig-calib: new checkbox "Force extra rotation fit (x_rx)" in the
+    Auto-calibrate tuning panel (ui/main.slint, main.rs,
+    calibration.rs).
+  - reco-cli: new `--enable-x-rx` flag on `reco calibrate`
+    (reco-cli/src/main.rs, calibrate.rs).
+  - Both simply set `OptimizerConfig.enable_x_rx = true` directly,
+    which survives pipeline.rs's IMU-conditional logic unchanged
+    (that logic only ever turns it on, never resets it to false).
+
+------------------------------------------------------------------------
+3. OTHER CHANGES MADE (feature requests during this session)
+------------------------------------------------------------------------
+
+3.1 Persist last-used video/calibration paths
+------------------------------------------------
+New `crates/rig-calib/src/settings.rs`, mirroring reco-gui's existing
+settings pattern (`reco_io::settings`, `RecentFiles`). Stores at
+`<config>/reco/rig-calib.json`. On startup, if no --left/--right/
+--calibration CLI args are given, the app now pre-fills the last-used
+paths (only if the file still exists on disk). Every file-picker
+selection and every auto-save after Auto-Calibrate updates this file.
+
+3.2 Calibration progress percentage
+------------------------------------
+Previously, the GUI showed a single static "GPU init and feature
+matching" message for the entire AKAZE detect+match phase (the
+dominant cost - tens of seconds per frame pair), with no numeric
+feedback for 60-90+ seconds.
+
+Added a `fraction: Option<f32>` field to `CalibrationProgress`
+(reco-calibrate/src/types.rs) and threaded a per-frame-pair progress
+callback from the AKAZE loop (reco-calibrate/src/lib.rs,
+`calibrate_reporting`/`calibrate_with_reporting`) up through
+`CalibrationPipeline::calibrate_reporting` (pipeline.rs) and
+`calibrate_videos` (video.rs) to rig-calib's UI. The toolbar now shows
+e.g. "FeatureMatching - 25%" and updates live as each frame pair
+finishes. Verified working in the running GUI.
+
+Backward compatible: the existing `calibrate()` / `calibrate_with()` /
+`CalibrationPipeline::calibrate()` entry points are unchanged; the new
+`_reporting` variants are additive.
+
+------------------------------------------------------------------------
+4. NOT YET FIXED / RECOMMENDATIONS FOR DISCUSSION
+------------------------------------------------------------------------
+
+- z_rz (left camera's independent pitch) is still hardcoded to 0.0 in
+  the optimizer with no way to enable it. If rotation still looks off
+  after using the new "Force x_rx" option, this is the next thing to
+  add - but it increases the free-parameter count against a typically
+  small point set (~90 matches in our test), so it needs testing for
+  overfitting before being exposed as a default.
+
+- More fundamentally: `imu_sync()` in pipeline.rs currently gates
+  rig_tilt / rig_roll / differential_orientation / x_rx-auto-enable
+  behind the same `has_native_gyro` check used for temporal sync
+  reliability. These are different reliability profiles (sync needs
+  frame-accurate precision; tilt/roll/differential-orientation are
+  averaged, low-frequency estimates) and arguably should not share a
+  gate. Decoupling them so DJI-style quaternion-only cameras still get
+  auto-detected rotation seeding (while keeping audio-fallback sync)
+  would be a more complete fix than the manual x_rx checkbox added
+  here, and might make the checkbox unnecessary.
+
+- The calibration "confidence" metric does not currently reflect
+  reprojection/angular error blowing up (it stayed at 100% for both
+  the good and the 64x-worse-calibrated runs in section 2.2). Worth
+  reviewing what confidence is actually measuring, since it did not
+  flag the regression that caused the original bug report.
+
+------------------------------------------------------------------------
+5. FILES CHANGED
+------------------------------------------------------------------------
+  crates/rig-calib/ui/main.slint       - glyph fix, detect-y defaults,
+                                          force-x-rx checkbox, progress %
+  crates/rig-calib/src/main.rs         - force-x-rx wiring, progress
+                                          wiring, settings persistence
+  crates/rig-calib/src/calibration.rs  - force_x_rx param, progress
+                                          fraction relay
+  crates/rig-calib/src/settings.rs     - new: recent-files persistence
+  crates/rig-calib/Cargo.toml          - enabled reco-io "config" feature
+  crates/reco-cli/src/main.rs          - --enable-x-rx CLI flag
+  crates/reco-cli/src/calibrate.rs     - enable_x_rx plumbing
+  crates/reco-calibrate/src/types.rs   - CalibrationProgress.fraction
+  crates/reco-calibrate/src/lib.rs     - calibrate_reporting /
+                                          calibrate_with_reporting
+  crates/reco-calibrate/src/pipeline.rs- CalibrationPipeline::
+                                          calibrate_reporting
+  crates/reco-calibrate/src/video.rs   - per-frame progress emission
+  crates/reco-calibrate/src/live.rs    - CalibrationProgress.fraction
+                                          field update (compile fix)

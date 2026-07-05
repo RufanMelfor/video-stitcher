@@ -70,11 +70,13 @@ pub struct DetectRegion {
     pub y_max: f32,
 }
 
-/// Maximum width for AKAZE detection. Images wider than this are
+/// Default maximum width for AKAZE detection. Images wider than this are
 /// downscaled before feature detection (keypoints are mapped back to
 /// original coordinates). 1920px provides full-quality features while
-/// still being faster than raw 4K/5K input.
-const DETECT_MAX_WIDTH: u32 = 1920;
+/// still being faster than raw 4K/5K input. Callers that want full
+/// source-resolution feature detection can pass `0` (no cap) or a
+/// higher value to [`detect_with_border`] via [`AkazeConfig::detect_max_width`](crate::types::AkazeConfig::detect_max_width).
+pub(crate) const DETECT_MAX_WIDTH: u32 = 1920;
 
 /// Detect features and compute descriptors using AKAZE.
 ///
@@ -88,7 +90,16 @@ pub fn detect(
     max_keypoints: usize,
     threshold: f64,
 ) -> (Vec<KeyPoint>, Vec<Descriptor>) {
-    detect_with_border(rgba, width, height, region, max_keypoints, threshold, 30)
+    detect_with_border(
+        rgba,
+        width,
+        height,
+        region,
+        max_keypoints,
+        threshold,
+        30,
+        DETECT_MAX_WIDTH,
+    )
 }
 
 /// Extra pixel margin around the detection region crop.
@@ -108,15 +119,17 @@ const CROP_MARGIN_PX: u32 = 32;
 /// saving 40-60% of computation. Keypoint coordinates are mapped back
 /// to the original image space.
 ///
-/// Images wider than 1920px are downscaled before detection for
+/// Images wider than `max_width` are downscaled before detection for
 /// performance; keypoint coordinates are mapped back to the original
-/// resolution.
+/// resolution. Pass `0` for `max_width` to detect at full source
+/// resolution (no cap).
 ///
 /// `border_margin`: pixel distance from black edges to reject. Set to 0 to disable.
 ///
 /// # Panics
 ///
 /// Panics if `rgba.len() < (width * height * 4)`.
+#[allow(clippy::too_many_arguments)]
 pub fn detect_with_border(
     rgba: &[u8],
     width: u32,
@@ -125,6 +138,7 @@ pub fn detect_with_border(
     max_keypoints: usize,
     threshold: f64,
     border_margin: i32,
+    max_width: u32,
 ) -> (Vec<KeyPoint>, Vec<Descriptor>) {
     let expected = width as usize * height as usize * 4;
     assert!(
@@ -194,10 +208,10 @@ pub fn detect_with_border(
     };
     let dynamic = image::DynamicImage::ImageRgb8(img);
 
-    // Downscale if needed for performance
-    let (detect_img, scale) = if detect_w > DETECT_MAX_WIDTH {
-        let s = DETECT_MAX_WIDTH as f32 / detect_w as f32;
-        let new_w = DETECT_MAX_WIDTH;
+    // Downscale if needed for performance. `max_width == 0` means "no cap".
+    let (detect_img, scale) = if max_width > 0 && detect_w > max_width {
+        let s = max_width as f32 / detect_w as f32;
+        let new_w = max_width;
         let new_h = (detect_h as f32 * s) as u32;
         let resized = dynamic.resize_exact(new_w, new_h, image::imageops::FilterType::Triangle);
         log::debug!(

@@ -160,6 +160,29 @@ fn emit_progress(
     on_progress(&CalibrationProgress {
         step,
         detail: detail.into(),
+        fraction: None,
+        preview: None,
+    });
+}
+
+/// Emit a `FeatureMatching` progress update with a known fraction
+/// (`done` out of `total` frame pairs processed so far) and the annotated
+/// detection preview for the frame pair that just finished.
+fn emit_frame_progress(
+    on_progress: &mut dyn FnMut(&CalibrationProgress),
+    done: usize,
+    total: usize,
+    preview: crate::preview::DetectionPreview,
+) {
+    on_progress(&CalibrationProgress {
+        step: CalibrationStep::FeatureMatching,
+        detail: format!("Matching frame pair {done}/{total}"),
+        fraction: if total == 0 {
+            None
+        } else {
+            Some(done as f32 / total as f32)
+        },
+        preview: Some(preview),
     });
 }
 
@@ -313,6 +336,10 @@ pub fn calibrate_videos(
     let gpu = GpuContext::new_blocking()?;
     log::info!("GPU: {}", gpu.gpu_name());
 
-    let result = pipeline.calibrate(&gpu, &frame_pairs)?;
+    let result = pipeline.calibrate_reporting(
+        &gpu,
+        &frame_pairs,
+        Some(&mut |done, total, preview| emit_frame_progress(on_progress, done, total, preview)),
+    )?;
     Ok(result)
 }

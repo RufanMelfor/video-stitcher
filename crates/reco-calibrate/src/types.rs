@@ -109,6 +109,13 @@ pub struct AkazeConfig {
     /// Points below this line are excluded from feature detection.
     /// Default 0.95 (skip bottom 5%). The border filter handles edge artifacts.
     pub detect_y_max: f64,
+    /// Images wider than this are downscaled before AKAZE detection for
+    /// performance; keypoints are mapped back to full resolution
+    /// afterward, so this only trades detection quality for speed, not
+    /// final calibration precision. `0` disables the cap (detect at full
+    /// source resolution). Default 1920.
+    #[serde(default = "default_detect_max_width")]
+    pub detect_max_width: u32,
 }
 
 impl Default for AkazeConfig {
@@ -118,8 +125,22 @@ impl Default for AkazeConfig {
             max_keypoints: 2000,
             detect_y_min: 0.05,
             detect_y_max: 0.95,
+            detect_max_width: default_detect_max_width(),
         }
     }
+}
+
+/// Backward-compatible default for [`AkazeConfig::detect_max_width`] when
+/// deserializing a config written before the field existed.
+fn default_detect_max_width() -> u32 {
+    crate::features::DETECT_MAX_WIDTH
+}
+
+/// Backward-compatible default for [`OptimizerConfig::seam_sigma_y`] when
+/// deserializing a config written before the field existed - matches the
+/// value that used to be hardcoded in `geometry::SeamWeightConfig`.
+fn default_seam_sigma_y() -> f64 {
+    0.08
 }
 
 /// Feature matching and spatial filtering settings.
@@ -182,14 +203,31 @@ pub struct OptimizerConfig {
     /// Auto-enabled when IMU detects differential pitch > 2 degrees
     /// between cameras. When false, x_rx is fixed at 0.
     pub enable_x_rx: bool,
+    /// Enable the z_rz parameter (left plane roll).
+    ///
+    /// No IMU signal maps to this angle, so unlike `enable_x_rx` there is
+    /// no auto-enable path - it's manual-only. When false, z_rz is fixed
+    /// at 0.
+    #[serde(default)]
+    pub enable_z_rz: bool,
     /// Horizontal Gaussian sigma for seam-proximity weighting.
     ///
-    /// Controls horizontal (seam-proximity) width; vertical sigma is
-    /// fixed at 0.08. Points near the stitch seam are weighted more
-    /// heavily. A smaller sigma concentrates weight tighter around the
-    /// seam. Confirmed "much better" than unweighted across all test
-    /// footages.
+    /// Controls horizontal (seam-proximity) width. Points near the stitch
+    /// seam are weighted more heavily. A smaller sigma concentrates
+    /// weight tighter around the seam. Confirmed "much better" than
+    /// unweighted across all test footages.
     pub seam_sigma: f64,
+    /// Vertical Gaussian sigma for center-band weighting.
+    ///
+    /// Controls how much weight points far from the image center (near
+    /// the sky, or close to the camera at the bottom of frame) get
+    /// relative to center-band points. Default 0.08 collapses the weight
+    /// of near-camera matches almost to zero even when they exist (e.g.
+    /// from sampling many frames) - widen this if you specifically want
+    /// the optimizer to use near-field matches, at the cost of also
+    /// trusting noisier far-edge ones more.
+    #[serde(default = "default_seam_sigma_y")]
+    pub seam_sigma_y: f64,
     /// Fraction of worst-error points to drop during optimization.
     ///
     /// 0.0 = no trimming (use all points), 0.2 = drop worst 20%.
@@ -206,7 +244,9 @@ impl Default for OptimizerConfig {
             lock_cam_d: false,
             lock_z_rx: false,
             enable_x_rx: false,
+            enable_z_rz: false,
             seam_sigma: 0.08,
+            seam_sigma_y: default_seam_sigma_y(),
             trim_fraction: 0.3,
             max_iters: 5000,
         }
@@ -342,6 +382,12 @@ impl CalibrationConfig {
                 self.optimizer.seam_sigma
             )));
         }
+        if self.optimizer.seam_sigma_y <= 0.0 {
+            return Err(CalibrateError::InvalidConfig(format!(
+                "seam_sigma_y must be > 0, got {}",
+                self.optimizer.seam_sigma_y
+            )));
+        }
         Ok(())
     }
 }
@@ -353,6 +399,17 @@ pub struct CalibrationProgress {
     pub step: CalibrationStep,
     /// Human-readable detail about the current operation.
     pub detail: String,
+    /// Fractional progress (0.0-1.0) within the current step, if known.
+    ///
+    /// Only populated for `FeatureMatching` (one AKAZE detect+match pass
+    /// per frame pair - the dominant cost, tens of seconds per pair on
+    /// 4K footage). `None` for steps that are effectively instantaneous
+    /// or atomic (nothing meaningful to subdivide).
+    pub fraction: Option<f32>,
+    /// Annotated detection preview for the frame pair that just finished,
+    /// if any. Only populated for `FeatureMatching` progress updates;
+    /// `None` for every other step.
+    pub preview: Option<crate::preview::DetectionPreview>,
 }
 
 /// Steps in the calibration pipeline.

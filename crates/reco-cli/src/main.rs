@@ -634,6 +634,15 @@ enum Commands {
         #[arg(long, default_value_t = 0.5)]
         detect_x: f64,
 
+        /// Max frame width for AKAZE feature detection; images wider than
+        /// this are downscaled before detection (keypoints mapped back to
+        /// full resolution). Default 1920. `0` disables the cap (detect at
+        /// full source resolution) - use this when widening `--detect-x`,
+        /// otherwise the extra area gets downscaled harder to fit the same
+        /// pixel budget, which can lose more matches than it gains.
+        #[arg(long, default_value_t = 1920)]
+        detect_max_width: u32,
+
         /// Detection region y minimum (fraction). Skip top N% of image.
         /// Default 0.25 (skip top 25% to avoid sky and undistortion edges).
         #[arg(long, default_value_t = 0.25)]
@@ -654,15 +663,39 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         lock_z_rx: bool,
 
+        /// Solve the right camera's independent pitch (x_rx), bypassing
+        /// the IMU differential-pitch>2deg auto-enable gate. Try this if
+        /// the two images still look rotated relative to each other after
+        /// calibrating - most useful on rigs without a native gyro, where
+        /// that gate never fires.
+        #[arg(long, default_value_t = false)]
+        enable_x_rx: bool,
+
+        /// Solve the left camera's independent roll (z_rz). There is no
+        /// IMU-based auto-enable gate for this one (no telemetry signal
+        /// maps to it), so it is manual-only. Try this if the stitch still
+        /// looks rotated after `--enable-x-rx`.
+        #[arg(long, default_value_t = false)]
+        enable_z_rz: bool,
+
         /// Drop the worst N% of points during optimization (0.0-1.0).
         /// E.g. 0.3 = ignore worst 30%. Makes optimizer robust to outliers.
         #[arg(long, default_value_t = 0.3)]
         trim: f64,
 
-        /// Seam proximity weighting sigma. Lower = focus more on seam center.
-        /// Default 0.08. Try 0.12 for wider weighting.
+        /// Seam proximity weighting sigma (horizontal). Lower = focus more
+        /// on seam center. Default 0.08. Try 0.12 for wider weighting.
         #[arg(long, default_value_t = 0.08)]
         seam_sigma: f64,
+
+        /// Center-band weighting sigma (vertical). Controls how much
+        /// weight points far from image-center (sky, or close to the
+        /// camera at the bottom of frame) get. Default 0.08 nearly zeroes
+        /// out near-field matches even when they exist (e.g. with a
+        /// higher --frames count). Widen this (e.g. 0.2-0.3) if you want
+        /// the optimizer to actually use near-field matches.
+        #[arg(long, default_value_t = 0.08)]
+        seam_sigma_y: f64,
 
         /// Directory to write debug data (keypoints, matches as JSON + images).
         #[arg(long)]
@@ -1065,12 +1098,16 @@ fn main() -> anyhow::Result<()> {
             akaze_threshold,
             lowe_ratio,
             detect_x,
+            detect_max_width,
             detect_y_min,
             detect_y_max,
             lock_cam_d,
             lock_z_rx,
+            enable_x_rx,
+            enable_z_rz,
             trim,
             seam_sigma,
+            seam_sigma_y,
             debug_dir,
             output,
         } => calibrate::run_calibrate(
@@ -1087,12 +1124,16 @@ fn main() -> anyhow::Result<()> {
             akaze_threshold,
             lowe_ratio,
             detect_x,
+            detect_max_width,
             detect_y_min,
             detect_y_max,
             lock_cam_d,
             lock_z_rx,
+            enable_x_rx,
+            enable_z_rz,
             trim,
             seam_sigma,
+            seam_sigma_y,
             debug_dir.as_deref(),
             &output,
         ),
