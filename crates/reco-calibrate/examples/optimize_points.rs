@@ -61,6 +61,10 @@ fn main() {
                 z_rx: -0.0035,
                 z_rz: None,
                 x_rx: None,
+                ground_tilt_x: None,
+                ground_tilt_z: None,
+                k_x: 1.0,
+                k_z: 1.0,
             };
             let v1_err = geometry::angular_error(&points, &v1);
             eprintln!("\n  v1 reference residual: {:.6}", v1_err);

@@ -7,5 +7,6 @@ pub mod pipeline;
 pub mod planes;
 pub mod renderer;
 pub mod scene;
+pub mod single_camera;
 pub mod stitch_renderer;
 pub mod viewport;

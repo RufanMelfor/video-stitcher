@@ -1,6 +1,0 @@
-Graag zelf een volledige test doen.
-Linker Video: D:\VOETBAL_VIDEO\CALIB\PATTERN_TEST\L\PATTERN2_L01.MP4
-Rechter Video: D:\VOETBAL_VIDEO\CALIB\PATTERN_TEST\R\PATTERN2_R01.MP4
-
-1. Sla de  pad op naar de laatste linder en rechter video, als deze opstart dan staan ze er nog in
-2. Laat ergens zien de resterende percentage als de Calibratie bezig is.

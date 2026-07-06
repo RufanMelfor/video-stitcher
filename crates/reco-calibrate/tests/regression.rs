@@ -219,6 +219,10 @@ fn dji_basin_costs() {
         z_rx: (-0.74_f64).to_radians(),
         z_rz: None,
         x_rx: None,
+        ground_tilt_x: None,
+        ground_tilt_z: None,
+        k_x: 1.0,
+        k_z: 1.0,
     };
     // Basin B: the raw optimum (coherent but visually off)
     let params_b = reco_calibrate::geometry::OptParams {
@@ -229,6 +233,10 @@ fn dji_basin_costs() {
         z_rx: (-2.82_f64).to_radians(),
         z_rz: None,
         x_rx: None,
+        ground_tilt_x: None,
+        ground_tilt_z: None,
+        k_x: 1.0,
+        k_z: 1.0,
     };
 
     let cost_a = reco_calibrate::geometry::trimmed_seam_weighted_reprojection_error(

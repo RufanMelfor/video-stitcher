@@ -88,6 +88,36 @@ pub struct OptParams {
     /// X-axis rotation of the right plane (radians).
     /// `None` unless `enable_x_rx` is set in the optimizer config.
     pub x_rx: Option<f64>,
+    /// Band-limited ground-plane perspective correction for the x-plane
+    /// (right camera's points, `MatchedPoint::left`) - see
+    /// `band_limited_ground_warp`.
+    ///
+    /// `c = tan(theta)`, where `theta` is how much further down that
+    /// camera really looks than the flat-plane model assumes, applied
+    /// only within a near-field band (points closer to image center are
+    /// mathematically untouched). `None` (or `Some(0.0)`) reproduces
+    /// today's flat-plane behavior exactly. Independent from
+    /// `ground_tilt_z` because the two planes need not share the same
+    /// mount height/tilt deviation - see `crates/reco-calibrate/FRICTION.md`.
+    /// Experimental - not yet wired into the production optimizer.
+    pub ground_tilt_x: Option<f64>,
+    /// Band-limited ground-plane perspective correction for the z-plane
+    /// (left camera's points, `MatchedPoint::right`). See `ground_tilt_x`.
+    pub ground_tilt_z: Option<f64>,
+    /// Focal-scale constant for the x-plane's ground-tilt warp: `k_x =
+    /// fy / (2 * width)` for the right camera (`MatchedPoint::left`),
+    /// using that camera's own intrinsics. This is a **known constant**
+    /// derived from calibrated intrinsics, not a fitted parameter -
+    /// unlike every other field on this struct. Required to correctly
+    /// convert a plane-y value to/from a true angle (see
+    /// `warp_ground_y`'s doc comment for the derivation and why `k != 1`
+    /// in general). Defaults to `1.0`, which reproduces the pre-2026-07-05
+    /// (dimensionally incorrect) formula - only matters when
+    /// `ground_tilt_x` is `Some`.
+    pub k_x: f64,
+    /// Focal-scale constant for the z-plane's ground-tilt warp (left
+    /// camera, `MatchedPoint::right`). See `k_x`.
+    pub k_z: f64,
 }
 
 impl OptParams {
@@ -103,6 +133,10 @@ impl OptParams {
             z_rx: x[4],
             z_rz: None,
             x_rx: None,
+            ground_tilt_x: None,
+            ground_tilt_z: None,
+            k_x: 1.0,
+            k_z: 1.0,
         }
     }
 
@@ -118,6 +152,10 @@ impl OptParams {
             z_rx: x[4],
             z_rz: Some(x[5]),
             x_rx: None,
+            ground_tilt_x: None,
+            ground_tilt_z: None,
+            k_x: 1.0,
+            k_z: 1.0,
         }
     }
 
@@ -139,6 +177,92 @@ impl OptParams {
     }
 }
 
+/// Ground-plane perspective correction for a single plane-space coordinate.
+///
+/// `normalize_to_plane` produces `t`, a value proportional to (not equal
+/// to) `tan(phi)` for the real vertical angle `phi` from the optical
+/// axis. Tracing the exact pixel -> GPU-undistort -> `normalize_to_plane`
+/// path (see `fisheye.wgsl`'s `fs_main` and its `uv * 2.0 - 0.5` remap):
+///
+/// ```text
+/// t = tan(phi) * k,   where k = fy / (2 * image_width)
+/// ```
+///
+/// (`fy`/`image_width` from that camera's own `CameraParams`, in pixels;
+/// the factor of 2 comes directly from the shader's UV remap, confirmed
+/// against `lens/mod.rs`'s CPU mirror which halves `fy`/`fx` for the same
+/// reason). `k` is a fixed, known constant for a given camera and lens -
+/// **not** a value to fit - it's usually far from `1.0` (~0.19 for this
+/// project's DJI Osmo Action 4 rig at 3840px width), so treating `t` as
+/// if it already equaled `tan(phi)` (this function's pre-2026-07-05
+/// version) applies the tangent-addition identity at the wrong scale.
+///
+/// The correct derivation: `phi = atan(t / k)`, add the extra tilt
+/// `theta` (`c = tan(theta)`), then convert back: `t' = k * tan(theta +
+/// phi)`. Expanding via the tangent-addition identity gives:
+///
+/// ```text
+/// warp(t, c, k) = k*tan(theta + phi) = (k*c + t) / (1 - c*t/k)
+/// ```
+///
+/// `warp(t, 0.0, k) == t` exactly for any `k`, so `c = 0.0` reproduces
+/// today's flat-plane behavior bit-for-bit. `k = 1.0` reduces to the
+/// original (dimensionally-incorrect-for-real-cameras) formula - kept as
+/// the default in `OptParams` so existing tests/callers that don't set a
+/// real `k` are unaffected.
+///
+/// The denominator is guarded away from zero (the horizon-direction
+/// singularity) so callers driving `c` via an unconstrained optimizer
+/// can't wander into NaN/infinite territory.
+#[inline]
+pub fn warp_ground_y(t: f64, c: f64, k: f64) -> f64 {
+    let denom = 1.0 - c * t / k;
+    let denom = if denom.abs() < 1e-9 {
+        1e-9_f64.copysign(denom)
+    } else {
+        denom
+    };
+    (k * c + t) / denom
+}
+
+/// Classic Hermite smoothstep, clamped to `[edge0, edge1]`.
+#[inline]
+fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// `|t|` below which a point is fully outside the ground-tilt correction
+/// band (0.08 matches this project's `sigma_y`/near-field-bucket
+/// convention used elsewhere - see FRICTION.md, `fit_ground_tilt.rs`).
+const GROUND_TILT_BAND_START: f64 = 0.08;
+/// `|t|` at and beyond which the correction reaches full strength.
+const GROUND_TILT_BAND_FULL: f64 = 0.16;
+
+/// Band-limited ground-plane correction.
+///
+/// [`warp_ground_y`] is a *global* tilt reparametrization - `warp(0, c) =
+/// c`, not `0`, so applying it uniformly shifts far-field points almost
+/// as much as near-field ones (confirmed empirically and mathematically,
+/// see FRICTION.md's "ground-plane perspective correction" entry: doing
+/// this made far-field residual monotonically worse for every tested `c`,
+/// and pushed `cam_d` to its bound). This wraps it in a smoothstep blend
+/// against the identity so the correction is mathematically guaranteed to
+/// leave points with `|t| <= GROUND_TILT_BAND_START` completely untouched,
+/// ramping to the full `warp_ground_y` effect by `|t| >= GROUND_TILT_BAND_FULL`.
+/// Same "correction ramps in, far field is provably unaffected" shape as
+/// the reverted `ground_correction` shader ramp
+/// (`smoothstep(0.75, 1.0, uv.y)`), but applied to the calibration fit
+/// instead of a render-time pixel shift.
+#[inline]
+pub fn band_limited_ground_warp(t: f64, c: f64, k: f64) -> f64 {
+    let weight = smoothstep(GROUND_TILT_BAND_START, GROUND_TILT_BAND_FULL, t.abs());
+    if weight == 0.0 {
+        return t;
+    }
+    t + weight * (warp_ground_y(t, c, k) - t)
+}
+
 /// Apply geometric transformations to matched point pairs.
 ///
 /// Converts 2D plane coordinates to 3D, applies rotations and translations
@@ -153,8 +277,13 @@ pub fn apply_transformations(
 ) -> (Vec<Vector3<f64>>, Vec<Vector3<f64>>) {
     let half_offset = PLANE_WIDTH / 2.0 * (1.0 - params.intersect);
 
-    // Left plane (x-plane): Z-rotation by x_rz, translated along X
-    let r_x_plane = rotation_matrix(0.0, 0.0, params.x_rz);
+    // Left plane (x-plane): X-rotation by x_rx (right camera's independent
+    // pitch - previously dead here: read by the renderer at
+    // SceneGeometry::from_layout_with_aspect but never applied to this
+    // cost function, so enabling it gave the optimizer zero gradient),
+    // Z-rotation by x_rz, translated along X.
+    let x_rx = params.x_rx.unwrap_or(0.0);
+    let r_x_plane = rotation_matrix(x_rx, 0.0, params.x_rz);
     let t_x_plane = Vector3::new(half_offset, params.x_ty, 0.0);
 
     // Right plane (z-plane): X-rotation by z_rx, optionally Z-rotation by z_rz,
@@ -163,12 +292,23 @@ pub fn apply_transformations(
     let r_z_plane = rotation_matrix(params.z_rx, 0.0, z_rz);
     let t_z_plane = Vector3::new(0.0, 0.0, half_offset);
 
+    let ground_tilt_x = params.ground_tilt_x.unwrap_or(0.0);
+    let ground_tilt_z = params.ground_tilt_z.unwrap_or(0.0);
+
     let mut x_transformed = Vec::with_capacity(points.len());
     let mut z_transformed = Vec::with_capacity(points.len());
 
     for mp in points {
-        let x_3d = to_3d_x_plane(mp.left);
-        let z_3d = to_3d_z_plane(mp.right);
+        let mut left = mp.left;
+        let mut right = mp.right;
+        if ground_tilt_x != 0.0 {
+            left[1] = band_limited_ground_warp(left[1], ground_tilt_x, params.k_x);
+        }
+        if ground_tilt_z != 0.0 {
+            right[1] = band_limited_ground_warp(right[1], ground_tilt_z, params.k_z);
+        }
+        let x_3d = to_3d_x_plane(left);
+        let z_3d = to_3d_z_plane(right);
 
         // v1 uses `point @ R.T` (row-vector convention).
         // nalgebra uses column vectors, so `R * point` is equivalent.
@@ -575,6 +715,10 @@ mod tests {
             z_rx: 0.0,
             z_rz: None,
             x_rx: None,
+            ground_tilt_x: None,
+            ground_tilt_z: None,
+            k_x: 1.0,
+            k_z: 1.0,
         };
         let err = reprojection_error(&points, &params);
         assert_abs_diff_eq!(err, 0.0, epsilon = 1e-6);
@@ -599,6 +743,10 @@ mod tests {
             z_rx: 0.0,
             z_rz: None,
             x_rx: None,
+            ground_tilt_x: None,
+            ground_tilt_z: None,
+            k_x: 1.0,
+            k_z: 1.0,
         };
 
         let bad_params = OptParams {
@@ -609,6 +757,10 @@ mod tests {
             z_rx: 0.0,
             z_rz: None,
             x_rx: None,
+            ground_tilt_x: None,
+            ground_tilt_z: None,
+            k_x: 1.0,
+            k_z: 1.0,
         };
 
         let good_err = reprojection_error(&points, &good_params);
@@ -635,6 +787,10 @@ mod tests {
             z_rx: 0.0,
             z_rz: None,
             x_rx: None,
+            ground_tilt_x: None,
+            ground_tilt_z: None,
+            k_x: 1.0,
+            k_z: 1.0,
         };
 
         let bad = OptParams {
@@ -645,6 +801,10 @@ mod tests {
             z_rx: 0.0,
             z_rz: None,
             x_rx: None,
+            ground_tilt_x: None,
+            ground_tilt_z: None,
+            k_x: 1.0,
+            k_z: 1.0,
         };
 
         let reproj_good = reprojection_error(&points, &good);
@@ -666,6 +826,10 @@ mod tests {
             z_rx: -0.004,
             z_rz: None,
             x_rx: None,
+            ground_tilt_x: None,
+            ground_tilt_z: None,
+            k_x: 1.0,
+            k_z: 1.0,
         };
         let packed = params.to_5param();
         let unpacked = OptParams::from_5param(&packed);
@@ -684,6 +848,10 @@ mod tests {
             z_rx: -0.004,
             z_rz: Some(0.003),
             x_rx: None,
+            ground_tilt_x: None,
+            ground_tilt_z: None,
+            k_x: 1.0,
+            k_z: 1.0,
         };
         let packed = params.to_6param();
         let unpacked = OptParams::from_6param(&packed);
@@ -707,6 +875,10 @@ mod tests {
             z_rx: 0.0,
             z_rz: None,
             x_rx: None,
+            ground_tilt_x: None,
+            ground_tilt_z: None,
+            k_x: 1.0,
+            k_z: 1.0,
         };
 
         // With intersect=0.5:
@@ -745,6 +917,221 @@ mod tests {
         assert!(
             err_far < err_near * 1e-6,
             "far point should be near-zero weighted"
+        );
+    }
+
+    #[test]
+    fn warp_ground_y_identity_at_zero() {
+        for t in [-0.4, -0.1, 0.0, 0.05, 0.2, 0.45] {
+            assert_abs_diff_eq!(warp_ground_y(t, 0.0, 1.0), t, epsilon = 1e-15);
+        }
+    }
+
+    #[test]
+    fn warp_ground_y_monotonic_in_c() {
+        // For a fixed near-field t, warp(t, c) should move monotonically
+        // as c increases from 0 (this is what lets an optimizer actually
+        // climb a gradient instead of hitting a flat or oscillating cost).
+        let t = 0.2;
+        let mut prev = warp_ground_y(t, 0.0, 1.0);
+        for c in [0.05, 0.1, 0.15, 0.2] {
+            let cur = warp_ground_y(t, c, 1.0);
+            assert!(
+                cur > prev,
+                "warp should increase monotonically with c: c={c} gave {cur} <= prev {prev}"
+            );
+            prev = cur;
+        }
+    }
+
+    #[test]
+    fn warp_ground_y_guards_against_singularity() {
+        // The horizon-direction singularity is at t = k/c (denominator
+        // hits zero). Must return a large-but-finite value, never NaN/inf.
+        let c = 2.0;
+        let k = 1.0;
+        let t = k / c;
+        let warped = warp_ground_y(t, c, k);
+        assert!(warped.is_finite(), "expected finite value, got {warped}");
+    }
+
+    #[test]
+    fn warp_ground_y_matches_true_angle_roundtrip_for_nonunit_k() {
+        // Direct check of the derivation in warp_ground_y's doc comment:
+        // convert t to a true angle via t/k, add the extra tilt theta,
+        // convert back by multiplying by k. This is the property that
+        // distinguishes the corrected (2026-07-05) formula from the
+        // original one, which only matched this derivation when k == 1.0
+        // (this project's real DJI Osmo Action 4 rig has k ~= 0.19, not
+        // 1.0 - see FRICTION.md's "k-scaling bug" entry).
+        let k = 0.19; // representative of this project's real rig
+        let theta = 0.1_f64;
+        let c = theta.tan();
+        for t in [-0.15_f64, -0.05, 0.0, 0.05, 0.15] {
+            let phi = (t / k).atan();
+            let expected = k * (theta + phi).tan();
+            let actual = warp_ground_y(t, c, k);
+            assert_abs_diff_eq!(actual, expected, epsilon = 1e-12);
+        }
+    }
+
+    #[test]
+    fn warp_ground_y_k_matters_reprojection_changes_with_k() {
+        // Regression guard for the k-scaling bug itself: prove that using
+        // the correct k (rather than silently defaulting to 1.0, as every
+        // OptParams literal before this fix implicitly did) changes the
+        // warped value for a realistic near-field t and nonzero c - i.e.
+        // k is not a no-op default that happens to cancel out.
+        let t = 0.12;
+        let c = 0.1;
+        let with_k1 = warp_ground_y(t, c, 1.0);
+        let with_k_real = warp_ground_y(t, c, 0.19);
+        assert!(
+            (with_k1 - with_k_real).abs() > 1e-6,
+            "k should change the warped value: k=1.0 -> {with_k1}, k=0.19 -> {with_k_real}"
+        );
+    }
+
+    #[test]
+    fn band_limited_warp_is_identity_below_band_start() {
+        // The key property that fixes the global-shift failure mode found
+        // in the unbanded ground_tilt experiment (FRICTION.md): points at
+        // or below GROUND_TILT_BAND_START must be mathematically
+        // untouched, for any c, not just approximately close.
+        for t in [0.0, 0.02, -0.05, 0.079, -0.08] {
+            for c in [-0.3, -0.1, 0.1, 0.3] {
+                let warped = band_limited_ground_warp(t, c, 1.0);
+                assert_abs_diff_eq!(warped, t, epsilon = 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn band_limited_warp_reaches_full_strength_beyond_band_full() {
+        // At and beyond GROUND_TILT_BAND_FULL, the band-limited warp
+        // should match the raw (unbanded) warp_ground_y exactly.
+        let c = 0.15;
+        for t in [0.16, 0.2, -0.25, -0.16] {
+            let banded = band_limited_ground_warp(t, c, 1.0);
+            let raw = warp_ground_y(t, c, 1.0);
+            assert_abs_diff_eq!(banded, raw, epsilon = 1e-12);
+        }
+    }
+
+    #[test]
+    fn band_limited_warp_identity_at_zero_c() {
+        for t in [0.0, 0.05, 0.1, 0.15, 0.2, -0.18] {
+            assert_abs_diff_eq!(band_limited_ground_warp(t, 0.0, 1.0), t, epsilon = 1e-15);
+        }
+    }
+
+    #[test]
+    fn band_limited_warp_transitions_smoothly() {
+        // Inside the band, the result should lie strictly between the
+        // identity and the full warp - no discontinuity at either edge.
+        let c = 0.2;
+        let t = 0.12; // midway between BAND_START (0.08) and BAND_FULL (0.16)
+        let banded = band_limited_ground_warp(t, c, 1.0);
+        let raw = warp_ground_y(t, c, 1.0);
+        assert!(
+            (banded - t).abs() < (raw - t).abs(),
+            "mid-band value {banded} should be a partial blend, not the full warp {raw}"
+        );
+        assert!(
+            (banded - t).abs() > 1e-9,
+            "mid-band value {banded} should differ from identity {t}"
+        );
+    }
+
+    #[test]
+    fn ground_tilt_x_and_z_change_reprojection_error_independently() {
+        // Regression guard for the x_rx-style silent no-op bug: prove
+        // ground_tilt_x/ground_tilt_z actually participate in the cost
+        // function instead of being parameters the optimizer could set to
+        // anything with zero effect on what it's minimizing - and that
+        // each affects the result on its own, not just when combined.
+        let points = vec![
+            MatchedPoint::from_planes([0.1, 0.15], [0.12, 0.16]),
+            MatchedPoint::from_planes([-0.15, 0.2], [-0.13, 0.22]),
+            MatchedPoint::from_planes([0.05, -0.1], [0.06, -0.11]),
+        ];
+        let base = OptParams {
+            x_ty: 0.0,
+            intersect: 0.5,
+            cam_d: 0.25,
+            x_rz: 0.0,
+            z_rx: 0.0,
+            z_rz: None,
+            x_rx: None,
+            ground_tilt_x: None,
+            ground_tilt_z: None,
+            k_x: 1.0,
+            k_z: 1.0,
+        };
+        let with_x = OptParams {
+            ground_tilt_x: Some(0.3),
+            ..base
+        };
+        let with_z = OptParams {
+            ground_tilt_z: Some(0.3),
+            k_x: 1.0,
+            k_z: 1.0,
+            ..base
+        };
+        let err_base = reprojection_error(&points, &base);
+        let err_x = reprojection_error(&points, &with_x);
+        let err_z = reprojection_error(&points, &with_z);
+        assert!(
+            (err_base - err_x).abs() > 1e-12,
+            "ground_tilt_x should change reprojection error: base={err_base} x={err_x}"
+        );
+        assert!(
+            (err_base - err_z).abs() > 1e-12,
+            "ground_tilt_z should change reprojection error: base={err_base} z={err_z}"
+        );
+        // The two shouldn't happen to produce an identical effect - if
+        // they did, that would suggest one of them isn't actually wired
+        // to its own plane.
+        assert!(
+            (err_x - err_z).abs() > 1e-12,
+            "ground_tilt_x and ground_tilt_z affect different planes and should not produce \
+             identical error: x={err_x} z={err_z}"
+        );
+    }
+
+    #[test]
+    fn x_rx_changes_reprojection_error() {
+        // Regression guard for the bug this change fixes: x_rx was
+        // declared on OptParams and applied at render time
+        // (SceneGeometry::from_layout_with_aspect) but never read inside
+        // apply_transformations, so the CPU cost function had zero
+        // gradient with respect to it even when enable_x_rx was set.
+        let points = vec![
+            MatchedPoint::from_planes([0.1, 0.15], [0.12, 0.16]),
+            MatchedPoint::from_planes([-0.15, 0.2], [-0.13, 0.22]),
+        ];
+        let base = OptParams {
+            x_ty: 0.0,
+            intersect: 0.5,
+            cam_d: 0.25,
+            x_rz: 0.0,
+            z_rx: 0.0,
+            z_rz: None,
+            x_rx: None,
+            ground_tilt_x: None,
+            ground_tilt_z: None,
+            k_x: 1.0,
+            k_z: 1.0,
+        };
+        let with_x_rx = OptParams {
+            x_rx: Some(0.15),
+            ..base
+        };
+        let err_base = reprojection_error(&points, &base);
+        let err_x_rx = reprojection_error(&points, &with_x_rx);
+        assert!(
+            (err_base - err_x_rx).abs() > 1e-12,
+            "x_rx should change reprojection error: base={err_base} with_x_rx={err_x_rx}"
         );
     }
 }

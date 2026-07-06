@@ -1,381 +1,147 @@
-SESSION HANDOFF - RIG CALIB (bijgewerkt 2026-07-03)
+SESSION HANDOFF - RIG CALIB (bijgewerkt 2026-07-07, nacht-sessie)
 ========================================================================
 
-STATUS: Alle taken van vandaag afgerond, NIETS gecommit naar git.
-Werkboom bevat nog uncommitted changes - zie "GIT STATUS" onderaan.
+STATUS: NIETS gecommit naar git. Alle werk van vandaag/vannacht staat
+alleen in de working tree. Zie "GIT STATUS" - run zelf `git status` om
+de volledige lijst te zien, die is te lang om hier te herhalen.
+
+Dit bestand is fors herschreven t.o.v. de vorige versie (2026-07-03) -
+er is sindsdien een hele dag/nacht aan werk bijgekomen. Voor het volledige,
+gedetailleerde verhaal: `crates/reco-calibrate/FRICTION.md` (17 genummerde
+experimenten, allemaal met eerlijke uitkomst - win of verlies - erin).
+Dit bestand is de korte samenvatting.
 
 ------------------------------------------------------------------------
-WAT IS ER VANDAAG GEDAAN
+WAAR STAAN WE NU - HET KORTE ANTWOORD
 ------------------------------------------------------------------------
 
-1. Dubbele vierkantje-bug (UI) - opgelost
-   De section-header had een geel statusvierkantje + een pijltje-teken
-   dat niet in het beschikbare font zat (rendert als "missing glyph"
-   vierkantje). Teken verwijderd, alleen het statusvierkantje blijft.
+Het seam-misalignment probleem (de stap in lijnen dicht bij de camera,
+op de plek waar de twee camerabeelden aan elkaar geplakt worden) is NOG
+NIET opgelost. Vannacht is er hard gezocht naar een echte softwarematige
+fix, met onderzoek naar hoe Photoshop/PTGui/Hugin/professionele video-
+stitchers (VideoStitch, Insta360, GoPro) dit aanpakken - conclusie uit
+dat onderzoek: dit is een erkend, industrie-breed moeilijk probleem
+("large parallax stitching is nog steeds een intractable problem" - zelfs
+Adobe's eigen documentatie zegt dit). Er bestaat geen "perfecte" kant-en-
+klare oplossing, ook niet bij de grote spelers.
 
-2. Misalignment in Auto-Calibrate - hoofdoorzaak gevonden en opgelost
-   rig-calib gebruikte een te brede AKAZE-detectieband (0.05-0.95 van
-   de framehoogte, incl. lucht + vervormde randen). reco-cli gebruikte
-   al de betere 0.25-0.85. Gefixt: rig-calib default nu ook 0.25-0.85.
-   Geverifieerd: reprojection error ging van 2.99 naar 0.047 (~64x beter)
-   op de PATTERN_TEST clips.
-
-3. Restrotatie (jouw instinct "moet iets roteren") - deels opgelost
-   x_rx (onafhankelijke pitch van de rechtercamera) wordt normaal alleen
-   opgelost als de IMU >2 graden verschil detecteert. DJI Osmo Action 4
-   heeft geen raw-gyro data in de video (alleen fused quaternion), dus
-   die IMU-check slaat het hele traject over, x_rx blijft altijd 0.
-   Toegevoegd: handmatige "Force extra rotation fit (x_rx)" checkbox
-   (rig-calib) + --enable-x-rx flag (reco-cli). Getest: vond een echte
-   1.94 graden rotatiecorrectie op de rechtercamera.
-   NOG OPEN: z_rz (linkercamera pitch) is nog hardcoded op 0.0, kan nog
-   niet opgelost worden. En de IMU-gate die x_rx blokkeert zou eigenlijk
-   losgekoppeld moeten worden van de sync-betrouwbaarheids-check (zie
-   calibration_alignment_fix_summary.txt punt 4 voor details).
-
-4. Twee losse feature-requests geimplementeerd
-   - Laatst gebruikte links/rechts video + calibratiebestand worden nu
-     onthouden (rig-calib/src/settings.rs), staan er bij herstart weer in.
-     Getest: bestand op %APPDATA%\reco\config\rig-calib.json klopt.
-   - Voortgangspercentage tijdens Auto-Calibrate ("FeatureMatching - 25%"),
-     update live per verwerkt frame-paar. Getest in draaiende GUI.
-
-5. Uitgebreide Engelse samenvatting geschreven voor de software engineer:
-   calibration_alignment_fix_summary.txt (repo root) - alle root causes,
-   gewijzigde bestanden, en openstaande aanbevelingen staan daarin.
+Er is een nieuwe, principieel betere aanpak gebouwd en getest
+(zie "NIEUW VANNACHT" hieronder) die niet meer 1 globaal getal zoekt,
+maar per beeldregel een eigen correctie meet. Die aanpak is grondiger
+getest dan alles hiervoor (checkt nu standaard of andere delen van het
+beeld niet stiekem slechter worden, en test op een frame dat niet is
+gebruikt om te fitten) - maar het resultaat op de Berghem-beelden is nog
+steeds gemengd: het middendeel van het beeld werd aantoonbaar beter, maar
+het near-field (waar we het probleem juist wilden oplossen) werd slechter.
+De reden is nu wel goed begrepen (zie hieronder) - dit is dus geen
+mislukte poging zonder inzicht, maar een concrete, goed onderbouwde
+volgende stap voor een toekomstige sessie.
 
 ------------------------------------------------------------------------
-MORGEN VERDER MET (nog niet gedaan, alleen benoemd als aanbeveling)
+WAT IS ER VANNACHT GEBEURD (chronologisch, kort)
 ------------------------------------------------------------------------
-- z_rz (linkercamera onafhankelijke pitch) toevoegen als echte losse
-  parameter in de optimizer - let op overfitting risico (~90 matches).
-- imu_sync() in reco-calibrate/src/pipeline.rs ontkoppelen: rig_tilt/
-  rig_roll/differential_orientation zouden quaternion-data moeten
-  kunnen gebruiken ook al is de camera's "has_native_gyro" false (dat
-  zou de handmatige x_rx-checkbox mogelijk overbodig maken).
-- "Confidence" metric geeft altijd 100% zelfs bij een 64x slechtere
-  calibratie - waard om te herzien wat die metric precies meet.
-- todo.txt bevat nog punt 1 en 2 (pad onthouden + percentage) die beide
-  al zijn opgelost vandaag - kan opgeschoond worden.
 
-------------------------------------------------------------------------
-BUILD REMINDER (elke nieuwe sessie/terminal opnieuw nodig)
-------------------------------------------------------------------------
-    export FFMPEG_DIR="C:/Users/Rufan/AppData/Local/Microsoft/WinGet/Packages/BtbN.FFmpeg.GPL.Shared.7.1_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-n7.1.4-7-gadcf20da26-win64-gpl-shared-7.1"
-    export PATH="/c/Program Files/LLVM/bin:$FFMPEG_DIR/bin:$PATH"
+1. Photometrische ZNCC-aanpak (van eerder vandaag) getest op 3 verschillende
+   video's: Berghem (LEFT_PART/RIGTH_PART), PATTERN_TEST (kegel-kalibratie-
+   beelden), en een nieuwe OJC-Bergem wedstrijd (04-07-2026). Resultaat:
+   2 van de 3 zagen een verbetering van de near-field lijn (zichtbaar
+   gecontroleerd via echte `reco stitch` full-frame renders, niet alleen
+   de losse test-tool), 1 (PATTERN_TEST) werd zichtbaar SLECHTER.
 
-Build target: D:\cargo-target\video-stitcher (via .cargo/config.toml).
-Binaries na build: D:\cargo-target\video-stitcher\release\reco.exe en
-...\release\rig-calib.exe
+2. JIJ hebt zelf een fout gevonden die ik gemist had: bij de OJC-test zag
+   de near-field lijn er goed uit, maar toen je zelf op een ANDERE hoogte
+   in `stitch_refined.png` keek (bij de goal/achtergrond), zag je een
+   duidelijke verdubbeling/misalignment die er in de baseline niet was.
+   Dat bleek ook (subtieler) in de originele Berghem-test te zitten.
+   Conclusie: het "near-field beter maken" ging ten koste van het
+   middenveld - de fout werd verplaatst, niet opgelost. Dit was een
+   belangrijke correctie op mijn eerdere (te positieve) conclusie.
 
-------------------------------------------------------------------------
-GIT STATUS (niets gecommit vandaag - working tree only)
-------------------------------------------------------------------------
-Gewijzigd (modified):
-  crates/reco-calibrate/src/{lib.rs, pipeline.rs, video.rs, live.rs, types.rs}
-  crates/reco-cli/src/{main.rs, calibrate.rs}
-  (plus al bestaande wijzigingen van voor deze sessie: reco-calibrate/
-  Cargo.toml, defaults.rs, features.rs; reco-core/Cargo.toml,
-  render/pipeline.rs; .gitignore, Cargo.toml, Cargo.lock - deze waren
-  al gewijzigd voordat deze sessie begon, niet door mij aangeraakt
-  behalve waar hierboven genoemd)
+3. Jij vroeg om een betere aanpak en gaf me vrije hand voor de nacht.
+   Onderzoek gedaan naar Photoshop/PTGui/Hugin/VideoStitch/Insta360/GoPro
+   (zie FRICTION.md punt 17 voor bronnen/details) + de 2 GitHub-repos die
+   je noemde (allebei MATLAB-implementaties van dezelfde paper: Li et al.
+   "Parallax-Tolerant Image Stitching Based on Robust Elastic Warping",
+   IEEE TMM 2017 - niet gekloond/uitgevoerd, wel als inspiratie gebruikt).
 
-Nieuw (untracked, niet door mij aangemaakt tenzij genoemd):
-  calibration_alignment_fix_summary.txt   <- door mij aangemaakt vandaag
-  session_handoff.txt                     <- dit bestand
-  crates/rig-calib/                       <- door mij gewijzigd vandaag
-    (settings.rs is nieuw; main.rs, calibration.rs, ui/main.slint,
-    Cargo.toml gewijzigd)
-  crates/reco-calibrate/models/, src/ai_features.rs, crates/reco-stitch-img/,
-  crates/reco-core/FRICTION.md, vendor/  <- al aanwezig voor deze sessie,
-    niet door mij aangeraakt
+4. NIEUWE AANPAK GEBOUWD: "row-varying local disparity correction"
+   (`crates/reco-calibrate/src/row_profile.rs` + nieuw voorbeeld
+   `examples/fit_row_profile.rs`). Kernidee: in plaats van 1 getal voor
+   de hele plaatsing te zoeken (wat altijd fout gaat zodra near-field en
+   far-field een verschillende correctie nodig hebben - en dat is precies
+   wat er aan de hand is), wordt PER BEELDREGEL apart gemeten hoeveel
+   verticale verschuiving er nodig is, robuust tegen bewegende spelers
+   (meerdere frames vergelijken, instabiele metingen weggooien), en met
+   een harde garantie dat de correctie buiten het gemeten gebied precies
+   0 is (dezelfde wiskundige aanpak als de eerdere band_limited_ground_warp
+   - dus geen nieuw risico op dat vlak).
 
-Nog geen enkele commit gemaakt - alles staat klaar om te reviewen en
-eventueel te committen wanneer je wilt.
+   Deze keer is de validatie-discipline VOORAF ingebouwd (niet achteraf
+   toegevoegd nadat jij een fout vond): elke run checkt automatisch
+   near/mid/far apart, EN houdt het laatste frame apart (niet gebruikt om
+   te fitten) om te checken of de correctie ook werkt op een frame die hij
+   nooit heeft gezien.
 
-------------------------------------------------------------------------
-VERVOLG 2026-07-04: z_rz toegevoegd als losse optimizer-parameter
-------------------------------------------------------------------------
-Eerste punt van "MORGEN VERDER MET" hierboven is gedaan: z_rz (roll van
-de linkercamera) kan nu net als x_rx handmatig aangezet worden, in
-plaats van hardcoded op 0.0 te blijven staan.
+   Resultaat op Berghem (4 frames, 3 om te fitten + 1 apart gehouden):
+   - Middenveld: echt en consistent beter, ook op het apart gehouden frame.
+   - Near-field (het eigenlijke doel): consistent SLECHTER geworden.
+   - Far-field: ongeveer gelijk.
 
-Gewijzigd:
-- crates/reco-calibrate/src/optimizer.rs: de 4 losse
-  params_from_vec*-functies (voor elke combinatie van lock_cam_d/
-  lock_z_rx) zijn vervangen door 1 generieke unpack_params(), anders
-  waren er 8 varianten nodig geweest (2 locks x 2 optionele parameters).
-  z_rz start altijd op 0.0 - er is geen IMU-signaal dat er iets over
-  zegt, dus in tegenstelling tot x_rx is er geen auto-enable gate om te
-  omzeilen.
-- crates/reco-calibrate/src/types.rs: OptimizerConfig kreeg een
-  enable_z_rz veld (default false).
-- reco-cli: nieuwe --enable-z-rz flag op `reco calibrate`.
-- rig-calib: nieuwe checkbox "Force extra rotation fit (z_rz)" naast de
-  bestaande x_rx-checkbox (ui/main.slint + calibration.rs + main.rs).
-- Tests toegevoegd/aangepast in optimizer.rs (unpack_params, 7-parameter
-  simplex met x_rx+z_rz samen).
-
-Geverifieerd: cargo test -p reco-calibrate (51 + 5 regressietests, alle
-groen), cargo build op reco-cli en rig-calib, cargo clippy/fmt op de
-gewijzigde bestanden (de resterende clippy-fouten zitten in
-niet-aangeraakte bestanden van voor deze sessie: reco-core en
-ai_features.rs). Ook een echte calibratie gedraaid met
---enable-x-rx --enable-z-rz op PATTERN2_L01/R01: zRz kwam uit op
-~0.0000015 rad (vrijwel 0) - logisch, want er zit geen echte
-linkercamera-roll in dit rigje, en met maar 37 matches is dat precies
-het gewenste gedrag (geen ruis oppikken als een valse rotatie).
-
-Nog steeds niets gecommit - ook deze wijziging staat klaar in de
-working tree.
-
-Nog open van de oorspronkelijke lijst:
-- imu_sync() loskoppelen (rig_tilt/rig_roll/differential_orientation
-  laten werken op quaternion-only camera's zoals de DJI).
-- Confidence-metric herzien (blijft 100%/74% ongeacht kwaliteit-
-  verschillen die er echt toe doen).
-- todo.txt opschonen (punt 1 en 2 waren al klaar voor deze sessie).
-
-------------------------------------------------------------------------
-VERVOLG 2026-07-04 deel 2: bodemlijn-misalignment op echte wedstrijdbeelden
-------------------------------------------------------------------------
-Jij liet een screenshot zien van de rig-calib preview (blend width 0) op
-echte wedstrijdbeelden (Berghem Sport J011-1, DJI Osmo Action 4): overal
-lijnt de stitch perfect uit (middenlijn, cirkel, goal), behalve de lijn
-onderin beeld (dichtst bij de camera) - die springt zichtbaar over de naad.
-
-Twee hypotheses getest en allebei verworpen, met echte experimenten op
-deze beelden:
-1. AKAZE-detectieband (detect_y_max/spatial_y_high, normaal 0.85/0.8)
-   verruimd naar 0.97/0.95 - matches verschoven nauwelijks (100 -> 94),
-   geen zichtbare verbetering. De tijdelijke --spatial-y-high CLI-flag
-   is weer teruggedraaid.
-2. Lensvervorming/undistortion nagerekend: losse ontdistorte camera-
-   frames gedumpt (--debug-dir) en een echte rechte zijlijn dicht bij de
-   camera wiskundig gefit. Rechte fit: RMSE 1.3 pixel op 4K; een gebogen
-   fit was maar 4.6% beter - geen meetbare kromming. De lensdata komt
-   trouwens al uit de fabrieks-telemetrie van de DJI zelf, niet uit een
-   generieke database-fallback.
-
-Conclusie (vastgelegd in crates/reco-calibrate/FRICTION.md): dit is een
-fundamentele beperking van het platte-twee-vlakken-plaatsingsmodel, dat
-het echte grondvlak-perspectief het slechtst benadert vlak bij de camera
-- geen instelbaar probleem, geen lensprobleem. Een echte oplossing zou
-een ander geometrisch model vereisen (grondvlak/dome-model voor het
-nabije veld) - een groot apart traject, geen tuning-fix. Ook gevraagd of
-"AI-tweaking" van de lens een optie is: nee, er bestaat nergens in de
-codebase een mechanisme om distortie-coëfficiënten te verfijnen vanuit
-beeldmateriaal, en het zou een dure herbouw van de optimizer-inner-loop
-vereisen (opnieuw undistorten per iteratie) voor een gebied dat de
-kostenfunctie toch al nauwelijks meeweegt.
-
-Nog steeds niets gecommit.
-
-------------------------------------------------------------------------
-VERVOLG 2026-07-04 deel 3: "Ground correction" - echte fix voor de
-bodemlijn-misalignment
-------------------------------------------------------------------------
-Jij wilde het probleem echt opgelost hebben, niet alleen gedocumenteerd.
-Een volwaardig grondvlak/dome-model bleek een fikse ingreep (raakt ook de
-GPU-renderpijplijn in reco-core, niet alleen reco-calibrate) en heeft
-bovendien camerahoogte + hellingshoek nodig die deze rig niet kan leveren
-(geen ruwe IMU-gyro op de DJI Osmo Action 4). Jij koos ervoor om in plaats
-daarvan een handmatig instelbare, live-tunable correctie te bouwen - geen
-optimizer-parameter (die route liep al vast op te weinig betrouwbare
-matches dicht bij de camera), maar een geometrische aanpassing per
-videoframe.
-
-Nieuw: "Ground correction" schuifje in rig-calib (naast Blend width),
-bereik -0.2 tot 0.2, default 0.0 = exact het oude gedrag. Duwt de onderste
-~25% van elk cameravlak verticaal iets uit elkaar/naar elkaar toe (per
-vlak tegengesteld teken), precies in de band die de AKAZE-calibratie toch
-al negeert. Ook een --ground-correction vlag toegevoegd aan reco-cli's
-stitch/preview/camera/libcamera commando's.
-
-Getest op de echte Berghem-beelden (reco stitch --blend 0
---ground-correction <n>):
-  +0.02  -> sprong in de bodemlijn bijna helemaal weg, geen vervorming
-  +0.04  -> overcorrectie, sprong komt terug (andere kant op)
-  -0.02  -> geen zichtbaar effect (bevestigt: richting/sterkte is
-            per-rig, geen universele waarde - gewoon aanslepen tot het
-            klopt, met blend width op 0)
-
-Gewijzigde bestanden (spiegelt exact hoe blend_width al werkte):
-  crates/reco-core/src/calibration.rs, render/viewport.rs,
-  render/stitch_renderer.rs, render/pipeline.rs, render/renderer.rs,
-  shaders/fisheye.wgsl, crates/rig-calib/ui/main.slint + src/main.rs +
-  src/preview.rs, crates/reco-cli/src/main.rs + stitch.rs + preview.rs +
-  camera.rs + libcamera_cmd.rs, crates/reco-io/src/stitch_job.rs.
-
-cargo test -p reco-core: 144 groen (de 2 CUDA-tests die falen gaan over
-apparaat-initialisatie, niets met deze wijziging te maken - waarschijnlijk
-een andere applicatie die de GPU vasthoudt). gstreamer/libcamera-features
-kon ik niet builden op deze Windows-machine (geen GStreamer SDK/pkg-config
-geinstalleerd) - die wijzigingen zijn wel 1-op-1 hetzelfde patroon als het
-al-geverifieerde stitch/preview-pad.
-
-Belangrijk: dit lost het probleem NIET fundamenteel op (het blijft een
-handmatige nabewerking, geen echt grondvlak-model), maar werkt wel
-aantoonbaar en is per rig opnieuw in te stellen zonder te hercalibreren.
-
-------------------------------------------------------------------------
-VERVOLG 2026-07-04 deel 4: ground_correction blijkt spookbeeld te geven
-op spelers - dieper onderzoek, geen betere oplossing gevonden
-------------------------------------------------------------------------
-Jij testte de ground_correction-schuifknop in rig-calib op echte
-wedstrijdbeelden: de bodemlijn kwam mooi recht op een leeg stuk veld,
-maar zodra een speler door die onderste band liep, kreeg die een duidelijk
-spookbeeld/dubbel beeld. Oorzaak: de correctie schuift per beeldrij, niet
-per echte diepte - een staande speler beslaat meerdere rijen maar zit
-eigenlijk op bijna dezelfde afstand tot de camera (een mens is klein
-vergeleken met de afstand tot de rig), dus voeten en hoofd krijgen elk een
-andere (foute) correctie.
-
-Jij bracht een goed tegenargument in: de twee camera's zitten vast in een
-behuizing, dus zou de correctie toch een vaste eigenschap van de rig
-moeten zijn? Antwoord: gedeeltelijk juist - de rig-geometrie is inderdaad
-vast, maar dat levert GEEN vaste 2D-uitlijning op die voor alles tegelijk
-klopt, vanwege parallax (het "houd een vinger vlak voor je gezicht en
-knijp om beurten een oog dicht"-effect). Dat is natuurkunde, geen
-implementatiefout.
-
-Jij had eerder goede ervaringen met een ander programma, ActionStitch
-(actionstitch.com). We hebben hun eigen logbestand
-(%LOCALAPPDATA%\actionstitch.com\ActionStitch\actionstitch.log, stond al
-lokaal geinstalleerd) uitgeplozen: zij gebruiken gewoon EEN globale
-2D-homografie uit feature-matches + RANSAC - dezelfde soort aanpak als
-wij, alleen met meer vrijheidsgraden (8 vrij vs onze 7 fysiek-beperkte
-parameters). Hun eigen handleiding erkent dat parallax bestaat en
-adviseert de naad weg van drukke plekken te leggen - zij lossen het dus
-ook niet op, ze verbergen het beter.
-
-Twee concrete alternatieven getest op onze eigen data, allebei negatief:
-1. Een gewone globale homografie fitten op onze bestaande AKAZE-matches:
-   leek numeriek geweldig (sub-2px mediane fout) maar bleek pure overfit -
-   onze 17-49 matches per frame clusteren allemaal in een klein gebiedje
-   (zichtbaar bevestigd via de bestaande match-visualisatie-afbeeldingen).
-   De warp naar een echt beeld mislukte compleet buiten dat clustertje.
-2. De AI-featurematcher (XFeat, al ingebouwd, nu ook toegankelijk via een
-   nieuwe --use-ai-matching vlag op reco-cli - eerder alleen in rig-calib
-   beschikbaar): vond veel meer kandidaten (500+ per frame) maar RANSAC
-   moest 95% weggooien en de uitkomst was veel slechter (parameters tegen
-   de grenzen aan geduwd) - de overgebleven matches clusterden nu rond
-   spelers in plaats van lijnen (waarschijnlijk gelijkende spelers door
-   elkaar gehaald).
-
-Conclusie: het echte knelpunt is een tekort aan breed verspreide,
-betrouwbare matches - niet de keuze van het model. ground_correction
-blijft staan met een duidelijke waarschuwing (UI-tooltip + CLI-help) dat
-het alleen veilig is voor stukken beeld zonder mensen in de onderste band.
---use-ai-matching blijft staan als nuttige infrastructuur ondanks het
-negatieve resultaat hier. Volledig verslag in
-crates/reco-calibrate/FRICTION.md.
-
-Nog steeds niets gecommit - ook dit staat klaar in de working tree.
-
-------------------------------------------------------------------------
-VERVOLG (nacht 2026-07-04/05): "los dit volledig op" - eerlijk eindverslag
-------------------------------------------------------------------------
-Je vroeg om dit probleem 's nachts volledig op te lossen, en zo nodig
-door te schakelen naar een ander model. Eerlijk antwoord vooraf: het is
-me niet gelukt de bodemlijn-misalignment volledig te elimineren - en na
-vannacht ben ik er vrij zeker van dat dat met de huidige twee-camera-rig
-en het huidige model ook niet lukt (zie hieronder waarom). Wat ik wel heb
-gedaan: alle redelijke sporen uitgeput en getest (niet alleen beredeneerd),
-een paar echte bugs gevonden en gefixt, en een praktische verzachting
-gevonden die het probleem in de praktijk grotendeels onzichtbaar maakt.
-
-**1. XFeat/AI-matching volledig verwijderd** (jouw beslissing na het
-   negatieve testresultaat): ai_features.rs, de ai-features Cargo-feature
-   overal, de ONNX-modellen, en de checkbox in rig-calib. Puur AKAZE nu.
-
-**2. --detect-x (overlapbreedte) verbreden getest: hielp niet.**
-   Bleek de verkeerde hendel (regelt horizontale spreiding, niet hoe
-   dicht bij de onderrand gezocht wordt) - en verlaagde het aantal matches
-   zelfs (downscale-cap verdunt de extra breedte). Wel een nuttige nieuwe
-   --detect-max-width vlag aan reco-cli toegevoegd om dit goed te kunnen
-   testen (rig-calib had dit al, reco-cli nog niet).
-
-**3. Belangrijkste experiment: 15 frames i.p.v. 4 samplen.**
-   Dit vond wél echte matches diep in het nabije-veld-gebied (y tot 0.148
-   i.p.v. 0.013 met 4 frames - 402 punten totaal). Maar de optimizer bleek
-   die data niet te gebruiken: de verticale gewichtsfunctie
-   (seam_sigma_y, tot vannacht hardcoded op 0.08) drukt punten ver van het
-   beeldcentrum praktisch weg. Blootgelegd als nieuwe --seam-sigma-y vlag
-   en doorlopen van 0.08 tot 1.0 op dezelfde 402 punten (optimizer
-   opnieuw gedraaid op de al opgeslagen matched_points.json, zonder de
-   trage AKAZE-stap over te doen): de kernparameters (cam_d, intersect,
-   xTy, xRz, zRx) bleven vrijwel exact hetzelfde, en de residual werd
-   zelfs licht slechter. Dit is het sterkste bewijs tot nu toe: zelfs met
-   de data beschikbaar EN volledig gewogen, vindt de optimizer geen betere
-   oplossing - de sprong in de bodemlijn is het beste compromis dat het
-   platte-vlakken-model kan vinden, geen tekort aan data of verkeerde
+   Waarom: de metingen konden geen betrouwbare uitslag krijgen in de
+   allerdiepste near-field rijen (dichtst bij de camera) - waarschijnlijk
+   omdat het gras daar te weinig/te repetitieve textuur heeft (dit is
+   al eerder in FRICTION.md als risico benoemd, nu bevestigd voor een
+   heel andere techniek). Groter zoekbereik geprobeerd om dieper te meten
+   - dat werd juist erger (1 nep-match op de randwaarde van het zoekbereik
+   die ook het far-field beschadigde). Teruggedraaid naar de veilige
    instelling.
 
-**4. Praktische verzachting gevonden (dit is denk ik het bruikbaarste
-   resultaat van vannacht):** de hele sessie hebben we blend=0 gebruikt
-   voor diagnose. Met de standaard blend_width van 0.05 is de sprong al
-   duidelijk zachter; bij blend_width=0.12 is hij op het geteste frame
-   bijna onzichtbaar. Geen echte fix (verbloemt het probleem, lost het
-   niet op), en er is een bekende afweging (een brede blend kan bal-
-   tracking in het overlapgebied "wassen" - staat al in de renderer-code
-   als comment van eerdere Jetson-productietests). Toch de laagste-
-   risico-hendel die vandaag beschikbaar is.
-
-**5. Zijspoor: Free-Fly-camera bug gevonden en gefixt.** De coverage-
-   grens (voorkomt zwarte randen bij pannen) werd nooit opnieuw berekend
-   nadat de vlieg-camera bewoog, dus met "constrained look" aan (standaard
-   aan) leek pannen tijdens vliegen vastgeklemd op de startpositie. Fix:
-   nieuwe StitchRenderer::refresh_coverage(), aangeroepen na elke
-   fly_camera-beweging.
-
-**Eerlijke conclusie:** de oorzaak is en blijft parallax + een plat-
-vlakken-model dat de vorm van de werkelijkheid dicht bij de camera niet
-kan volgen. Dat is natuurkunde/geometrie, geen implementatiefout, en
-vannacht is dat nu experimenteel bevestigd (niet alleen beredeneerd) door
-te laten zien dat zelfs met de juiste data en volledige gewichtstoekenning
-de optimizer geen andere oplossing vindt. Een echte oplossing (een
-grondvlak-model met camerahoogte/hellingshoek) is een groot apart traject
-dat deze rig momenteel niet kan voeden (geen ruwe IMU-gyro, geen
-fysieke meting gedaan). Voor nu: blend_width omhoog is de simpelste
-praktische stap, ground_correction is er voor stukken zonder spelers
-in de onderste band.
-
-Volledig technisch verslag: crates/reco-calibrate/FRICTION.md.
-Nog steeds niets gecommit.
+   Dit is dus GEEN geldige fix, maar wel eerlijk en goed onderbouwd
+   getest, en de tooling zelf werkt correct en is herbruikbaar.
 
 ------------------------------------------------------------------------
-VERVOLG (2026-07-05, ochtend): 3 taken na jouw review
+CONCREET ADVIES VOOR DE VOLGENDE STAP (niet gedaan, alleen aanbevolen)
 ------------------------------------------------------------------------
-1. **ground_correction volledig verwijderd.** Je vond het geen goede
-   oplossing (de player-ghosting was een dealbreaker, niet slechts een
-   afweging). Alles teruggedraaid: struct-veld, GPU-uniform, shader-ramp,
-   CLI-vlaggen, rig-calib-slider/callback - over alle 24 geraakte
-   bestanden. Build/test/clippy/fmt allemaal schoon nadien.
 
-2. **"AKAZE-band versmallen" getest en verworpen.** Idee was: alleen
-   vlak bij de naad zoeken (--detect-x hoger dan 0.5) in plaats van de
-   halve breedte. Op echte Berghem-beelden (6 frames): bij 0.5 (huidige
-   default) 171 matches, 6/6 frames bruikbaar. Bij 0.75 en 0.9: 0/6
-   frames bruikbaar (spatial filter hield nog maar 0-3 matches over per
-   frame, ver onder het minimum van 6). De lijnen die AKAZE nodig heeft
-   liggen verspreid over het overlapgebied, niet geclusterd vlak bij de
-   rand - een smalle strook heeft simpelweg te weinig textuur. Dus 0.5
-   is al vrijwel optimaal in beide richtingen (verbreden verdunt de
-   resolutie tegen de downscale-cap, versmallen laat de matches
-   instorten). Niets aangepast in code, alleen vastgelegd in FRICTION.md.
+De row_profile-aanpak zelf hoeft niet weggegooid te worden - het probleem
+zit in HOE de disparity gemeten wordt in de allerdiepste rijen, niet in
+de architectuur (per-rij correctie, band-limited, multi-frame-robuust
+blijft de juiste richting gezien wat er vandaag allemaal NIET werkte).
+Concreet idee voor een volgende sessie: gebruik voor de allerdiepste
+rijen geen generieke block-matching ZNCC (die heeft veel textuur nodig),
+maar expliciete lijn/rand-detectie op echte veldlijnen (net als het
+line_fit.py scriptje van eerder deze week, D:/VOETBAL_VIDEO/CALIB/
+lens_compare/line_fit.py) - een rechte witte lijn op gras is een veel
+sterker, contrastrijker doelwit dan generieke textuurvergelijking.
 
-3. **"Preview Detected Points"-knop vervangen door live weergave tijdens
-   Auto-Calibrate.** In plaats van een losse freeze-frame-knop laat
-   rig-calib nu tijdens het echte calibratieproces elke verwerkte
-   frame-pair automatisch zien (blauw = gedetecteerd, groen = binnen het
-   verwachte overlapgebied, geel kader = de band zelf) - ook als een
-   frame faalt, zodat je live ziet waarom. Grootste verandering: de
-   annotatie-tekencode is verplaatst van rig-calib naar
-   reco-calibrate/src/preview.rs (nieuwe module, geen GUI-afhankelijkheid)
-   zodat zowel de video-pipeline (calibrate_reporting/calibrate_videos)
-   als straks andere GUIs 'm kunnen hergebruiken. `feature_preview.rs` in
-   rig-calib is weg; de losse knop/property/callback in main.slint ook.
+Andere opties die nog open staan (zie ook FRICTION.md's eigen conclusies):
+- Rij-profiel ALLEEN toepassen waar het metingen heeft (near-field met
+  rust laten i.p.v. door laten "zakken" naar 0) i.p.v. automatisch
+  overal een profiel te forceren.
+- De praktische, allang bekende mitigatie: blend_width omhoog (0.12
+  i.p.v. 0.05) maakt de naad bijna onzichtbaar - kost niks, lost niks
+  echt op, maar is een reeds geverifieerde, direct beschikbare optie.
+- De "echte" fix (pitch-marking ground-plane homography) - grote, nieuwe
+  feature, nog steeds niet gebouwd, wel al eerder als beste optie
+  genoemd in FRICTION.md.
 
-Build/test/clippy(--no-deps)/fmt allemaal schoon. Nog steeds niets
-gecommit - staat klaar in de working tree voor jouw review.
+------------------------------------------------------------------------
+OOK GEDAAN VANDAAG (los van de seam-investigatie)
+------------------------------------------------------------------------
+- rig-calib: "Feature Matching - 25%" tekst boven is teruggebracht tot
+  gewoon "FeatureMatching" (percentage weg, zoals gevraagd).
+- rig-calib: progress bar toegevoegd achter de "Calibrating: ..." tekst
+  onderin - vult zich als er een percentage bekend is, pulseert anders
+  (zodat je ziet: bezig / vastgelopen / klaar).
+- rig-calib.exe en reco.exe opnieuw gebuild met alle bovenstaande wijzigingen
+  (D:\cargo-target\video-stitcher\release\).
+
+------------------------------------------------------------------------
+BELANGRIJK: NIETS COMMIT
+------------------------------------------------------------------------
+Op jouw eigen instructie is er vannacht niets naar git gecommit en niets
+naar productiecode (shader/renderer) doorgevoerd - alles staat in
+losse, geïsoleerde `reco-calibrate/examples/*.rs` bestanden + 1 nieuw
+(inert) bestand in reco-core (`render/single_camera.rs`, van eerder
+vandaag, ook nog niet gecommit). Niets hiervan wordt door de normale
+`reco stitch`/`rig-calib` productiepaden gebruikt.

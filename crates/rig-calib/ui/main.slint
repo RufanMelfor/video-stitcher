@@ -196,8 +196,12 @@ export component CalibrateApp inherits Window {
     in-out property <string> calibration-step: "";
     // Fraction (0.0-1.0) of the current calibration step completed, or
     // -1.0 when the current step has no meaningful fraction (e.g.
-    // probing, sync) - callers should hide the percentage in that case.
+    // probing, sync) - the progress bar shows a pulsing indeterminate
+    // fill in that case instead of a precise width.
     in-out property <float> calibration-progress: -1.0;
+    // Toggled by progress-pulse-timer to animate the indeterminate
+    // (calibration-progress < 0) progress bar fill's opacity.
+    property <bool> progress-pulse-on: false;
     in-out property <string> version: "";
 
     // Camera view state.
@@ -341,6 +345,15 @@ export component CalibrateApp inherits Window {
     forward-focus: key-scope;
     public function refocus() { key-scope.focus(); }
 
+    // Drives the indeterminate progress-bar pulse while calibrating with
+    // no known fraction (calibration-progress < 0) - stopped otherwise so
+    // it doesn't keep the event loop ticking when idle.
+    progress-pulse-timer := Timer {
+        interval: 900ms;
+        running: root.calibrating && root.calibration-progress < 0.0;
+        triggered => { root.progress-pulse-on = !root.progress-pulse-on; }
+    }
+
     key-scope := FocusScope {
         width: 100%;
         height: 100%;
@@ -424,9 +437,7 @@ export component CalibrateApp inherits Window {
                     Rectangle { horizontal-stretch: 1; }
 
                     if root.calibrating: Text {
-                        text: root.calibration-progress >= 0.0
-                            ? root.calibration-step + " - " + round(root.calibration-progress * 100) + "%"
-                            : root.calibration-step;
+                        text: root.calibration-step;
                         color: root.text-muted;
                         vertical-alignment: center;
                     }
@@ -563,11 +574,47 @@ export component CalibrateApp inherits Window {
                         }
                     }
 
-                    // Status line (replaces reco-gui's toast stack).
-                    Text {
-                        text: root.status-text;
-                        color: root.status-is-error ? root.accent-error : root.text-muted;
-                        font-size: 13px;
+                    // Status line (replaces reco-gui's toast stack). While
+                    // calibrating, a thin progress bar renders behind the
+                    // text: filled to calibration-progress when known, or
+                    // pulsing at full width when not (e.g. probing/sync
+                    // steps with no meaningful fraction) - so busy vs.
+                    // stalled vs. finished is visible at a glance, not just
+                    // inferable from the text changing.
+                    Rectangle {
+                        height: 20px;
+                        clip: true;
+
+                        if root.calibrating: track := Rectangle {
+                            width: 100%;
+                            height: 100%;
+                            background: root.bg-card;
+                            border-radius: 3px;
+
+                            Rectangle {
+                                x: 0px;
+                                y: 0px;
+                                height: 100%;
+                                width: root.calibration-progress >= 0.0
+                                    ? track.width * root.calibration-progress
+                                    : track.width;
+                                background: root.accent-info;
+                                opacity: root.calibration-progress >= 0.0
+                                    ? 0.55
+                                    : (root.progress-pulse-on ? 0.55 : 0.2);
+                                border-radius: 3px;
+                                animate width { duration: 200ms; easing: ease-out; }
+                                animate opacity { duration: 900ms; easing: ease-in-out; }
+                            }
+                        }
+
+                        Text {
+                            text: root.status-text;
+                            color: root.status-is-error ? root.accent-error : root.text-muted;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                            height: 100%;
+                        }
                     }
                 }
 
