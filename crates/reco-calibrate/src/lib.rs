@@ -73,9 +73,11 @@ pub mod lens_database;
 /// by the consumer, not a file.
 pub mod live;
 pub mod optimizer;
+pub mod photometric;
 pub mod pipeline;
 pub mod preview;
 mod ransac;
+pub mod row_profile;
 pub mod sampling;
 pub mod telemetry;
 pub mod traits;
@@ -552,6 +554,10 @@ pub fn calibrate_with_reporting(
         z_rx: best_layout.z_rx,
         z_rz: None,
         x_rx: None,
+        ground_tilt_x: None,
+        ground_tilt_z: None,
+        k_x: 1.0,
+        k_z: 1.0,
     };
     let total_reproj = geometry::reprojection_error(&all_points, &best_params);
     let angular_err = geometry::angular_error(&all_points, &best_params);

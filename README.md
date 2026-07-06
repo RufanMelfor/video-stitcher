@@ -78,7 +78,7 @@ LIBVA_MESSAGING_LEVEL=2 ./target/release/reco stitch left.mp4 right.mp4 -c match
 
 ## Architecture
 
-Nine Rust crates. Strict dependency direction keeps the engine reusable as a library.
+Eleven Rust crates. Strict dependency direction keeps the engine reusable as a library.
 
 ```
 reco-core        GPU stitching engine (wgpu). No I/O, no domain logic.
@@ -90,6 +90,8 @@ reco-control     Operator intent vocabulary (keyboard today; gopro/mobile/websoc
 reco-cli         Terminal consumer: stitch / calibrate / preview / camera / analyze / info.
 reco-gui         Slint desktop consumer with wgpu preview + export UI.
 reco-obs         OBS Studio source plugin (async-frame ingestion, BGRA, interactive pan/zoom).
+rig-calib        Standalone lens + rig stitch calibration tool with live GPU preview (Slint).
+reco-stitch-img  Standalone GPU image stitcher for pipeline benchmarking and optimization.
 ```
 
 **Dependency direction:** consumers (`cli` / `gui` / `obs`) depend on the four library crates (`autocam`, `calibrate`, `detect`, `io`); all four depend on `reco-core`. `reco-control` is consumed by `cli` / `gui` / `obs`.

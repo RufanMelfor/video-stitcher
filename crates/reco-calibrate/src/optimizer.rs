@@ -232,6 +232,10 @@ fn unpack_params(
         z_rx,
         z_rz,
         x_rx,
+        ground_tilt_x: None,
+        ground_tilt_z: None,
+        k_x: 1.0,
+        k_z: 1.0,
     }
 }
 
@@ -520,6 +524,10 @@ mod tests {
             z_rx: 0.0,
             z_rz: None,
             x_rx: None,
+            ground_tilt_x: None,
+            ground_tilt_z: None,
+            k_x: 1.0,
+            k_z: 1.0,
         };
 
         let points = synthetic_points(&true_params, 50);
@@ -554,6 +562,10 @@ mod tests {
             z_rx: -0.005,
             z_rz: None,
             x_rx: None,
+            ground_tilt_x: None,
+            ground_tilt_z: None,
+            k_x: 1.0,
+            k_z: 1.0,
         };
         let points = synthetic_points(&true_params, 50);
 
