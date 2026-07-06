@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Manual seam-line picker</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #666; --panel: #f4f4f5;
+    --accent: #1a6dd8; --accent2: #d8501a; --line-done: #2a9d3f; --border: #ccc;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #16181c; --fg: #e8e8e8; --muted: #9aa0a6; --panel: #212327; --border: #3a3d42; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--fg); margin: 0; padding: 1.25rem;
+  }
+  h1 { font-size: 1.25rem; margin: 0 0 0.25rem; }
+  h2 { font-size: 1rem; margin: 0 0 0.5rem; }
+  p.help { color: var(--muted); max-width: 70rem; line-height: 1.4; }
+  .panels { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 1rem; }
+  .panel {
+    flex: 1 1 420px; min-width: 320px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem;
+  }
+  .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+  .canvas-wrap {
+    overflow: auto; max-height: 65vh; border: 1px solid var(--border);
+    border-radius: 4px; margin-top: 0.5rem; background: #202020;
+  }
+  canvas { display: block; cursor: crosshair; }
+  .status { margin-top: 0.4rem; font-size: 0.85rem; color: var(--muted); }
+  .status b { color: var(--fg); }
+  .coords { font-size: 0.8rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  select, button, input[type=file] {
+    font: inherit; padding: 0.3rem 0.6rem; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--fg);
+  }
+  button { cursor: pointer; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.primary { background: var(--accent); color: white; border-color: var(--accent); }
+  .controls { margin-top: 1rem; display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
+  .lines-list { margin-top: 1rem; }
+  .lines-list ol { padding-left: 1.4rem; }
+  .lines-list li { margin-bottom: 0.3rem; font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+  .lines-list button { font-size: 0.75rem; padding: 0.1rem 0.5rem; margin-left: 0.6rem; }
+  .export { margin-top: 1rem; }
+  pre#jsonPreview {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 0.75rem; max-height: 16rem; overflow: auto; font-size: 0.8rem;
+  }
+  .empty-hint { color: var(--muted); font-size: 0.85rem; }
+</style>
+</head>
+<body>
+
+<h1>Manual seam-line picker</h1>
+<p class="help">
+  For <code>reco-calibrate</code>'s <code>fit_ground_tilt_manual</code> harness (see
+  <code>crates/reco-calibrate/FRICTION.md</code> point 18). Load the GPU-undistorted
+  <code>frame_XX_left.png</code> / <code>frame_XX_right.png</code> images that
+  <code>reco calibrate --debug-dir &lt;dir&gt; ...</code> already dumps. On each side, click two
+  points along the <em>same real field line</em>, near the seam - one further from the camera, one
+  closer - then "Add line pair". Repeat for at least 2 different lines (2 independent points are
+  needed to fit <code>ground_tilt_x</code> and <code>ground_tilt_z</code> - 1 line falls back to a
+  single shared parameter). Nothing here is uploaded anywhere - it's a plain static file, runs
+  entirely in this tab.
+</p>
+
+<div class="panels">
+  <div class="panel" data-side="left">
+    <div class="panel-head">
+      <h2>Left camera</h2>
+      <div>
+        <input type="file" accept="image/png,image/*" class="fileInput">
+        <select class="zoom">
+          <option value="0.25">25%</option>
+          <option value="0.5" selected>50%</option>
+          <option value="0.75">75%</option>
+          <option value="1">100%</option>
+          <option value="2">200%</option>
+        </select>
+      </div>
+    </div>
+    <div class="canvas-wrap"><canvas class="canvas" width="0" height="0"></canvas></div>
+    <div class="status">Load an image, then click point 1 (far from seam).</div>
+    <div class="coords">cursor: -</div>
+  </div>
+
+  <div class="panel" data-side="right">
+    <div class="panel-head">
+      <h2>Right camera</h2>
+      <div>
+        <input type="file" accept="image/png,image/*" class="fileInput">
+        <select class="zoom">
+          <option value="0.25">25%</option>
+          <option value="0.5" selected>50%</option>
+          <option value="0.75">75%</option>
+          <option value="1">100%</option>
+          <option value="2">200%</option>
+        </select>
+      </div>
+    </div>
+    <div class="canvas-wrap"><canvas class="canvas" width="0" height="0"></canvas></div>
+    <div class="status">Load an image, then click point 1 (far from seam).</div>
+    <div class="coords">cursor: -</div>
+  </div>
+</div>
+
+<div class="controls">
+  <button id="addLineBtn" class="primary" disabled>Add line pair</button>
+  <button id="resetCurrentBtn">Reset current points</button>
+  <span class="empty-hint" id="addHint">Click 2 points on both sides to enable.</span>
+</div>
+
+<div class="lines-list">
+  <h2>Collected line pairs</h2>
+  <ol id="linesOl"><li class="empty-hint" style="list-style:none">None yet.</li></ol>
+</div>
+
+<div class="export">
+  <h2>Export</h2>
+  <div class="controls" style="margin-top:0">
+    <button id="copyBtn">Copy JSON</button>
+    <button id="downloadBtn">Download manual_lines.json</button>
+  </div>
+  <pre id="jsonPreview">{"lines": []}</pre>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /** @type {{p1: [number,number]|null, p2: [number,number]|null}} */
+  function emptyPoint() { return { p1: null, p2: null }; }
+
+  const sides = {};
+  for (const panel of document.querySelectorAll(".panel")) {
+    const side = panel.dataset.side;
+    const canvas = panel.querySelector("canvas");
+    sides[side] = {
+      panel,
+      canvas,
+      ctx: canvas.getContext("2d"),
+      img: null,
+      scale: parseFloat(panel.querySelector(".zoom").value),
+      current: emptyPoint(),
+      statusEl: panel.querySelector(".status"),
+      coordsEl: panel.querySelector(".coords"),
+    };
+  }
+
+  const lines = []; // { left: {p1,p2}, right: {p1,p2} }
+
+  function redraw(side) {
+    const s = sides[side];
+    if (!s.img) return;
+    const w = Math.round(s.img.naturalWidth * s.scale);
+    const h = Math.round(s.img.naturalHeight * s.scale);
+    s.canvas.width = w;
+    s.canvas.height = h;
+    s.ctx.drawImage(s.img, 0, 0, w, h);
+
+    // Confirmed lines (muted green), current in-progress (bright accent).
+    s.ctx.lineWidth = 2;
+    for (const pair of lines) {
+      drawLine(s, pair[side], "#2a9d3f", true);
+    }
+    drawLine(s, s.current, "#d8501a", false);
+  }
+
+  function drawLine(s, pt, color, filled) {
+    const toCanvas = (p) => [p[0] * s.scale, p[1] * s.scale];
+    s.ctx.fillStyle = color;
+    s.ctx.strokeStyle = color;
+    if (pt.p1) {
+      const [x, y] = toCanvas(pt.p1);
+      crosshair(s.ctx, x, y, color);
+    }
+    if (pt.p2) {
+      const [x, y] = toCanvas(pt.p2);
+      crosshair(s.ctx, x, y, color);
+    }
+    if (pt.p1 && pt.p2) {
+      const [x1, y1] = toCanvas(pt.p1);
+      const [x2, y2] = toCanvas(pt.p2);
+      s.ctx.beginPath();
+      s.ctx.moveTo(x1, y1);
+      s.ctx.lineTo(x2, y2);
+      s.ctx.stroke();
+    }
+  }
+
+  function crosshair(ctx, x, y, color) {
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x - 7, y);
+    ctx.lineTo(x + 7, y);
+    ctx.moveTo(x, y - 7);
+    ctx.lineTo(x, y + 7);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x, y, 3, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function updateStatus(side) {
+    const s = sides[side];
+    if (!s.img) {
+      s.statusEl.innerHTML = "Load an image, then click point 1 (far from seam).";
+    } else if (!s.current.p1) {
+      s.statusEl.innerHTML = "Click point <b>1</b> (further from camera).";
+    } else if (!s.current.p2) {
+      s.statusEl.innerHTML = "Click point <b>2</b> (closer to camera / seam), on the same line.";
+    } else {
+      s.statusEl.innerHTML = "Both points set for this line - click “Add line pair” once the other side is ready too.";
+    }
+  }
+
+  function updateAddEnabled() {
+    const ready = Object.values(sides).every((s) => s.current.p1 && s.current.p2);
+    document.getElementById("addLineBtn").disabled = !ready;
+    document.getElementById("addHint").style.display = ready ? "none" : "inline";
+  }
+
+  for (const side of Object.keys(sides)) {
+    const s = sides[side];
+    const fileInput = s.panel.querySelector(".fileInput");
+    const zoomSelect = s.panel.querySelector(".zoom");
+
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        s.img = img;
+        s.current = emptyPoint();
+        redraw(side);
+        updateStatus(side);
+        updateAddEnabled();
+        URL.revokeObjectURL(url);
+      };
+      img.src = url;
+    });
+
+    zoomSelect.addEventListener("change", () => {
+      s.scale = parseFloat(zoomSelect.value);
+      redraw(side);
+    });
+
+    s.canvas.addEventListener("mousemove", (ev) => {
+      if (!s.img) return;
+      const rect = s.canvas.getBoundingClientRect();
+      const x = Math.round((ev.clientX - rect.left) / s.scale);
+      const y = Math.round((ev.clientY - rect.top) / s.scale);
+      s.coordsEl.textContent = `cursor: (${x}, ${y}) px  [image ${s.img.naturalWidth}x${s.img.naturalHeight}]`;
+    });
+
+    s.canvas.addEventListener("click", (ev) => {
+      if (!s.img) return;
+      const rect = s.canvas.getBoundingClientRect();
+      const x = Math.round((ev.clientX - rect.left) / s.scale);
+      const y = Math.round((ev.clientY - rect.top) / s.scale);
+      if (!s.current.p1) {
+        s.current.p1 = [x, y];
+      } else if (!s.current.p2) {
+        s.current.p2 = [x, y];
+      } else {
+        // Both already set - start a fresh line on this side.
+        s.current = { p1: [x, y], p2: null };
+      }
+      redraw(side);
+      updateStatus(side);
+      updateAddEnabled();
+    });
+  }
+
+  function refreshExport() {
+    const payload = { lines: lines.map((l) => ({ left: l.left, right: l.right })) };
+    document.getElementById("jsonPreview").textContent = JSON.stringify(payload, null, 2);
+  }
+
+  function refreshLinesList() {
+    const ol = document.getElementById("linesOl");
+    ol.innerHTML = "";
+    if (lines.length === 0) {
+      const li = document.createElement("li");
+      li.textContent = "None yet.";
+      li.className = "empty-hint";
+      li.style.listStyle = "none";
+      ol.appendChild(li);
+      return;
+    }
+    lines.forEach((pair, i) => {
+      const li = document.createElement("li");
+      li.textContent = `left [${pair.left.p1}] → [${pair.left.p2}]   |   right [${pair.right.p1}] → [${pair.right.p2}]`;
+      const del = document.createElement("button");
+      del.textContent = "remove";
+      del.addEventListener("click", () => {
+        lines.splice(i, 1);
+        refreshLinesList();
+        refreshExport();
+        redraw("left");
+        redraw("right");
+      });
+      li.appendChild(del);
+      ol.appendChild(li);
+    });
+  }
+
+  document.getElementById("addLineBtn").addEventListener("click", () => {
+    lines.push({
+      left: { p1: sides.left.current.p1, p2: sides.left.current.p2 },
+      right: { p1: sides.right.current.p1, p2: sides.right.current.p2 },
+    });
+    for (const side of Object.keys(sides)) {
+      sides[side].current = emptyPoint();
+      redraw(side);
+      updateStatus(side);
+    }
+    updateAddEnabled();
+    refreshLinesList();
+    refreshExport();
+  });
+
+  document.getElementById("resetCurrentBtn").addEventListener("click", () => {
+    for (const side of Object.keys(sides)) {
+      sides[side].current = emptyPoint();
+      redraw(side);
+      updateStatus(side);
+    }
+    updateAddEnabled();
+  });
+
+  document.getElementById("copyBtn").addEventListener("click", async () => {
+    const text = document.getElementById("jsonPreview").textContent;
+    try {
+      await navigator.clipboard.writeText(text);
+      const btn = document.getElementById("copyBtn");
+      const orig = btn.textContent;
+      btn.textContent = "Copied!";
+      setTimeout(() => (btn.textContent = orig), 1200);
+    } catch (e) {
+      alert("Clipboard write failed - select the text in the box below and copy manually.");
+    }
+  });
+
+  document.getElementById("downloadBtn").addEventListener("click", () => {
+    const text = document.getElementById("jsonPreview").textContent;
+    const blob = new Blob([text], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "manual_lines.json";
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  refreshExport();
+})();
+</script>
+</body>
+</html>

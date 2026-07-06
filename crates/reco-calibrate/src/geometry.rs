@@ -465,6 +465,31 @@ pub fn angular_error(points: &[MatchedPoint], params: &OptParams) -> f64 {
     total
 }
 
+/// Pixel-space (normalized `[0, 1]`) column where each camera's own
+/// contribution to the stitched output ends, derived from the current
+/// `intersect` value.
+///
+/// Matches the left/right swap convention used throughout this module:
+/// `MatchedPoint::left` / `left_pixel_nx` come from the *right* camera,
+/// `MatchedPoint::right` / `right_pixel_nx` come from the *left* camera.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SeamColumns {
+    /// Seam column in the right camera's own normalized pixel space -
+    /// compare against `MatchedPoint::left_pixel_nx`.
+    pub right_camera_seam_nx: f64,
+    /// Seam column in the left camera's own normalized pixel space -
+    /// compare against `MatchedPoint::right_pixel_nx`.
+    pub left_camera_seam_nx: f64,
+}
+
+/// Compute both cameras' seam columns from the current `intersect` value.
+pub fn seam_columns(intersect: f64) -> SeamColumns {
+    SeamColumns {
+        right_camera_seam_nx: intersect / 2.0,
+        left_camera_seam_nx: 1.0 - intersect / 2.0,
+    }
+}
+
 /// Configuration for seam-proximity weighting in the cost function.
 #[derive(Debug, Clone, Copy)]
 pub struct SeamWeightConfig {
@@ -527,8 +552,7 @@ fn per_point_seam_weighted_errors_full(
     let camera = Vector3::new(params.cam_d, 0.0, params.cam_d);
     let (x_pts, z_pts) = apply_transformations(points, params);
 
-    let left_cam_seam = 1.0 - params.intersect / 2.0;
-    let right_cam_seam = params.intersect / 2.0;
+    let seams = seam_columns(params.intersect);
     // Clamp sigma to a minimum to prevent NaN from division by zero
     let sx = config.sigma_x.max(1e-6);
     let sy = config.sigma_y.max(1e-6);
@@ -540,8 +564,8 @@ fn per_point_seam_weighted_errors_full(
         .zip(z_pts.iter())
         .enumerate()
         .map(|(idx, (x_pt, z_pt))| {
-            let dl = points[idx].left_pixel_nx - right_cam_seam;
-            let dr = points[idx].right_pixel_nx - left_cam_seam;
+            let dl = points[idx].left_pixel_nx - seams.right_camera_seam_nx;
+            let dr = points[idx].right_pixel_nx - seams.left_camera_seam_nx;
             let w_horiz =
                 0.5 * ((-dl * dl * inv_2sigma_sq).exp() + (-dr * dr * inv_2sigma_sq).exp());
 
@@ -860,6 +884,15 @@ mod tests {
             params.z_rz.unwrap(),
             epsilon = 1e-15
         );
+    }
+
+    #[test]
+    fn seam_columns_matches_hand_derivation() {
+        // Same values the seam-weighting test below already relies on via
+        // hand-derived comments - now backed by the extracted helper.
+        let seams = seam_columns(0.5);
+        assert_abs_diff_eq!(seams.right_camera_seam_nx, 0.25, epsilon = 1e-12);
+        assert_abs_diff_eq!(seams.left_camera_seam_nx, 0.75, epsilon = 1e-12);
     }
 
     #[test]

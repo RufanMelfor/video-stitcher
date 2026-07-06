@@ -968,3 +968,70 @@ most to least impactful:
 Recommended order: try (1) first since it's nearly free to test and
 could resolve this on its own; if the rig can't be remounted enough or
 it's not sufficient, (2) is the real feature to plan and build next.
+
+18. **Manual field-line seam-continuity input (2026-07-06/07) - built and
+    unit-tested, NOT YET validated on real footage.** User's idea: instead
+    of any automatic near-field measurement (all of which failed above -
+    AKAZE lacks texture there, ZNCC gets fooled by grass, `row_profile`'s
+    block-matching can't get a confident read on the deepest rows), let
+    the user manually click 2 points along a real field line in each
+    camera's own GPU-undistorted frame (not 1 point - a single point on a
+    straight line is ambiguous/slidable; 2 points fix both position and
+    slope), independently per camera (no need to click the exact same
+    physical point in both - each line is just traced in its own camera's
+    view).
+
+    New module `src/line_seam.rs`: extrapolates each camera's clicked line
+    to that camera's own seam pixel column (`geometry::seam_columns`, a
+    new public helper factored out of the inline formula
+    `per_point_seam_weighted_errors_full` already used) and turns the two
+    extrapolated points into one `MatchedPoint` - identical in kind to an
+    AKAZE match, so it reuses `apply_transformations`/
+    `reprojection_error` and, critically, the already-built-but-never-
+    wired-into-production `ground_tilt_x`/`ground_tilt_z` band-limited
+    parameters from points 8-11 (which stalled at a ~6% ceiling for lack
+    of confident near-field AKAZE data - manual clicks sidestep that
+    limitation directly rather than trying to extract more signal from
+    the same weak automatic measurement).
+
+    New example `examples/fit_ground_tilt_manual.rs`: loads an existing
+    `match.json` (base 5-7 params frozen), loads a small manual-lines JSON
+    (pixel clicks), converts to `MatchedPoint`s, and grid-searches
+    `ground_tilt_x`/`ground_tilt_z` against them exactly like
+    `fit_ground_tilt.rs` already does for AKAZE-derived near-field points -
+    falling back to a single shared parameter if only 1 line is given
+    (2 independent parameters from 1 constraint is under-determined).
+    Optional `--matched-points` cross-checks that AKAZE far-field residual
+    is unaffected - expected to be exactly flat by construction
+    (`band_limited_ground_warp` is provably identity beyond
+    `GROUND_TILT_BAND_FULL`), but verified rather than assumed, per this
+    file's own standing rule.
+
+    7 new unit tests (line extrapolation math, the swap-convention wiring,
+    JSON round-trip, the extracted `seam_columns` helper), all passing;
+    `cargo test -p reco-calibrate --lib` 88/88 green; clippy/fmt clean on
+    the changed/new files (pre-existing, unrelated clippy errors in
+    `reco-core`'s session/d3d11 code were confirmed present on `main`
+    before this change too, via `git stash`).
+
+    Also added `tools/manual_line_picker.html` - a small, dependency-free
+    static page (open directly in a browser, nothing uploaded anywhere)
+    for actually producing a `manual_lines.json`: load the two
+    `--debug-dir`-dumped PNGs, click two points per line on each side,
+    "Add line pair", export. Exists because without it the only way to
+    get real pixel coordinates off these images was an external image
+    editor plus hand-typing JSON - exactly the kind of friction this
+    project's own rule ("document friction, don't work around it")
+    argues for fixing directly rather than working around.
+
+    **Not yet done, and the honest reason why:** this has no real click
+    data run through it yet - producing that requires a human looking at
+    real GPU-undistorted footage and clicking actual field-line points,
+    which isn't something this session can do without display/video
+    access. Next real step is running `fit_ground_tilt_manual` against a
+    couple of manually-clicked lines on real Berghem or PATTERN_TEST
+    footage and checking the same way every other experiment in this file
+    was checked: does the near-field residual actually drop, and does a
+    real rendered composite crop confirm it visually (not just trust the
+    number) - before any GUI work or production wiring (`PlaneLayout` +
+    `fisheye.wgsl` shader ramp) is worth doing.
