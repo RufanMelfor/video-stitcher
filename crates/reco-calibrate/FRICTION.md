@@ -1036,6 +1036,157 @@ it's not sufficient, (2) is the real feature to plan and build next.
     number) - before any GUI work or production wiring (`PlaneLayout` +
     `fisheye.wgsl` shader ramp) is worth doing.
 
+19. **First real-data run of `fit_ground_tilt_manual` (2026-07-07, OJC
+    Werkplaats match) - inconclusive, overfitting risk identified, do not
+    treat as validation.** `resources/test-data/` now has a real
+    `match_werkplaats.json` (from `clicks_to_match.py` + the OJC lens
+    profile) and a real `manual_lines.json` (one field line, clicked via
+    `click_line_calib_v1.html`'s plane-coordinate export). Running
+    `cargo run --release -p reco-calibrate --example fit_ground_tilt_manual
+    -- resources/test-data/match_werkplaats.json
+    resources/test-data/manual_lines.json` end-to-end for the first time:
+
+    - `cargo test -p reco-calibrate --lib`: 90/90 passing (up from 88,
+      the plane-coord-space tests from point 18's follow-up commit).
+      `cargo fmt --all --check` clean. Clippy on `reco-calibrate` itself
+      clean; the same pre-existing, unrelated `reco-core` session/d3d11
+      dead-code and raw-pointer errors noted in point 18 are still the
+      only clippy failures workspace-wide - untouched by anything in this
+      entry.
+    - Only 1 line was clicked, so (as the tool itself warns) this is the
+      under-determined 1-constraint fallback (`ground_tilt_x = ground_tilt_z`,
+      one shared scalar), not the real 2-independent-parameter fit the
+      feature is designed for.
+    - At the harness's default grid range (`GRID_RANGE = 0.3`, matching
+      `fit_ground_tilt.rs`'s AKAZE-tuned range), the fit **pinned exactly
+      at the search boundary** (`-0.3000`), a 73.8% error reduction. A
+      result sitting exactly on a search-range edge is a red flag, not a
+      converged answer - it means the true minimum (if one exists) lies
+      outside the range that was checked, or the objective is
+      monotonically improving without bound (degenerate fit). Widening
+      the range tenfold (`GRID_RANGE = 5.0`, `GRID_STEP = 0.01`, tested
+      locally, not committed - this file's own point 8 already flagged an
+      unconstrained `c` as able to "wander into NaN/infinite territory"
+      via `warp_ground_y`'s pole) found a genuine interior minimum at
+      `c ≈ -1.18`, a 99.6% error reduction (0.00198 → 0.0000075) - so this
+      specific fit isn't unbounded/degenerate, just outside the default
+      range.
+    - **But `c ≈ -1.18` is `tan(theta)` for `theta ≈ -49.7°`** - an
+      implausibly large "extra" ground tilt to stack on top of the rig's
+      own ~19° `rig_tilt`, for what this file has consistently described
+      as a subtle near-field parallax residual. A single clicked line
+      gives the 1-parameter fit exactly one scalar constraint to satisfy,
+      with nothing to stop it from reaching for whatever value zeroes
+      that one number, however physically implausible - the same
+      "risks overfitting on sparse match sets" concern already logged
+      for `z_rz` in `calibration_alignment_fix_summary.txt` section 4
+      (repo root), now observed directly rather than theorized.
+    - No AKAZE far-field matched-points file exists yet for this
+      Werkplaats clip, so the `--matched-points` cross-check (does this
+      corrupt far-field alignment?) could not be run either - one more
+      reason not to trust this number as a real result.
+
+    **Conclusion: the code path works correctly end-to-end on real data
+    (this was the actual gap - point 18 had unit tests but zero real
+    clicks run through it) - but one clicked line is not enough evidence
+    to judge the manual-line-seam idea itself.** Next real step: click a
+    second, independent field line on the same Werkplaats frame pair (a
+    different real line, not a re-click of the same one) so the fit
+    becomes properly 2-constraint/2-parameter as designed, re-run, and
+    check whether the fitted `ground_tilt_x`/`ground_tilt_z` land on
+    physically sane values (single-digit-degree range, not ~50°) *before*
+    trusting any error-reduction percentage - and generate an AKAZE
+    matched-points file for the same clip so the far-field cross-check
+    this file's own standing rule calls for can actually run.
+
+    **Harness hardened same day:** `fit_ground_tilt_manual.rs` previously
+    reported a grid-search result with no indication that it had pinned at
+    the search boundary - exactly what happened above, and easy to miss
+    since the error-reduction percentage alone looks like a win. Added a
+    boundary-pin check (warns loudly if `|best_c| >= GRID_RANGE -
+    GRID_STEP`) and a `theta = atan(c)` degrees readout next to each fitted
+    value, so an implausible angle (like the ~-49.7° above) is visible at
+    a glance instead of requiring a manual conversion. Verified: rerunning
+    against `match_werkplaats.json`/`manual_lines.json` now prints the
+    warning and `theta = -16.7 deg` (at the unwidened default range - still
+    clearly too large for a "subtle" correction, reinforcing this isn't
+    ready to trust). fmt/clippy clean on the changed file; no other files
+    touched.
+
+    Blocked on real assets, not on more code: the two concrete next steps
+    (a second independent clicked line; an AKAZE matched-points file for
+    far-field cross-check) both need either a human clicking in
+    `click_line_calib_v1.html` (precision + its own in-browser undistort
+    matter, not something to approximate from a still image) or the raw
+    OJC source `.MP4`s that `export_synced_frames.py`'s docstring points
+    at - not present on this machine (checked `D:\VOETBAL VIDEO\` and
+    `C:\...\OneDrive\Voetbal Berghem Sport JO11-3`, no OJC/J011 match
+    folder or matching DJI raw files under either).
+
+20. **Proper 3-line run (2026-07-07, same day): the fit is now trustworthy,
+    and the answer it gives is that the band-limited ground_tilt correction
+    has a ~7-8% ceiling even with good manual near-field data - closing the
+    open question from points 8-11.** After the click tool's detector was
+    reworked (Hough-transform centerline detection, cross-side pairing by
+    seam-edge height - `resources/click_line_calib_v1.html`), the user
+    exported a fresh `manual_lines.json` with 3 independent lines: one in
+    the untouched band (|y| < `GROUND_TILT_BAND_START`, provides a control),
+    one in the ramp zone, one deep near-field (|y| ≈ 0.27, the thick near
+    sideline). Left/right seam heights agree to ~0.001-0.005 plane units
+    per line - the clicks are clean.
+
+    Results (`fit_ground_tilt_manual`, `match_werkplaats.json`):
+    - All 3 lines, true 2-parameter fit: interior minimum (no boundary
+      pin), `ground_tilt_x = -0.090` (θ = -5.1°), `ground_tilt_z = -0.085`
+      (θ = -4.9°), error -7.3%. The two *independently fitted* parameters
+      agreeing at ~-5° is strong evidence they measure a real, shared
+      physical effect rather than noise - and directly confirms point 19's
+      overfitting diagnosis of the single-line -49.7° result.
+    - Lines 1+2 only (the two the correction can touch): same fitted
+      values, -7.7%. The control line contributes constant error as
+      expected.
+    - Line 2 alone (deepest near-field, 1-param fallback): pins at the
+      search boundary again, wants ~-50°, -74% - reproducing the point 19
+      overfit exactly. Its baseline error (0.00207) is ~63% of the total
+      (0.00331), so the near line dominates the correctable error, but
+      zeroing it demands a tilt that the mid-field line immediately vetoes
+      in the constrained fit.
+
+    **Conclusion: the ~6% ceiling from points 8-11 was never a
+    data-quality problem.** The manual clicks provided exactly the
+    confident near-field measurement AKAZE/photometric methods couldn't,
+    and the ceiling barely moved (~6% → ~7-8%). A single tan-warp scalar
+    per plane - even band-limited, even fed perfect near-field data -
+    cannot fix the near-field step without breaking the mid-field, because
+    the residual isn't shaped like a shared ground-plane tilt. This is the
+    flat two-plane model-shape problem again, measured cleanly for the
+    first time.
+
+    **Owner decisions (2026-07-07) - these supersede this file's earlier
+    option ranking in the "How to actually make progress" section:**
+    - A ~7-8% improvement IS worth shipping. The acceptance bar for this
+      seam is ~0.1% residual continuity error (visually seamless), and
+      every honest increment toward it counts. Production wiring of
+      `ground_tilt_x`/`ground_tilt_z` (`PlaneLayout` + `fisheye.wgsl`
+      band-limited ramp) is wanted.
+    - Shrinking the physical camera baseline (the old option 1) is **not
+      an option for this rig - ruled out by the owner. Do not propose it
+      again.**
+    - The ground-plane homography calibration from known pitch-marking
+      dimensions (the old option 2) is to be built **as an optional,
+      opt-in feature** - not forced into the default calibration flow.
+      The manual-line clicking workflow built for this experiment is
+      directly reusable for it: clicking known points/lines per camera is
+      the same interaction, and the tool now has reliable auto-detection
+      to speed it up.
+
+    (Far-field cross-check still not run - no AKAZE matched-points file
+    exists for this clip, raw source videos not on this machine. With
+    production wiring now planned this check matters again and should be
+    run before the wiring ships: `band_limited_ground_warp` is provably
+    identity beyond the band, but verifying on real data is this file's
+    own standing rule.)
+
 ## Calibration "confidence" metric measures match count, not fit quality
 
 **Symptom, documented since 2026-07-03:** `CalibrationResult::confidence`
