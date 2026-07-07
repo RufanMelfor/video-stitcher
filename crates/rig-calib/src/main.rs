@@ -74,6 +74,9 @@ const POSE_SMOOTHING: f32 = 0.25;
 
 /// Free-fly camera movement speed (scene units per second).
 const FLY_SPEED: f32 = 0.6;
+/// Free-fly vertical (E/C) movement speed - kept separate from FLY_SPEED
+/// since up/down needs finer control than horizontal/forward movement.
+const FLY_VERTICAL_SPEED: f32 = 0.2;
 /// Free-fly speed multiplier while Shift is held.
 const FLY_BOOST: f32 = 4.0;
 
@@ -481,9 +484,10 @@ impl AppState {
         let render = self.pose.render_pose(rig_tilt);
         let boost = if self.fly_shift { FLY_BOOST } else { 1.0 };
         let step = FLY_SPEED * boost * dt;
+        let vstep = FLY_VERTICAL_SPEED * boost * dt;
         if let Some(bridge) = self.bridge.as_mut() {
             bridge.renderer_mut().pipeline_mut().fly_camera(
-                [mv[0] * step, mv[1] * step, mv[2] * step],
+                [mv[0] * step, mv[1] * vstep, mv[2] * step],
                 render.yaw,
                 render.pitch,
             );
