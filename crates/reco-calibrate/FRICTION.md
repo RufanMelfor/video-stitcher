@@ -1208,6 +1208,105 @@ it's not sufficient, (2) is the real feature to plan and build next.
     tiny trimmed error but outlier-blown mean - which is the new metric
     doing exactly its job on a fit that shouldn't be trusted.
 
+21. **Production wiring of `ground_tilt_x`/`ground_tilt_z` (2026-07-07,
+    owner decision: ship the ~7-8% improvement, see point 20).** Wired all
+    the way through: `PlaneLayout::ground_tilt_x`/`ground_tilt_z`
+    (`reco-core/src/calibration.rs`, `#[serde(default)]` so old
+    calibrations without the fields load unchanged with `0.0` = exact
+    no-op), a new `CameraParams::ground_tilt_k()` helper (the same
+    `fy / (2*width)` formula `fit_ground_tilt_manual.rs` computed inline -
+    now shared, that example updated to call it), a new `GroundTilt { tilt,
+    k }` struct threaded through `build_gpu_uniforms`/`GpuUniforms` and
+    every one of its 6 call sites (`Renderer::encode_stitch_pass`,
+    `GpuUndistort`, `LensPreviewRenderer`, `SingleCameraRenderer` - the
+    latter three pass `GroundTilt::default()`, having no plane-pair
+    placement context), and a direct port of `smoothstep`/`warp_ground_y`/
+    `band_limited_ground_warp` into `fisheye.wgsl`'s fragment shader,
+    applied to the plane's own local y (recovered from `in.uv.y` via the
+    plane aspect ratio, matching `geometry::normalize_to_plane`'s
+    convention exactly) before the KB4 lookup.
+
+    Left/right mapping is the easy thing to get backwards here:
+    `ground_tilt_x` corrects the x-plane, which - per
+    `reco_calibrate::geometry`'s own module doc (the v1-derived left/right
+    swap) - holds the *right* camera's content and sits at this renderer's
+    "right" plane position; `ground_tilt_z` corrects the z-plane (*left*
+    camera, "left" plane). Verified against `SceneGeometry::
+    from_layout_with_aspect`'s own positions before wiring, not assumed.
+
+    **Verification, in order of how much it actually proved:**
+    1. `geometry::wgsl_ground_warp_matches_rust_on_grid` - new GPU
+       compute-dispatch test (mirrors reco-core's own
+       `wgsl_kb4_matches_rust_kb4_on_theta_grid` precedent for exactly this
+       "WGSL and Rust can't cross-language-link" problem): the shader body
+       is copy-pasted into a compute shader and run on a 434-point grid (t,
+       c, k combinations spanning the untouched band, the ramp, and deep
+       beyond it, including the point-19 overfit magnitude and its
+       sign-flip). Caught a real thing on the first run: a fixed absolute
+       tolerance failed near `warp_ground_y`'s pole (large output
+       magnitude amplifies ordinary f32-vs-f64 rounding) - not a bug in the
+       port, just the wrong tolerance shape for a function with a genuine
+       singularity; fixed by switching to relative-or-absolute tolerance
+       (`1e-4 + 1e-3 * |rust_value|`), the standard approach for this
+       class of function.
+    2. **New `examples/verify_ground_tilt.rs` - render the real Werkplaats
+       seam twice** (fitted `ground_tilt` vs `0.0`, identical frame data,
+       via `SingleCameraRenderer` - the same isolated-plane harness
+       `fit_photometric.rs` already uses for calibration validation) **and
+       this is what actually caught a real bug the grid check couldn't:**
+       the first render showed a large, wrong change across the *sky/
+       skyline* strip, not just the near field. Root cause: `geometry::
+       band_limited_ground_warp` gated on `t.abs()`, so it read as
+       "distance from center, either direction" - full strength not just
+       for `t >= 0.16` (near field, correct) but symmetrically for
+       `t <= -0.16` too (sky and beyond, wrong). This was **invisible in
+       every prior fitting/testing pass** (points 8-20) because every real
+       matched point ever fed to it - AKAZE, manual field-line clicks - is
+       real ground content with `t > 0`; nothing ever asked it to warp
+       `t < -0.16`, until a shader applies it to *every pixel* in a
+       rendered frame, including sky. Fixed at the source
+       (`geometry::band_limited_ground_warp`, one-sided in `t` now, not
+       `|t|`) and mirrored in both WGSL copies (`fisheye.wgsl` and the
+       compute-test shader) - the fix is exactly backward-compatible with
+       every previous fit, since it only changes behavior for `t <= 0`,
+       which no real calibration data has ever touched. Added
+       `band_limited_warp_is_one_sided_not_symmetric_in_abs_t` as a
+       permanent regression guard. Re-rendered after the fix: far-field
+       mean abs pixel diff is exactly `0.0000` (top 20% of frame), near
+       field shows a real, visible shift concentrated exactly at the
+       clicked seam lines (bottom 20%: mean diff 31.66/255) - saved as
+       `resources/test-data/ground_tilt_check/wiring_verify_{baseline,
+       corrected,diff_x8}.png`.
+    3. Re-ran the far-field AKAZE cross-check (point 20, 42 points) after
+       the one-sided fix - still before == after exactly, as expected
+       (those points were always `t > 0`, so the fix doesn't touch them).
+
+    `resources/test-data/match_werkplaats.json` now ships the fitted
+    values (`groundTiltX: -0.09, groundTiltZ: -0.085`) for real - this is
+    the first entry in this file where the near-field seam fix is
+    something a user's own match.json can actually contain and have
+    rendered, not just a fitting-harness number.
+
+    94/94 -> 96/96 reco-calibrate tests (2 new: the GPU grid cross-check,
+    the one-sided regression guard), 148/148 reco-core (unchanged count,
+    2 new `GroundTilt`-uniform tests replacing coverage lost by the
+    `build_gpu_uniforms` signature change), fmt clean, clippy clean on
+    both crates' own code (`--no-deps`) - the usual 4 pre-existing
+    `reco-core` session/d3d11 errors are the only clippy failures
+    workspace-wide, confirmed unchanged. Also fixed a pre-existing,
+    unrelated `derivable_impls` clippy lint in `line_seam.rs`
+    (`CoordSpace`'s manual `Default` impl) while getting a clean
+    `--no-deps` clippy baseline - `cargo clippy -p reco-calibrate` without
+    `--no-deps` has never once reached reco-calibrate's own lints, since
+    reco-core's pre-existing errors abort the build first, so this had
+    never been caught.
+
+    **Not done / real remaining gaps:** rig-calib's GUI has no field for
+    `groundTiltX`/`groundTiltZ` yet - they can only be set by hand-editing
+    match.json today. The ground-plane homography feature (owner decision:
+    build as optional/opt-in) is still not started - this wiring makes the
+    *existing* band-limited correction real, it isn't that feature.
+
 ## Calibration "confidence" metric measures match count, not fit quality
 
 **Symptom, documented since 2026-07-03:** `CalibrationResult::confidence`
