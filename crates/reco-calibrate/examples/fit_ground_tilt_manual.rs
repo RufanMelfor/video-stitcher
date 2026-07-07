@@ -134,9 +134,31 @@ fn main() {
         grid_search_2d(&manual_points, &base, k_x, k_z)
     };
 
+    // A fit landing exactly on the grid edge isn't a converged answer - it
+    // means the true minimum (if one exists at all) lies outside the range
+    // that was searched, or the objective improves without bound (a
+    // degenerate fit - see FRICTION.md point 19, where this was first
+    // observed on real data with only 1 clicked line). Either way, silently
+    // reporting the boundary value as "the" result is misleading.
+    let pinned = |c: f64| (c.abs() - GRID_RANGE).abs() < GRID_STEP;
+    if pinned(best_cx) || pinned(best_cz) {
+        eprintln!(
+            "\n*** WARNING: fitted value hit the search boundary (+/-{GRID_RANGE}) - this is NOT \
+             a converged result. Re-run with a wider GRID_RANGE before trusting this number, or \
+             add more independent clicked lines (a single-line fit has nothing to stop it \
+             reaching for whatever value zeroes that one constraint, however implausible). ***"
+        );
+    }
+
     eprintln!("\n=== Fitted result ===");
-    eprintln!("ground_tilt_x = {best_cx:+.4}");
-    eprintln!("ground_tilt_z = {best_cz:+.4}");
+    eprintln!(
+        "ground_tilt_x = {best_cx:+.4} (theta = {:+.1} deg)",
+        best_cx.atan().to_degrees()
+    );
+    eprintln!(
+        "ground_tilt_z = {best_cz:+.4} (theta = {:+.1} deg)",
+        best_cz.atan().to_degrees()
+    );
     eprintln!(
         "manual continuity error: {base_err:.8} -> {best_err:.8} ({:+.1}%)",
         100.0 * (best_err - base_err) / base_err.max(1e-12)
