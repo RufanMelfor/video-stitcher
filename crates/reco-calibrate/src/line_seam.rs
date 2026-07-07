@@ -119,17 +119,12 @@ pub fn matched_point_from_lines(
 /// plane space - what `resources/click_calib_v2.html`'s field-line mode
 /// exports directly, since that tool already does its own in-browser
 /// fisheye undistort - and are used as-is.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CoordSpace {
+    #[default]
     Pixel,
     Plane,
-}
-
-impl Default for CoordSpace {
-    fn default() -> Self {
-        CoordSpace::Pixel
-    }
 }
 
 /// One clicked line, for serialized input files - in whichever

@@ -13,7 +13,7 @@
 use crate::calibration::CameraParams;
 use crate::gpu::GpuContext;
 use crate::render::pipeline::YuvPlanes;
-use crate::render::renderer::{InputFormat, build_gpu_uniforms, opengl_to_wgpu_matrix};
+use crate::render::renderer::{GroundTilt, InputFormat, build_gpu_uniforms, opengl_to_wgpu_matrix};
 
 use bytemuck::Pod;
 use nalgebra::Orthographic3;
@@ -301,8 +301,18 @@ impl LensPreviewRenderer {
         let ortho = Orthographic3::new(-0.5, 0.5, -hh, hh, -1.0, 1.0);
         let mvp = opengl_to_wgpu_matrix() * ortho.to_homogeneous();
 
-        let mut uniforms =
-            build_gpu_uniforms(&mvp, params, false, 0.0, InputFormat::Yuv420p, false, false);
+        // No plane-pair placement context here (single isolated camera) -
+        // ground tilt is a no-op.
+        let mut uniforms = build_gpu_uniforms(
+            &mvp,
+            params,
+            false,
+            0.0,
+            InputFormat::Yuv420p,
+            false,
+            false,
+            GroundTilt::default(),
+        );
         uniforms.lens_preview[0] = correction_amount.clamp(-1.0, 1.0);
 
         gpu.queue

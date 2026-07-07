@@ -248,15 +248,32 @@ const GROUND_TILT_BAND_FULL: f64 = 0.16;
 /// this made far-field residual monotonically worse for every tested `c`,
 /// and pushed `cam_d` to its bound). This wraps it in a smoothstep blend
 /// against the identity so the correction is mathematically guaranteed to
-/// leave points with `|t| <= GROUND_TILT_BAND_START` completely untouched,
-/// ramping to the full `warp_ground_y` effect by `|t| >= GROUND_TILT_BAND_FULL`.
+/// leave points with `t <= GROUND_TILT_BAND_START` completely untouched,
+/// ramping to the full `warp_ground_y` effect by `t >= GROUND_TILT_BAND_FULL`.
 /// Same "correction ramps in, far field is provably unaffected" shape as
 /// the reverted `ground_correction` shader ramp
 /// (`smoothstep(0.75, 1.0, uv.y)`), but applied to the calibration fit
 /// instead of a render-time pixel shift.
+///
+/// One-sided in `t`, not `|t|`: `t > 0` is near field (close to the
+/// camera, bottom of frame - this project's `sigma_y`/plane-y convention),
+/// which is what actually suffers from the flat-plane model's parallax
+/// error; `t <= 0` is everything from the horizon up through the sky, and
+/// is *always* identity regardless of magnitude. Every real matched point
+/// this was ever fitted against (AKAZE, manual field-line clicks) is real
+/// ground content with `t > 0`, so this was invisible during fitting - but
+/// `fisheye.wgsl`'s render-time port applies this to *every pixel*,
+/// including sky, where the old symmetric-in-`|t|` version would ramp to
+/// full strength again once `|t| >= GROUND_TILT_BAND_FULL` in the negative
+/// direction, visibly warping the skyline (caught by rendering a real
+/// frame with `examples/verify_ground_tilt.rs`, not by any point-based
+/// numeric check - see FRICTION.md point 20's wiring entry).
 #[inline]
 pub fn band_limited_ground_warp(t: f64, c: f64, k: f64) -> f64 {
-    let weight = smoothstep(GROUND_TILT_BAND_START, GROUND_TILT_BAND_FULL, t.abs());
+    if t <= 0.0 {
+        return t;
+    }
+    let weight = smoothstep(GROUND_TILT_BAND_START, GROUND_TILT_BAND_FULL, t);
     if weight == 0.0 {
         return t;
     }
@@ -1041,13 +1058,33 @@ mod tests {
 
     #[test]
     fn band_limited_warp_reaches_full_strength_beyond_band_full() {
-        // At and beyond GROUND_TILT_BAND_FULL, the band-limited warp
-        // should match the raw (unbanded) warp_ground_y exactly.
+        // At and beyond GROUND_TILT_BAND_FULL (positive t = near field),
+        // the band-limited warp should match the raw (unbanded)
+        // warp_ground_y exactly.
         let c = 0.15;
-        for t in [0.16, 0.2, -0.25, -0.16] {
+        for t in [0.16, 0.2, 0.25] {
             let banded = band_limited_ground_warp(t, c, 1.0);
             let raw = warp_ground_y(t, c, 1.0);
             assert_abs_diff_eq!(banded, raw, epsilon = 1e-12);
+        }
+    }
+
+    #[test]
+    fn band_limited_warp_is_one_sided_not_symmetric_in_abs_t() {
+        // Regression guard for the bug caught by rendering a real frame
+        // (examples/verify_ground_tilt.rs, FRICTION.md point 20's wiring
+        // entry): t <= 0 (horizon and sky, in this project's plane-y
+        // convention) must stay identity no matter how large |t| is or
+        // what c is - never ramp back up to full strength the way a
+        // naive `smoothstep(..., t.abs())` would beyond -BAND_FULL. Every
+        // matched point this has ever been fitted against is real ground
+        // content with t > 0, so this direction was never exercised by
+        // fitting - only by rendering every pixel, including sky.
+        for t in [-0.16, -0.2, -0.5, -1.0] {
+            for c in [-0.3, -0.09, 0.09, 0.3, 1.18] {
+                let warped = band_limited_ground_warp(t, c, 0.1897);
+                assert_abs_diff_eq!(warped, t, epsilon = 1e-12);
+            }
         }
     }
 
@@ -1074,6 +1111,302 @@ mod tests {
             (banded - t).abs() > 1e-9,
             "mid-band value {banded} should differ from identity {t}"
         );
+    }
+
+    // Step: evaluate band_limited_ground_warp on a real GPU via wgpu compute
+    // dispatch and compare against this file's f64 Rust canonical. The
+    // shader body below is a deliberate SYNC_WITH copy of
+    // `reco-core/src/shaders/fisheye.wgsl`'s smoothstep_band/warp_ground_y/
+    // band_limited_ground_warp - this is the production render's actual
+    // ground-tilt implementation, not a reimplementation for testing.
+    // Mirrors reco-core's `wgsl_kb4_matches_rust_kb4_on_theta_grid` (same
+    // rationale: WGSL and Rust can't cross-language-link, so a real
+    // GPU dispatch is the only way to lock the two numerically together).
+    #[test]
+    fn wgsl_ground_warp_matches_rust_on_grid() {
+        use wgpu::util::DeviceExt;
+
+        let gpu = match pollster::block_on(reco_core::gpu::GpuContext::new()) {
+            Ok(ctx) => ctx,
+            Err(
+                reco_core::gpu::GpuError::NoAdapter | reco_core::gpu::GpuError::AdapterRequest(_),
+            ) => {
+                eprintln!("Skipping: no GPU adapter available");
+                return;
+            }
+            Err(e) => panic!("Unexpected GPU error: {e}"),
+        };
+        let device = gpu.device();
+        let queue = gpu.queue();
+
+        // Grid covering: inside the untouched band, the ramp zone, fully
+        // beyond the band, both signs of t, and c values spanning realistic
+        // fitted values (FRICTION.md point 20: -0.09/-0.085) up to the
+        // point-19 single-line overfit (-1.18) and its sign-flip, at two
+        // different focal-scale constants (the real Werkplaats k, and 1.0).
+        let ts: Vec<f32> = (-15..=15).map(|i| i as f32 * 0.02).collect(); // -0.30..=0.30
+        let cs: [f32; 7] = [-1.18, -0.5, -0.09, 0.0, 0.085, 0.5, 1.18];
+        let ks: [f32; 2] = [0.1897, 1.0];
+
+        let mut t_in = Vec::new();
+        let mut c_in = Vec::new();
+        let mut k_in = Vec::new();
+        for &k in &ks {
+            for &c in &cs {
+                for &t in &ts {
+                    t_in.push(t);
+                    c_in.push(c);
+                    k_in.push(k);
+                }
+            }
+        }
+        let count = t_in.len() as u32;
+
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Uniforms {
+            count: u32,
+            _pad: [u32; 3],
+        }
+        let uniforms = Uniforms {
+            count,
+            _pad: [0; 3],
+        };
+
+        let shader_source = r#"
+struct Uniforms { count: u32, _pad0: u32, _pad1: u32, _pad2: u32 }
+@group(0) @binding(0) var<uniform> u: Uniforms;
+@group(0) @binding(1) var<storage, read> t_in: array<f32>;
+@group(0) @binding(2) var<storage, read> c_in: array<f32>;
+@group(0) @binding(3) var<storage, read> k_in: array<f32>;
+@group(0) @binding(4) var<storage, read_write> out: array<f32>;
+
+const GROUND_TILT_BAND_START: f32 = 0.08;
+const GROUND_TILT_BAND_FULL: f32 = 0.16;
+
+fn smoothstep_band(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// SYNC_WITH shaders/fisheye.wgsl's warp_ground_y
+fn warp_ground_y(t: f32, c: f32, k: f32) -> f32 {
+    var denom = 1.0 - c * t / k;
+    if abs(denom) < 1e-9 {
+        denom = select(-1e-9, 1e-9, denom >= 0.0);
+    }
+    return (k * c + t) / denom;
+}
+
+// SYNC_WITH shaders/fisheye.wgsl's band_limited_ground_warp
+fn band_limited_ground_warp(t: f32, c: f32, k: f32) -> f32 {
+    if t <= 0.0 {
+        return t;
+    }
+    let weight = smoothstep_band(GROUND_TILT_BAND_START, GROUND_TILT_BAND_FULL, t);
+    if weight == 0.0 {
+        return t;
+    }
+    return t + weight * (warp_ground_y(t, c, k) - t);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= u.count) { return; }
+    out[i] = band_limited_ground_warp(t_in[i], c_in[i], k_in[i]);
+}
+"#;
+
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ground_warp_agreement_shader"),
+            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+        });
+
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ground_warp_agreement_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ground_warp_agreement_pl"),
+            bind_group_layouts: &[&bgl],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("ground_warp_agreement_pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ground_warp_uniform"),
+            contents: bytemuck::bytes_of(&uniforms),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let t_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ground_warp_t_in"),
+            contents: bytemuck::cast_slice(&t_in),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let c_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ground_warp_c_in"),
+            contents: bytemuck::cast_slice(&c_in),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let k_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ground_warp_k_in"),
+            contents: bytemuck::cast_slice(&k_in),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let output_size = (count as u64) * std::mem::size_of::<f32>() as u64;
+        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ground_warp_output"),
+            size: output_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ground_warp_staging"),
+            size: output_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ground_warp_bind_group"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: t_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: c_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: k_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: output_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ground_warp_encoder"),
+        });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("ground_warp_pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&pipeline);
+            cpass.set_bind_group(0, &bind_group, &[]);
+            let groups = count.div_ceil(64);
+            cpass.dispatch_workgroups(groups, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_size);
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let buffer_slice = staging_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll should not fail on a well-formed dispatch");
+        rx.recv().unwrap().expect("buffer should map successfully");
+
+        let gpu_out: Vec<f32> = {
+            let data = buffer_slice.get_mapped_range();
+            bytemuck::cast_slice::<u8, f32>(&data).to_vec()
+        };
+        staging_buffer.unmap();
+
+        let mut checked = 0;
+        for i in 0..count as usize {
+            let (t, c, k) = (t_in[i] as f64, c_in[i] as f64, k_in[i] as f64);
+            let rust = band_limited_ground_warp(t, c, k);
+            let diff = (gpu_out[i] as f64 - rust).abs();
+            // warp_ground_y has a genuine pole (denom -> 0); near it, the
+            // *output* magnitude grows large, so a fixed absolute tolerance
+            // fails even though f32 vs f64 agree to full single-precision
+            // accuracy. Relative-or-absolute (whichever is looser) is the
+            // standard way to check a function whose output spans orders
+            // of magnitude - tight near zero, appropriately loose near the
+            // pole, without needing to special-case denom at all.
+            let tol = 1e-4 + 1e-3 * rust.abs();
+            assert!(
+                diff < tol,
+                "t={t} c={c} k={k}: GPU {} vs Rust {rust} (diff {diff}, tol {tol})",
+                gpu_out[i]
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, count as usize);
     }
 
     #[test]

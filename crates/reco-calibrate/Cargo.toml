@@ -40,3 +40,8 @@ io = ["dep:reco-io"]
 approx = "0.5"
 pollster = "0.4"
 reco-io = { path = "../reco-io" }
+# GPU compute-dispatch cross-check for the fisheye.wgsl band_limited_ground_warp
+# port (see geometry.rs's wgsl_ground_warp_matches_rust_on_grid), mirroring
+# reco-core's wgsl_kb4_matches_rust_kb4_on_theta_grid pattern.
+wgpu = "28"
+bytemuck = { version = "1", features = ["derive"] }

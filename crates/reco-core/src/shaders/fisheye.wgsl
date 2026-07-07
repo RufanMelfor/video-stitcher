@@ -28,6 +28,15 @@ struct Uniforms {
     // lens_preview.x: correction_amount (0.0 = no correction, 1.0 = full KB4)
     // lens_preview.y: split_view (> 0.5 = left half uncorrected, right half corrected)
     lens_preview: vec4<f32>,
+    // ground_tilt.x: tilt parameter c (tan(theta) of the extra near-field
+    //   ground-plane tilt; 0.0 = no-op, matches PlaneLayout::ground_tilt_x/z)
+    // ground_tilt.y: focal-scale constant k (CameraParams::ground_tilt_k) -
+    //   only meaningful when .x != 0.0
+    // ground_tilt.z: this plane's aspect ratio (width / height), needed to
+    //   convert the plane's own UV.y into the same "plane space" convention
+    //   band_limited_ground_warp expects (see reco_calibrate::geometry)
+    // ground_tilt.w: unused
+    ground_tilt: vec4<f32>,
 };
 
 // YUV420P plane textures (Y = full res R8Unorm, U/V = half res R8Unorm)
@@ -159,6 +168,52 @@ fn sample_yuv(uv: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(rgb, 1.0);
 }
 
+// ---- Ground-plane tilt correction ----
+//
+// Direct port of reco_calibrate::geometry's warp_ground_y /
+// band_limited_ground_warp / smoothstep (crates/reco-calibrate/src/geometry.rs)
+// - must stay bit-for-bit equivalent in shape, since the parameter fitted
+// there (FRICTION.md points 8-11, 18-20) is only meaningful if the render
+// applies the exact same warp. See PlaneLayout::ground_tilt_x/z's doc
+// comment for the full picture.
+
+const GROUND_TILT_BAND_START: f32 = 0.08;
+const GROUND_TILT_BAND_FULL: f32 = 0.16;
+
+fn smoothstep_band(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// warp(t, 0.0, k) == t exactly, so c == 0.0 (no ground tilt fitted) is a
+// guaranteed no-op regardless of k - callers still gate on c != 0.0 below
+// purely to skip the extra arithmetic, not for correctness.
+fn warp_ground_y(t: f32, c: f32, k: f32) -> f32 {
+    var denom = 1.0 - c * t / k;
+    if abs(denom) < 1e-9 {
+        denom = select(-1e-9, 1e-9, denom >= 0.0);
+    }
+    return (k * c + t) / denom;
+}
+
+// One-sided in t, not abs(t): t > 0 is near field (close to the camera,
+// bottom of frame); t <= 0 is horizon and sky, always identity regardless
+// of magnitude. SYNC_WITH geometry::band_limited_ground_warp's doc
+// comment for why this has to be one-sided - a symmetric-in-abs(t)
+// version visibly warps the skyline once |t| >= GROUND_TILT_BAND_FULL in
+// the negative direction, since every pixel (not just near-field matched
+// points) goes through this function at render time.
+fn band_limited_ground_warp(t: f32, c: f32, k: f32) -> f32 {
+    if t <= 0.0 {
+        return t;
+    }
+    let weight = smoothstep_band(GROUND_TILT_BAND_START, GROUND_TILT_BAND_FULL, t);
+    if weight == 0.0 {
+        return t;
+    }
+    return t + weight * (warp_ground_y(t, c, k) - t);
+}
+
 // ---- Fragment shader ----
 
 @fragment
@@ -186,9 +241,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let cx = u.intrinsics.z;
     let cy = u.intrinsics.w;
 
+    // Ground-plane tilt: warp this plane's own local y-position (in the
+    // same "plane space" convention geometry::normalize_to_plane produces
+    // from AKAZE keypoints) before the KB4 lookup below, so the correction
+    // fitted against real near-field measurements (FRICTION.md points
+    // 18-20) has the same effect here as it did during that fit. Uses
+    // `in.uv.y` (the plane's raw 0..1 texture position), not the extended
+    // `uv.y` above - `ground_tilt.z` (plane aspect) converts it into the
+    // same width-normalized unit `normalize_to_plane` uses.
+    var uv_y = uv.y;
+    if u.ground_tilt.x != 0.0 {
+        let plane_y = (in.uv.y - 0.5) / u.ground_tilt.z;
+        let warped_plane_y = band_limited_ground_warp(plane_y, u.ground_tilt.x, u.ground_tilt.y);
+        uv_y = (warped_plane_y * u.ground_tilt.z + 0.5) * 2.0 - 0.5;
+    }
+
     // KB4 fisheye undistortion: map from plane UV to video texture coordinate
     let x = (uv.x - cx) / fx;
-    let y = (uv.y - cy) / fy;
+    let y = (uv_y - cy) / fy;
     let r = sqrt(x * x + y * y);
     let theta = atan(r);
     let theta2 = theta * theta;

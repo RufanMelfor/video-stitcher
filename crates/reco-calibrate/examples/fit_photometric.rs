@@ -633,6 +633,8 @@ fn vec5_to_layout(p: &[f64], x_rx: f64, z_rz: f64) -> PlaneLayout {
         z_rx: p[4],
         x_rx,
         z_rz,
+        ground_tilt_x: 0.0,
+        ground_tilt_z: 0.0,
     }
 }
 
@@ -680,6 +682,7 @@ fn render_and_score(ctx: &RenderCtx<'_>, layout: &PlaneLayout) -> RenderScoreRes
         &ctx.left_yuv.y,
         &ctx.left_yuv.u,
         &ctx.left_yuv.v,
+        reco_core::render::renderer::GroundTilt::default(),
     );
     let right_rgba = ctx.right_renderer.render_and_readback(
         ctx.gpu,
@@ -690,6 +693,7 @@ fn render_and_score(ctx: &RenderCtx<'_>, layout: &PlaneLayout) -> RenderScoreRes
         &ctx.right_yuv.y,
         &ctx.right_yuv.u,
         &ctx.right_yuv.v,
+        reco_core::render::renderer::GroundTilt::default(),
     );
 
     let mask = photometric::overlap_mask_from_alpha(

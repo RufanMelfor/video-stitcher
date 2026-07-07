@@ -5457,6 +5457,7 @@ dependencies = [
  "approx",
  "argmin",
  "argmin-math",
+ "bytemuck",
  "ciborium",
  "flate2",
  "float-ord",
@@ -5477,6 +5478,7 @@ dependencies = [
  "telemetry-parser",
  "thiserror 2.0.18",
  "tracing",
+ "wgpu",
 ]
 
 [[package]]
