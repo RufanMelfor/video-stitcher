@@ -104,14 +104,50 @@ use reco_core::lens::undistort::GpuUndistort;
 
 use types::{FrameMatches, MatchedPoint};
 
-/// Number of total matched points at which calibration confidence reaches 1.0.
+/// Number of total matched points at which the match-count term of
+/// calibration confidence reaches 1.0.
 ///
-/// Confidence is computed as `min(total_matches / FULL_CONFIDENCE_MATCHES, 1.0)`.
-/// With 50 matches, confidence saturates at 100%. Fewer matches reduce
-/// confidence linearly (e.g. 25 matches = 50% confidence). This threshold
-/// is empirically chosen: 50 well-distributed matches across multiple frames
-/// reliably produce sub-pixel calibration.
+/// With 50 matches, this term saturates at 100%. Fewer matches reduce it
+/// linearly (e.g. 25 matches = 50%). This threshold is empirically chosen:
+/// 50 well-distributed matches across multiple frames reliably produce
+/// sub-pixel calibration - but this only measures how much data went in, not
+/// how good the resulting fit is. See `FULL_CONFIDENCE_MATCHES`'s sibling
+/// constants below and `FRICTION.md`'s "Calibration 'confidence' metric
+/// measures match count, not fit quality" entry for why both terms matter.
 const FULL_CONFIDENCE_MATCHES: f64 = 50.0;
+
+/// Mean per-point reprojection error (`geometry::reprojection_error`'s sum,
+/// divided by point count) at or below which the fit-quality term of
+/// confidence is 1.0 - "as good as any calibration on this rig has measured
+/// so far". Anchored to the known-good run in
+/// `calibration_alignment_fix_summary.txt` section 2.2 (0.047 total / 100
+/// matches ≈ 0.00047 per point), with a ~2x safety margin so ordinary run-to-
+/// run noise on a genuinely good calibration doesn't get penalized.
+const GOOD_MEAN_REPROJECTION_ERROR: f64 = 0.001;
+
+/// Mean per-point reprojection error at or above which the fit-quality term
+/// drops to 0.0 - "as bad as the known-bad AKAZE-detection-band regression".
+/// Anchored to the same section 2.2 bad run (2.994 total / 94 matches ≈
+/// 0.0319 per point), with a ~3x safety margin on the low side so this
+/// threshold isn't only just barely tripped by that one specific regression.
+///
+/// Both thresholds are a first-pass calibration from the one confirmed real
+/// before/after pair this repo has - not a settled, extensively-tuned curve.
+/// Revisit if a real calibration run gets flagged low-confidence despite
+/// looking visually fine, or vice versa.
+const BAD_MEAN_REPROJECTION_ERROR: f64 = 0.01;
+
+/// Fit-quality term for calibration confidence: 1.0 at or below
+/// [`GOOD_MEAN_REPROJECTION_ERROR`], 0.0 at or above
+/// [`BAD_MEAN_REPROJECTION_ERROR`], linear in between. Deliberately separate
+/// from the match-count term (`total_matches / FULL_CONFIDENCE_MATCHES`) -
+/// plenty of matches says nothing about whether the resulting fit is
+/// actually good, which is exactly how confidence stayed at 100% through a
+/// 64x-worse-reprojection-error regression (see `FRICTION.md`).
+fn quality_confidence(mean_reprojection_error: f64) -> f64 {
+    let span = BAD_MEAN_REPROJECTION_ERROR - GOOD_MEAN_REPROJECTION_ERROR;
+    (1.0 - (mean_reprojection_error - GOOD_MEAN_REPROJECTION_ERROR) / span).clamp(0.0, 1.0)
+}
 
 /// Process an undistorted RGBA frame pair through the feature matching pipeline.
 ///
@@ -544,8 +580,6 @@ pub fn calibrate_with_reporting(
         e
     })?;
 
-    let confidence = (total_matches as f64 / FULL_CONFIDENCE_MATCHES).min(1.0);
-
     // Log both metrics for diagnostic comparison
     let best_params = geometry::OptParams {
         x_ty: best_layout.x_ty,
@@ -563,10 +597,17 @@ pub fn calibrate_with_reporting(
     let total_reproj = geometry::reprojection_error(&all_points, &best_params);
     let angular_err = geometry::angular_error(&all_points, &best_params);
     let trimmed_err = geometry::trimmed_reprojection_error(&all_points, &best_params, 0.2);
+    let mean_reproj = total_reproj / total_matches as f64;
+
+    let match_confidence = (total_matches as f64 / FULL_CONFIDENCE_MATCHES).min(1.0);
+    let fit_confidence = quality_confidence(mean_reproj);
+    let confidence = match_confidence * fit_confidence;
+
     log::info!(
         "calibration complete: median_error={best_residual:.6}, trimmed={trimmed_err:.6}, \
-         total_reproj={total_reproj:.6}, angular_error={angular_err:.6}, \
-         confidence={confidence:.2}, z_rz={:.4}",
+         total_reproj={total_reproj:.6}, mean_reproj={mean_reproj:.6}, \
+         angular_error={angular_err:.6}, match_confidence={match_confidence:.2}, \
+         fit_confidence={fit_confidence:.2}, confidence={confidence:.2}, z_rz={:.4}",
         best_layout.z_rz
     );
 
@@ -592,9 +633,50 @@ pub fn calibrate_with_reporting(
         left_lens_profile: None,
         right_lens_profile: None,
         quality: Some(types::CalibrationQuality {
-            mean_reprojection_error: total_reproj,
+            mean_reprojection_error: mean_reproj,
             trimmed_reprojection_error: trimmed_err,
             angular_error: angular_err,
         }),
     })
+}
+
+#[cfg(test)]
+mod confidence_tests {
+    use super::*;
+
+    #[test]
+    fn quality_confidence_is_full_at_or_below_good_threshold() {
+        assert_eq!(quality_confidence(0.0), 1.0);
+        assert_eq!(quality_confidence(GOOD_MEAN_REPROJECTION_ERROR), 1.0);
+        // The known-good run from calibration_alignment_fix_summary.txt
+        // section 2.2 (0.047 total / 100 matches).
+        assert_eq!(quality_confidence(0.047 / 100.0), 1.0);
+    }
+
+    #[test]
+    fn quality_confidence_is_zero_at_or_above_bad_threshold() {
+        assert_eq!(quality_confidence(BAD_MEAN_REPROJECTION_ERROR), 0.0);
+        // The known-bad (64x-worse) run from the same section.
+        assert_eq!(quality_confidence(2.994 / 94.0), 0.0);
+    }
+
+    #[test]
+    fn quality_confidence_degrades_linearly_between_thresholds() {
+        let midpoint = (GOOD_MEAN_REPROJECTION_ERROR + BAD_MEAN_REPROJECTION_ERROR) / 2.0;
+        assert!((quality_confidence(midpoint) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn confidence_regression_matches_documented_64x_case() {
+        // Reproduces calibration_alignment_fix_summary.txt section 2.2 without
+        // needing the real footage: same match counts, before/after
+        // reprojection totals. The old confidence formula reported 100% for
+        // both; the combined formula should clearly separate them.
+        let good_confidence =
+            (100.0_f64 / FULL_CONFIDENCE_MATCHES).min(1.0) * quality_confidence(0.047 / 100.0);
+        let bad_confidence =
+            (94.0_f64 / FULL_CONFIDENCE_MATCHES).min(1.0) * quality_confidence(2.994 / 94.0);
+        assert_eq!(good_confidence, 1.0);
+        assert_eq!(bad_confidence, 0.0);
+    }
 }

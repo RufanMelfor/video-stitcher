@@ -1035,3 +1035,93 @@ it's not sufficient, (2) is the real feature to plan and build next.
     real rendered composite crop confirm it visually (not just trust the
     number) - before any GUI work or production wiring (`PlaneLayout` +
     `fisheye.wgsl` shader ramp) is worth doing.
+
+## Calibration "confidence" metric measures match count, not fit quality
+
+**Symptom, documented since 2026-07-03:** `CalibrationResult::confidence`
+stays at (or near) 100% even when the underlying calibration is badly
+misaligned. First observed in `calibration_alignment_fix_summary.txt`
+section 2.2: an AKAZE detection-band bug (`[0.05, 0.95]` used instead of
+the correct `[0.25, 0.85]`) produced a **64x-worse reprojection error**
+on identical footage (`total_reproj`: 0.047 -> 2.994, `angular_error`:
+0.668 -> 1.859) while `confidence` sat at 100% throughout, in both the
+good and the badly-miscalibrated run. Also called out at the very top of
+this file (line 9): the seam misalignment this whole file investigates
+"visibly steps... even though the optimizer reports near-zero residual
+error and 100% confidence."
+
+**Root cause, confirmed by reading the code
+(`crates/reco-calibrate/src/lib.rs:107-114` and `:547`):**
+
+```rust
+const FULL_CONFIDENCE_MATCHES: f64 = 50.0;
+...
+let confidence = (total_matches as f64 / FULL_CONFIDENCE_MATCHES).min(1.0);
+```
+
+`confidence` is purely `min(total_matched_points / 50, 1.0)` - a raw
+count of matched feature points, saturating at 50. It has **zero
+dependency** on any of the fit-quality metrics the same function already
+computes a few lines later in the same block: `best_residual` (exposed
+as `CalibrationResult::residual_error`), or `total_reproj` /
+`trimmed_err` / `angular_err` (bundled into
+`CalibrationResult::quality: Option<CalibrationQuality>`). A calibration
+can have 50+ well-distributed matches (100% confidence) and a
+catastrophically wrong fit at the same time - that is exactly what
+happened in the 64x-worse run above; matches were plentiful (the wide
+band finds more keypoints, not fewer), the fit was just bad.
+
+**User-facing impact on both consumer surfaces:**
+- CLI (`reco-cli/src/calibrate.rs:294`): prints `Confidence: X%` as a
+  headline stat. `residual_error` is printed too (line 295) but as a raw
+  dimensionless number with no interpretive threshold attached, so a user
+  has no way to tell "0.047 good, 2.994 bad" without already knowing what
+  a healthy number looks like for their rig.
+- GUI (`reco-gui/src/main.rs:4610-4622`): the *only* automatic "Low
+  calibration confidence" warning dialog check is `if confidence < 0.5`
+  (i.e. fewer than 25 matches) - it does not read `residual_error` or
+  `quality` at all. A calibration with plenty of matches but a badly
+  wrong fit - the exact failure mode that caused the original rig-calib
+  bug report this whole investigation started from - triggers **zero**
+  warning in the GUI.
+
+**Fixed (2026-07-07).** `confidence` is now `match_confidence *
+fit_confidence` (`crates/reco-calibrate/src/lib.rs`):
+`match_confidence` is the original `total_matches / 50` term, unchanged;
+`fit_confidence` (new `quality_confidence()` fn) is 1.0 at or below
+`GOOD_MEAN_REPROJECTION_ERROR = 0.001`, 0.0 at or above
+`BAD_MEAN_REPROJECTION_ERROR = 0.01`, and linear in between, evaluated
+against the mean (not summed) per-point reprojection error. Both
+thresholds are anchored to the one confirmed real before/after pair this
+repo has - the section 2.2 good run (0.047 total / 100 matches ≈ 0.00047
+per point) and bad run (2.994 total / 94 matches ≈ 0.0319 per point) -
+with safety margins (~2x above the good measurement, ~3x below the bad
+one) so this doesn't just barely trip on that one specific regression.
+**This is a first-pass calibration, not an extensively-tuned curve** -
+revisit if a real run gets flagged low-confidence despite looking
+visually fine, or the reverse.
+
+Also fixed in passing: `CalibrationQuality::mean_reprojection_error` was
+mislabeled - it held `geometry::reprojection_error`'s raw *summed* total,
+which scales with match count, not an actual mean. Now divided by
+`total_matches` so the field matches its name and is comparable across
+calibrations with different match counts. Confirmed via grep that no
+other code in the workspace read this field before the fix, so this
+doesn't change behavior anywhere else. `trimmed_reprojection_error` and
+`angular_error` are still raw sums (their names don't claim otherwise);
+left alone to keep this change minimal.
+
+4 new unit tests added (`confidence_tests` module in `lib.rs`), including
+one that reproduces the documented 64x-worse case from stored numbers
+(no real footage needed) and confirms it now separates to 100% vs 0%
+confidence instead of 100% vs 100%. `cargo test -p reco-calibrate --lib`:
+94/94 passing (up from 90). fmt clean; clippy clean on `reco-calibrate`
+(the same 4 pre-existing, unrelated `reco-core` session/d3d11 errors
+noted throughout this file are still the only clippy failures
+workspace-wide).
+
+**Not done:** wiring the CLI/GUI to show `match_confidence` and
+`fit_confidence` as separate numbers (right now only the combined
+`confidence` changes) - the GUI's `if confidence < 0.5` warning
+threshold and the telemetry field both still work unchanged, since
+they consume the same `confidence` value, now just a more honest one.
