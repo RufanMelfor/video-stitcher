@@ -1180,12 +1180,33 @@ it's not sufficient, (2) is the real feature to plan and build next.
       the same interaction, and the tool now has reliable auto-detection
       to speed it up.
 
-    (Far-field cross-check still not run - no AKAZE matched-points file
-    exists for this clip, raw source videos not on this machine. With
-    production wiring now planned this check matters again and should be
-    run before the wiring ships: `band_limited_ground_warp` is provably
-    identity beyond the band, but verifying on real data is this file's
-    own standing rule.)
+    **Far-field cross-check: run and passed (2026-07-07, same day).** The
+    blocker was that `dump_points.rs` needs the source videos (not on this
+    machine) - but the raw frame *PNGs* are committed under
+    `resources/test-data/frames/`. New `examples/match_png_frames.rs`
+    loads those PNG pairs, converts RGB → limited-range BT.709 YUV420P
+    (the exact convention the undistort shader expects), and runs the
+    full production `calibrate()` pipeline, writing
+    `CalibrationResult::per_frame` as
+    `resources/test-data/matched_points_werkplaats.json` (65 matches
+    across 4 pairs). Feeding that to `fit_ground_tilt_manual
+    --matched-points`: 42 far-field points, error before == after to the
+    last printed decimal (+0.0000%) at the fitted
+    `ground_tilt_x/z = -0.090/-0.085`. The by-construction identity of
+    `band_limited_ground_warp` beyond the band is now verified on real
+    data, per this file's standing rule - the wiring prerequisite is met.
+
+    Two honest caveats on that matched-points file: (a) the absolute
+    far-field error total (~16e6) shows ~16 of the 42 points hitting the
+    behind-camera 1e6 penalty under the loaded layout - outlier matches
+    (default `calibrate()` runs no RANSAC point filter). Irrelevant for
+    the identity check (before == after regardless), but don't reuse this
+    file for anything error-magnitude-sensitive without outlier
+    filtering. (b) the fresh 4-frame auto-fit printed alongside diverges
+    from the hand-clicked `match_werkplaats.json` (intersect 0.66 vs
+    0.10) and the new quality-aware confidence metric flags it at 0% -
+    tiny trimmed error but outlier-blown mean - which is the new metric
+    doing exactly its job on a fit that shouldn't be trusted.
 
 ## Calibration "confidence" metric measures match count, not fit quality
 
