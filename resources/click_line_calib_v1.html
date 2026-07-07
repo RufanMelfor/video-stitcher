@@ -36,8 +36,13 @@
  To correct a point (pending or already added, in <b>either</b> mode), just <b>drag</b> it — cursor shows a hand when
  hovering one.
  <b>Auto-detect line</b>: zoom in on a clear, mostly-horizontal white field line in both viewports first, then click the
- button — it scans the currently visible crop on both sides for the brightest near-horizontal line and drops pending
- points on it. Only a starting point: always drag-correct the endpoints against the real line before "Add line".
+ button — it scans the currently visible crop on both sides (Hough transform over near-horizontal angles, robust to
+ other lines/shirts/glare nearby) for the strongest line and drops pending points on it. Only a starting point: always
+ drag-correct the endpoints against the real line before "Add line".<br>
+ <b>Auto-detect N lines</b>: same detector, but finds up to N lines per side at once (set the number next to the
+ button), matches them across sides by their height at the seam edge (a detection without a plausible partner on the
+ other side is dropped, never force-paired), and adds all matched pairs directly to the list - no per-line "Add"
+ needed. Always review the result: drag any endpoint to fix it, or "Undo line" to drop the last pair if one is wrong.
 </div>
 
 <div class="bar">
@@ -88,6 +93,8 @@
   <label><input type="radio" name="mode" value="line" onchange="setMode('line')"> field lines (near-field seam, FRICTION.md #18)</label>
   &nbsp;|&nbsp;
   <button onclick="autoDetectLine()">Auto-detect line</button>
+  <input type="number" id="nlines" value="4" min="1" max="10" style="width:48px">
+  <button onclick="autoDetectLines()">Auto-detect N lines</button>
   <button onclick="addLine()">Add line</button>
   <button onclick="undoLine()">Undo line pt</button>
   <button onclick="resetLines()">Reset lines</button>
@@ -219,7 +226,20 @@ function hitTestPoint(s,uv){
     const cuv=canvasFromFv(fvFromPlane(P),s.side),x=cuv[0]*s.ov.width,y=cuv[1]*s.ov.height;
     const d=Math.hypot(x-px,y-py);if(d<bestD){bestD=d;best=slot;}}
   return best;}
-// ---- auto line detection (brightest near-horizontal white line in the current viewport) ----
+// ---- auto line detection (Hough transform over near-horizontal angles) ----
+// The old approach picked the single brightest pixel per x-column, then did an
+// iterative-trim linear fit over those picks. That silently jumps between
+// *different* real lines whenever one is locally brighter than another in a
+// given column (shirts, sun glare, a second field line crossing the same
+// x-range), which is exactly the "one long spurious diagonal" failure mode -
+// the fit isn't wrong given its inputs, its inputs already mix two lines.
+//
+// A Hough transform fixes this at the root: every qualifying pixel votes for
+// every (angle, perpendicular-offset) line it could lie on, and pixels from
+// the *same* real line stack into one strong peak regardless of what else is
+// nearby, while scattered noise (a shirt, a sunlit patch) spreads across many
+// weak bins instead of forming a peak. This also makes multi-line detection
+// natural: just take the top N distinct peaks instead of only the strongest.
 function pxToPlane(x,y,w,h,side){return toPlane(fvFromCanvas([x/w,y/h],side));}
 function linearFit(pts){
   let n=pts.length,sx=0,sy=0,sxx=0,sxy=0;
@@ -228,54 +248,238 @@ function linearFit(pts){
   if(Math.abs(denom)<1e-9)return null;
   const a=(n*sxy-sx*sy)/denom,b=(sy-a*sx)/n;
   return {a,b};}
-function detectLineOnSide(s){
+// Per-column run centers ("centerline" points). A painted line has real
+// thickness - tens of px near the bottom of frame - and feeding raw
+// threshold pixels to the Hough means the stripe's two *edges* each
+// register as their own line (observed on real footage: the near sideline
+// produced two crossing detections). Collapsing each column's contiguous
+// white run to its single center point kills that at the source: one point
+// per column per stripe, exactly where a human would click. Scanning
+// columns at full vertical resolution also fixes a second real bug: the
+// old row-stride-3 sampling could miss a 1-2px-thin distant line entirely.
+// Runs taller than MAX_RUN are discarded (a shirt/blob/sun-bleached patch,
+// not a near-horizontal line's cross-section).
+function extractCenterPoints(qualifies,w,h,yMin){
+  const X_STRIDE=3, MAX_RUN=Math.max(8,Math.round(h*0.04));
+  const pts=[];
+  for(let x=0;x<w;x+=X_STRIDE){
+    let runStart=-1;
+    for(let y=yMin;y<=h;y++){ // y===h closes a run touching the bottom edge
+      const q=y<h&&qualifies(x,y);
+      if(q&&runStart<0)runStart=y;
+      else if(!q&&runStart>=0){
+        const len=y-runStart;
+        if(len<=MAX_RUN)pts.push([x,runStart+(len-1)/2]);
+        runStart=-1;
+      }
+    }
+  }
+  return pts;
+}
+function collectLinePixels(s){
   const {gl}=s.ctx,w=s.cv.width,h=s.cv.height;
   const buf=new Uint8Array(w*h*4);
   gl.readPixels(0,0,w,h,gl.RGBA,gl.UNSIGNED_BYTE,buf);
-  const STRIDE=3,BRIGHT_MIN=110,Y_MIN=Math.round(h*0.3); // skip top 30% - sky/buildings, not ground
-  let pts=[];
-  for(let x=0;x<w;x+=STRIDE){
-    let bestY=-1,bestScore=-1;
-    for(let gy=0;gy<h;gy+=STRIDE){ // gy = WebGL row, 0=bottom
-      const canvasY=h-1-gy; // flip to top-down canvas y
-      if(canvasY<Y_MIN)continue;
-      const idx=(gy*w+x)*4,r=buf[idx],g=buf[idx+1],b=buf[idx+2];
-      const bright=(r+g+b)/3;
-      if(bright<BRIGHT_MIN)continue;
-      if(b-r>25)continue; // sky/void: noticeably blue-shifted; white paint/turf are not
-      const whiteness=Math.min(r,g,b); // white paint: r~g~b and bright; green turf: low blue
-      if(whiteness>bestScore){bestScore=whiteness;bestY=canvasY;}
+  const BRIGHT_MIN=110,SAT_MAX=38,Y_MIN=Math.round(h*0.3); // skip top 30% - sky/buildings, not ground
+  const qualifies=(x,canvasY)=>{
+    const gy=h-1-canvasY; // WebGL rows are bottom-up
+    const idx=(gy*w+x)*4,r=buf[idx],g=buf[idx+1],b=buf[idx+2];
+    const bright=(r+g+b)/3;
+    if(bright<BRIGHT_MIN)return false;
+    if(b-r>25)return false; // sky/void: noticeably blue-shifted; white paint/turf are not
+    const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
+    if(mn<BRIGHT_MIN-30)return false;
+    // Color-neutrality gate: real white paint is r~g~b even when bright or
+    // in shadow. A sunlit mowing-pattern stripe, a yellow bib, or skin tone
+    // can be just as bright as paint but still leans toward one channel
+    // (mowing stripes/grass stay green-dominant even when lit up) - without
+    // this check those get accepted as "white line" candidates, which is
+    // what produced false line detections that weren't real paint.
+    if(mx-mn>SAT_MAX)return false;
+    return true;
+  };
+  return {pts:extractCenterPoints(qualifies,w,h,Y_MIN),w,h};}
+// Hough-transform peak search restricted to near-horizontal lines (matches
+// this tool's own "mostly-horizontal white field line" assumption). Returns
+// up to maxLines distinct lines, strongest (most-supported) first, each
+// refined by an exact least-squares fit over its actual inlier pixels (the
+// Hough bin itself is only used to *find* the line, not to draw it - bin
+// quantization would otherwise blur the reported slope).
+// Evaluate a fitted line's y at a given x (linear extrapolation beyond its
+// own endpoints is fine here - only used for the duplicate check below,
+// over each pair's *shared* x-range).
+function lineValueAt(l,x){
+  const slope=(l.p2[1]-l.p1[1])/(l.p2[0]-l.p1[0]);
+  return l.p1[1]+slope*(x-l.p1[0]);
+}
+// True if two lines track the same real feature over their shared x-range.
+// Mean distance sampled at both ends and the middle of the shared span -
+// NOT just the midpoint: two fits of the same thick stripe can *cross*
+// mid-span (observed on real footage as a blue/white X on the near
+// sideline), staying close at the crossing while diverging at the ends, or
+// vice versa. The 3-point mean stays small for any same-feature pair
+// (parallel edges ~10px apart, or crossing fits) but stays large (~the
+// real separation) for genuinely distinct lines. Lines with no shared
+// x-range are never duplicates for this check's purposes.
+function linesAreDuplicate(a,b){
+  const lo=Math.max(a.p1[0],b.p1[0]),hi=Math.min(a.p2[0],b.p2[0]);
+  if(hi<=lo)return false;
+  let sum=0;
+  for(const x of [lo,(lo+hi)/2,hi])sum+=Math.abs(lineValueAt(a,x)-lineValueAt(b,x));
+  return sum/3<18;
+}
+function houghLines(pts,w,h,maxLines){
+  if(pts.length<40)return [];
+  const PHI_MAX=35*Math.PI/180,PHI_STEP=Math.PI/180; // +/-35 deg from horizontal, 1 deg steps
+  const nPhi=Math.round(2*PHI_MAX/PHI_STEP)+1;
+  const cosT=new Float64Array(nPhi),sinT=new Float64Array(nPhi);
+  for(let i=0;i<nPhi;i++){const phi=-PHI_MAX+i*PHI_STEP;cosT[i]=Math.cos(phi);sinT[i]=Math.sin(phi);}
+  const RHO_BIN=3,rhoMin=-w,rhoMax=h; // generous bound: rho=y*cos(phi)-x*sin(phi), |x|<=w,|y|<=h
+  const nRho=Math.ceil((rhoMax-rhoMin)/RHO_BIN)+1;
+  const acc=new Int32Array(nPhi*nRho);
+  for(const [x,y] of pts)for(let i=0;i<nPhi;i++){
+    const rho=y*cosT[i]-x*sinT[i];
+    const rbin=Math.round((rho-rhoMin)/RHO_BIN);
+    if(rbin>=0&&rbin<nRho)acc[i*nRho+rbin]++;
+  }
+  // Greedy peak-pick with local non-max suppression: take the strongest
+  // remaining bin, then zero out a neighborhood around it so the next pick
+  // is a genuinely distinct line, not another bin still voted-up by the same
+  // real line's own angular/positional spread. A long real line's support
+  // isn't perfectly contained by this neighborhood though, so try more
+  // candidates than maxLines and reject near-duplicates explicitly below,
+  // rather than trusting suppression radius alone to prevent them.
+  const used=new Uint8Array(nPhi*nRho);
+  const PHI_SUP=6,RHO_SUP=Math.round(24/RHO_BIN);
+  const claimed=new Uint8Array(pts.length); // point indices already claimed by an accepted line
+  const lines=[];
+  const MAX_CANDIDATES=maxLines*4+8;
+  for(let k=0;k<MAX_CANDIDATES&&lines.length<maxLines;k++){
+    let best=-1,bi=-1,bj=-1;
+    for(let i=0;i<nPhi;i++)for(let j=0;j<nRho;j++){
+      if(used[i*nRho+j])continue;
+      const v=acc[i*nRho+j];
+      if(v>best){best=v;bi=i;bj=j;}
     }
-    if(bestY>=0)pts.push([x,bestY]);
+    if(best<6)break; // no more distinct clusters worth pursuing
+    used[bi*nRho+bj]=1;
+    for(let i=Math.max(0,bi-PHI_SUP);i<=Math.min(nPhi-1,bi+PHI_SUP);i++)
+      for(let j=Math.max(0,bj-RHO_SUP);j<=Math.min(nRho-1,bj+RHO_SUP);j++)used[i*nRho+j]=1;
+
+    const phi=-PHI_MAX+bi*PHI_STEP,c=Math.cos(phi),sn=Math.sin(phi);
+    const rho=rhoMin+bj*RHO_BIN;
+    const inlierIdx=[];
+    for(let pi=0;pi<pts.length;pi++){
+      const [x,y]=pts[pi];
+      if(Math.abs(y*c-x*sn-rho)<6)inlierIdx.push(pi);
+    }
+    if(inlierIdx.length<20)continue; // real gate: resolution-adaptive, unlike a raw vote-count cutoff
+    // Reject as a duplicate of an already-accepted line if most of this
+    // peak's support is pixels an earlier (stronger) peak already claimed.
+    const alreadyClaimed=inlierIdx.reduce((n,pi)=>n+(claimed[pi]?1:0),0);
+    if(alreadyClaimed/inlierIdx.length>0.4)continue;
+    const inlierPts=inlierIdx.map(pi=>pts[pi]);
+    const fit=linearFit(inlierPts);
+    if(!fit)continue;
+    const xs=inlierPts.map(p=>p[0]);
+    const x0=Math.min(...xs),x1=Math.max(...xs);
+    if(x1-x0<w*0.1)continue; // too narrow a span to trust the slope
+    // Density check: a real continuous painted line has dense coverage
+    // along its span; a handful of points spread across a wide range
+    // (noise that's coincidentally near-collinear with a couple of real
+    // points) does not, even if it clears the raw count/span gates above.
+    const distinctX=new Set(inlierPts.map(p=>p[0])).size;
+    if(distinctX/(x1-x0)<0.15)continue;
+    const candidate={p1:[x0,fit.a*x0+fit.b],p2:[x1,fit.a*x1+fit.b]};
+    // Geometric duplicate check, independent of point-index overlap above -
+    // catches the "two edges of one thick stripe" case the overlap check
+    // can miss (see linesAreDuplicate).
+    if(lines.some(existing=>linesAreDuplicate(existing,candidate)))continue;
+    for(const pi of inlierIdx)claimed[pi]=1;
+    lines.push({p1:candidate.p1,p2:candidate.p2,w,h,votes:inlierIdx.length});
   }
-  if(pts.length<20)return null;
-  // 2-pass outlier rejection so one dominant line survives (ball/shirts/sunlit patches otherwise skew the fit)
-  for(let iter=0;iter<3;iter++){
-    const fit=linearFit(pts);
-    if(!fit)return null;
-    const resid=pts.map(([x,y])=>Math.abs(y-(fit.a*x+fit.b)));
-    const sorted=[...resid].sort((a,b)=>a-b);
-    const thresh=Math.max(sorted[Math.floor(sorted.length*0.6)]*2,4);
-    const kept=pts.filter((_,i)=>resid[i]<=thresh);
-    if(kept.length<15||kept.length===pts.length){pts=kept;break;}
-    pts=kept;
+  lines.sort((a,b)=>b.votes-a.votes);
+  return lines;}
+function detectLinesOnSide(s,maxLines){
+  const {pts,w,h}=collectLinePixels(s);
+  return houghLines(pts,w,h,maxLines);}
+// Plane-space height where a detected line crosses its seam-facing viewport
+// edge (left viewport: right edge; right viewport: left edge). A physically
+// continuous field line crosses the seam at (nearly) the same height in
+// both cameras - that is the whole seam-continuity premise this tool feeds
+// (see line_seam.rs) - so this is the right quantity to match lines across
+// sides with. Plane coords, not canvas px, so it stays valid even when the
+// two viewports are zoomed/panned differently.
+function seamPlaneY(l,side){
+  const xe=side==='L'?l.w-1:0;
+  return pxToPlane(xe,lineValueAt(l,xe),l.w,l.h,side)[1];
+}
+// Pair detections across sides by seam-edge height, greedy nearest-first,
+// dropping anything without a plausible partner. The obvious alternative -
+// sort each side by height and zip by index - mispairs the *entire list*
+// as soon as one side detects a line the other missed (observed on real
+// footage: a bottom-sideline detection on the left got paired with a
+// mid-field line on the right). A dropped line costs one manual click; a
+// silently wrong pair corrupts the downstream fit.
+function pairBySeamY(dls,drs,seamYFn,maxDy){
+  const cands=[];
+  dls.forEach((dl,i)=>drs.forEach((dr,j)=>{
+    const dy=Math.abs(seamYFn(dl,'L')-seamYFn(dr,'R'));
+    if(dy<=maxDy)cands.push({i,j,dy});
+  }));
+  cands.sort((a,b)=>a.dy-b.dy);
+  const usedL=new Set(),usedR=new Set(),pairs=[];
+  for(const c of cands){
+    if(usedL.has(c.i)||usedR.has(c.j))continue;
+    usedL.add(c.i);usedR.add(c.j);pairs.push([dls[c.i],drs[c.j]]);
   }
-  const fit=linearFit(pts);
-  if(!fit)return null;
-  // report the line only across the x-range the surviving inliers actually span - extrapolating
-  // to the full canvas width exaggerates any small slope error into a huge, confusing line
-  const xs=pts.map(p=>p[0]);
-  const x0=Math.min(...xs),x1=Math.max(...xs);
-  if(x1-x0<w*0.1)return null; // too narrow a span to trust the slope
-  return {p1:[x0,fit.a*x0+fit.b],p2:[x1,fit.a*x1+fit.b],w,h};}
+  return {pairs,droppedL:dls.length-pairs.length,droppedR:drs.length-pairs.length};
+}
+// Max seam-height mismatch (plane units) to accept a cross-side pair. Real
+// corresponding lines land within ~0.01-0.03 even on an imperfect stitch;
+// distinct field lines are much further apart. Deliberately strict: a
+// dropped pair is one manual click, a wrong pair is a corrupted fit.
+const PAIR_MAX_DY=0.05;
 function autoDetectLine(){
   if(MODE!=='line'){alert('Switch to "field lines" mode first.');return;}
   if(!glL||!glR||!glL.ctx.tex||!glR.ctx.tex){alert('Load both frames first.');return;}
-  const dl=detectLineOnSide(glL),dr=detectLineOnSide(glR);
-  if(!dl||!dr){alert('Could not confidently find a bright near-horizontal line on one or both sides.\nZoom in closer on a clear white field line and try again.');return;}
+  // Detect a few candidates per side, then take the strongest *matched*
+  // pair - the strongest line on each side independently need not be the
+  // same physical line (e.g. left's brightest is the near sideline, right's
+  // is a mid-field line), which would silently hand the fit a false
+  // correspondence.
+  const dls=detectLinesOnSide(glL,3),drs=detectLinesOnSide(glR,3);
+  if(!dls.length||!drs.length){alert('Could not confidently find a bright near-horizontal line on one or both sides.\nZoom in closer on a clear white field line and try again.');return;}
+  const {pairs}=pairBySeamY(dls,drs,seamPlaneY,PAIR_MAX_DY);
+  if(!pairs.length){alert('Found lines, but none at a matching height on both sides.\nFrame both viewports so the same real field line is visible in each, then try again.');return;}
+  let best=pairs[0],bs=-1;
+  for(const p of pairs){const s=p[0].votes+p[1].votes;if(s>bs){bs=s;best=p;}}
+  const [dl,dr]=best;
   lcur.L={p1:pxToPlane(dl.p1[0],dl.p1[1],dl.w,dl.h,'L'),p2:pxToPlane(dl.p2[0],dl.p2[1],dl.w,dl.h,'L')};
   lcur.R={p1:pxToPlane(dr.p1[0],dr.p1[1],dr.w,dr.h,'R'),p2:pxToPlane(dr.p2[0],dr.p2[1],dr.w,dr.h,'R')};
   drawOverlays();}
+// Multi-line variant: detects up to N lines per side independently, pairs
+// them by seam-edge height (see pairBySeamY - anything without a plausible
+// cross-side partner is dropped, not force-matched), and pushes each pair
+// straight into the confirmed `lines[]` list (skipping the single-line
+// flow's "Add line" step, since clicking Add N times would be tedious).
+// Review the result: drag any endpoint to correct it, or "Undo line" to
+// drop the most-recently-added pair if one is spurious.
+function autoDetectLines(){
+  if(MODE!=='line'){alert('Switch to "field lines" mode first.');return;}
+  if(!glL||!glR||!glL.ctx.tex||!glR.ctx.tex){alert('Load both frames first.');return;}
+  const n=Math.max(1,Math.min(10,Math.round(+nlines.value||4)));
+  const dls=detectLinesOnSide(glL,n),drs=detectLinesOnSide(glR,n);
+  if(!dls.length||!drs.length){alert('Could not confidently find any bright near-horizontal lines on one or both sides.\nZoom out a bit to include more field lines, or in for a cleaner view, and try again.');return;}
+  const {pairs,droppedL,droppedR}=pairBySeamY(dls,drs,seamPlaneY,PAIR_MAX_DY);
+  if(!pairs.length){alert(`Found ${dls.length} line(s) on the left and ${drs.length} on the right, but none matched up at a similar height near the seam - no pairs added.\nFrame both viewports on the same real lines and try again, or click the line manually.`);return;}
+  for(const [dl,dr] of pairs){
+    lines.push({
+      left:{p1:pxToPlane(dl.p1[0],dl.p1[1],dl.w,dl.h,'L'),p2:pxToPlane(dl.p2[0],dl.p2[1],dl.w,dl.h,'L')},
+      right:{p1:pxToPlane(dr.p1[0],dr.p1[1],dr.w,dr.h,'R'),p2:pxToPlane(dr.p2[0],dr.p2[1],dr.w,dr.h,'R')}});
+  }
+  drawOverlays();
+  alert(`Added ${pairs.length} line pair(s), matched by height at the seam edge (found ${dls.length} left / ${drs.length} right; dropped ${droppedL} left / ${droppedR} right without a cross-side match).\nReview each pair against the real lines - drag endpoints to correct, "Undo line" removes the most recent pair.`);}
 function drawLineOnSide(s,key,p1,p2,color){
   const g=s.ov.getContext('2d'),put=P=>{const uv=canvasFromFv(fvFromPlane(P),key);return [uv[0]*s.ov.width,uv[1]*s.ov.height];};
   g.strokeStyle=color;g.fillStyle=color;g.lineWidth=2;
