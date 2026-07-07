@@ -877,6 +877,8 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Cal
                     app.set_cal_intersect(layout.intersect as f32);
                     app.set_cal_camera_axis_offset(layout.camera_axis_offset as f32);
                     app.set_cal_x_ty(layout.x_ty as f32);
+                    app.set_cal_ground_tilt_x(layout.ground_tilt_x as f32);
+                    app.set_cal_ground_tilt_z(layout.ground_tilt_z as f32);
                     app.set_cal_dirty(false);
                 }
                 if let Some(rt) = rig_tilt_rad {
@@ -1638,6 +1640,34 @@ fn main() -> anyhow::Result<()> {
             return;
         };
         layout.x_ty = v as f64;
+        s.apply_layout(layout);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_cal_ground_tilt_x(move |v| {
+        let mut s = state_ref.borrow_mut();
+        let Some(mut layout) = s.calibration.as_ref().map(|c| c.layout.clone()) else {
+            return;
+        };
+        layout.ground_tilt_x = v as f64;
+        s.apply_layout(layout);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_cal_ground_tilt_z(move |v| {
+        let mut s = state_ref.borrow_mut();
+        let Some(mut layout) = s.calibration.as_ref().map(|c| c.layout.clone()) else {
+            return;
+        };
+        layout.ground_tilt_z = v as f64;
         s.apply_layout(layout);
         if let Some(app) = app_weak.upgrade() {
             app.set_cal_dirty(true);

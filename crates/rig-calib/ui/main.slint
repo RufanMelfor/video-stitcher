@@ -219,6 +219,8 @@ export component CalibrateApp inherits Window {
     in-out property <float> cal-intersect: 0.0;
     in-out property <float> cal-camera-axis-offset: 0.0;
     in-out property <float> cal-x-ty: 0.0;
+    in-out property <float> cal-ground-tilt-x: 0.0;
+    in-out property <float> cal-ground-tilt-z: 0.0;
     in-out property <bool> cal-dirty: false;
 
     // Auto-calibrate tuning knobs.
@@ -331,6 +333,8 @@ export component CalibrateApp inherits Window {
     callback changed-cal-intersect(float);
     callback changed-cal-camera-axis-offset(float);
     callback changed-cal-x-ty(float);
+    callback changed-cal-ground-tilt-x(float);
+    callback changed-cal-ground-tilt-z(float);
     callback save-calibration();
     callback reset-calibration();
     callback changed-lens-param();
@@ -702,6 +706,24 @@ export component CalibrateApp inherits Window {
                                         minimum: -0.1; maximum: 0.1; decimals: 3;
                                         value <=> root.cal-x-ty;
                                         changed(v) => { root.changed-cal-x-ty(v); }
+                                    }
+                                }
+                                Tip {
+                                    tip: "Near-field ground-plane tilt correction for the right camera's content (x-plane). Fixes a seam step in ground lines close to the camera that the flat two-plane model can't otherwise correct - only affects the bottom of frame, close to the camera; leaves everything else untouched. Fitted via reco-calibrate's manual field-line workflow (see FRICTION.md), not solved by auto-calibrate.";
+                                    LabeledSlider {
+                                        label: "ground_tilt_x";
+                                        minimum: -0.3; maximum: 0.3; decimals: 3;
+                                        value <=> root.cal-ground-tilt-x;
+                                        changed(v) => { root.changed-cal-ground-tilt-x(v); }
+                                    }
+                                }
+                                Tip {
+                                    tip: "Same as ground_tilt_x, for the left camera's content (z-plane).";
+                                    LabeledSlider {
+                                        label: "ground_tilt_z";
+                                        minimum: -0.3; maximum: 0.3; decimals: 3;
+                                        value <=> root.cal-ground-tilt-z;
+                                        changed(v) => { root.changed-cal-ground-tilt-z(v); }
                                     }
                                 }
 
