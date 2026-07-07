@@ -527,7 +527,18 @@ pub struct CalibrationResult {
 /// Detailed calibration quality metrics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalibrationQuality {
+    /// Mean symmetric reprojection error per matched point (dimensionless
+    /// plane units). This is `geometry::reprojection_error`'s summed total
+    /// divided by point count, so it stays comparable across calibrations
+    /// with different match counts - unlike a raw sum, which grows with
+    /// more matches even for an equally good per-point fit.
     pub mean_reprojection_error: f64,
+    /// Sum of per-point reprojection error after dropping the worst 20%
+    /// (`geometry::trimmed_reprojection_error`) - robust to a few outlier
+    /// matches, but still a total, not a mean; scales with match count.
     pub trimmed_reprojection_error: f64,
+    /// Sum of per-point angular reprojection error in radians
+    /// (`geometry::angular_error`) - a total, not a mean; scales with match
+    /// count.
     pub angular_error: f64,
 }
