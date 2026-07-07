@@ -30,17 +30,34 @@ use crate::geometry;
 use crate::types::MatchedPoint;
 
 /// Two points along a real, straight field line, as manually identified in
-/// one camera's own GPU-undistorted frame (pixel coordinates, not plane
-/// coordinates - conversion happens in [`ClickedLine::extrapolate_to_seam`]).
+/// one camera's own GPU-undistorted frame - stored in plane coordinates
+/// (the same view/FOV-independent space `geometry::normalize_to_plane`
+/// produces from pixels).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClickedLine {
-    pub p1_px: (f64, f64),
-    pub p2_px: (f64, f64),
-    pub img_w: u32,
-    pub img_h: u32,
+    p1_plane: [f64; 2],
+    p2_plane: [f64; 2],
 }
 
 impl ClickedLine {
+    /// Build from pixel coordinates in a camera's own GPU-undistorted debug
+    /// frame (e.g. `reco calibrate --debug-dir`'s dumped PNGs), the way
+    /// `tools/manual_line_picker.html` produces clicks.
+    pub fn from_pixels(p1_px: (f64, f64), p2_px: (f64, f64), img_w: u32, img_h: u32) -> Self {
+        Self {
+            p1_plane: geometry::normalize_to_plane(p1_px.0, p1_px.1, img_w, img_h),
+            p2_plane: geometry::normalize_to_plane(p2_px.0, p2_px.1, img_w, img_h),
+        }
+    }
+
+    /// Build directly from already-canonical plane coordinates - what
+    /// `resources/click_calib_v2.html`'s field-line mode exports (it does
+    /// its own in-browser fisheye undistort, a port of `fisheye.wgsl`, so
+    /// there's no separate pixel-space step or debug-dir dump needed).
+    pub fn from_plane(p1_plane: [f64; 2], p2_plane: [f64; 2]) -> Self {
+        Self { p1_plane, p2_plane }
+    }
+
     /// Extrapolate this line to a given normalized-pixel-x seam column,
     /// returning the plane-space `[x, y]` position where the line would
     /// cross the seam.
@@ -53,8 +70,7 @@ impl ClickedLine {
     /// near-horizontal field line crossing the seam; a caller hitting this
     /// most likely swapped or duplicated a click.
     pub fn extrapolate_to_seam(&self, seam_nx: f64) -> [f64; 2] {
-        let p1 = geometry::normalize_to_plane(self.p1_px.0, self.p1_px.1, self.img_w, self.img_h);
-        let p2 = geometry::normalize_to_plane(self.p2_px.0, self.p2_px.1, self.img_w, self.img_h);
+        let (p1, p2) = (self.p1_plane, self.p2_plane);
         let seam_x = (seam_nx - 0.5) * geometry::PLANE_WIDTH;
 
         let dx = p2[0] - p1[0];
@@ -95,7 +111,29 @@ pub fn matched_point_from_lines(
     }
 }
 
-/// One clicked line, in pixel coordinates, for serialized input files.
+/// Which coordinate space a [`ManualLinesFile`]'s clicked points are in.
+///
+/// `Pixel` (the default, for backward compatibility with
+/// `tools/manual_line_picker.html`) needs `img_w`/`img_h` to convert via
+/// `geometry::normalize_to_plane`. `Plane` points are already in canonical
+/// plane space - what `resources/click_calib_v2.html`'s field-line mode
+/// exports directly, since that tool already does its own in-browser
+/// fisheye undistort - and are used as-is.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordSpace {
+    Pixel,
+    Plane,
+}
+
+impl Default for CoordSpace {
+    fn default() -> Self {
+        CoordSpace::Pixel
+    }
+}
+
+/// One clicked line, for serialized input files - in whichever
+/// [`CoordSpace`] the containing [`ManualLinesFile`] declares.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ClickedLineInput {
     pub p1: [f64; 2],
@@ -103,12 +141,15 @@ pub struct ClickedLineInput {
 }
 
 impl ClickedLineInput {
-    fn into_clicked_line(self, img_w: u32, img_h: u32) -> ClickedLine {
-        ClickedLine {
-            p1_px: (self.p1[0], self.p1[1]),
-            p2_px: (self.p2[0], self.p2[1]),
-            img_w,
-            img_h,
+    fn into_clicked_line(self, img_w: u32, img_h: u32, coord_space: CoordSpace) -> ClickedLine {
+        match coord_space {
+            CoordSpace::Pixel => ClickedLine::from_pixels(
+                (self.p1[0], self.p1[1]),
+                (self.p2[0], self.p2[1]),
+                img_w,
+                img_h,
+            ),
+            CoordSpace::Plane => ClickedLine::from_plane(self.p1, self.p2),
         }
     }
 }
@@ -125,13 +166,17 @@ pub struct ManualLinePair {
 /// `examples/fit_ground_tilt_manual.rs` for the CLI that consumes this).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ManualLinesFile {
+    #[serde(default)]
+    pub coord_space: CoordSpace,
     pub lines: Vec<ManualLinePair>,
 }
 
 impl ManualLinesFile {
-    /// Convert every clicked line pair into a [`MatchedPoint`], using the
-    /// given per-camera image dimensions and the calibration's current
-    /// `intersect` to locate each camera's seam column.
+    /// Convert every clicked line pair into a [`MatchedPoint`]. `img_w`/
+    /// `img_h` are only used for `CoordSpace::Pixel` input; ignored (but
+    /// still required, to keep one call site) for `CoordSpace::Plane`.
+    /// The calibration's current `intersect` locates each camera's seam
+    /// column either way.
     pub fn to_matched_points(
         &self,
         left_img_w: u32,
@@ -143,8 +188,12 @@ impl ManualLinesFile {
         self.lines
             .iter()
             .map(|pair| {
-                let left_line = pair.left.into_clicked_line(left_img_w, left_img_h);
-                let right_line = pair.right.into_clicked_line(right_img_w, right_img_h);
+                let left_line =
+                    pair.left
+                        .into_clicked_line(left_img_w, left_img_h, self.coord_space);
+                let right_line =
+                    pair.right
+                        .into_clicked_line(right_img_w, right_img_h, self.coord_space);
                 matched_point_from_lines(&left_line, &right_line, intersect)
             })
             .collect()
@@ -164,12 +213,7 @@ mod tests {
         // wherever we're extrapolating to, since the line is already
         // "vertical" in image space (constant x). Use a line with a real
         // slope instead so extrapolation is meaningful.
-        let line = ClickedLine {
-            p1_px: (100.0, 100.0),
-            p2_px: (300.0, 300.0),
-            img_w: 1000,
-            img_h: 1000,
-        };
+        let line = ClickedLine::from_pixels((100.0, 100.0), (300.0, 300.0), 1000, 1000);
         // plane coords: normalize_to_plane(100,100,1000,1000) = (-0.4, -0.4)
         //               normalize_to_plane(300,300,1000,1000) = (-0.2, -0.2)
         // slope dy/dx = 1.0, line is y = x (through origin).
@@ -193,12 +237,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "distinct x")]
     fn extrapolate_to_seam_rejects_degenerate_line() {
-        let line = ClickedLine {
-            p1_px: (100.0, 100.0),
-            p2_px: (100.0, 300.0), // same x -> undefined slope in plane-x
-            img_w: 1000,
-            img_h: 1000,
-        };
+        // same x -> undefined slope in plane-x
+        let line = ClickedLine::from_pixels((100.0, 100.0), (100.0, 300.0), 1000, 1000);
         line.extrapolate_to_seam(0.5);
     }
 
@@ -207,18 +247,8 @@ mod tests {
         // Both cameras see the same real-world line y=x (in plane
         // coordinates), so a perfectly-calibrated seam should show zero
         // continuity error regardless of where the seam column falls.
-        let left_line = ClickedLine {
-            p1_px: (50.0, 50.0),
-            p2_px: (250.0, 250.0),
-            img_w: 1000,
-            img_h: 1000,
-        };
-        let right_line = ClickedLine {
-            p1_px: (700.0, 700.0),
-            p2_px: (900.0, 900.0),
-            img_w: 1000,
-            img_h: 1000,
-        };
+        let left_line = ClickedLine::from_pixels((50.0, 50.0), (250.0, 250.0), 1000, 1000);
+        let right_line = ClickedLine::from_pixels((700.0, 700.0), (900.0, 900.0), 1000, 1000);
         let intersect = 0.5;
         let mp = matched_point_from_lines(&left_line, &right_line, intersect);
 
@@ -232,18 +262,8 @@ mod tests {
     fn matched_point_from_lines_uses_swap_convention() {
         // Sanity check on which camera maps to which MatchedPoint field:
         // left_camera_line -> mp.right (z-plane), right_camera_line -> mp.left (x-plane).
-        let left_line = ClickedLine {
-            p1_px: (50.0, 500.0),
-            p2_px: (250.0, 520.0),
-            img_w: 1000,
-            img_h: 1000,
-        };
-        let right_line = ClickedLine {
-            p1_px: (700.0, 900.0),
-            p2_px: (900.0, 920.0),
-            img_w: 1000,
-            img_h: 1000,
-        };
+        let left_line = ClickedLine::from_pixels((50.0, 500.0), (250.0, 520.0), 1000, 1000);
+        let right_line = ClickedLine::from_pixels((700.0, 900.0), (900.0, 920.0), 1000, 1000);
         let seams = geometry::seam_columns(0.5);
         let expected_left_at_seam = left_line.extrapolate_to_seam(seams.left_camera_seam_nx);
         let expected_right_at_seam = right_line.extrapolate_to_seam(seams.right_camera_seam_nx);
@@ -256,6 +276,7 @@ mod tests {
     #[test]
     fn manual_lines_file_round_trips_through_json() {
         let file = ManualLinesFile {
+            coord_space: CoordSpace::Pixel,
             lines: vec![ManualLinePair {
                 left: ClickedLineInput {
                     p1: [50.0, 500.0],
@@ -273,8 +294,19 @@ mod tests {
     }
 
     #[test]
+    fn manual_lines_file_defaults_coord_space_to_pixel_when_absent() {
+        // Backward compat with tools/manual_line_picker.html's existing
+        // export, which predates the coord_space field entirely.
+        let json = r#"{"lines": [{"left": {"p1": [50.0, 500.0], "p2": [250.0, 520.0]},
+                                    "right": {"p1": [700.0, 900.0], "p2": [900.0, 920.0]}}]}"#;
+        let parsed: ManualLinesFile = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.coord_space, CoordSpace::Pixel);
+    }
+
+    #[test]
     fn to_matched_points_produces_one_point_per_line() {
         let file = ManualLinesFile {
+            coord_space: CoordSpace::Pixel,
             lines: vec![
                 ManualLinePair {
                     left: ClickedLineInput {
@@ -300,5 +332,40 @@ mod tests {
         };
         let points = file.to_matched_points(1000, 1000, 1000, 1000, 0.5);
         assert_eq!(points.len(), 2);
+    }
+
+    #[test]
+    fn plane_coord_space_skips_pixel_normalization() {
+        // Same line as `matched_point_from_lines_zero_error_for_perfectly_continuous_line`,
+        // but expressed as CoordSpace::Plane input (what click_calib_v2.html's
+        // field-line mode exports) instead of pixels - should agree exactly,
+        // since from_pixels((50,50),(250,250),1000,1000) normalizes to the
+        // same plane points used here directly.
+        let pixel_line = ClickedLine::from_pixels((50.0, 50.0), (250.0, 250.0), 1000, 1000);
+        let file = ManualLinesFile {
+            coord_space: CoordSpace::Plane,
+            lines: vec![ManualLinePair {
+                left: ClickedLineInput {
+                    p1: geometry::normalize_to_plane(50.0, 50.0, 1000, 1000),
+                    p2: geometry::normalize_to_plane(250.0, 250.0, 1000, 1000),
+                },
+                right: ClickedLineInput {
+                    p1: geometry::normalize_to_plane(700.0, 700.0, 1000, 1000),
+                    p2: geometry::normalize_to_plane(900.0, 900.0, 1000, 1000),
+                },
+            }],
+        };
+        // img dims are irrelevant for Plane input - pass nonsense values to prove it.
+        let points = file.to_matched_points(1, 1, 1, 1, 0.5);
+        assert_eq!(points.len(), 1);
+        let expected = matched_point_from_lines(
+            &pixel_line,
+            &ClickedLine::from_pixels((700.0, 700.0), (900.0, 900.0), 1000, 1000),
+            0.5,
+        );
+        assert_abs_diff_eq!(points[0].left[0], expected.left[0], epsilon = 1e-12);
+        assert_abs_diff_eq!(points[0].left[1], expected.left[1], epsilon = 1e-12);
+        assert_abs_diff_eq!(points[0].right[0], expected.right[0], epsilon = 1e-12);
+        assert_abs_diff_eq!(points[0].right[1], expected.right[1], epsilon = 1e-12);
     }
 }
