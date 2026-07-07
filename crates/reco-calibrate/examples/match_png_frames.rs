@@ -133,10 +133,10 @@ fn discover_pairs(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
             if let Ok(n) = num.parse::<u64>() {
                 lefts.push((n, path));
             }
-        } else if let Some(num) = rest.strip_suffix("_right.png") {
-            if let Ok(n) = num.parse::<u64>() {
-                rights.push((n, path));
-            }
+        } else if let Some(num) = rest.strip_suffix("_right.png")
+            && let Ok(n) = num.parse::<u64>()
+        {
+            rights.push((n, path));
         }
     }
     lefts.sort_by_key(|(n, _)| *n);

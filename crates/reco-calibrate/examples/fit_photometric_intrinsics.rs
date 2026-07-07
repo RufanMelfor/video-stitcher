@@ -604,6 +604,7 @@ fn render_and_score(
         &ctx.left_yuv.y,
         &ctx.left_yuv.u,
         &ctx.left_yuv.v,
+        reco_core::render::renderer::GroundTilt::default(),
     );
     let right_rgba = ctx.right_renderer.render_and_readback(
         ctx.gpu,
@@ -614,6 +615,7 @@ fn render_and_score(
         &ctx.right_yuv.y,
         &ctx.right_yuv.u,
         &ctx.right_yuv.v,
+        reco_core::render::renderer::GroundTilt::default(),
     );
 
     let mask = photometric::overlap_mask_from_alpha(

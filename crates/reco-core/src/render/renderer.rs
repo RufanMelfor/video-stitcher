@@ -71,6 +71,22 @@ pub(crate) struct GpuUniforms {
     color_offset_blend: [f32; 4],
     flags: [u32; 4],
     pub(crate) lens_preview: [f32; 4],
+    ground_tilt: [f32; 4],
+}
+
+/// Per-plane ground-plane tilt correction for [`build_gpu_uniforms`] and
+/// [`super::single_camera::SingleCameraRenderer::render_and_readback`] - see
+/// `PlaneLayout::ground_tilt_x`/`ground_tilt_z`'s doc comment
+/// (`crates/reco-core/src/calibration.rs`) and `fisheye.wgsl`'s
+/// `band_limited_ground_warp` for the full picture. `k` only matters when
+/// `tilt != 0.0`; `Default` (both zero) is the "no correction" no-op. `pub`
+/// (not `pub(crate)`): `render_and_readback` is called from other crates
+/// (`reco-calibrate`'s validation examples), so this type has to be at
+/// least as visible as that function.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct GroundTilt {
+    pub tilt: f32,
+    pub k: f32,
 }
 
 /// Vertex with 3D position and UV coordinates.
@@ -845,6 +861,28 @@ impl Renderer {
             viewport.config.rig_roll,
         );
 
+        // Ground-tilt mapping is not the naive left<->left, right<->right
+        // pairing it looks like: `PlaneLayout::ground_tilt_x` corrects the
+        // x-plane, which - per reco_calibrate::geometry's module doc (the
+        // v1-derived left/right swap) - holds the *right* camera's content
+        // and is positioned at this renderer's "right" plane; ground_tilt_z
+        // corrects the z-plane (*left* camera, this renderer's "left"
+        // plane). Verified against `SceneGeometry::from_layout_with_aspect`:
+        // its "left plane" sits at `[0,0,half_offset]` (geometry.rs's
+        // z-plane translation) and "right plane" at `[half_offset,...]`
+        // (geometry.rs's x-plane translation) - so this renderer's own
+        // left/right naming already matches the physical cameras directly,
+        // and it's only the optimizer's internal x-plane/z-plane bookkeeping
+        // that's swapped.
+        let left_ground_tilt = GroundTilt {
+            tilt: calibration.layout.ground_tilt_z as f32,
+            k: calibration.left.ground_tilt_k() as f32,
+        };
+        let right_ground_tilt = GroundTilt {
+            tilt: calibration.layout.ground_tilt_x as f32,
+            k: calibration.right.ground_tilt_k() as f32,
+        };
+
         let left_mvp = projection * view * scene.model_matrix_left();
         let correction = viewport.config.lens_correction_amount;
         let mut left_uniforms = build_gpu_uniforms(
@@ -855,6 +893,7 @@ impl Renderer {
             self.input_format,
             self.flip_180[0],
             self.is_full_range,
+            left_ground_tilt,
         );
         left_uniforms.lens_preview[0] = correction;
 
@@ -867,6 +906,7 @@ impl Renderer {
             self.input_format,
             self.flip_180[1],
             self.is_full_range,
+            right_ground_tilt,
         );
         right_uniforms.lens_preview[0] = correction;
 
@@ -1234,6 +1274,12 @@ fn view_matrix(
 /// `flip_180`: when true, the shader flips UV coordinates to apply
 /// 180-degree rotation. Used by the GPU zero-copy path where the CPU
 /// buffer-reversal trick from the software decode path is not possible.
+///
+/// `ground_tilt`: this plane's near-field ground correction (zero/default
+/// for any caller not rendering a calibrated stitch pair - single-camera
+/// preview and lens-correction-tuning paths have no plane-pair placement
+/// context for it to apply to).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_gpu_uniforms(
     mvp: &Matrix4<f32>,
     camera: &CameraParams,
@@ -1242,6 +1288,7 @@ pub(crate) fn build_gpu_uniforms(
     input_format: InputFormat,
     flip_180: bool,
     is_full_range: bool,
+    ground_tilt: GroundTilt,
 ) -> GpuUniforms {
     let w = camera.width as f32;
     let h = camera.height as f32;
@@ -1274,6 +1321,7 @@ pub(crate) fn build_gpu_uniforms(
         // Full correction for normal stitching. LensPreviewRenderer
         // overrides this field for the single-camera preview mode.
         lens_preview: [1.0, 0.0, 0.0, 0.0],
+        ground_tilt: [ground_tilt.tilt, ground_tilt.k, w / h, 0.0],
     }
 }
 
@@ -1326,6 +1374,7 @@ mod tests {
             InputFormat::Yuv420p,
             false,
             false,
+            GroundTilt::default(),
         );
 
         // fx/width ≈ 0.4678
@@ -1335,6 +1384,41 @@ mod tests {
         // is_right = 0, use_nv12 = 0
         assert_eq!(u.flags[0], 0);
         assert_eq!(u.flags[1], 0);
+        // ground_tilt defaulted to zero (no-op) - not asserting the
+        // aspect-ratio slot here, see ground_tilt_uniform_packs_plane_aspect
+        assert_eq!(u.ground_tilt[0], 0.0);
+        assert_eq!(u.ground_tilt[1], 0.0);
+    }
+
+    #[test]
+    fn ground_tilt_uniform_packs_plane_aspect() {
+        let camera = CameraParams {
+            width: 3840,
+            height: 2880,
+            fx: 1457.07,
+            fy: 1457.07,
+            cx: 1920.0,
+            cy: 1440.0,
+            d: [0.0; 4],
+        };
+        let mvp = Matrix4::identity();
+        let u = build_gpu_uniforms(
+            &mvp,
+            &camera,
+            true,
+            0.0,
+            InputFormat::Yuv420p,
+            false,
+            false,
+            GroundTilt {
+                tilt: -0.09,
+                k: 0.1897,
+            },
+        );
+        assert_eq!(u.ground_tilt[0], -0.09);
+        assert!((u.ground_tilt[1] - 0.1897).abs() < 1e-6);
+        // plane_aspect = width / height = 3840 / 2880
+        assert!((u.ground_tilt[2] - (3840.0 / 2880.0)).abs() < 1e-6);
     }
 
     #[test]

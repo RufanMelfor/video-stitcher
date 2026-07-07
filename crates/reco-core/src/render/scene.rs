@@ -153,6 +153,8 @@ mod tests {
             z_rx: 0.0,
             x_rx: 0.0,
             z_rz: 0.0,
+            ground_tilt_x: 0.0,
+            ground_tilt_z: 0.0,
         };
 
         let geom = SceneGeometry::from_layout_with_aspect(&layout, 16.0 / 9.0);
@@ -175,6 +177,8 @@ mod tests {
             z_rx: -0.004,
             x_rx: 0.0,
             z_rz: 0.0,
+            ground_tilt_x: 0.0,
+            ground_tilt_z: 0.0,
         };
 
         let geom = SceneGeometry::from_layout_with_aspect(&layout, 16.0 / 9.0);
@@ -196,6 +200,8 @@ mod tests {
             z_rx: 0.0,
             x_rx: 0.0,
             z_rz: 0.0,
+            ground_tilt_x: 0.0,
+            ground_tilt_z: 0.0,
         };
 
         let aspect_4_3 = 4.0 / 3.0;

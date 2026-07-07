@@ -147,6 +147,23 @@ pub struct CameraParams {
     pub d: [f64; 4],
 }
 
+impl CameraParams {
+    /// Focal-scale constant `k` for [`PlaneLayout::ground_tilt_x`] /
+    /// [`PlaneLayout::ground_tilt_z`]'s `warp_ground_y(t, c, k)` (see
+    /// `reco_calibrate::geometry`): `k = fy / (2 * width)`.
+    ///
+    /// `t` (plane-space y) is measured in "plane width = 1.0" units, not
+    /// pixels or radians, so the tangent-addition identity
+    /// `warp(t, c, k) = (k*c + t) / (1 - c*t/k)` needs this same-units
+    /// focal-length scale to convert between them - treating `t` as if it
+    /// already equaled `tan(phi)` applies the identity at the wrong scale
+    /// (the bug this formula replaced, see `geometry::warp_ground_y`'s own
+    /// doc comment for the derivation).
+    pub fn ground_tilt_k(&self) -> f64 {
+        self.fy / (2.0 * self.width as f64)
+    }
+}
+
 /// Plane layout parameters defining the 3D arrangement of two camera planes.
 ///
 /// These parameters are computed by the position optimization algorithm, which
@@ -209,6 +226,25 @@ pub struct PlaneLayout {
     /// orientation. Defaults to 0.0 for backward compatibility with v1.
     #[serde(rename = "zRz", default)]
     pub z_rz: f64,
+
+    /// Ground-plane tilt correction for the x-plane (right camera's content -
+    /// see `reco_calibrate::geometry`'s module doc for the x-plane/z-plane
+    /// left/right swap convention). `tan(theta)` of an additional tilt
+    /// applied only near the bottom of frame (close to the camera, where
+    /// flat two-plane parallax error is largest); mathematically identity
+    /// below a near-field threshold and ramped in via a smoothstep beyond
+    /// it, matching `reco_calibrate::geometry::band_limited_ground_warp`
+    /// exactly (`fisheye.wgsl`'s fragment shader is a direct port of that
+    /// same function). `0.0` (the default) is a no-op - existing
+    /// calibrations render unchanged. See `crates/reco-calibrate/FRICTION.md`
+    /// points 8-11, 18-20 for how this value is fitted.
+    #[serde(rename = "groundTiltX", default)]
+    pub ground_tilt_x: f64,
+
+    /// Ground-plane tilt correction for the z-plane (left camera's content).
+    /// See [`Self::ground_tilt_x`] - same math, applied to the other plane.
+    #[serde(rename = "groundTiltZ", default)]
+    pub ground_tilt_z: f64,
 }
 
 /// Playing field region of interest for per-camera detection filtering.
@@ -603,6 +639,8 @@ fn validate_layout(l: &PlaneLayout) -> Result<(), CalibrationError> {
         ("params.xRx", l.x_rx),
         ("params.zRx", l.z_rx),
         ("params.zRz", l.z_rz),
+        ("params.groundTiltX", l.ground_tilt_x),
+        ("params.groundTiltZ", l.ground_tilt_z),
     ] {
         if !val.is_finite() {
             return Err(CalibrationError::NonFiniteFloat {
@@ -719,6 +757,8 @@ mod tests {
                 z_rx: -0.00431,
                 x_rx: 0.0,
                 z_rz: 0.0,
+                ground_tilt_x: 0.0,
+                ground_tilt_z: 0.0,
             },
             rig_tilt: 0.0,
             rig_roll: 0.0,
@@ -899,6 +939,10 @@ mod tests {
                 z_rx: 0.0,
                 x_rx: 0.0,
                 z_rz: 0.0,
+                // Deliberately non-zero/non-default, same reasoning as
+                // lens_correction_amount/blend_width below.
+                ground_tilt_x: -0.09,
+                ground_tilt_z: -0.085,
             },
             rig_tilt: 0.3,
             rig_roll: -0.12,
@@ -919,21 +963,46 @@ mod tests {
         assert_eq!(parsed.sync_offset, cal.sync_offset);
         assert!((parsed.lens_correction_amount - cal.lens_correction_amount).abs() < f32::EPSILON);
         assert!((parsed.blend_width - cal.blend_width).abs() < f32::EPSILON);
+        assert!((parsed.layout.ground_tilt_x - cal.layout.ground_tilt_x).abs() < f64::EPSILON);
+        assert!((parsed.layout.ground_tilt_z - cal.layout.ground_tilt_z).abs() < f64::EPSILON);
     }
 
     #[test]
     fn old_calibration_json_without_new_fields_uses_safe_defaults() {
-        // A calibration written before lens_correction_amount/blend_width
-        // existed must load with the prior behaviour: full correction
-        // (1.0) and the 0.05 seam.
+        // A calibration written before lens_correction_amount/blend_width/
+        // groundTiltX/groundTiltZ existed must load with the prior
+        // behaviour: full correction (1.0), the 0.05 seam, and no ground
+        // tilt (0.0 - band_limited_ground_warp's own identity, so this
+        // matches "the correction never existed" exactly, not just "off").
         let mut value = serde_json::to_value(valid_cal()).unwrap();
         let obj = value.as_object_mut().unwrap();
         obj.remove("lens_correction_amount");
         obj.remove("blend_width");
+        obj["params"].as_object_mut().unwrap().remove("groundTiltX");
+        obj["params"].as_object_mut().unwrap().remove("groundTiltZ");
 
         let parsed: MatchCalibration = serde_json::from_value(value).unwrap();
         assert!((parsed.lens_correction_amount - 1.0).abs() < f32::EPSILON);
         assert!((parsed.blend_width - 0.05).abs() < f32::EPSILON);
+        assert_eq!(parsed.layout.ground_tilt_x, 0.0);
+        assert_eq!(parsed.layout.ground_tilt_z, 0.0);
+    }
+
+    #[test]
+    fn ground_tilt_k_matches_documented_formula() {
+        // Matches the value fit_ground_tilt_manual.rs computed inline before
+        // this helper existed: k_x = right.fy / (2 * right.width) for the
+        // Werkplaats rig (fy=1457.07373046875, width=3840) -> k ~= 0.1897.
+        let cam = CameraParams {
+            width: 3840,
+            height: 2880,
+            fx: 1457.07373046875,
+            fy: 1457.07373046875,
+            cx: 1920.0,
+            cy: 1440.0,
+            d: [0.0; 4],
+        };
+        assert!((cam.ground_tilt_k() - 0.1897).abs() < 1e-4);
     }
 
     #[test]

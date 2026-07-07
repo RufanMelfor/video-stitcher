@@ -94,8 +94,8 @@ fn main() {
         })
     };
 
-    let k_x = cal.right.fy / (2.0 * cal.right.width as f64); // x-plane = right camera
-    let k_z = cal.left.fy / (2.0 * cal.left.width as f64); // z-plane = left camera
+    let k_x = cal.right.ground_tilt_k(); // x-plane = right camera
+    let k_z = cal.left.ground_tilt_k(); // z-plane = left camera
     eprintln!("Focal-scale constants from match.json: k_x={k_x:.4} k_z={k_z:.4}");
 
     let manual_points = manual.to_matched_points(

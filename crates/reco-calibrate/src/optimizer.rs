@@ -424,6 +424,11 @@ impl Optimizer for NelderMeadOptimizer {
             z_rx: params.z_rx,
             x_rx: params.x_rx.unwrap_or(0.0),
             z_rz: params.z_rz.unwrap_or(0.0),
+            // Not fitted by this optimizer - see fit_ground_tilt_manual.rs
+            // and FRICTION.md points 18-20 for the separate manual-line
+            // workflow that fits these.
+            ground_tilt_x: 0.0,
+            ground_tilt_z: 0.0,
         };
 
         Ok((layout, best_cost))
