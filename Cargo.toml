@@ -55,6 +55,20 @@ serde_json  = { path = "vendor/serde_json" }
 naga        = { path = "vendor/naga" }
 # wgpu-hal's build script also uses cfg_aliases. Same Defender-bypass patch.
 wgpu-hal    = { path = "vendor/wgpu-hal" }
+# aligned-vec (pulled in via Slint's build-time image/AVIF codec stack:
+# i-slint-compiler -> image -> ravif -> rav1e -> aligned-vec) uses the
+# `equator` crate's proc-macro for its internal assert!, which hits a
+# known rustc regression on 1.92 (rust-lang/rust#140219, "expected
+# identifier, found metavariable"). Patched to drop the `equator`
+# dependency and use the builtin assert! instead - functionally
+# identical for an internal invariant check, no behavior change.
+aligned-vec = { path = "vendor/aligned-vec" }
+# keyboard-types wraps its `Modifiers` bitflags struct's serde derive in a
+# path-qualified `derive(serde::Serialize, serde::Deserialize)`, forwarded
+# through the `bitflags!` macro - same rust-lang/rust#140219 regression
+# class as aligned-vec above, just triggered via a different macro path.
+# Patched to use plain imported names instead of qualified paths.
+keyboard-types = { path = "vendor/keyboard-types" }
 
 # SPIKE: wgpu 28 interop with Slint. Fork removed; if wgpu 28 doesn't
 # have the shaderDrawParameters regression, no patch is needed.
