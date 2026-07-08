@@ -286,7 +286,7 @@ impl StitchSession {
     }
 
     /// Run GPU-resident detection from CUDA NV12 shared textures.
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     pub(crate) fn detect_and_update_director_gpu(
         &mut self,
         left_buf: &crate::interop::zero_copy::GpuBufInfo,
