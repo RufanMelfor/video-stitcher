@@ -28,15 +28,13 @@
     ]
   },
   "params": {
-    "cameraAxisOffset": 0.3,
-    "intersect": 0.104057,
-    "xTy": -0.002382,
-    "xRz": -0.06131,
-    "zRx": 0.061311,
+    "cameraAxisOffset": 0.190257,
+    "intersect": 0.65571,
+    "xTy": -0.003856,
+    "xRz": 0.009587,
+    "zRx": -0.0182,
     "xRx": 0.0,
-    "zRz": 0.0,
-    "groundTiltX": -0.09,
-    "groundTiltZ": -0.085
+    "zRz": 0.0
   },
   "rig_tilt": 0.33161255787892263,
   "rig_roll": 0.0,
