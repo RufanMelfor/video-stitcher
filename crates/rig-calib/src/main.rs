@@ -93,6 +93,8 @@ const SEEK_DEBOUNCE_MS: u64 = 120;
 /// `sync_offset` error as a shifted transient; a multi-second window
 /// dilutes that shift into a barely-visible fraction of the display.
 const AUDIO_WAVEFORM_WINDOW_FRAMES: f64 = 10.0;
+/// Clamp range for the user-adjustable waveform window width (frames).
+const AUDIO_WAVEFORM_WINDOW_FRAMES_RANGE: (f64, f64) = (1.0, 300.0);
 /// Number of bars drawn per waveform track.
 const AUDIO_WAVEFORM_BUCKETS: usize = 240;
 /// Minimum wall-clock time between recompute triggers. Each recompute
@@ -166,6 +168,10 @@ struct AppState {
     /// first recompute (see [`AppState::maybe_recompute_audio_envelope`]).
     audio_envelope_left: Vec<f32>,
     audio_envelope_right: Vec<f32>,
+    /// User-adjustable window width (frames), clamped to
+    /// `AUDIO_WAVEFORM_WINDOW_FRAMES_RANGE`. Defaults to
+    /// `AUDIO_WAVEFORM_WINDOW_FRAMES`.
+    audio_window_frames: f64,
     /// Playhead time (seconds) the displayed envelope was computed for.
     /// Recompute triggers once the playhead has moved far enough from
     /// this. Starts at `NEG_INFINITY` so the first expand always computes.
@@ -222,6 +228,7 @@ impl AppState {
             settings: RigCalibSettings::load(),
             audio_envelope_left: Vec::new(),
             audio_envelope_right: Vec::new(),
+            audio_window_frames: AUDIO_WAVEFORM_WINDOW_FRAMES,
             audio_envelope_center_secs: f64::NEG_INFINITY,
             audio_envelope_rx: None,
             audio_envelope_triggered_at: None,
@@ -629,6 +636,18 @@ impl AppState {
         }
     }
 
+    /// Update the audio-sync waveform's window width (frames), clamped to
+    /// `AUDIO_WAVEFORM_WINDOW_FRAMES_RANGE`, and force the next tick's
+    /// `maybe_recompute_audio_envelope` to recompute against it instead of
+    /// showing the stale pre-change envelope.
+    fn set_audio_window_frames(&mut self, frames: f32) {
+        self.audio_window_frames = (frames as f64).clamp(
+            AUDIO_WAVEFORM_WINDOW_FRAMES_RANGE.0,
+            AUDIO_WAVEFORM_WINDOW_FRAMES_RANGE.1,
+        );
+        self.audio_envelope_center_secs = f64::NEG_INFINITY;
+    }
+
     /// Poll for a completed audio-sync waveform envelope and, if the
     /// playhead has moved far enough since the last one, trigger a new
     /// background recompute. Called from the vsync render tick; cheap
@@ -668,7 +687,7 @@ impl AppState {
             return;
         }
 
-        let window_secs = AUDIO_WAVEFORM_WINDOW_FRAMES / fps;
+        let window_secs = self.audio_window_frames / fps;
         let recenter_secs = AUDIO_WAVEFORM_RECENTER_FRAMES / fps;
         let center_secs = self.playback.frame_index() as f64 / fps;
         let moved_enough = (center_secs - self.audio_envelope_center_secs).abs() >= recenter_secs;
@@ -1283,6 +1302,7 @@ fn main() -> anyhow::Result<()> {
             let mut config = slint::wgpu_28::WGPUConfiguration::default();
             if let slint::wgpu_28::WGPUConfiguration::Automatic(ref mut settings) = config {
                 settings.device_required_limits = reco_core::wgpu::Limits::downlevel_defaults();
+                settings.backends = reco_core::gpu::GpuContext::select_backends();
             }
             config
         })
@@ -1663,6 +1683,11 @@ fn main() -> anyhow::Result<()> {
     let state_ref = Rc::clone(&state);
     app.on_changed_playback_speed(move |speed| {
         state_ref.borrow_mut().playback.set_speed(speed as f64);
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_changed_audio_window_frames(move |frames| {
+        state_ref.borrow_mut().set_audio_window_frames(frames);
     });
 
     // ── Camera / view control callbacks ──

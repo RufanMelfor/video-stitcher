@@ -59,9 +59,37 @@ fn normalize_to_peak(envelope: &mut [f32]) {
     }
 }
 
+/// Bucket radius for [`smooth_envelope`]'s moving average.
+const SMOOTHING_RADIUS: usize = 3;
+
+/// Smooth `envelope` with a centered moving average of `radius` buckets on
+/// each side.
+///
+/// The raw peak-per-bucket envelope is noisy bucket-to-bucket (each bucket
+/// is an independent max, not a continuous signal), which reads as a messy
+/// spike train rather than a shape whose peaks are easy to compare by eye.
+/// Averaging over a small neighborhood turns it into a smooth curve while
+/// still preserving genuine transients wide enough to matter for a
+/// frame-scale sync check.
+fn smooth_envelope(envelope: &[f32], radius: usize) -> Vec<f32> {
+    if radius == 0 || envelope.is_empty() {
+        return envelope.to_vec();
+    }
+    let len = envelope.len();
+    (0..len)
+        .map(|i| {
+            let start = i.saturating_sub(radius);
+            let end = (i + radius + 1).min(len);
+            let sum: f32 = envelope[start..end].iter().sum();
+            sum / (end - start) as f32
+        })
+        .collect()
+}
+
 /// Extract a peak-amplitude envelope for a window of audio centered on
-/// `center_secs` in the file at `path`, auto-scaled so its loudest peak
-/// in the window reaches the top of the display (see [`normalize_to_peak`]).
+/// `center_secs` in the file at `path`, smoothed (see [`smooth_envelope`])
+/// and auto-scaled so its loudest point reaches the top of the display
+/// (see [`normalize_to_peak`]).
 pub fn extract_window_envelope(
     path: &Path,
     center_secs: f64,
@@ -75,7 +103,8 @@ pub fn extract_window_envelope(
         start_secs,
         window_secs,
     )?;
-    let mut envelope = compute_envelope(&samples, buckets);
+    let envelope = compute_envelope(&samples, buckets);
+    let mut envelope = smooth_envelope(&envelope, SMOOTHING_RADIUS);
     normalize_to_peak(&mut envelope);
     Ok(envelope)
 }
@@ -134,5 +163,39 @@ mod tests {
         let mut env = vec![0.0; 4];
         normalize_to_peak(&mut env);
         assert_eq!(env, vec![0.0; 4], "no division by zero on pure silence");
+    }
+
+    #[test]
+    fn smooth_envelope_radius_zero_is_identity() {
+        let env = vec![0.0, 1.0, 0.0, 1.0];
+        assert_eq!(smooth_envelope(&env, 0), env);
+    }
+
+    #[test]
+    fn smooth_envelope_empty_stays_empty() {
+        assert!(smooth_envelope(&[], 3).is_empty());
+    }
+
+    #[test]
+    fn smooth_envelope_flattens_a_single_spike() {
+        let mut env = vec![0.0; 11];
+        env[5] = 1.0;
+        let smoothed = smooth_envelope(&env, 2);
+        // The spike spreads into its 2-bucket neighborhood (5 buckets averaged into 1.0/5)...
+        assert!((smoothed[5] - 1.0 / 5.0).abs() < 1e-6);
+        // ...and the peak is no longer an isolated single-bucket outlier.
+        assert!(smoothed[5] > smoothed[0]);
+        assert!(smoothed[4] > 0.0 && smoothed[6] > 0.0);
+    }
+
+    #[test]
+    fn smooth_envelope_preserves_length_and_shrinks_window_at_edges() {
+        let env = vec![1.0, 1.0, 1.0, 1.0];
+        let smoothed = smooth_envelope(&env, 2);
+        assert_eq!(smoothed.len(), env.len());
+        // Uniform input stays uniform regardless of the clamped edge window.
+        for v in smoothed {
+            assert!((v - 1.0).abs() < 1e-6);
+        }
     }
 }

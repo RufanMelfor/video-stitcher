@@ -240,6 +240,10 @@ export component CalibrateApp inherits Window {
     in-out property <bool> audio-sync-expanded: false;
     in-out property <[float]> audio-envelope-left: [];
     in-out property <[float]> audio-envelope-right: [];
+    // User-adjustable window width (frames) and display height for the
+    // audio-sync waveform panel below.
+    in-out property <float> audio-window-frames: 10.0;
+    in-out property <float> audio-waveform-height-px: 90.0;
     // Playback speed multiplier, adjustable to frame accuracy (see
     // `Playback::set_speed`). 1.0 = normal speed.
     in-out property <float> playback-speed: 1.0;
@@ -371,6 +375,7 @@ export component CalibrateApp inherits Window {
     callback seek(float);
     callback seek-relative(float);
     callback changed-playback-speed(float);
+    callback changed-audio-window-frames(float);
     callback pan(float, float);
     callback zoom(float);
     callback reset-view();
@@ -605,7 +610,6 @@ export component CalibrateApp inherits Window {
                     HorizontalBox {
                         height: 36px;
                         spacing: 6px;
-                        Tip { tip: "Seek back 5 seconds."; Button { text: "◀◀"; enabled: root.files-loaded; clicked => { root.seek-relative(-5.0); } } }
                         Tip { tip: "Step back one frame."; Button { text: "|<"; enabled: root.files-loaded; clicked => { root.step-backward(); } } }
                         Tip { tip: "Play or pause."; Button { text: root.playing ? "||" : "▶"; enabled: root.files-loaded; clicked => { root.toggle-playback(); } } }
                         Tip { tip: "Step forward one frame."; Button { text: ">|"; enabled: root.files-loaded; clicked => { root.step-forward(); } } }
@@ -720,41 +724,127 @@ export component CalibrateApp inherits Window {
                                 spacing: 4px;
 
                                 Text {
-                                    text: "L (blue) / R (orange), ~10 frames around playhead. Aligned peaks = in sync.";
+                                    text: "L (blue) / R (orange), " + root.audio-window-frames + " frames around playhead. Aligned peaks = in sync.";
                                     color: root.text-muted; font-size: 11px; wrap: word-wrap;
                                 }
 
+                                HorizontalBox {
+                                    padding: 0px;
+                                    spacing: 12px;
+                                    HorizontalLayout {
+                                        spacing: 3px;
+                                        Tip {
+                                            tip: "Number of frames of audio shown around the playhead.";
+                                            Text { text: "Window:"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
+                                        }
+                                        // Deliberately outside the `Tip` above: `Tip` inherits
+                                        // `TouchArea`, which grabs mouse presses before a nested
+                                        // `LineEdit` can claim keyboard focus, making it very
+                                        // hard to reliably click into and type in.
+                                        LineEdit {
+                                            text: root.audio-window-frames;
+                                            width: 64px;
+                                            accepted => {
+                                                root.audio-window-frames = self.text.to-float();
+                                                root.changed-audio-window-frames(self.text.to-float());
+                                            }
+                                        }
+                                        Text { text: "frames"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 3px;
+                                        Tip {
+                                            tip: "Height of the waveform display.";
+                                            Text { text: "Height:"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
+                                        }
+                                        LineEdit {
+                                            text: root.audio-waveform-height-px;
+                                            width: 64px;
+                                            accepted => {
+                                                root.audio-waveform-height-px = min(300, max(40, self.text.to-float()));
+                                            }
+                                        }
+                                        Text { text: "px"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
+                                    }
+                                }
+
                                 waveform-area := Rectangle {
-                                    height: 90px;
+                                    height: root.audio-waveform-height-px * 1px;
                                     background: root.bg-base;
                                     border-radius: 4px;
                                     clip: true;
 
-                                    property <float> bucket-count-l: max(1, root.audio-envelope-left.length) * 1.0;
-                                    property <float> bucket-count-r: max(1, root.audio-envelope-right.length) * 1.0;
-                                    property <length> bar-w-l: waveform-area.width / bucket-count-l;
-                                    property <length> bar-w-r: waveform-area.width / bucket-count-r;
+                                    property <float> bucket-count: max(1, root.audio-envelope-left.length) * 1.0;
+                                    property <length> bar-w: waveform-area.width / bucket-count;
 
-                                    // Mirrored layout (left grows up from center,
-                                    // right grows down): comparing a transient's
-                                    // x-position between the top and bottom half
-                                    // is far easier to read than two traces
-                                    // overlaid in the same band, which just mixes
-                                    // their colors together.
-                                    for v[idx] in root.audio-envelope-left: Rectangle {
-                                        x: idx * waveform-area.bar-w-l;
-                                        width: waveform-area.bar-w-l;
-                                        height: v * waveform-area.height * 0.5;
-                                        y: waveform-area.height * 0.5 - self.height;
-                                        background: #5fb8ffdd;
+                                    // Background grid, purely a reading aid:
+                                    // horizontal thirds + a vertical line
+                                    // every 8 buckets.
+                                    for row in [0.25, 0.5, 0.75]: Rectangle {
+                                        x: 0px; width: waveform-area.width;
+                                        y: waveform-area.height * row; height: 1px;
+                                        background: #ffffff16;
+                                    }
+                                    for i in 9: Rectangle {
+                                        x: waveform-area.width * (i + 1) / 10; width: 1px;
+                                        y: 0px; height: waveform-area.height;
+                                        background: #ffffff10;
                                     }
 
+                                    // Both channels are plain (unmirrored)
+                                    // lines sharing one axis - 0 at the
+                                    // bottom, loudest point at the top - so a
+                                    // real sync offset reads as a horizontal
+                                    // shift between the two lines' peaks,
+                                    // same as any two-series line chart.
+                                    //
+                                    // Each point is a thin horizontal marker
+                                    // PLUS a vertical connector to the next
+                                    // point's height, so consecutive buckets
+                                    // join into a continuous "staircase" line
+                                    // instead of reading as scattered dots.
+                                    // Not a `Path`: Slint fits a `Path`'s
+                                    // viewbox uniformly, which would squash a
+                                    // wide/short envelope flat; and Rectangle
+                                    // has no rotation for a true diagonal
+                                    // stroke, so this approximates one.
+                                    for v[idx] in root.audio-envelope-left: Rectangle {
+                                        x: idx * waveform-area.bar-w;
+                                        width: waveform-area.bar-w;
+                                        height: 2px;
+                                        y: waveform-area.height * (1.0 - v) - 1px;
+                                        background: #5fb8ff;
+                                    }
+                                    for v[idx] in root.audio-envelope-left: Rectangle {
+                                        property <bool> has-next: idx + 1 < root.audio-envelope-left.length;
+                                        property <float> next-v: has-next ? root.audio-envelope-left[idx + 1] : v;
+                                        property <length> y0: waveform-area.height * (1.0 - v);
+                                        property <length> y1: waveform-area.height * (1.0 - next-v);
+                                        visible: has-next;
+                                        x: (idx + 1) * waveform-area.bar-w - 1px;
+                                        width: 2px;
+                                        y: min(y0, y1);
+                                        height: max(y0, y1) - min(y0, y1) + 2px;
+                                        background: #5fb8ff;
+                                    }
                                     for v[idx] in root.audio-envelope-right: Rectangle {
-                                        x: idx * waveform-area.bar-w-r;
-                                        width: waveform-area.bar-w-r;
-                                        height: v * waveform-area.height * 0.5;
-                                        y: waveform-area.height * 0.5;
-                                        background: #ff9f5fdd;
+                                        x: idx * waveform-area.bar-w;
+                                        width: waveform-area.bar-w;
+                                        height: 2px;
+                                        y: waveform-area.height * (1.0 - v) - 1px;
+                                        background: #ff9f5f;
+                                    }
+                                    for v[idx] in root.audio-envelope-right: Rectangle {
+                                        property <bool> has-next: idx + 1 < root.audio-envelope-right.length;
+                                        property <float> next-v: has-next ? root.audio-envelope-right[idx + 1] : v;
+                                        property <length> y0: waveform-area.height * (1.0 - v);
+                                        property <length> y1: waveform-area.height * (1.0 - next-v);
+                                        visible: has-next;
+                                        x: (idx + 1) * waveform-area.bar-w - 1px;
+                                        width: 2px;
+                                        y: min(y0, y1);
+                                        height: max(y0, y1) - min(y0, y1) + 2px;
+                                        background: #ff9f5f;
                                     }
 
                                     Rectangle {
