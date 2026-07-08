@@ -201,6 +201,9 @@ pub fn setup_autocam(
     let detection_interval = config.detection_interval;
     let tracking_mode = config.tracking_mode;
     let field_roi = config.field_roi.as_ref();
+    // Only consumed by the native-TensorRT path and the Linux ORT-GPU path
+    // (see below); other backend combinations never read it.
+    #[cfg(any(feature = "tensorrt-native", all(feature = "ort", target_os = "linux")))]
     let is_10bit = config.is_10bit;
 
     let mut detection_active = false;

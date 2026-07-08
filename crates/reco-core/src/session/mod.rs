@@ -137,8 +137,8 @@ pub struct StitchSession {
         std::sync::mpsc::SyncSender<u8>,
         std::sync::mpsc::SyncSender<u8>,
     )>,
-    /// CUDA buffer info for GPU detection (GPU zero-copy).
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    /// CUDA buffer info for GPU detection (GPU zero-copy, Linux only).
+    #[cfg(target_os = "linux")]
     pub(crate) gpu_buf_info: Option<(
         crate::interop::zero_copy::GpuBufInfo,
         crate::interop::zero_copy::GpuBufInfo,
@@ -294,7 +294,7 @@ impl StitchSession {
             gpu_bind_groups: None,
             #[cfg(target_os = "linux")]
             gpu_slot_free_tx: None,
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            #[cfg(target_os = "linux")]
             gpu_buf_info: None,
             #[cfg(target_os = "linux")]
             gpu_shared_views: None,

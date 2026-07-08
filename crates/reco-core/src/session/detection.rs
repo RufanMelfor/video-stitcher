@@ -307,7 +307,7 @@ impl DetectionPipeline {
     /// from the shared-texture slot pointers + pitches and dispatches
     /// through the unified trait. Returns raw detections from both
     /// cameras; the caller maps them to panorama coordinates.
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     pub(super) fn run_gpu_detection(
         &mut self,
         left_buf: &crate::interop::zero_copy::GpuBufInfo,
