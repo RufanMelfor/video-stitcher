@@ -86,18 +86,25 @@ const FLY_BOOST: f32 = 4.0;
 /// debouncing a drag would saturate it with hundreds of reinits.
 const SEEK_DEBOUNCE_MS: u64 = 120;
 
-/// Width of the audio-sync waveform window (seconds of audio shown per
-/// track), centered on the current playhead. Narrow enough to make a
-/// frame-scale `sync_offset` error visible as a shifted transient.
-const AUDIO_WAVEFORM_WINDOW_SECS: f64 = 4.0;
+/// Width of the audio-sync waveform window, in frames of video at the
+/// source's own fps - converted to seconds of audio at recompute time
+/// since fps is only known once a file is loaded. Frame-based (not a
+/// fixed duration) because the whole point is spotting a frame-scale
+/// `sync_offset` error as a shifted transient; a multi-second window
+/// dilutes that shift into a barely-visible fraction of the display.
+const AUDIO_WAVEFORM_WINDOW_FRAMES: f64 = 10.0;
 /// Number of bars drawn per waveform track.
 const AUDIO_WAVEFORM_BUCKETS: usize = 240;
 /// Minimum wall-clock time between recompute triggers. Each recompute
 /// shells out to `ffmpeg` twice (left + right), so this throttles how
 /// often that happens during continuous playback.
 const AUDIO_WAVEFORM_THROTTLE_MS: u64 = 500;
-/// Minimum playhead movement (seconds) that warrants a recompute.
-const AUDIO_WAVEFORM_RECENTER_SECS: f64 = 1.0;
+/// Minimum playhead movement, in frames, that warrants a recompute -
+/// also converted to seconds at recompute time. Frame-based for the same
+/// reason as the window width: keeps the recenter threshold proportional
+/// to the (now much narrower) window instead of the window being fully
+/// skipped past between recomputes.
+const AUDIO_WAVEFORM_RECENTER_FRAMES: f64 = 3.0;
 
 /// Optionally preload left/right videos and a calibration file.
 #[derive(Parser)]
@@ -661,9 +668,10 @@ impl AppState {
             return;
         }
 
+        let window_secs = AUDIO_WAVEFORM_WINDOW_FRAMES / fps;
+        let recenter_secs = AUDIO_WAVEFORM_RECENTER_FRAMES / fps;
         let center_secs = self.playback.frame_index() as f64 / fps;
-        let moved_enough =
-            (center_secs - self.audio_envelope_center_secs).abs() >= AUDIO_WAVEFORM_RECENTER_SECS;
+        let moved_enough = (center_secs - self.audio_envelope_center_secs).abs() >= recenter_secs;
         let throttled = self
             .audio_envelope_triggered_at
             .is_some_and(|t| t.elapsed() < Duration::from_millis(AUDIO_WAVEFORM_THROTTLE_MS));
@@ -680,14 +688,14 @@ impl AppState {
             let left = crate::waveform::extract_window_envelope(
                 &left_path,
                 center_secs,
-                AUDIO_WAVEFORM_WINDOW_SECS,
+                window_secs,
                 AUDIO_WAVEFORM_BUCKETS,
             )
             .unwrap_or_default();
             let right = crate::waveform::extract_window_envelope(
                 &right_path,
                 center_secs,
-                AUDIO_WAVEFORM_WINDOW_SECS,
+                window_secs,
                 AUDIO_WAVEFORM_BUCKETS,
             )
             .unwrap_or_default();

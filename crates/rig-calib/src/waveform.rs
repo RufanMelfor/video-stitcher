@@ -40,8 +40,28 @@ pub fn compute_envelope(samples: &[i16], buckets: usize) -> Vec<f32> {
         .collect()
 }
 
+/// Rescale `envelope` in place so its tallest bucket reaches `1.0`.
+///
+/// Raw envelope values are normalized against the theoretical maximum PCM
+/// amplitude (`i16::MAX`), so quiet audio - ambient crowd/wind noise well
+/// below full scale - would otherwise draw as barely-visible slivers even
+/// though there's a real, comparable transient to see. Left/right are
+/// normalized independently (each call site handles one side), which is
+/// also the right behavior here: the two camera mics can have quite
+/// different absolute gain, and this view only cares about *where* each
+/// side's peaks fall in time, not their relative loudness.
+fn normalize_to_peak(envelope: &mut [f32]) {
+    let peak = envelope.iter().copied().fold(0.0f32, f32::max);
+    if peak > 1e-6 {
+        for v in envelope.iter_mut() {
+            *v /= peak;
+        }
+    }
+}
+
 /// Extract a peak-amplitude envelope for a window of audio centered on
-/// `center_secs` in the file at `path`.
+/// `center_secs` in the file at `path`, auto-scaled so its loudest peak
+/// in the window reaches the top of the display (see [`normalize_to_peak`]).
 pub fn extract_window_envelope(
     path: &Path,
     center_secs: f64,
@@ -55,7 +75,9 @@ pub fn extract_window_envelope(
         start_secs,
         window_secs,
     )?;
-    Ok(compute_envelope(&samples, buckets))
+    let mut envelope = compute_envelope(&samples, buckets);
+    normalize_to_peak(&mut envelope);
+    Ok(envelope)
 }
 
 #[cfg(test)]
@@ -94,5 +116,23 @@ mod tests {
         let samples = vec![i16::MIN; 10];
         let env = compute_envelope(&samples, 1);
         assert!((env[0] - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn normalize_to_peak_scales_quiet_envelope_up() {
+        let mut env = vec![0.0, 0.05, 0.02, 0.1];
+        normalize_to_peak(&mut env);
+        assert!((env[3] - 1.0).abs() < 1e-6, "loudest bucket should hit 1.0");
+        assert!(
+            (env[1] - 0.5).abs() < 1e-6,
+            "other buckets scale by the same factor"
+        );
+    }
+
+    #[test]
+    fn normalize_to_peak_leaves_silence_untouched() {
+        let mut env = vec![0.0; 4];
+        normalize_to_peak(&mut env);
+        assert_eq!(env, vec![0.0; 4], "no division by zero on pure silence");
     }
 }

@@ -714,13 +714,13 @@ export component CalibrateApp inherits Window {
                             // ── Audio Sync (collapsible): overlaid L/R waveform ──
                             // around the playhead, so a sync_offset error shows up
                             // as a visible shift between the two traces.
-                            audio-section := SectionHeader { title: "Audio Sync"; expanded: false; }
+                            audio-section := SectionHeader { title: "Audio Sync"; expanded <=> root.audio-sync-expanded; }
 
                             if audio-section.expanded && root.files-loaded: VerticalLayout {
                                 spacing: 4px;
 
                                 Text {
-                                    text: "L (blue) / R (orange), 4s around playhead. Overlap = in sync.";
+                                    text: "L (blue) / R (orange), ~10 frames around playhead. Aligned peaks = in sync.";
                                     color: root.text-muted; font-size: 11px; wrap: word-wrap;
                                 }
 
@@ -735,20 +735,26 @@ export component CalibrateApp inherits Window {
                                     property <length> bar-w-l: waveform-area.width / bucket-count-l;
                                     property <length> bar-w-r: waveform-area.width / bucket-count-r;
 
+                                    // Mirrored layout (left grows up from center,
+                                    // right grows down): comparing a transient's
+                                    // x-position between the top and bottom half
+                                    // is far easier to read than two traces
+                                    // overlaid in the same band, which just mixes
+                                    // their colors together.
                                     for v[idx] in root.audio-envelope-left: Rectangle {
                                         x: idx * waveform-area.bar-w-l;
                                         width: waveform-area.bar-w-l;
                                         height: v * waveform-area.height * 0.5;
-                                        y: waveform-area.height * 0.5 - self.height * 0.5;
-                                        background: #5fb8ffaa;
+                                        y: waveform-area.height * 0.5 - self.height;
+                                        background: #5fb8ffdd;
                                     }
 
                                     for v[idx] in root.audio-envelope-right: Rectangle {
                                         x: idx * waveform-area.bar-w-r;
                                         width: waveform-area.bar-w-r;
                                         height: v * waveform-area.height * 0.5;
-                                        y: waveform-area.height * 0.5 - self.height * 0.5;
-                                        background: #ff9f5faa;
+                                        y: waveform-area.height * 0.5;
+                                        background: #ff9f5fdd;
                                     }
 
                                     Rectangle {
