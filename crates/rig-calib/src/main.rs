@@ -24,6 +24,7 @@ mod playback;
 mod preview;
 mod settings;
 mod status;
+mod waveform;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -85,6 +86,19 @@ const FLY_BOOST: f32 = 4.0;
 /// debouncing a drag would saturate it with hundreds of reinits.
 const SEEK_DEBOUNCE_MS: u64 = 120;
 
+/// Width of the audio-sync waveform window (seconds of audio shown per
+/// track), centered on the current playhead. Narrow enough to make a
+/// frame-scale `sync_offset` error visible as a shifted transient.
+const AUDIO_WAVEFORM_WINDOW_SECS: f64 = 4.0;
+/// Number of bars drawn per waveform track.
+const AUDIO_WAVEFORM_BUCKETS: usize = 240;
+/// Minimum wall-clock time between recompute triggers. Each recompute
+/// shells out to `ffmpeg` twice (left + right), so this throttles how
+/// often that happens during continuous playback.
+const AUDIO_WAVEFORM_THROTTLE_MS: u64 = 500;
+/// Minimum playhead movement (seconds) that warrants a recompute.
+const AUDIO_WAVEFORM_RECENTER_SECS: f64 = 1.0;
+
 /// Optionally preload left/right videos and a calibration file.
 #[derive(Parser)]
 #[command(name = "rig-calib", about = "Lens + rig calibration tool")]
@@ -140,6 +154,21 @@ struct AppState {
     /// Persisted recent-files settings (last left/right video, last
     /// calibration file) so the app reopens with them pre-filled.
     settings: RigCalibSettings,
+    /// Left/right audio-sync waveform envelopes currently displayed,
+    /// downsampled around `audio_envelope_center_secs`. Empty until the
+    /// first recompute (see [`AppState::maybe_recompute_audio_envelope`]).
+    audio_envelope_left: Vec<f32>,
+    audio_envelope_right: Vec<f32>,
+    /// Playhead time (seconds) the displayed envelope was computed for.
+    /// Recompute triggers once the playhead has moved far enough from
+    /// this. Starts at `NEG_INFINITY` so the first expand always computes.
+    audio_envelope_center_secs: f64,
+    /// `Some` while a background extraction job is in flight; polled and
+    /// cleared by `maybe_recompute_audio_envelope`.
+    audio_envelope_rx: Option<std::sync::mpsc::Receiver<(Vec<f32>, Vec<f32>)>>,
+    /// Wall-clock time of the last triggered recompute, for throttling
+    /// during continuous playback (each recompute shells out to ffmpeg).
+    audio_envelope_triggered_at: Option<Instant>,
 }
 
 fn pose_config() -> PoseControlConfig {
@@ -184,6 +213,11 @@ impl AppState {
             fly_shift: false,
             last_move_time: Instant::now(),
             settings: RigCalibSettings::load(),
+            audio_envelope_left: Vec::new(),
+            audio_envelope_right: Vec::new(),
+            audio_envelope_center_secs: f64::NEG_INFINITY,
+            audio_envelope_rx: None,
+            audio_envelope_triggered_at: None,
         }
     }
 
@@ -193,6 +227,10 @@ impl AppState {
         self.pose = PoseControl::new(pose_config());
         self.pending_seek = None;
         self.preview_dirty = false;
+        self.audio_envelope_left.clear();
+        self.audio_envelope_right.clear();
+        self.audio_envelope_center_secs = f64::NEG_INFINITY;
+        self.audio_envelope_rx = None;
     }
 
     /// Build a PreviewBridge using the captured Slint GPU handles. Fails
@@ -578,7 +616,83 @@ impl AppState {
             }
             log::info!("Sync offset changed to {offset} frames");
             self.preview_dirty = true;
+            // Force the audio-sync waveform to recompute against the new
+            // offset instead of showing the stale pre-change envelope.
+            self.audio_envelope_center_secs = f64::NEG_INFINITY;
         }
+    }
+
+    /// Poll for a completed audio-sync waveform envelope and, if the
+    /// playhead has moved far enough since the last one, trigger a new
+    /// background recompute. Called from the vsync render tick; cheap
+    /// when idle (a few field reads), since the actual `ffmpeg`
+    /// extraction only runs on a background thread when genuinely
+    /// warranted.
+    fn maybe_recompute_audio_envelope(&mut self, app_weak: &slint::Weak<CalibrateApp>) {
+        if let Some(rx) = &self.audio_envelope_rx
+            && let Ok((left, right)) = rx.try_recv()
+        {
+            self.audio_envelope_rx = None;
+            self.audio_envelope_left = left.clone();
+            self.audio_envelope_right = right.clone();
+            if let Some(app) = app_weak.upgrade() {
+                app.set_audio_envelope_left(slint::ModelRc::new(slint::VecModel::from(left)));
+                app.set_audio_envelope_right(slint::ModelRc::new(slint::VecModel::from(right)));
+            }
+            return;
+        }
+
+        if self.audio_envelope_rx.is_some() {
+            return; // job already in flight
+        }
+
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        if !app.get_audio_sync_expanded() {
+            return;
+        }
+        let (Some(left_path), Some(right_path)) = (self.left_path.clone(), self.right_path.clone())
+        else {
+            return;
+        };
+        let fps = self.playback.fps();
+        if fps <= 0.0 {
+            return;
+        }
+
+        let center_secs = self.playback.frame_index() as f64 / fps;
+        let moved_enough =
+            (center_secs - self.audio_envelope_center_secs).abs() >= AUDIO_WAVEFORM_RECENTER_SECS;
+        let throttled = self
+            .audio_envelope_triggered_at
+            .is_some_and(|t| t.elapsed() < Duration::from_millis(AUDIO_WAVEFORM_THROTTLE_MS));
+        if !moved_enough || throttled {
+            return;
+        }
+
+        self.audio_envelope_center_secs = center_secs;
+        self.audio_envelope_triggered_at = Some(Instant::now());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.audio_envelope_rx = Some(rx);
+        std::thread::spawn(move || {
+            let left = crate::waveform::extract_window_envelope(
+                &left_path,
+                center_secs,
+                AUDIO_WAVEFORM_WINDOW_SECS,
+                AUDIO_WAVEFORM_BUCKETS,
+            )
+            .unwrap_or_default();
+            let right = crate::waveform::extract_window_envelope(
+                &right_path,
+                center_secs,
+                AUDIO_WAVEFORM_WINDOW_SECS,
+                AUDIO_WAVEFORM_BUCKETS,
+            )
+            .unwrap_or_default();
+            let _ = tx.send((left, right));
+        });
     }
 
     fn reset_view(&mut self) {
@@ -703,12 +817,13 @@ fn set_lens_profile_props(
 
 fn format_time(frame: u64, fps: f64) -> String {
     if fps <= 0.0 {
-        return "0:00".into();
+        return "0:00.000".into();
     }
-    let total_secs = (frame as f64 / fps) as u64;
-    let m = total_secs / 60;
-    let s = total_secs % 60;
-    format!("{m}:{s:02}")
+    let total_ms = (frame as f64 / fps * 1000.0) as u64;
+    let m = total_ms / 60_000;
+    let s = (total_ms / 1000) % 60;
+    let ms = total_ms % 1000;
+    format!("{m}:{s:02}.{ms:03}")
 }
 
 fn sync_frame_display(app: &CalibrateApp, frame: u64, total: u64, fps: f64) {
@@ -866,6 +981,10 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Cal
                 app.set_files_loaded(true);
                 sync_frame_display(&app, s.playback.frame_index(), total, fps);
                 app.set_fps(fps as f32);
+                // Fresh `Playback` always resets to 1.0x - reflect that in the
+                // UI too, so a custom speed set on a previous clip doesn't
+                // linger as a stale display after loading a new one.
+                app.set_playback_speed(s.playback.speed() as f32);
                 set_status(
                     &app,
                     StatusLine::info(format!("Ready - {fps:.0} fps - {total} frames")),
@@ -1533,6 +1652,11 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
+    let state_ref = Rc::clone(&state);
+    app.on_changed_playback_speed(move |speed| {
+        state_ref.borrow_mut().playback.set_speed(speed as f64);
+    });
+
     // ── Camera / view control callbacks ──
 
     let state_ref = Rc::clone(&state);
@@ -2055,6 +2179,12 @@ fn main() -> anyhow::Result<()> {
         move || {
             let mut s = state_ref.borrow_mut();
 
+            // Independent of rendering: the audio-sync waveform must keep
+            // computing even while paused, when `vsync_render_tick` (which
+            // only fires on an actual redraw) may never run because
+            // nothing else is playing/seeking/dirty.
+            s.maybe_recompute_audio_envelope(&app_weak);
+
             if s.auto_calibrate.is_some() {
                 let done = {
                     let handle = s.auto_calibrate.as_ref().unwrap();
@@ -2098,4 +2228,25 @@ fn main() -> anyhow::Result<()> {
 
     app.run()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod format_time_tests {
+    use super::format_time;
+
+    #[test]
+    fn zero_fps_returns_zero() {
+        assert_eq!(format_time(123, 0.0), "0:00.000");
+    }
+
+    #[test]
+    fn formats_minutes_seconds_milliseconds() {
+        // 30fps, frame 1985 -> 66.1666...s -> 1:06.166
+        assert_eq!(format_time(1985, 30.0), "1:06.166");
+    }
+
+    #[test]
+    fn zero_frame_is_zero() {
+        assert_eq!(format_time(0, 30.0), "0:00.000");
+    }
 }

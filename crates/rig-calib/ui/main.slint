@@ -3,7 +3,10 @@
 
 import { Button, VerticalBox, HorizontalBox, Slider, ScrollView, CheckBox, LineEdit } from "std-widgets.slint";
 
-/// One labeled slider row for the controls panel.
+/// One labeled slider row for the controls panel. The value display
+/// doubles as a text input: double-click it to type an exact value
+/// instead of dragging the slider. Commits on Enter or on clicking away;
+/// clamped to [minimum, maximum] like the slider itself.
 component LabeledSlider inherits VerticalLayout {
     in property <string> label;
     in property <float> minimum;
@@ -11,9 +14,30 @@ component LabeledSlider inherits VerticalLayout {
     in-out property <float> value;
     in property <string> suffix: "";
     in property <int> decimals: 2;
+    in-out property <bool> editing: false;
     callback changed(float);
 
     spacing: 2px;
+
+    property <float> scale:
+        root.decimals <= 0 ? 1
+      : root.decimals == 1 ? 10
+      : root.decimals == 2 ? 100
+      : root.decimals == 3 ? 1000
+      : root.decimals == 4 ? 10000
+      : 100000;
+    property <float> display-value:
+        root.decimals == 0 ? round(root.value) : round(root.value * root.scale) / root.scale;
+
+    // Takes the typed text rather than reaching into the (conditionally
+    // instantiated, so not name-addressable from outside its own `if`
+    // branch) LineEdit - both call sites below already have `self.text`
+    // in scope since they're callbacks on the LineEdit itself.
+    function commit-edit(text: string) {
+        root.value = clamp(text.to-float(), root.minimum, root.maximum);
+        root.changed(root.value);
+        root.editing = false;
+    }
 
     HorizontalLayout {
         Text {
@@ -23,20 +47,37 @@ component LabeledSlider inherits VerticalLayout {
             vertical-alignment: center;
             horizontal-stretch: 1;
         }
-        Text {
-            property <float> scale:
-                root.decimals <= 0 ? 1
-              : root.decimals == 1 ? 10
-              : root.decimals == 2 ? 100
-              : root.decimals == 3 ? 1000
-              : root.decimals == 4 ? 10000
-              : 100000;
-            text: (root.decimals == 0
-                ? round(root.value)
-                : round(root.value * scale) / scale) + root.suffix;
-            color: #888;
-            font-size: 13px;
-            vertical-alignment: center;
+
+        if !root.editing: TouchArea {
+            mouse-cursor: pointer;
+            double-clicked => { root.editing = true; }
+
+            Text {
+                text: root.display-value + root.suffix;
+                color: #888;
+                font-size: 13px;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.editing: HorizontalLayout {
+            spacing: 3px;
+            LineEdit {
+                text: root.display-value;
+                width: 56px;
+                font-size: 13px;
+                init => {
+                    self.focus();
+                    self.select-all();
+                }
+                accepted => { root.commit-edit(self.text); }
+                changed has-focus => {
+                    if !self.has-focus && root.editing {
+                        root.commit-edit(self.text);
+                    }
+                }
+            }
+            Text { text: root.suffix; color: #888; font-size: 13px; vertical-alignment: center; }
         }
     }
 
@@ -189,9 +230,19 @@ export component CalibrateApp inherits Window {
     in-out property <bool> status-is-error: false;
     in-out property <int> current-frame: 0;
     in-out property <int> total-frames: 0;
-    in-out property <string> current-time-text: "0:00";
-    in-out property <string> total-time-text: "0:00";
+    in-out property <string> current-time-text: "0:00.000";
+    in-out property <string> total-time-text: "0:00.000";
     in-out property <float> fps: 0.0;
+    // Audio-sync waveform panel: downsampled peak-amplitude envelopes for
+    // a window of audio around the current playhead (see `waveform.rs`).
+    // `audio-sync-expanded` mirrors the section's collapse state into
+    // Rust so the (ffmpeg-backed) recompute only runs while visible.
+    in-out property <bool> audio-sync-expanded: false;
+    in-out property <[float]> audio-envelope-left: [];
+    in-out property <[float]> audio-envelope-right: [];
+    // Playback speed multiplier, adjustable to frame accuracy (see
+    // `Playback::set_speed`). 1.0 = normal speed.
+    in-out property <float> playback-speed: 1.0;
     in-out property <bool> calibrating: false;
     in-out property <string> calibration-step: "";
     // Fraction (0.0-1.0) of the current calibration step completed, or
@@ -319,6 +370,7 @@ export component CalibrateApp inherits Window {
     callback step-backward();
     callback seek(float);
     callback seek-relative(float);
+    callback changed-playback-speed(float);
     callback pan(float, float);
     callback zoom(float);
     callback reset-view();
@@ -553,13 +605,32 @@ export component CalibrateApp inherits Window {
                     HorizontalBox {
                         height: 36px;
                         spacing: 6px;
+                        Tip { tip: "Seek back 5 seconds."; Button { text: "◀◀"; enabled: root.files-loaded; clicked => { root.seek-relative(-5.0); } } }
                         Tip { tip: "Step back one frame."; Button { text: "|<"; enabled: root.files-loaded; clicked => { root.step-backward(); } } }
                         Tip { tip: "Play or pause."; Button { text: root.playing ? "||" : "▶"; enabled: root.files-loaded; clicked => { root.toggle-playback(); } } }
                         Tip { tip: "Step forward one frame."; Button { text: ">|"; enabled: root.files-loaded; clicked => { root.step-forward(); } } }
+                        Tip {
+                            tip: "Playback speed multiplier.";
+                            HorizontalLayout {
+                                spacing: 3px;
+                                speed-input := LineEdit {
+                                    text: root.playback-speed;
+                                    width: 44px;
+                                    enabled: root.files-loaded;
+                                    accepted => {
+                                        root.playback-speed = self.text.to-float();
+                                        root.changed-playback-speed(self.text.to-float());
+                                    }
+                                }
+                                Text { text: "x"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
+                            }
+                        }
                         Text {
                             text: root.current-time-text;
                             color: root.text-muted;
                             vertical-alignment: center;
+                            width: 64px;
+                            horizontal-alignment: right;
                         }
                         Slider {
                             enabled: root.files-loaded;
@@ -575,6 +646,14 @@ export component CalibrateApp inherits Window {
                             text: root.total-time-text;
                             color: root.text-muted;
                             vertical-alignment: center;
+                            width: 64px;
+                        }
+                        Text {
+                            text: "#" + root.current-frame;
+                            color: root.text-muted;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                            width: 50px;
                         }
                     }
 
@@ -631,6 +710,61 @@ export component CalibrateApp inherits Window {
                         VerticalBox {
                             padding: 8px;
                             spacing: 10px;
+
+                            // ── Audio Sync (collapsible): overlaid L/R waveform ──
+                            // around the playhead, so a sync_offset error shows up
+                            // as a visible shift between the two traces.
+                            audio-section := SectionHeader { title: "Audio Sync"; expanded: false; }
+
+                            if audio-section.expanded && root.files-loaded: VerticalLayout {
+                                spacing: 4px;
+
+                                Text {
+                                    text: "L (blue) / R (orange), 4s around playhead. Overlap = in sync.";
+                                    color: root.text-muted; font-size: 11px; wrap: word-wrap;
+                                }
+
+                                waveform-area := Rectangle {
+                                    height: 90px;
+                                    background: root.bg-base;
+                                    border-radius: 4px;
+                                    clip: true;
+
+                                    property <float> bucket-count-l: max(1, root.audio-envelope-left.length) * 1.0;
+                                    property <float> bucket-count-r: max(1, root.audio-envelope-right.length) * 1.0;
+                                    property <length> bar-w-l: waveform-area.width / bucket-count-l;
+                                    property <length> bar-w-r: waveform-area.width / bucket-count-r;
+
+                                    for v[idx] in root.audio-envelope-left: Rectangle {
+                                        x: idx * waveform-area.bar-w-l;
+                                        width: waveform-area.bar-w-l;
+                                        height: v * waveform-area.height * 0.5;
+                                        y: waveform-area.height * 0.5 - self.height * 0.5;
+                                        background: #5fb8ffaa;
+                                    }
+
+                                    for v[idx] in root.audio-envelope-right: Rectangle {
+                                        x: idx * waveform-area.bar-w-r;
+                                        width: waveform-area.bar-w-r;
+                                        height: v * waveform-area.height * 0.5;
+                                        y: waveform-area.height * 0.5 - self.height * 0.5;
+                                        background: #ff9f5faa;
+                                    }
+
+                                    Rectangle {
+                                        x: waveform-area.width * 0.5 - 1px;
+                                        width: 2px;
+                                        height: waveform-area.height;
+                                        background: #ffffff55;
+                                    }
+
+                                    if root.audio-envelope-left.length == 0 && root.audio-envelope-right.length == 0: Text {
+                                        text: "Computing…";
+                                        color: root.text-muted; font-size: 10px;
+                                        x: 6px; y: 6px;
+                                    }
+                                }
+                            }
 
                             // Rig calibration section.
                             rig-header := SectionHeader { title: "Rig calibration"; expanded: true; }
