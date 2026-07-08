@@ -75,6 +75,36 @@ fn extract_audio_returns_samples() {
 }
 
 #[test]
+#[ignore]
+fn extract_audio_window_returns_samples() {
+    if !have_test_footage() {
+        eprintln!("Skipping: test footage not available");
+        return;
+    }
+
+    // 5-second window starting 10s in, well within a real clip's length.
+    let samples =
+        calibration_io::extract_audio_pcm_window(Path::new(LEFT_4K), 44100, 10.0, 5.0).unwrap();
+
+    // ~5s at 44100 Hz = 220500 samples; allow slack for ffmpeg's frame
+    // boundary rounding.
+    assert!(!samples.is_empty());
+    assert!(samples.len() > 44100, "too few samples: {}", samples.len());
+    assert!(
+        samples.len() < 44100 * 7,
+        "too many samples for a 5s window: {}",
+        samples.len()
+    );
+}
+
+#[test]
+fn extract_audio_window_nonexistent_file_returns_error() {
+    let result =
+        calibration_io::extract_audio_pcm_window(Path::new("/nonexistent/video.mp4"), 44100, 0.0, 5.0);
+    assert!(result.is_err());
+}
+
+#[test]
 fn probe_nonexistent_file_returns_error() {
     reco_io::init();
     let result = calibration_io::probe_video(Path::new("/nonexistent/video.mp4"));
