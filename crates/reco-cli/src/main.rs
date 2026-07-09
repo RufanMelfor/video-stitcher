@@ -176,6 +176,13 @@ enum Commands {
         #[arg(long, default_value_t = 0.15, value_parser = parse_blend)]
         blend: f32,
 
+        /// Flip which camera fades in over the other at the blend seam.
+        /// Default: right fades in over a fixed left. When set: left fades
+        /// in over a fixed right. Purely a rendering choice - doesn't move
+        /// the seam or affect calibration geometry.
+        #[arg(long, default_value_t = false)]
+        blend_flip_direction: bool,
+
         /// Frame offset for temporal sync between cameras.
         /// Positive: skip N right frames (right started first).
         /// Negative: skip N left frames (left started first).
@@ -817,6 +824,7 @@ fn main() -> anyhow::Result<()> {
             codec,
             quality,
             blend,
+            blend_flip_direction,
             sync_offset,
             model,
             detection_interval,
@@ -842,6 +850,7 @@ fn main() -> anyhow::Result<()> {
                 width,
                 height,
                 blend,
+                blend_flip_direction,
                 start_time,
                 end_time,
                 max_frames,

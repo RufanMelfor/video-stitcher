@@ -54,6 +54,7 @@ pub struct StitchJob {
     max_frames: Option<u64>,
     sync_offset: Option<i64>,
     blend_width: f32,
+    blend_flip_direction: bool,
 
     // Callbacks
     on_progress: Option<ProgressCallback>,
@@ -248,6 +249,7 @@ impl StitchJob {
             max_frames: None,
             sync_offset: None,
             blend_width: 0.15,
+            blend_flip_direction: false,
             on_progress: None,
             on_finalizing: None,
             session_hooks: Vec::new(),
@@ -368,6 +370,14 @@ impl StitchJob {
     /// Set the blend width for seam blending (0.0 - 1.0). Default: 0.15.
     pub fn blend_width(mut self, blend: f32) -> Self {
         self.blend_width = blend;
+        self
+    }
+
+    /// Flip which camera fades in over the other at the blend seam. See
+    /// `reco_core::render::viewport::ViewportConfig::blend_flip_direction`.
+    /// Default: false (right fades over a fixed left).
+    pub fn blend_flip_direction(mut self, flip: bool) -> Self {
+        self.blend_flip_direction = flip;
         self
     }
 
@@ -588,6 +598,7 @@ impl StitchJob {
             width: out_w,
             height: out_h,
             blend_width: self.blend_width,
+            blend_flip_direction: self.blend_flip_direction,
             rig_tilt: cal.rig_tilt as f32,
             rig_roll: cal.rig_roll as f32,
             ..Default::default()

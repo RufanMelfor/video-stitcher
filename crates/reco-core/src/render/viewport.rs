@@ -29,6 +29,13 @@ pub struct ViewportConfig {
     /// Jetson CSI IMX477, larger blends wash out ball tracking in the
     /// overlap region).
     pub blend_width: f32,
+    /// Flip which camera's content fades over the other at the blend seam.
+    ///
+    /// `false` (default) = right camera fades in over a fixed left
+    /// (original behavior). `true` = left camera fades in over a fixed
+    /// right. Purely a rendering choice - doesn't move the seam or affect
+    /// calibration geometry (unlike `PlaneLayout::intersect`).
+    pub blend_flip_direction: bool,
     /// Rig tilt in radians (forward lean from vertical).
     ///
     /// Rotates the entire scene (both planes) to compensate for a
@@ -57,6 +64,7 @@ impl Default for ViewportConfig {
             height: 1080,
             fov_degrees: 75.0,
             blend_width: 0.05,
+            blend_flip_direction: false,
             rig_tilt: 0.0,
             rig_roll: 0.0,
             lens_correction_amount: 1.0,

@@ -35,7 +35,9 @@ struct Uniforms {
     // ground_tilt.z: this plane's aspect ratio (width / height), needed to
     //   convert the plane's own UV.y into the same "plane space" convention
     //   band_limited_ground_warp expects (see reco_calibrate::geometry)
-    // ground_tilt.w: unused
+    // ground_tilt.w: fades_at_seam (> 0.5 = this plane ramps alpha near
+    //   its seam-adjacent edge this frame; see the seam-blending comment
+    //   in fs_main and ViewportConfig::blend_flip_direction)
     ground_tilt: vec4<f32>,
 };
 
@@ -298,12 +300,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Apply YUV-space color transfer
     color = apply_color_transfer(color, u.color_scale.xyz, u.color_offset_blend.xyz);
 
-    // Compute alpha for seam blending (right plane fades in at left edge)
+    // Compute alpha for seam blending. `ground_tilt.w` (otherwise unused -
+    // see `Uniforms`' doc above) marks which plane fades at the seam this
+    // frame; the other plane stays fully opaque. Direction is chosen CPU-
+    // side (`ViewportConfig::blend_flip_direction`, default = right fades
+    // over a fixed left) together with draw order, so the fading plane
+    // always draws second/on top of the already-opaque one - see
+    // `encode_stitch_pass`'s comment for why that ordering matters.
+    //
+    // The two planes' seam-adjacent edges sit at opposite ends of their
+    // own local `uv.x` (the right plane's quad keeps its local +X axis
+    // aligned with world +X, seam-adjacent edge at uv.x=0; the left
+    // plane's quad is rotated 90 degrees so its local +X maps to world
+    // -Z, putting its seam-adjacent edge at the opposite end, uv.x=1).
     var alpha = 1.0;
     let blend_width = u.color_offset_blend.w;
-    if u.flags.x == 1u && blend_width > 0.0 {
-        let edge_dist = uv.x;
-        alpha = smoothstep(0.0, blend_width, edge_dist);
+    if u.ground_tilt.w > 0.5 && blend_width > 0.0 {
+        if u.flags.x == 1u {
+            alpha = smoothstep(0.0, blend_width, uv.x);
+        } else {
+            alpha = 1.0 - smoothstep(1.0 - blend_width, 1.0, uv.x);
+        }
     }
 
     // Split-view separator line (1px white at the midpoint)
