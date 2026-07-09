@@ -92,7 +92,7 @@ const SEEK_DEBOUNCE_MS: u64 = 120;
 /// fixed duration) because the whole point is spotting a frame-scale
 /// `sync_offset` error as a shifted transient; a multi-second window
 /// dilutes that shift into a barely-visible fraction of the display.
-const AUDIO_WAVEFORM_WINDOW_FRAMES: f64 = 1.0;
+const AUDIO_WAVEFORM_WINDOW_FRAMES: f64 = 5.0;
 /// Clamp range for the user-adjustable waveform window width (frames).
 const AUDIO_WAVEFORM_WINDOW_FRAMES_RANGE: (f64, f64) = (1.0, 300.0);
 /// Number of bars drawn per waveform track.
