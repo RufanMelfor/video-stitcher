@@ -707,67 +707,85 @@ export component CalibrateApp inherits Window {
                             vertical-alignment: center;
                             width: 64px;
                         }
-                        Tip {
-                            tip: "Jump to an exact frame number. Click to type.";
-                            HorizontalLayout {
-                                spacing: 3px;
+                        HorizontalLayout {
+                            spacing: 3px;
+                            Tip {
+                                tip: "Jump to an exact frame number. Click to type.";
                                 Text { text: "#"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
+                            }
 
-                                // Plain-Text/LineEdit swap (not a single
-                                // persistent LineEdit bound to
-                                // `current-frame`): Slint's built-in text
-                                // widgets break a one-way `text: expr`
-                                // binding the moment the user types into
-                                // them, so a persistent LineEdit here would
-                                // permanently stop reflecting the playhead
-                                // after the first edit - exactly the "frame
-                                // number doesn't update on step" bug this
-                                // fixes. Re-instantiating on each edit (like
-                                // `LabeledSlider`) gives a fresh binding
-                                // every time instead.
-                                if !root.frame-input-editing: TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.frame-input-editing = true; }
-                                    Text {
-                                        text: root.current-frame;
-                                        color: root.text-muted;
-                                        font-size: 10px;
-                                        vertical-alignment: center;
-                                        width: 70px;
+                            // Plain-Text/LineEdit swap (not a single
+                            // persistent LineEdit bound to
+                            // `current-frame`): Slint's built-in text
+                            // widgets break a one-way `text: expr`
+                            // binding the moment the user types into
+                            // them, so a persistent LineEdit here would
+                            // permanently stop reflecting the playhead
+                            // after the first edit - exactly the "frame
+                            // number doesn't update on step" bug this
+                            // fixes. Re-instantiating on each edit (like
+                            // `LabeledSlider`) gives a fresh binding
+                            // every time instead.
+                            //
+                            // Deliberately NOT wrapped in `Tip` (unlike
+                            // the "#" label above): `Tip` owns a
+                            // hover-triggered `PopupWindow` that only
+                            // closes via its own `changed has-hover`
+                            // binding. Wrapping this toggleable region
+                            // orphaned that popup permanently on-screen -
+                            // reproduced live - because clicking to enter
+                            // edit mode destroys the `Tip` instance (and
+                            // its hover binding) while the popup is still
+                            // showing, so `popup.close()` never runs.
+                            if !root.frame-input-editing: TouchArea {
+                                mouse-cursor: pointer;
+                                // TouchArea doesn't auto-size to its
+                                // child within a layout (same gotcha
+                                // documented on the `Tip` component
+                                // above) - without an explicit width
+                                // this collapses to ~0px, silently
+                                // hiding the whole field.
+                                width: 70px;
+                                clicked => { root.frame-input-editing = true; }
+                                Text {
+                                    text: root.current-frame;
+                                    color: root.text-muted;
+                                    font-size: 10px;
+                                    vertical-alignment: center;
+                                    width: 70px;
+                                }
+                            }
+                            if root.frame-input-editing: HorizontalLayout {
+                                frame-input := LineEdit {
+                                    text: root.current-frame;
+                                    width: 70px;
+                                    enabled: root.files-loaded;
+                                    function commit() {
+                                        if root.total-frames > 0 {
+                                            root.seek(clamp(self.text.to-float(), 0.0, 1.0 * (root.total-frames - 1)) / root.total-frames);
+                                        }
+                                        root.frame-input-editing = false;
+                                    }
+                                    accepted => { self.commit(); }
+                                    changed has-focus => {
+                                        if !self.has-focus && root.frame-input-editing {
+                                            self.commit();
+                                        }
                                     }
                                 }
-                                if root.frame-input-editing: HorizontalLayout {
-                                    frame-input := LineEdit {
-                                        text: root.current-frame;
-                                        width: 70px;
-                                        enabled: root.files-loaded;
-                                        function commit() {
-                                            if root.total-frames > 0 {
-                                                root.seek(clamp(self.text.to-float(), 0.0, 1.0 * (root.total-frames - 1)) / root.total-frames);
-                                            }
-                                            root.frame-input-editing = false;
-                                        }
-                                        accepted => { self.commit(); }
-                                        changed has-focus => {
-                                            if !self.has-focus && root.frame-input-editing {
-                                                self.commit();
-                                            }
-                                        }
-                                    }
-                                    // Deferred focus: focusing synchronously
-                                    // from `init` (mid-layout-pass, since
-                                    // this branch was just mounted by the
-                                    // `if` toggle above) hits the same
-                                    // Slint "Recursion detected" panic
-                                    // documented on `LabeledSlider` above.
-                                    focus-timer := Timer {
-                                        interval: 1ms;
-                                        running: true;
-                                        triggered => {
-                                            self.running = false;
-                                            frame-input.focus();
-                                            frame-input.select-all();
-                                        }
+                                // Deferred focus: focusing synchronously
+                                // from `init` (mid-layout-pass, since
+                                // this branch was just mounted by the
+                                // `if` toggle above) hits the same
+                                // Slint "Recursion detected" panic
+                                // documented on `LabeledSlider` above.
+                                focus-timer := Timer {
+                                    interval: 1ms;
+                                    running: true;
+                                    triggered => {
+                                        self.running = false;
+                                        frame-input.focus();
+                                        frame-input.select-all();
                                     }
                                 }
                             }
