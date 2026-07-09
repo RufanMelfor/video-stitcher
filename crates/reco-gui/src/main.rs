@@ -19,8 +19,10 @@ mod export;
 mod playback;
 mod preview;
 mod settings;
+mod sync_offset;
 mod telemetry_client;
 mod toast;
+mod waveform;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -89,6 +91,28 @@ const POSE_SMOOTHING: f32 = 0.25;
 /// NVDEC codec reinit that costs ~50ms. Without debouncing, a drag
 /// saturates the GPU with hundreds of pending reinits.
 const SEEK_DEBOUNCE_MS: u64 = 120;
+
+/// Width of the audio-sync waveform window, in frames of video at the
+/// source's own fps - converted to seconds of audio at recompute time
+/// since fps is only known once a file is loaded. Frame-based (not a
+/// fixed duration) because the whole point is spotting a frame-scale
+/// `sync_offset` error as a shifted transient; a multi-second window
+/// dilutes that shift into a barely-visible fraction of the display.
+const AUDIO_WAVEFORM_WINDOW_FRAMES: f64 = 5.0;
+/// Clamp range for the user-adjustable waveform window width (frames).
+const AUDIO_WAVEFORM_WINDOW_FRAMES_RANGE: (f64, f64) = (1.0, 300.0);
+/// Number of bars drawn per waveform track.
+const AUDIO_WAVEFORM_BUCKETS: usize = 240;
+/// Minimum wall-clock time between recompute triggers. Each recompute
+/// shells out to `ffmpeg` twice (left + right), so this throttles how
+/// often that happens during continuous playback.
+const AUDIO_WAVEFORM_THROTTLE_MS: u64 = 500;
+/// Minimum playhead movement, in frames, that warrants a recompute -
+/// also converted to seconds at recompute time. Frame-based for the same
+/// reason as the window width: keeps the recenter threshold proportional
+/// to the (now much narrower) window instead of the window being fully
+/// skipped past between recomputes.
+const AUDIO_WAVEFORM_RECENTER_FRAMES: f64 = 3.0;
 
 /// Calibration payload sent from the background worker: the computed
 /// match calibration plus the lens profile info each side resolved to,
@@ -204,6 +228,29 @@ struct AppState {
     recording_frames: u64,
     /// Receives calibration results from the background thread.
     cal_rx: Option<std::sync::mpsc::Receiver<CalibrationResult>>,
+    /// Receives the result of a standalone sync-offset detection job (see
+    /// `on_compute_sync_offset`), separate from full auto-calibrate.
+    sync_offset_job:
+        Option<std::sync::mpsc::Receiver<Result<sync_offset::SyncOffsetResult, String>>>,
+    /// Left/right audio-sync waveform envelopes currently displayed,
+    /// downsampled around `audio_envelope_center_secs`. Empty until the
+    /// first recompute (see [`AppState::maybe_recompute_audio_envelope`]).
+    audio_envelope_left: Vec<f32>,
+    audio_envelope_right: Vec<f32>,
+    /// User-adjustable window width (frames), clamped to
+    /// `AUDIO_WAVEFORM_WINDOW_FRAMES_RANGE`. Defaults to
+    /// `AUDIO_WAVEFORM_WINDOW_FRAMES`.
+    audio_window_frames: f64,
+    /// Playhead time (seconds) the displayed envelope was computed for.
+    /// Recompute triggers once the playhead has moved far enough from
+    /// this. Starts at `NEG_INFINITY` so the first expand always computes.
+    audio_envelope_center_secs: f64,
+    /// `Some` while a background extraction job is in flight; polled and
+    /// cleared by `maybe_recompute_audio_envelope`.
+    audio_envelope_rx: Option<std::sync::mpsc::Receiver<(Vec<f32>, Vec<f32>)>>,
+    /// Wall-clock time of the last triggered recompute, for throttling
+    /// during continuous playback (each recompute shells out to ffmpeg).
+    audio_envelope_triggered_at: Option<Instant>,
     /// wgpu handles captured from Slint's rendering notifier. `None`
     /// until the window has completed its first rendering setup.
     shared_gpu: Option<SharedGpu>,
@@ -467,6 +514,13 @@ impl AppState {
             recording_path: None,
             recording_frames: 0,
             cal_rx: None,
+            sync_offset_job: None,
+            audio_envelope_left: Vec::new(),
+            audio_envelope_right: Vec::new(),
+            audio_window_frames: AUDIO_WAVEFORM_WINDOW_FRAMES,
+            audio_envelope_center_secs: f64::NEG_INFINITY,
+            audio_envelope_rx: None,
+            audio_envelope_triggered_at: None,
             shared_gpu: None,
             #[cfg(feature = "automation")]
             autoload: AutoloadSpec::from_env(),
@@ -547,6 +601,10 @@ impl AppState {
         self.pending_seek = None;
         self.last_render_at = None;
         self.preview_dirty = false;
+        self.audio_envelope_left.clear();
+        self.audio_envelope_right.clear();
+        self.audio_envelope_center_secs = f64::NEG_INFINITY;
+        self.audio_envelope_rx = None;
     }
 
     /// Build a PreviewBridge using the captured Slint GPU handles. Fails
@@ -607,6 +665,7 @@ impl AppState {
             out.left = pipeline.calibration().left.clone();
             out.right = pipeline.calibration().right.clone();
             out.blend_width = pipeline.viewport().blend_width;
+            out.blend_flip_direction = pipeline.viewport().blend_flip_direction;
         }
         let json = serde_json::to_string_pretty(&out).map_err(|e| format!("serialize: {e}"))?;
         std::fs::write(path, json).map_err(|e| format!("write {}: {e}", path.display()))?;
@@ -922,6 +981,14 @@ impl AppState {
         }
     }
 
+    /// Set which camera fades over the other at the blend seam.
+    fn set_blend_flip_direction(&mut self, flip: bool) {
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge.renderer_mut().set_blend_flip_direction(flip);
+            self.preview_dirty = true;
+        }
+    }
+
     fn set_rig_tilt(&mut self, deg: f32) {
         if let Some(cal) = self.calibration.as_mut() {
             cal.rig_tilt = (deg as f64).to_radians();
@@ -946,13 +1013,128 @@ impl AppState {
         if let (Some(left), Some(right)) = (&self.left_input, &self.right_input) {
             let left = left.clone();
             let right = right.clone();
+            let resume_frame = self.playback.frame_index();
             if let Err(e) = self.playback.open(&left, &right, offset) {
                 log::error!("Failed to reopen playback with sync offset {offset}: {e}");
                 return;
             }
+            // `open()` always resets to frame 0 (it builds a fresh decode
+            // pipeline to apply the new frame-skip alignment) - restore
+            // the playhead so changing the sync offset doesn't jerk the
+            // user back to the start of the clip.
+            if let Some(total) = self.playback.total_frames().filter(|&t| t > 0) {
+                let fraction = resume_frame.min(total - 1) as f32 / total as f32;
+                if let Err(e) = self.playback.seek(fraction) {
+                    log::error!("Failed to restore playhead after sync offset change: {e}");
+                }
+            }
             log::info!("Sync offset changed to {offset} frames");
             self.preview_dirty = true;
+            // Force the audio-sync waveform to recompute against the new
+            // offset instead of showing the stale pre-change envelope.
+            self.audio_envelope_center_secs = f64::NEG_INFINITY;
         }
+    }
+
+    /// Update the audio-sync waveform's window width (frames), clamped to
+    /// `AUDIO_WAVEFORM_WINDOW_FRAMES_RANGE`, and force the next tick's
+    /// `maybe_recompute_audio_envelope` to recompute against it instead of
+    /// showing the stale pre-change envelope.
+    fn set_audio_window_frames(&mut self, frames: f32) {
+        self.audio_window_frames = (frames as f64).clamp(
+            AUDIO_WAVEFORM_WINDOW_FRAMES_RANGE.0,
+            AUDIO_WAVEFORM_WINDOW_FRAMES_RANGE.1,
+        );
+        self.audio_envelope_center_secs = f64::NEG_INFINITY;
+    }
+
+    /// Poll for a completed audio-sync waveform envelope and, if the
+    /// playhead has moved far enough since the last one, trigger a new
+    /// background recompute. Called from the playback timer tick; cheap
+    /// when idle (a few field reads), since the actual `ffmpeg`
+    /// extraction only runs on a background thread when genuinely
+    /// warranted.
+    fn maybe_recompute_audio_envelope(&mut self, app_weak: &slint::Weak<RecoApp>) {
+        if let Some(rx) = &self.audio_envelope_rx
+            && let Ok((left, right)) = rx.try_recv()
+        {
+            self.audio_envelope_rx = None;
+            self.audio_envelope_left = left.clone();
+            self.audio_envelope_right = right.clone();
+            if let Some(app) = app_weak.upgrade() {
+                app.set_audio_envelope_left(slint::ModelRc::new(slint::VecModel::from(left)));
+                app.set_audio_envelope_right(slint::ModelRc::new(slint::VecModel::from(right)));
+            }
+            return;
+        }
+
+        if self.audio_envelope_rx.is_some() {
+            return; // job already in flight
+        }
+
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        if !app.get_audio_sync_expanded() {
+            return;
+        }
+        let (Some(left_path), Some(right_path)) = (self.left_path.clone(), self.right_path.clone())
+        else {
+            return;
+        };
+        let fps = self.playback.fps();
+        if fps <= 0.0 {
+            return;
+        }
+
+        let window_secs = self.audio_window_frames / fps;
+        let recenter_secs = AUDIO_WAVEFORM_RECENTER_FRAMES / fps;
+        let center_secs = self.playback.frame_index() as f64 / fps;
+        let moved_enough = (center_secs - self.audio_envelope_center_secs).abs() >= recenter_secs;
+        let throttled = self
+            .audio_envelope_triggered_at
+            .is_some_and(|t| t.elapsed() < Duration::from_millis(AUDIO_WAVEFORM_THROTTLE_MS));
+        if !moved_enough || throttled {
+            return;
+        }
+
+        self.audio_envelope_center_secs = center_secs;
+        self.audio_envelope_triggered_at = Some(Instant::now());
+
+        // `playback.frame_index()` is a synced-timeline index: frame k of
+        // the synced stream is raw left frame `k + max(-sync_offset, 0)`
+        // and raw right frame `k + max(sync_offset, 0)` (see
+        // `adapters::spawn_decode_pipeline_from_inputs`, which skips
+        // frames from whichever camera started first). Extracting both
+        // channels' audio windows at the same raw `center_secs` - as if
+        // `sync_offset` were always 0 - would make the waveform blind to
+        // the very thing it exists to verify: a correct offset should
+        // pull the two traces' transients into alignment, and a wrong one
+        // should show a residual shift.
+        let sync_offset = self.calibration.as_ref().map_or(0, |c| c.sync_offset);
+        let left_center_secs = center_secs + (-sync_offset).max(0) as f64 / fps;
+        let right_center_secs = center_secs + sync_offset.max(0) as f64 / fps;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.audio_envelope_rx = Some(rx);
+        std::thread::spawn(move || {
+            let mut left = crate::waveform::extract_window_envelope(
+                &left_path,
+                left_center_secs,
+                window_secs,
+                AUDIO_WAVEFORM_BUCKETS,
+            )
+            .unwrap_or_default();
+            let mut right = crate::waveform::extract_window_envelope(
+                &right_path,
+                right_center_secs,
+                window_secs,
+                AUDIO_WAVEFORM_BUCKETS,
+            )
+            .unwrap_or_default();
+            crate::waveform::normalize_pair_to_peak(&mut left, &mut right);
+            let _ = tx.send((left, right));
+        });
     }
 
     /// Re-open the playback source from the current chained inputs without
@@ -1142,12 +1324,13 @@ fn set_lens_profile_props(
 
 fn format_time(frame: u64, fps: f64) -> String {
     if fps <= 0.0 {
-        return "0:00".into();
+        return "00:00:00".into();
     }
     let total_secs = (frame as f64 / fps) as u64;
-    let m = total_secs / 60;
+    let h = total_secs / 3600;
+    let m = (total_secs % 3600) / 60;
     let s = total_secs % 60;
-    format!("{m}:{s:02}")
+    format!("{h:02}:{m:02}:{s:02}")
 }
 
 fn sync_frame_display(app: &RecoApp, frame: u64, total: u64, fps: f64) {
@@ -1438,6 +1621,29 @@ fn main() -> anyhow::Result<()> {
     {
         let s = state.borrow();
         app.set_dark_mode(s.user_settings.dark_mode);
+    }
+
+    // Reopen the last-used left/right video and calibration file (if they
+    // still exist on disk), so the app doesn't start from a blank slate
+    // every launch. Only sets display fields and `AppState` paths here;
+    // the actual pipeline init happens once the GPU is ready, in the
+    // `RenderingSetup` branch below (same as picking files manually).
+    {
+        let mut s = state.borrow_mut();
+        if let Some(left) = s.user_settings.last_left() {
+            app.set_left_path(display_name(&left).into());
+            s.left_input = Some(reco_io::stitch_job::InputPath::Single(left.clone()));
+            s.left_path = Some(left);
+        }
+        if let Some(right) = s.user_settings.last_right() {
+            app.set_right_path(display_name(&right).into());
+            s.right_input = Some(reco_io::stitch_job::InputPath::Single(right.clone()));
+            s.right_path = Some(right);
+        }
+        if let Some(cal) = s.user_settings.last_calibration() {
+            app.set_calibration_path(display_name(&cal).into());
+            s.calibration_path = Some(cal);
+        }
     }
 
     // Check for updates in the background.
@@ -2496,20 +2702,32 @@ fn main() -> anyhow::Result<()> {
         };
         drop(s);
 
-        let (use_imu_seeds, cal_frames, akaze_threshold, detect_y_min, detect_y_max, skip_end) =
-            app_weak
-                .upgrade()
-                .map(|a| {
-                    (
-                        a.get_use_imu_seeds(),
-                        a.get_calibration_frames().max(2) as usize,
-                        a.get_cal_akaze_threshold() as f64,
-                        a.get_cal_detect_y_min() as f64,
-                        a.get_cal_detect_y_max() as f64,
-                        a.get_cal_skip_end_secs() as f64,
-                    )
-                })
-                .unwrap_or((false, 4, 0.0001, 0.05, 0.95, 0.0));
+        let (
+            use_imu_seeds,
+            cal_frames,
+            akaze_threshold,
+            detect_y_min,
+            detect_y_max,
+            skip_end,
+            force_x_rx,
+            force_z_rz,
+            full_res_features,
+        ) = app_weak
+            .upgrade()
+            .map(|a| {
+                (
+                    a.get_use_imu_seeds(),
+                    a.get_calibration_frames().max(2) as usize,
+                    a.get_cal_akaze_threshold() as f64,
+                    a.get_cal_detect_y_min() as f64,
+                    a.get_cal_detect_y_max() as f64,
+                    a.get_cal_skip_end_secs() as f64,
+                    a.get_force_x_rx(),
+                    a.get_force_z_rz(),
+                    a.get_cal_full_res_features(),
+                )
+            })
+            .unwrap_or((false, 4, 0.0001, 0.05, 0.95, 0.0, false, false, false));
 
         if let Some(app) = app_weak.upgrade() {
             app.set_calibrating(true);
@@ -2562,8 +2780,9 @@ fn main() -> anyhow::Result<()> {
             // feature matches are noisier per frame.
             log::info!(
                 "Auto-calibrate: {cal_frames} frames, skip=[{current_time_secs:.1}s, -{skip_end:.0}s], \
-                 imu_seeds={use_imu_seeds}, akaze={akaze_threshold}, \
-                 detect_y=[{detect_y_min:.2}, {detect_y_max:.2}]"
+                 imu_seeds={use_imu_seeds}, force_x_rx={force_x_rx}, force_z_rz={force_z_rz}, \
+                 akaze={akaze_threshold}, detect_y=[{detect_y_min:.2}, {detect_y_max:.2}], \
+                 full_res_features={full_res_features}"
             );
             let mut config = reco_calibrate::CalibrationConfig {
                 num_frames: cal_frames,
@@ -2575,6 +2794,13 @@ fn main() -> anyhow::Result<()> {
             config.akaze.threshold = akaze_threshold;
             config.akaze.detect_y_min = detect_y_min;
             config.akaze.detect_y_max = detect_y_max;
+            config.akaze.detect_max_width = if full_res_features { 0 } else { 1920 };
+            if force_x_rx {
+                config.optimizer.enable_x_rx = true;
+            }
+            if force_z_rz {
+                config.optimizer.enable_z_rz = true;
+            }
             if existing_left_params.is_some() {
                 log::info!("Re-calibrating with user-picked lens profiles");
             }
@@ -2637,6 +2863,23 @@ fn main() -> anyhow::Result<()> {
 
     let app_weak = app.as_weak();
     let state_ref = Rc::clone(&state);
+    app.on_pause_playback(move || {
+        let mut s = state_ref.borrow_mut();
+        if s.playback.state() == PlayState::Playing {
+            s.playback.toggle();
+        }
+        if let Some(app) = app_weak.upgrade() {
+            app.set_playing(false);
+        }
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_changed_playback_speed(move |speed| {
+        state_ref.borrow_mut().playback.set_speed(speed as f64);
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
     app.on_step_forward(move || {
         let mut s = state_ref.borrow_mut();
         if s.is_exporting() {
@@ -2648,9 +2891,11 @@ fn main() -> anyhow::Result<()> {
         match s.playback.step_forward() {
             Ok(true) => {
                 let img = s.render_current();
+                let total = s.playback.total_frames().unwrap_or(0);
+                let fps = s.playback.fps();
                 if let (Some(app), Some(img)) = (app_weak.upgrade(), img) {
                     app.set_preview_frame(img);
-                    app.set_current_frame(s.playback.frame_index() as i32);
+                    sync_frame_display(&app, s.playback.frame_index(), total, fps);
                 }
             }
             Ok(false) => {}
@@ -2678,9 +2923,10 @@ fn main() -> anyhow::Result<()> {
         match s.playback.seek(fraction) {
             Ok(()) => {
                 let img = s.render_current();
+                let fps = s.playback.fps();
                 if let (Some(app), Some(img)) = (app_weak.upgrade(), img) {
                     app.set_preview_frame(img);
-                    app.set_current_frame(s.playback.frame_index() as i32);
+                    sync_frame_display(&app, s.playback.frame_index(), total, fps);
                 }
             }
             Err(e) => log::error!("Step backward error: {e}"),
@@ -2756,6 +3002,15 @@ fn main() -> anyhow::Result<()> {
 
     let state_ref = Rc::clone(&state);
     let app_weak = app.as_weak();
+    app.on_changed_blend_flip_direction(move |flip| {
+        state_ref.borrow_mut().set_blend_flip_direction(flip);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let state_ref = Rc::clone(&state);
+    let app_weak = app.as_weak();
     app.on_changed_rig_tilt(move |deg| {
         state_ref.borrow_mut().set_rig_tilt(deg);
         if let Some(app) = app_weak.upgrade() {
@@ -2781,6 +3036,31 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_compute_sync_offset(move || {
+        let s = state_ref.borrow();
+        let (left, right) = match (&s.left_path, &s.right_path) {
+            (Some(l), Some(r)) => (l.clone(), r.clone()),
+            _ => return,
+        };
+        drop(s);
+
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        app.set_detecting_sync(true);
+        app.set_status_text("Detecting sync offset (IMU, falling back to audio)...".into());
+
+        let rx = sync_offset::spawn_compute_sync_offset(left, right);
+        state_ref.borrow_mut().sync_offset_job = Some(rx);
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_changed_audio_window_frames(move |frames| {
+        state_ref.borrow_mut().set_audio_window_frames(frames);
+    });
+
     let state_ref = Rc::clone(&state);
     app.on_changed_fov(move |deg| {
         state_ref.borrow_mut().set_fov(deg);
@@ -2795,9 +3075,11 @@ fn main() -> anyhow::Result<()> {
             return;
         }
         let img = s.render_current();
+        let total = s.playback.total_frames().unwrap_or(0);
+        let fps = s.playback.fps();
         if let (Some(app), Some(img)) = (app_weak.upgrade(), img) {
             app.set_preview_frame(img);
-            app.set_current_frame(s.playback.frame_index() as i32);
+            sync_frame_display(&app, s.playback.frame_index(), total, fps);
         }
     });
 
@@ -2851,6 +3133,34 @@ fn main() -> anyhow::Result<()> {
 
     let app_weak = app.as_weak();
     let state_ref = Rc::clone(&state);
+    app.on_changed_cal_ground_tilt_x(move |v| {
+        let mut s = state_ref.borrow_mut();
+        let Some(mut layout) = s.calibration.as_ref().map(|c| c.layout.clone()) else {
+            return;
+        };
+        layout.ground_tilt_x = v as f64;
+        s.apply_layout(layout);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_cal_ground_tilt_z(move |v| {
+        let mut s = state_ref.borrow_mut();
+        let Some(mut layout) = s.calibration.as_ref().map(|c| c.layout.clone()) else {
+            return;
+        };
+        layout.ground_tilt_z = v as f64;
+        s.apply_layout(layout);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
     app.on_save_calibration(move || {
         let save_result = state_ref.borrow().save_calibration();
         match save_result {
@@ -2888,6 +3198,8 @@ fn main() -> anyhow::Result<()> {
             app.set_cal_intersect(layout.intersect as f32);
             app.set_cal_camera_axis_offset(layout.camera_axis_offset as f32);
             app.set_cal_x_ty(layout.x_ty as f32);
+            app.set_cal_ground_tilt_x(layout.ground_tilt_x as f32);
+            app.set_cal_ground_tilt_z(layout.ground_tilt_z as f32);
             app.set_cal_dirty(false);
         }
     });
@@ -3688,6 +4000,11 @@ fn main() -> anyhow::Result<()> {
 
             let mut s = state_ref.borrow_mut();
 
+            // Independent of rendering: the audio-sync waveform must keep
+            // computing even while paused, when nothing else in this timer
+            // tick would otherwise be dirty.
+            s.maybe_recompute_audio_envelope(&app_weak);
+
             // Check for update notification from the background thread.
             if let Ok(mut guard) = update_check.try_lock()
                 && let Some(tag) = guard.take()
@@ -3713,6 +4030,34 @@ fn main() -> anyhow::Result<()> {
             {
                 s.cal_rx = None;
                 handle_calibration_result(result, &mut s, &app_weak);
+                return;
+            }
+
+            // Poll for standalone sync-offset detection results.
+            if let Some(rx) = &s.sync_offset_job
+                && let Ok(result) = rx.try_recv()
+            {
+                s.sync_offset_job = None;
+                if let Some(app) = app_weak.upgrade() {
+                    app.set_detecting_sync(false);
+                    match result {
+                        Ok(r) => {
+                            s.set_sync_offset(r.frames as i32);
+                            app.set_sync_offset(r.frames as i32);
+                            app.set_cal_dirty(true);
+                            app.set_status_text(
+                                format!(
+                                    "Sync offset detected: {} frames ({})",
+                                    r.frames, r.method
+                                )
+                                .into(),
+                            );
+                        }
+                        Err(e) => {
+                            app.set_status_text(format!("Sync-offset detection failed: {e}").into());
+                        }
+                    }
+                }
                 return;
             }
 
@@ -3953,9 +4298,11 @@ fn main() -> anyhow::Result<()> {
                 match s.playback.seek(frac) {
                     Ok(()) => {
                         let img = s.render_current();
+                        let total = s.playback.total_frames().unwrap_or(0);
+                        let fps = s.playback.fps();
                         if let (Some(app), Some(img)) = (app_weak.upgrade(), img) {
                             app.set_preview_frame(img);
-                            app.set_current_frame(s.playback.frame_index() as i32);
+                            sync_frame_display(&app, s.playback.frame_index(), total, fps);
                             s.last_render_at = Some(Instant::now());
                         }
                     }
@@ -4234,6 +4581,10 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 .bridge
                 .as_ref()
                 .map(|b| b.renderer().pipeline().viewport().blend_width);
+            let blend_flip_direction = s
+                .bridge
+                .as_ref()
+                .map(|b| b.renderer().pipeline().viewport().blend_flip_direction);
             // Lens-correction strength came in via the loaded calibration and
             // the renderer was seeded with it at bridge creation; mirror it
             // into AppState so a later save re-persists the right value.
@@ -4294,6 +4645,7 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 );
                 sync_frame_display(&app, s.playback.frame_index(), total, fps);
                 app.set_fps(fps as f32);
+                app.set_playback_speed(s.playback.speed() as f32);
                 app.set_status_text(format!("Ready - {:.0} fps - {total} frames", fps).into());
                 // The export trim defaults to the whole clip. When the input
                 // length changes (new file, appended segments, or a shorter
@@ -4317,6 +4669,8 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                     app.set_cal_intersect(layout.intersect as f32);
                     app.set_cal_camera_axis_offset(layout.camera_axis_offset as f32);
                     app.set_cal_x_ty(layout.x_ty as f32);
+                    app.set_cal_ground_tilt_x(layout.ground_tilt_x as f32);
+                    app.set_cal_ground_tilt_z(layout.ground_tilt_z as f32);
                     app.set_cal_dirty(false);
                 }
                 if let Some(rt) = rig_tilt_rad {
@@ -4327,6 +4681,9 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 }
                 if let Some(bw) = blend_width {
                     app.set_blend_width(bw);
+                }
+                if let Some(flip) = blend_flip_direction {
+                    app.set_blend_flip_direction(flip);
                 }
                 if let Some(lc) = lens_correction {
                     app.set_lens_correction_amount(lc);
@@ -4519,6 +4876,10 @@ fn handle_calibration_result(
                         .bridge
                         .as_ref()
                         .map(|b| b.renderer().pipeline().viewport().blend_width);
+                    let blend_flip_direction = state
+                        .bridge
+                        .as_ref()
+                        .map(|b| b.renderer().pipeline().viewport().blend_flip_direction);
                     let lens_correction =
                         state.calibration.as_ref().map(|c| c.lens_correction_amount);
                     if let Some(lc) = lens_correction {
@@ -4574,6 +4935,7 @@ fn handle_calibration_result(
                         sync_recent_paths(&state.user_settings, &app);
                         sync_frame_display(&app, state.playback.frame_index(), total, fps);
                         app.set_fps(fps as f32);
+                        app.set_playback_speed(state.playback.speed() as f32);
                         app.set_status_text(
                             format!("Auto-calibrated - {:.0} fps - {total} frames", fps,).into(),
                         );
@@ -4584,6 +4946,8 @@ fn handle_calibration_result(
                             app.set_cal_intersect(layout.intersect as f32);
                             app.set_cal_camera_axis_offset(layout.camera_axis_offset as f32);
                             app.set_cal_x_ty(layout.x_ty as f32);
+                            app.set_cal_ground_tilt_x(layout.ground_tilt_x as f32);
+                            app.set_cal_ground_tilt_z(layout.ground_tilt_z as f32);
                             app.set_cal_dirty(false);
                         }
                         if let Some(rt) = rig_tilt_rad {
@@ -4594,6 +4958,9 @@ fn handle_calibration_result(
                         }
                         if let Some(bw) = blend_width {
                             app.set_blend_width(bw);
+                        }
+                        if let Some(flip) = blend_flip_direction {
+                            app.set_blend_flip_direction(flip);
                         }
                         if let Some(lc) = lens_correction {
                             app.set_lens_correction_amount(lc);

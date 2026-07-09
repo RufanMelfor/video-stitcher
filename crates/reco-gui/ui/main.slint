@@ -3,40 +3,234 @@
 
 import { Button, VerticalBox, HorizontalBox, Slider, ProgressIndicator, LineEdit, ComboBox, CheckBox, ScrollView, TabWidget, Palette, StyleMetrics } from "std-widgets.slint";
 
-/// One labeled slider row for the controls panel.
+/// Wraps a control with a hover tooltip: shows `tip` in a small popup
+/// after a brief hover delay, closes as soon as the pointer leaves.
+/// Wrapping (rather than baking hover into every control) keeps this
+/// opt-in per usage site - just wrap `Tip { tip: "..."; <control> }`.
+component Tip inherits TouchArea {
+    in property <string> tip;
+
+    // TouchArea does not auto-size to its children the way a layout
+    // does, so a bare `@children` here would collapse to zero size
+    // inside the surrounding VerticalBox/HorizontalBox. Route the
+    // wrapped content through a real layout and mirror its computed
+    // size back onto this TouchArea (same pattern Slint's own Button
+    // widget uses: binding min/preferred size from an inner layout).
+    inner := VerticalLayout {
+        padding: 0px;
+        spacing: 0px;
+        @children
+    }
+    min-width: inner.min-width;
+    min-height: inner.min-height;
+    preferred-width: inner.preferred-width;
+    preferred-height: inner.preferred-height;
+
+    changed has-hover => {
+        if root.has-hover && root.tip != "" {
+            tip-timer.running = true;
+        } else {
+            tip-timer.running = false;
+            popup.close();
+        }
+    }
+
+    tip-timer := Timer {
+        interval: 600ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            popup.show();
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0px;
+        y: root.height + 4px;
+        Rectangle {
+            background: #2a2a2a;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: #444;
+            width: tip-text.width + 16px;
+            height: tip-text.height + 12px;
+            tip-text := Text {
+                x: 8px;
+                y: 6px;
+                text: root.tip;
+                color: #eee;
+                font-size: 13px;
+                wrap: word-wrap;
+                width: 220px;
+            }
+        }
+    }
+}
+
+/// One labeled slider row for the controls panel. The value display
+/// doubles as a text input: double-click it to type an exact value
+/// instead of dragging the slider. Commits on Enter or on clicking away;
+/// clamped to [minimum, maximum] like the slider itself.
+///
+/// Takes its own optional `tip` and wraps only the label in `Tip`
+/// internally, rather than callers wrapping the whole `LabeledSlider` in
+/// a `Tip`. `Tip` inherits `TouchArea` and mirrors its size from its
+/// child's layout info; wrapping it around the double-click-to-edit
+/// value (whose subtree shape toggles between a `TouchArea` and a
+/// `LineEdit` row) risked the same class of geometry re-entrancy as the
+/// bug documented below, so it's kept scoped to the static label.
+///
+/// Separately: the edit-mode `LineEdit` defers its focus() call by one
+/// tick (see the `Timer` below) instead of calling it from `init`.
+/// Calling `.focus()` synchronously from `init` re-enters Slint's
+/// geometry evaluation *while the current layout pass (triggered by this
+/// same `if !editing -> editing` branch swap) hasn't finished settling*
+/// - inside a `ScrollView`, focusing a widget also computes clip-rect
+/// geometry up the whole ancestor chain to scroll it into view, and
+/// doing that mid-layout-pass hit a real Slint 1.15.1 "Recursion
+/// detected" panic that killed the whole app. Reproduced with
+/// `RUST_BACKTRACE=1`: just double-clicking a value crashed it, before
+/// any typing - the panic is in `item_geometry`/
+/// `absolute_clip_rect_and_geometry`, not in anything commit-edit-related.
 component LabeledSlider inherits VerticalLayout {
     in property <string> label;
+    in property <string> tip: "";
     in property <float> minimum;
     in property <float> maximum;
     in-out property <float> value;
     in property <string> suffix: "";
     in property <int> decimals: 2;
+    in-out property <bool> editing: false;
+    // Step size for the optional up/down nudge buttons. `0.0` (default)
+    // hides them - most sliders are fine dragged or double-click-typed;
+    // some fine-grained params want exact small increments that
+    // dragging can't reliably hit.
+    in property <float> step: 0.0;
     callback changed(float);
 
     spacing: 2px;
 
+    property <float> scale:
+        root.decimals <= 0 ? 1
+      : root.decimals == 1 ? 10
+      : root.decimals == 2 ? 100
+      : root.decimals == 3 ? 1000
+      : root.decimals == 4 ? 10000
+      : 100000;
+    property <float> display-value:
+        root.decimals == 0 ? round(root.value) : round(root.value * root.scale) / root.scale;
+
+    // Takes the typed text rather than reaching into the (conditionally
+    // instantiated, so not name-addressable from outside its own `if`
+    // branch) LineEdit - both call sites below already have `self.text`
+    // in scope since they're callbacks on the LineEdit itself.
+    function commit-edit(text: string) {
+        root.value = clamp(text.to-float(), root.minimum, root.maximum);
+        root.changed(root.value);
+        root.editing = false;
+    }
+
     HorizontalLayout {
-        Text {
-            text: root.label;
-            color: #bbb;
-            font-size: 11px;
-            vertical-alignment: center;
+        Tip {
+            tip: root.tip;
             horizontal-stretch: 1;
+            Text {
+                text: root.label;
+                color: #bbb;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
         }
-        Text {
-            property <float> scale:
-                root.decimals <= 0 ? 1
-              : root.decimals == 1 ? 10
-              : root.decimals == 2 ? 100
-              : root.decimals == 3 ? 1000
-              : root.decimals == 4 ? 10000
-              : 100000;
-            text: (root.decimals == 0
-                ? round(root.value)
-                : round(root.value * scale) / scale) + root.suffix;
-            color: #888;
-            font-size: 11px;
-            vertical-alignment: center;
+
+        if !root.editing: TouchArea {
+            mouse-cursor: pointer;
+            double-clicked => { root.editing = true; }
+
+            Text {
+                text: root.display-value + root.suffix;
+                color: #888;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.editing: HorizontalLayout {
+            spacing: 3px;
+            edit-field := LineEdit {
+                text: root.display-value;
+                width: 56px;
+                font-size: 11px;
+                accepted => { root.commit-edit(self.text); }
+                changed has-focus => {
+                    if !self.has-focus && root.editing {
+                        root.commit-edit(self.text);
+                    }
+                }
+            }
+            Text { text: root.suffix; color: #888; font-size: 11px; vertical-alignment: center; }
+            // Single-shot, fires once the branch-swap layout pass has
+            // settled (see the doc comment above `LabeledSlider`).
+            focus-timer := Timer {
+                interval: 1ms;
+                running: true;
+                triggered => {
+                    self.running = false;
+                    edit-field.focus();
+                    edit-field.select-all();
+                }
+            }
+        }
+
+        if root.step > 0: VerticalLayout {
+            spacing: 1px;
+            stepper-up := TouchArea {
+                width: 14px;
+                height: 9px;
+                mouse-cursor: pointer;
+                clicked => {
+                    root.value = clamp(root.value + root.step, root.minimum, root.maximum);
+                    root.changed(root.value);
+                }
+                Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    background: stepper-up.has-hover ? #3a3a3a : transparent;
+                    border-radius: 2px;
+                    Text {
+                        text: "▲";
+                        font-size: 7px;
+                        color: #888;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: 100%;
+                        height: 100%;
+                    }
+                }
+            }
+            stepper-down := TouchArea {
+                width: 14px;
+                height: 9px;
+                mouse-cursor: pointer;
+                clicked => {
+                    root.value = clamp(root.value - root.step, root.minimum, root.maximum);
+                    root.changed(root.value);
+                }
+                Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    background: stepper-down.has-hover ? #3a3a3a : transparent;
+                    border-radius: 2px;
+                    Text {
+                        text: "▼";
+                        font-size: 7px;
+                        color: #888;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: 100%;
+                        height: 100%;
+                    }
+                }
+            }
         }
     }
 
@@ -170,9 +364,11 @@ component SectionHeader inherits Rectangle {
     in property <string> title;
     in-out property <bool> expanded: false;
 
-    height: 30px;
-    border-radius: 4px;
-    background: section-touch.has-hover ? #2e2e2e : #1e1e1e;
+    height: 34px;
+    border-radius: 8px;
+    background: root.expanded ? #191d21 : section-touch.has-hover ? #24282c : transparent;
+    border-width: 1px;
+    border-color: root.expanded ? #2a2e33 : transparent;
 
     section-touch := TouchArea {
         clicked => { root.expanded = !root.expanded; }
@@ -180,25 +376,123 @@ component SectionHeader inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: 6px;
-        padding-right: 6px;
-        spacing: 6px;
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 10px;
 
-        Text {
-            text: root.expanded ? "▾" : "▸";
-            color: root.expanded ? #aaa : #666;
-            font-size: 11px;
-            vertical-alignment: center;
-            width: 14px;
+        // Expanded/collapsed state marker: filled yellow when open, so an
+        // open panel is unmistakable even from a glance across the whole
+        // stack of section headers.
+        Rectangle {
+            width: 9px;
+            height: 9px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 3px;
+            background: root.expanded ? #e5b84b : transparent;
+            border-width: 1px;
+            border-color: root.expanded ? #e5b84b : #454b52;
         }
         Text {
             text: root.title;
-            color: #eee;
-            font-size: 13px;
-            font-weight: 600;
+            color: #dcdfe3;
+            font-size: 12.5px;
+            font-weight: 550;
             vertical-alignment: center;
             horizontal-stretch: 1;
         }
+        // Chevron: points right when collapsed, down when open.
+        Text {
+            text: root.expanded ? "⌄" : "›";
+            color: root.expanded ? #9aa0a7 : #6a7077;
+            font-size: root.expanded ? 13px : 15px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+/// Small flat transport button (jump/step/play/stop icons). The default
+/// `Button` widget from std-widgets renders noticeably bulkier than this
+/// - fine for the toolbar's full-size buttons, but too heavy for a tight
+/// 6-up icon cluster under the timeline.
+component TransportButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    // The play/pause button in the cluster is emphasized (accent-tinted,
+    // slightly wider) so the primary transport action reads at a glance.
+    in property <bool> emphasized: false;
+    callback clicked();
+
+    width: root.emphasized ? 34px : 28px;
+    height: 24px;
+    border-radius: 6px;
+    background: !root.enabled ? #1c1f22
+        : root.emphasized
+            ? (touch.has-hover ? #2c4a56 : #263842)
+            : (touch.pressed ? #1f2226 : touch.has-hover ? #2e333a : #24282c);
+    border-width: 1px;
+    border-color: !root.enabled ? #2a2e33 : root.emphasized ? #33505e : #34393f;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+
+    Text {
+        text: root.text;
+        color: !root.enabled ? #565b61 : root.emphasized ? #6fd0fa : #d8d8d8;
+        font-size: 11px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: 100%;
+        height: 100%;
+    }
+}
+
+/// Flat action button, the app-wide replacement for std-widgets `Button`.
+/// One consistent control language across the toolbar and panels: fixed
+/// 28px height, 7px radius, flat control fill with a hover lighten. The
+/// `primary` variant (blue) is used for the single dominant action in a
+/// context (Export, Save, an active toggle). Auto-sizes to its label; put
+/// it in a layout with `horizontal-stretch: 1` or set `width` to override.
+component FlatButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> primary: false;
+    callback clicked();
+
+    height: 28px;
+    border-radius: 7px;
+    border-width: 1px;
+
+    property <color> base: root.primary ? #2f7bd6 : #24282c;
+    property <color> hover: root.primary ? #3d89e2 : #2e333a;
+    background: !root.enabled ? #1c1f22
+        : touch.pressed ? (root.primary ? #2a6fc2 : #1f2226)
+        : touch.has-hover ? hover
+        : base;
+    border-color: !root.enabled ? #2a2e33 : root.primary ? #2f7bd6 : #34393f;
+
+    min-width: label.min-width;
+    preferred-width: label.preferred-width;
+
+    label := HorizontalLayout {
+        padding-left: 13px;
+        padding-right: 13px;
+        Text {
+            text: root.text;
+            color: !root.enabled ? #565b61 : root.primary ? #ffffff : #dcdfe3;
+            font-size: 12px;
+            font-weight: root.primary ? 600 : 500;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
     }
 }
 
@@ -325,8 +619,8 @@ component SegmentList inherits Rectangle {
 
     property <int> drag-from: -1; // row being dragged, or -1 when idle
     property <int> drag-to: -1; // insertion gap [0..count] under the cursor
-    property <length> row-h: 26px;
-    property <length> row-gap: 4px;
+    property <length> row-h: 32px;
+    property <length> row-gap: 5px;
     property <length> rowstep: root.row-h + root.row-gap;
     property <int> count: root.segments.length;
 
@@ -336,21 +630,23 @@ component SegmentList inherits Rectangle {
         spacing: root.row-gap;
         for seg[idx] in root.segments: Rectangle {
             height: root.row-h;
-            border-radius: 4px;
+            border-radius: 7px;
             background: root.card-bg;
+            border-width: 1px;
+            border-color: #34393f;
             // The dragged row dims to a "ghost"; the drop position is shown
             // by the insertion line below, not a per-row outline.
             opacity: root.drag-from == idx ? 0.4 : 1.0;
             HorizontalLayout {
-                padding-left: 2px;
-                padding-right: 4px;
-                spacing: 4px;
+                padding-left: 4px;
+                padding-right: 6px;
+                spacing: 6px;
                 // Drag handle. Only active with 2+ segments to reorder.
                 Rectangle {
                     width: 18px;
                     Text {
                         text: "⠿";
-                        color: grip.has-hover || root.drag-from == idx ? #8ae68a : #5a5a5a;
+                        color: grip.has-hover || root.drag-from == idx ? #74d69a : #474c52;
                         font-size: 13px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -396,18 +692,19 @@ component SegmentList inherits Rectangle {
                 }
                 Text {
                     text: (idx + 1) + ". " + seg;
-                    color: #ccc;
-                    font-size: 10px;
+                    color: #dcdfe3;
+                    font-size: 11px;
                     vertical-alignment: center;
                     overflow: elide;
                     horizontal-stretch: 1;
                 }
                 Rectangle {
-                    width: 18px;
-                    height: 18px;
-                    border-radius: 3px;
-                    background: rm.has-hover ? #3a2020 : transparent;
-                    Text { text: "×"; color: #888; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                    width: 20px;
+                    height: 20px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 5px;
+                    background: rm.has-hover ? #331516 : transparent;
+                    Text { text: "×"; color: rm.has-hover ? #ff6b6b : #6a7077; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
                     rm := TouchArea { clicked => { root.remove(idx); } }
                 }
             }
@@ -422,7 +719,7 @@ component SegmentList inherits Rectangle {
         y: max(0px, min(root.height - 2px, root.drag-to * root.rowstep - root.row-gap / 2));
         width: root.width;
         height: 2px;
-        background: #8ae68a;
+        background: #74d69a;
         border-radius: 1px;
         Rectangle {
             x: 0px;
@@ -430,7 +727,7 @@ component SegmentList inherits Rectangle {
             width: 6px;
             height: 6px;
             border-radius: 3px;
-            background: #8ae68a;
+            background: #74d69a;
         }
     }
 }
@@ -445,24 +742,26 @@ export component RecoApp inherits Window {
     // ── Theme colors ──
     in-out property <bool> dark-mode: true;
 
-    property <color> bg-base: dark-mode ? #121212 : #f5f5f5;
-    property <color> bg-panel: dark-mode ? #1a1a1a : #eaeaea;
-    property <color> bg-bar: dark-mode ? #1e1e1e : #e0e0e0;
-    property <color> bg-surface: dark-mode ? #222 : #fff;
-    property <color> bg-card: dark-mode ? #242424 : #ddd;
-    property <color> bg-hover: dark-mode ? #2e2e2e : #c8c8c8;
-    property <color> bg-preview: dark-mode ? #0a0a0a : #444;
+    // Cool-biased dark neutrals (a hint of blue toward the cyan accent),
+    // so the chrome reads as deliberately chosen rather than flat grey.
+    property <color> bg-base: dark-mode ? #101214 : #f5f5f5;
+    property <color> bg-panel: dark-mode ? #17191c : #eaeaea;
+    property <color> bg-bar: dark-mode ? #1a1d20 : #e0e0e0;
+    property <color> bg-surface: dark-mode ? #202327 : #fff;
+    property <color> bg-card: dark-mode ? #202327 : #ddd;
+    property <color> bg-hover: dark-mode ? #2e333a : #c8c8c8;
+    property <color> bg-preview: dark-mode ? #0d0e10 : #444;
     property <color> bg-scrim: dark-mode ? #000000aa : #000000aa;
-    property <color> border-subtle: dark-mode ? #333 : #ccc;
-    property <color> border-mid: dark-mode ? #444 : #aaa;
-    property <color> text-primary: dark-mode ? #eee : #111;
-    property <color> text-body: dark-mode ? #ccc : #222;
-    property <color> text-secondary: dark-mode ? #aaa : #333;
-    property <color> text-muted: dark-mode ? #888 : #444;
-    property <color> text-dim: dark-mode ? #666 : #555;
-    property <color> text-faint: dark-mode ? #555 : #666;
-    property <color> text-heading: dark-mode ? #fff : #111;
-    property <color> accent: dark-mode ? #8ae68a : #2a7a2a;
+    property <color> border-subtle: dark-mode ? #2a2e33 : #ccc;
+    property <color> border-mid: dark-mode ? #34393f : #aaa;
+    property <color> text-primary: dark-mode ? #dcdfe3 : #111;
+    property <color> text-body: dark-mode ? #c4c8cd : #222;
+    property <color> text-secondary: dark-mode ? #9aa0a7 : #333;
+    property <color> text-muted: dark-mode ? #777d84 : #444;
+    property <color> text-dim: dark-mode ? #6a7077 : #555;
+    property <color> text-faint: dark-mode ? #474c52 : #666;
+    property <color> text-heading: dark-mode ? #f0f2f4 : #111;
+    property <color> accent: dark-mode ? #74d69a : #2a7a2a;
     property <color> accent-info: dark-mode ? #8f8 : #2a8a2a;
     property <color> accent-warn: dark-mode ? #e8a060 : #c07020;
     property <color> accent-error: dark-mode ? #f88 : #c44;
@@ -488,11 +787,26 @@ export component RecoApp inherits Window {
     in-out property <string> status-text: "Load left + right videos and calibration JSON to begin";
     in-out property <float> progress: 0.0;
     in-out property <int> current-frame: 0;
+    property <bool> frame-input-editing: false;
     in-out property <int> total-frames: 0;
     in-out property <string> current-time-text: "0:00";
+    property <bool> speed-input-editing: false;
+    // Playback speed multiplier, adjustable to frame accuracy (see
+    // `Playback::set_speed`). 1.0 = normal speed.
+    in-out property <float> playback-speed: 1.0;
     in-out property <string> total-time-text: "0:00";
     in-out property <float> fps: 0.0;
     in-out property <bool> calibrating: false;
+    in-out property <bool> detecting-sync: false;
+    // `audio-sync-expanded` mirrors the section's collapse state into
+    // Rust so `maybe_recompute_audio_envelope` only runs the (relatively
+    // expensive, ffmpeg-shelling) extraction while the user can see the
+    // audio-sync waveform panel below.
+    in-out property <bool> audio-sync-expanded: false;
+    in-out property <[float]> audio-envelope-left: [];
+    in-out property <[float]> audio-envelope-right: [];
+    in-out property <float> audio-window-frames: 5.0;
+    in-out property <float> audio-waveform-height-px: 300.0;
     in-out property <string> calibration-step: "";
     in-out property <bool> has-both-videos: left-path != "" && right-path != "";
     in-out property <bool> has-roi: false;
@@ -507,6 +821,7 @@ export component RecoApp inherits Window {
     in-out property <float> pitch: 0.0;    // radians
     in-out property <float> fov: 75.0;     // degrees
     in-out property <float> blend-width: 0.05;
+    in-out property <bool> blend-flip-direction: false;
     in-out property <float> rig-tilt: 0.0; // degrees
     in-out property <float> rig-roll: 0.0; // degrees
     in-out property <int> sync-offset: 0;  // frames
@@ -517,6 +832,8 @@ export component RecoApp inherits Window {
     in-out property <float> cal-intersect: 0.0;
     in-out property <float> cal-camera-axis-offset: 0.0;
     in-out property <float> cal-x-ty: 0.0;
+    in-out property <float> cal-ground-tilt-x: 0.0;
+    in-out property <float> cal-ground-tilt-z: 0.0;
     in-out property <bool> cal-dirty: false;  // true when user has edited
 
     // Side panel visibility (unified Controls + Stats).
@@ -596,6 +913,22 @@ export component RecoApp inherits Window {
     // frame is pointed off-axis; harmful if the IMU is noisy. Default
     // off because the feature-matching seed is reliable on most footage.
     in-out property <bool> use-imu-seeds: false;
+    // Forces the optimizer to solve the right camera's independent pitch
+    // (x_rx) even without IMU data. Normally x_rx only turns on when the
+    // IMU sees >2 deg differential pitch between cameras; rigs without a
+    // native gyro never get that seed. Off by default: one more free
+    // rotation axis for the optimizer to fit against matched points risks
+    // overfitting noise instead of the real rotation.
+    in-out property <bool> force-x-rx: false;
+    // Forces the optimizer to solve the left camera's independent roll
+    // (z_rz). Unlike x_rx there is no IMU signal to auto-detect this and
+    // no auto-enable gate to bypass - it's always off unless checked here.
+    in-out property <bool> force-z-rz: false;
+    // Feature detection normally downscales frames wider than 1920px for
+    // speed (keypoints are mapped back to full resolution afterward).
+    // Enabling this detects at full source resolution instead - slower,
+    // but can improve precision on 4K+ footage.
+    in-out property <bool> cal-full-res-features: false;
     in-out property <int> calibration-frames: 4;
     in-out property <float> cal-akaze-threshold: 0.0001;
     in-out property <float> cal-detect-y-min: 0.05;
@@ -691,11 +1024,13 @@ export component RecoApp inherits Window {
     callback pick-calibration();
     callback auto-calibrate();
     callback toggle-playback();
+    callback pause-playback();
     callback step-forward();
     callback step-backward();
     callback seek(float);
     // Relative seek in seconds (negative for rewind). CLI parity with `[` and `]`.
     callback seek-relative(float);
+    callback changed-playback-speed(float);
     // Mouse drag delta in pixels.
     callback pan(float, float);
     // Scroll wheel delta (degrees FOV per tick).
@@ -704,14 +1039,19 @@ export component RecoApp inherits Window {
     callback reset-view();
     // Settings-panel slider callbacks.
     callback changed-blend-width(float);
+    callback changed-blend-flip-direction(bool);
     callback changed-rig-tilt(float);
     callback changed-rig-roll(float);
     callback changed-sync-offset(int);
+    callback compute-sync-offset();
+    callback changed-audio-window-frames(float);
     callback changed-fov(float);
     // Live calibration editing.
     callback changed-cal-intersect(float);
     callback changed-cal-camera-axis-offset(float);
     callback changed-cal-x-ty(float);
+    callback changed-cal-ground-tilt-x(float);
+    callback changed-cal-ground-tilt-z(float);
     callback save-calibration();
     callback reset-calibration();
     // Live lens parameter editing. Fires on any of the 8 sliders per
@@ -797,7 +1137,11 @@ export component RecoApp inherits Window {
     in-out property <bool> files-panel-open: false;
     // Panel widths (resizable via drag handles).
     in-out property <length> left-panel-width: 260px;
-    in-out property <length> right-panel-width: 280px;
+    // Wider than the left panel: this column holds LabeledSlider rows
+    // whose up/down stepper arrows sit at the far right edge, right where
+    // the ScrollView's vertical scrollbar renders - too narrow and the
+    // scrollbar overlaps the steppers, making them unclickable.
+    in-out property <length> right-panel-width: 320px;
 
     // Keyboard handling. The FocusScope must *wrap* the content so
     // key events have somewhere to bubble up when a child (button,
@@ -861,7 +1205,7 @@ export component RecoApp inherits Window {
                 spacing: 6px;
                 alignment: start;
 
-                Button {
+                FlatButton {
                     text: root.files-panel-open ? "◀ Files" : "Files ▶";
                     clicked => { root.files-panel-open = !root.files-panel-open; }
                 }
@@ -875,36 +1219,45 @@ export component RecoApp inherits Window {
 
                 Rectangle { horizontal-stretch: 1; }
 
-                Button { text: "?"; clicked => { root.shortcuts-dialog-open = true; } }
-                Button { text: "⚙"; clicked => { root.open-prefs-dialog(); } }
+                FlatButton { text: "?"; clicked => { root.shortcuts-dialog-open = true; } }
+                FlatButton { text: "⚙"; clicked => { root.open-prefs-dialog(); } }
 
-                Button {
+                FlatButton {
                     text: "Export…";
                     enabled: root.files-loaded && !root.export-in-progress;
                     primary: true;
                     clicked => { root.open-export-dialog(); }
                 }
 
-            }
+                // Right controls-panel toggle, at the end of the toolbar row
+                // (was a bare Rectangle with no x, which Slint centered - it
+                // floated in the middle of the toolbar). has-both-videos (not
+                // files-loaded): the right panel also holds the auto-calibrate
+                // tuning knobs, reachable before the first calibration exists.
+                Rectangle {
+                    width: 30px;
+                    height: 28px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 7px;
+                    border-width: 1px;
+                    border-color: panel-toggle-touch.has-hover && root.has-both-videos ? #34393f : transparent;
+                    background: panel-toggle-touch.has-hover && root.has-both-videos ? root.bg-hover : transparent;
 
-            // Panel toggle pinned to the window's far right
-            Rectangle {
-                width: 36px;
-                height: 42px;
-                background: panel-toggle-touch.has-hover ? root.bg-hover : transparent;
+                    panel-toggle-touch := TouchArea {
+                        enabled: root.has-both-videos;
+                        clicked => { root.controls-open = !root.controls-open; }
+                        mouse-cursor: root.has-both-videos ? pointer : default;
+                    }
 
-                panel-toggle-touch := TouchArea {
-                    enabled: root.files-loaded;
-                    clicked => { root.controls-open = !root.controls-open; }
-                    mouse-cursor: pointer;
-                }
-
-                Text {
-                    text: root.controls-open ? "▶" : "◀";
-                    color: root.files-loaded ? root.text-secondary : root.text-faint;
-                    font-size: 16px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                    Text {
+                        text: root.controls-open ? "⇥" : "⇤";
+                        color: root.has-both-videos ? root.text-secondary : root.text-faint;
+                        font-size: 15px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: 100%;
+                        height: 100%;
+                    }
                 }
             }
         }
@@ -948,8 +1301,8 @@ export component RecoApp inherits Window {
                         HorizontalLayout {
                             spacing: 6px;
                             Text { text: "Left"; color: #8ae68a; font-size: 12px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
-                            Button { text: "+"; clicked => { root.pick-left-video(); } }
-                            Button { text: "Clear"; enabled: root.left-path != ""; clicked => { root.clear-left(); } }
+                            FlatButton { text: "+"; clicked => { root.pick-left-video(); } }
+                            FlatButton { text: "Clear"; enabled: root.left-path != ""; clicked => { root.clear-left(); } }
                         }
 
                         if root.left-segments.length == 0: Text {
@@ -971,8 +1324,8 @@ export component RecoApp inherits Window {
                         HorizontalLayout {
                             spacing: 6px;
                             Text { text: "Right"; color: #8ae68a; font-size: 12px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
-                            Button { text: "+"; clicked => { root.pick-right-video(); } }
-                            Button { text: "Clear"; enabled: root.right-path != ""; clicked => { root.clear-right(); } }
+                            FlatButton { text: "+"; clicked => { root.pick-right-video(); } }
+                            FlatButton { text: "Clear"; enabled: root.right-path != ""; clicked => { root.clear-right(); } }
                         }
 
                         if root.right-segments.length == 0: Text {
@@ -994,7 +1347,7 @@ export component RecoApp inherits Window {
 
                         if root.has-both-videos: HorizontalLayout {
                             spacing: 4px;
-                            Button {
+                            FlatButton {
                                 text: root.calibrating
                                     ? "Calibrating..."
                                     : (root.files-loaded ? "Re-calibrate" : "Auto Calibrate");
@@ -1002,77 +1355,9 @@ export component RecoApp inherits Window {
                                 horizontal-stretch: 1;
                                 clicked => { root.auto-calibrate(); }
                             }
-                            Button {
+                            FlatButton {
                                 text: "Load…";
                                 clicked => { root.pick-calibration(); }
-                            }
-                        }
-
-                        if root.has-both-videos: VerticalLayout {
-                            spacing: 6px;
-
-                            cal-advanced := SectionHeader {
-                                title: "Advanced";
-                                expanded: false;
-                            }
-
-                            if cal-advanced.expanded: VerticalLayout {
-                                spacing: 4px;
-
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    Text { text: "Frames:"; color: #888; font-size: 11px; vertical-alignment: center; }
-                                    ComboBox {
-                                        model: ["2", "4", "6", "8"];
-                                        current-value: root.calibration-frames;
-                                        width: 56px;
-                                        enabled: !root.calibrating;
-                                        selected(v) => { root.calibration-frames = max(2, v.to-float()); }
-                                    }
-
-                                    CheckBox {
-                                        text: "IMU seeds";
-                                        checked <=> root.use-imu-seeds;
-                                        enabled: !root.calibrating;
-                                    }
-                                }
-
-                                LabeledSlider {
-                                    label: "AKAZE threshold";
-                                    minimum: 0.00005;
-                                    maximum: 0.005;
-                                    value <=> root.cal-akaze-threshold;
-                                    decimals: 4;
-                                    changed(v) => {}
-                                }
-
-                                LabeledSlider {
-                                    label: "Detect Y min";
-                                    minimum: 0;
-                                    maximum: 0.5;
-                                    value <=> root.cal-detect-y-min;
-                                    decimals: 2;
-                                    changed(v) => {}
-                                }
-
-                                LabeledSlider {
-                                    label: "Detect Y max";
-                                    minimum: 0.5;
-                                    maximum: 1.0;
-                                    value <=> root.cal-detect-y-max;
-                                    decimals: 2;
-                                    changed(v) => {}
-                                }
-
-                                LabeledSlider {
-                                    label: "Skip end";
-                                    minimum: 0;
-                                    maximum: 60;
-                                    value <=> root.cal-skip-end-secs;
-                                    suffix: "s";
-                                    decimals: 0;
-                                    changed(v) => {}
-                                }
                             }
                         }
 
@@ -1109,31 +1394,46 @@ export component RecoApp inherits Window {
                         if root.files-loaded: Text { text: "Stitching"; color: #aaa; font-size: 12px; font-weight: 600; }
 
                         if root.files-loaded: LabeledSlider {
+                            tip: "Width of the feathered blend at the seam between the two cameras.";
                             label: "Seam blend";
                             minimum: 0;
                             maximum: 0.3;
                             value <=> root.blend-width;
                             decimals: 2;
+                            step: 0.01;
                             changed(v) => { root.changed-blend-width(v); }
                         }
 
+                        if root.files-loaded: Tip {
+                            tip: "Which camera fades in over the other at the seam. Off (default): right fades over a fixed left. On: left fades over a fixed right. Doesn't move the seam itself.";
+                            CheckBox {
+                                text: "Flip blend direction (left over right)";
+                                checked <=> root.blend-flip-direction;
+                                toggled => { root.changed-blend-flip-direction(self.checked); }
+                            }
+                        }
+
                         if root.files-loaded: LabeledSlider {
+                            tip: "Forward/backward lean of the camera rig; straightens vertical lines at the panorama edges.";
                             label: "Rig tilt";
                             minimum: -30;
                             maximum: 30;
                             value <=> root.rig-tilt;
                             suffix: "°";
                             decimals: 1;
+                            step: 0.1;
                             changed(v) => { root.changed-rig-tilt(v); }
                         }
 
                         if root.files-loaded: LabeledSlider {
+                            tip: "Side-to-side tilt of the camera rig.";
                             label: "Rig roll";
                             minimum: -15;
                             maximum: 15;
                             value <=> root.rig-roll;
                             suffix: "°";
                             decimals: 1;
+                            step: 0.1;
                             changed(v) => { root.changed-rig-roll(v); }
                         }
 
@@ -1146,10 +1446,19 @@ export component RecoApp inherits Window {
                                 accepted => { root.sync-offset = self.text.to-float(); root.changed-sync-offset(self.text.to-float()); }
                             }
                             Text { text: "frames"; color: #777; font-size: 10px; vertical-alignment: center; }
-                            Button { text: "Apply"; clicked => { root.sync-offset = sync-input.text.to-float(); root.changed-sync-offset(sync-input.text.to-float()); } }
+                            FlatButton { text: "Apply"; clicked => { root.sync-offset = sync-input.text.to-float(); root.changed-sync-offset(sync-input.text.to-float()); } }
                         }
 
-                        if root.files-loaded && (root.cal-dirty || root.lens-dirty): Button {
+                        if root.files-loaded: Tip {
+                            tip: "Detect the sync offset only (IMU telemetry, falling back to audio cross-correlation) - the same detection Auto-Calibrate uses internally, without running feature matching/optimization. Can take up to a minute or two on footage with heavy IMU telemetry.";
+                            FlatButton {
+                                text: root.detecting-sync ? "Detecting…" : "Detect Sync Offset";
+                                enabled: !root.detecting-sync && !root.calibrating;
+                                clicked => { root.compute-sync-offset(); }
+                            }
+                        }
+
+                        if root.files-loaded && (root.cal-dirty || root.lens-dirty): FlatButton {
                             text: "Save Calibration";
                             primary: true;
                             clicked => { root.save-calibration(); }
@@ -1171,12 +1480,12 @@ export component RecoApp inherits Window {
 
                         if root.files-loaded: HorizontalLayout {
                             spacing: 4px;
-                            Button {
+                            FlatButton {
                                 text: root.has-roi ? "Edit ROI..." : "Set ROI...";
                                 horizontal-stretch: 1;
                                 clicked => { root.launch-roi-editor(); }
                             }
-                            Button {
+                            FlatButton {
                                 text: "Paste ROI";
                                 clicked => { root.paste-roi(); }
                             }
@@ -1199,7 +1508,7 @@ export component RecoApp inherits Window {
 
                         Rectangle { height: 1px; background: root.border-subtle; }
 
-                        Button {
+                        FlatButton {
                             text: "Recent…";
                             enabled: root.recent-left-paths.length > 0
                                    || root.recent-right-paths.length > 0
@@ -1214,7 +1523,7 @@ export component RecoApp inherits Window {
             // The outer Rectangle fills the layout cell; the inner
             // `preview-box` optionally constrains itself to a chosen
             // aspect ratio and centers inside the outer area.
-            Rectangle {
+            preview-column := Rectangle {
                 background: root.bg-preview;
                 horizontal-stretch: 1;
 
@@ -1330,6 +1639,36 @@ export component RecoApp inherits Window {
                         return accept;
                     }
                 }
+
+                // Current view state, surfaced over the preview where the
+                // eye already is. Non-interactive (no TouchArea) so pan/zoom
+                // drag underneath still works. Hidden until a clip loads.
+                if root.files-loaded && !root.lens-preview-active: Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: 12px;
+                    width: fov-pill.preferred-width + 24px;
+                    height: 26px;
+                    border-radius: 13px;
+                    background: #0d0f11d0;
+                    border-width: 1px;
+                    border-color: #2a2e33;
+                    fov-pill := HorizontalLayout {
+                        spacing: 7px;
+                        alignment: center;
+                        Text {
+                            text: "FOV " + round(root.fov) + "°";
+                            color: #9aa0a7;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                        if root.use-constrained-look: Text {
+                            text: "· Constrained";
+                            color: #6a7077;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
             }
 
             // Right-side controls panel. Collapsible sections keep
@@ -1388,7 +1727,7 @@ export component RecoApp inherits Window {
                         toggled => { root.changed-constrained-look(); }
                     }
 
-                    if !root.lens-preview-active: Button {
+                    if !root.lens-preview-active: FlatButton {
                         text: "Reset View";
                         clicked => { root.reset-view(); }
                     }
@@ -1425,7 +1764,7 @@ export component RecoApp inherits Window {
                             color: #777; font-size: 11px;
                         }
 
-                        Button {
+                        FlatButton {
                             text: "Browse profiles...";
                             clicked => { root.lens-picker-open = true; }
                         }
@@ -1449,8 +1788,8 @@ export component RecoApp inherits Window {
 
                         if root.lens-preview-active: HorizontalLayout {
                             spacing: 4px;
-                            Button { text: "Left"; primary: root.lens-preview-side == "left"; clicked => { root.lens-preview-side = "left"; root.changed-lens-preview(); } }
-                            Button { text: "Right"; primary: root.lens-preview-side == "right"; clicked => { root.lens-preview-side = "right"; root.changed-lens-preview(); } }
+                            FlatButton { text: "Left"; primary: root.lens-preview-side == "left"; clicked => { root.lens-preview-side = "left"; root.changed-lens-preview(); } }
+                            FlatButton { text: "Right"; primary: root.lens-preview-side == "right"; clicked => { root.lens-preview-side = "right"; root.changed-lens-preview(); } }
                         }
 
                         // Fine-tune: auto-expands in lens preview mode
@@ -1464,40 +1803,192 @@ export component RecoApp inherits Window {
 
                             HorizontalLayout {
                                 spacing: 4px;
-                                Button { text: "Left"; primary: root.lens-selected-camera == "left"; clicked => { root.lens-selected-camera = "left"; } }
-                                Button { text: "Right"; primary: root.lens-selected-camera == "right"; clicked => { root.lens-selected-camera = "right"; } }
-                                Button { text: "Both"; primary: root.lens-selected-camera == "both"; clicked => { root.lens-selected-camera = "both"; } }
+                                FlatButton { text: "Left"; primary: root.lens-selected-camera == "left"; clicked => { root.lens-selected-camera = "left"; } }
+                                FlatButton { text: "Right"; primary: root.lens-selected-camera == "right"; clicked => { root.lens-selected-camera = "right"; } }
+                                FlatButton { text: "Both"; primary: root.lens-selected-camera == "both"; clicked => { root.lens-selected-camera = "both"; } }
                             }
 
                             if root.lens-selected-camera == "left" || root.lens-selected-camera == "both": VerticalLayout {
                                 spacing: 3px;
-                                LabeledSlider { label: "fx"; minimum: root.lens-fx-min; maximum: root.lens-fx-max; value <=> root.lens-left-fx; decimals: 0; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { label: "fy"; minimum: root.lens-fy-min; maximum: root.lens-fy-max; value <=> root.lens-left-fy; decimals: 0; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { label: "cx"; minimum: root.lens-cx-min; maximum: root.lens-cx-max; value <=> root.lens-left-cx; decimals: 0; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { label: "cy"; minimum: root.lens-cy-min; maximum: root.lens-cy-max; value <=> root.lens-left-cy; decimals: 0; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { label: "k1"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-left-k1; decimals: 2; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { label: "k2"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-left-k2; decimals: 2; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { label: "k3"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-left-k3; decimals: 2; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { label: "k4"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-left-k4; decimals: 2; changed(v) => { root.changed-lens-param(); } }
+                                LabeledSlider { tip: "Horizontal focal length in pixels."; label: "fx"; minimum: root.lens-fx-min; maximum: root.lens-fx-max; value <=> root.lens-left-fx; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
+                                LabeledSlider { tip: "Vertical focal length in pixels."; label: "fy"; minimum: root.lens-fy-min; maximum: root.lens-fy-max; value <=> root.lens-left-fy; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
+                                LabeledSlider { tip: "Horizontal optical center in pixels."; label: "cx"; minimum: root.lens-cx-min; maximum: root.lens-cx-max; value <=> root.lens-left-cx; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
+                                LabeledSlider { tip: "Vertical optical center in pixels."; label: "cy"; minimum: root.lens-cy-min; maximum: root.lens-cy-max; value <=> root.lens-left-cy; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
+                                LabeledSlider { tip: "Fisheye distortion coefficient 1 (KB4 model)."; label: "k1"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-left-k1; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
+                                LabeledSlider { tip: "Fisheye distortion coefficient 2 (KB4 model)."; label: "k2"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-left-k2; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
+                                LabeledSlider { tip: "Fisheye distortion coefficient 3 (KB4 model)."; label: "k3"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-left-k3; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
+                                LabeledSlider { tip: "Fisheye distortion coefficient 4 (KB4 model)."; label: "k4"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-left-k4; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
                             }
 
                             if root.lens-selected-camera == "right": VerticalLayout {
                                 spacing: 3px;
-                                LabeledSlider { label: "fx"; minimum: root.lens-fx-min; maximum: root.lens-fx-max; value <=> root.lens-right-fx; decimals: 0; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { label: "fy"; minimum: root.lens-fy-min; maximum: root.lens-fy-max; value <=> root.lens-right-fy; decimals: 0; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { label: "cx"; minimum: root.lens-cx-min; maximum: root.lens-cx-max; value <=> root.lens-right-cx; decimals: 0; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { label: "cy"; minimum: root.lens-cy-min; maximum: root.lens-cy-max; value <=> root.lens-right-cy; decimals: 0; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { label: "k1"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-right-k1; decimals: 2; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { label: "k2"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-right-k2; decimals: 2; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { label: "k3"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-right-k3; decimals: 2; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { label: "k4"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-right-k4; decimals: 2; changed(v) => { root.changed-lens-param(); } }
+                                LabeledSlider { tip: "Horizontal focal length in pixels."; label: "fx"; minimum: root.lens-fx-min; maximum: root.lens-fx-max; value <=> root.lens-right-fx; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
+                                LabeledSlider { tip: "Vertical focal length in pixels."; label: "fy"; minimum: root.lens-fy-min; maximum: root.lens-fy-max; value <=> root.lens-right-fy; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
+                                LabeledSlider { tip: "Horizontal optical center in pixels."; label: "cx"; minimum: root.lens-cx-min; maximum: root.lens-cx-max; value <=> root.lens-right-cx; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
+                                LabeledSlider { tip: "Vertical optical center in pixels."; label: "cy"; minimum: root.lens-cy-min; maximum: root.lens-cy-max; value <=> root.lens-right-cy; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
+                                LabeledSlider { tip: "Fisheye distortion coefficient 1 (KB4 model)."; label: "k1"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-right-k1; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
+                                LabeledSlider { tip: "Fisheye distortion coefficient 2 (KB4 model)."; label: "k2"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-right-k2; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
+                                LabeledSlider { tip: "Fisheye distortion coefficient 3 (KB4 model)."; label: "k3"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-right-k3; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
+                                LabeledSlider { tip: "Fisheye distortion coefficient 4 (KB4 model)."; label: "k4"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-right-k4; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
                             }
 
-                            Button { text: "Reset Lens"; enabled: root.lens-dirty; clicked => { root.reset-lens(); } }
+                            FlatButton { text: "Reset Lens"; enabled: root.lens-dirty; clicked => { root.reset-lens(); } }
                         }
                     }
 
                     if !lens-section.expanded: Rectangle { height: 1px; background: #2a2a2a; }
+
+                    // ── Audio Sync (collapsible): overlaid L/R waveform ──
+                    // around the playhead, so a sync_offset error shows up
+                    // as a visible shift between the two traces.
+                    audio-section := SectionHeader {
+                        title: "Audio Sync Waveform";
+                        expanded <=> root.audio-sync-expanded;
+                    }
+
+                    if audio-section.expanded: VerticalLayout {
+                        spacing: 4px;
+
+                        Text {
+                            text: "L (blue) / R (orange), " + root.audio-window-frames + " frames around playhead. Aligned peaks = in sync.";
+                            color: root.text-muted; font-size: 11px; wrap: word-wrap;
+                        }
+
+                        HorizontalBox {
+                            padding: 0px;
+                            spacing: 12px;
+                            HorizontalLayout {
+                                spacing: 3px;
+                                Tip {
+                                    tip: "Number of frames of audio shown around the playhead.";
+                                    Text { text: "Window:"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
+                                }
+                                // Deliberately outside the `Tip` above: `Tip` inherits
+                                // `TouchArea`, which grabs mouse presses before a nested
+                                // `LineEdit` can claim keyboard focus, making it very
+                                // hard to reliably click into and type in.
+                                LineEdit {
+                                    text: root.audio-window-frames;
+                                    width: 64px;
+                                    accepted => {
+                                        root.audio-window-frames = self.text.to-float();
+                                        root.changed-audio-window-frames(self.text.to-float());
+                                    }
+                                }
+                                Text { text: "frames"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
+                            }
+                            HorizontalLayout {
+                                spacing: 3px;
+                                Tip {
+                                    tip: "Height of the waveform display.";
+                                    Text { text: "Height:"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
+                                }
+                                LineEdit {
+                                    text: root.audio-waveform-height-px;
+                                    width: 64px;
+                                    accepted => {
+                                        root.audio-waveform-height-px = min(300, max(40, self.text.to-float()));
+                                    }
+                                }
+                                Text { text: "px"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
+                            }
+                        }
+
+                        waveform-area := Rectangle {
+                            height: root.audio-waveform-height-px * 1px;
+                            background: root.bg-base;
+                            border-radius: 4px;
+                            clip: true;
+
+                            property <float> bucket-count: max(1, root.audio-envelope-left.length) * 1.0;
+                            property <length> bar-w: waveform-area.width / bucket-count;
+
+                            // Background grid, purely a reading aid:
+                            // horizontal thirds + a vertical line
+                            // every 8 buckets.
+                            for row in [0.25, 0.5, 0.75]: Rectangle {
+                                x: 0px; width: waveform-area.width;
+                                y: waveform-area.height * row; height: 1px;
+                                background: #ffffff16;
+                            }
+                            for i in 9: Rectangle {
+                                x: waveform-area.width * (i + 1) / 10; width: 1px;
+                                y: 0px; height: waveform-area.height;
+                                background: #ffffff10;
+                            }
+
+                            // Both channels are plain (unmirrored)
+                            // lines sharing one axis - 0 at the
+                            // bottom, loudest point at the top - so a
+                            // real sync offset reads as a horizontal
+                            // shift between the two lines' peaks,
+                            // same as any two-series line chart.
+                            //
+                            // Each point is a thin horizontal marker
+                            // PLUS a vertical connector to the next
+                            // point's height, so consecutive buckets
+                            // join into a continuous "staircase" line
+                            // instead of reading as scattered dots.
+                            // Not a `Path`: Slint fits a `Path`'s
+                            // viewbox uniformly, which would squash a
+                            // wide/short envelope flat; and Rectangle
+                            // has no rotation for a true diagonal
+                            // stroke, so this approximates one.
+                            for v[idx] in root.audio-envelope-left: Rectangle {
+                                x: idx * waveform-area.bar-w;
+                                width: waveform-area.bar-w;
+                                height: 1px;
+                                y: waveform-area.height * (1.0 - v) - 0.5px;
+                                background: #5fb8ff;
+                            }
+                            for v[idx] in root.audio-envelope-left: Rectangle {
+                                property <bool> has-next: idx + 1 < root.audio-envelope-left.length;
+                                property <float> next-v: has-next ? root.audio-envelope-left[idx + 1] : v;
+                                property <length> y0: waveform-area.height * (1.0 - v);
+                                property <length> y1: waveform-area.height * (1.0 - next-v);
+                                visible: has-next;
+                                x: (idx + 1) * waveform-area.bar-w - 0.5px;
+                                width: 1px;
+                                y: min(y0, y1);
+                                height: max(y0, y1) - min(y0, y1) + 1px;
+                                background: #5fb8ff;
+                            }
+                            for v[idx] in root.audio-envelope-right: Rectangle {
+                                x: idx * waveform-area.bar-w;
+                                width: waveform-area.bar-w;
+                                height: 1px;
+                                y: waveform-area.height * (1.0 - v) - 0.5px;
+                                background: #ff9f5f;
+                            }
+                            for v[idx] in root.audio-envelope-right: Rectangle {
+                                property <bool> has-next: idx + 1 < root.audio-envelope-right.length;
+                                property <float> next-v: has-next ? root.audio-envelope-right[idx + 1] : v;
+                                property <length> y0: waveform-area.height * (1.0 - v);
+                                property <length> y1: waveform-area.height * (1.0 - next-v);
+                                visible: has-next;
+                                x: (idx + 1) * waveform-area.bar-w - 0.5px;
+                                width: 1px;
+                                y: min(y0, y1);
+                                height: max(y0, y1) - min(y0, y1) + 1px;
+                                background: #ff9f5f;
+                            }
+
+                            Rectangle {
+                                x: waveform-area.width * 0.5 - 1px;
+                                width: 2px;
+                                height: waveform-area.height;
+                                background: #ffffff55;
+                            }
+
+                            if root.audio-envelope-left.length == 0 && root.audio-envelope-right.length == 0: Text {
+                                text: "Computing…";
+                                color: root.text-muted; font-size: 10px;
+                                x: 6px; y: 6px;
+                            }
+                        }
+                    }
+
+                    if !audio-section.expanded: Rectangle { height: 1px; background: #2a2a2a; }
 
                     // ── Calibration (collapsible) ──
                     cal-section := SectionHeader {
@@ -1509,30 +2000,58 @@ export component RecoApp inherits Window {
                         spacing: 8px;
 
                         LabeledSlider {
+                            tip: "Overlap between the two camera planes; controls how much of each image is used.";
                             label: "Intersect";
                             minimum: -1.0;
                             maximum: 1.0;
                             value <=> root.cal-intersect;
                             decimals: 3;
+                            step: 0.001;
                             changed(v) => { root.changed-cal-intersect(v); }
                         }
 
                         LabeledSlider {
+                            tip: "Distance of the virtual camera from the stitch origin; affects parallax at the seam.";
                             label: "Camera axis offset";
                             minimum: -0.6;
                             maximum: 0.6;
                             value <=> root.cal-camera-axis-offset;
                             decimals: 3;
+                            step: 0.001;
                             changed(v) => { root.changed-cal-camera-axis-offset(v); }
                         }
 
                         LabeledSlider {
+                            tip: "Vertical alignment correction between the two camera planes.";
                             label: "x_ty";
                             minimum: -0.1;
                             maximum: 0.1;
                             value <=> root.cal-x-ty;
                             decimals: 3;
+                            step: 0.001;
                             changed(v) => { root.changed-cal-x-ty(v); }
+                        }
+
+                        LabeledSlider {
+                            tip: "Near-field ground-plane tilt correction for the right camera's content (x-plane). Fixes a seam step in ground lines close to the camera that the flat two-plane model can't otherwise correct - only affects the bottom of frame, close to the camera; leaves everything else untouched.";
+                            label: "ground_tilt_x";
+                            minimum: -0.3;
+                            maximum: 0.3;
+                            value <=> root.cal-ground-tilt-x;
+                            decimals: 3;
+                            step: 0.001;
+                            changed(v) => { root.changed-cal-ground-tilt-x(v); }
+                        }
+
+                        LabeledSlider {
+                            tip: "Same as ground_tilt_x, for the left camera's content (z-plane).";
+                            label: "ground_tilt_z";
+                            minimum: -0.3;
+                            maximum: 0.3;
+                            value <=> root.cal-ground-tilt-z;
+                            decimals: 3;
+                            step: 0.001;
+                            changed(v) => { root.changed-cal-ground-tilt-z(v); }
                         }
 
                         // Saving lives in one place: the "Save Calibration"
@@ -1540,7 +2059,7 @@ export component RecoApp inherits Window {
                         // cal/lens dirty, saves the whole calibration incl. lens
                         // + blend). This section keeps only the contextual
                         // layout Reset so there is no duplicate save button.
-                        Button {
+                        FlatButton {
                             text: "Reset";
                             enabled: root.cal-dirty;
                             clicked => { root.reset-calibration(); }
@@ -1548,6 +2067,110 @@ export component RecoApp inherits Window {
                     }
 
                     if !cal-section.expanded: Rectangle { height: 1px; background: #2a2a2a; }
+
+                    // ── Auto-calibrate tuning (collapsible) ──
+                    if root.has-both-videos: VerticalLayout {
+                        spacing: 6px;
+
+                        cal-advanced := SectionHeader {
+                            title: "Advanced";
+                            expanded: false;
+                        }
+
+                        if cal-advanced.expanded: VerticalLayout {
+                            spacing: 4px;
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text { text: "Frames:"; color: #888; font-size: 11px; vertical-alignment: center; }
+                                ComboBox {
+                                    model: ["2", "4", "6", "8"];
+                                    current-value: root.calibration-frames;
+                                    width: 56px;
+                                    enabled: !root.calibrating;
+                                    selected(v) => { root.calibration-frames = max(2, v.to-float()); }
+                                }
+
+                                CheckBox {
+                                    text: "IMU seeds";
+                                    checked <=> root.use-imu-seeds;
+                                    enabled: !root.calibrating;
+                                }
+                            }
+
+                            LabeledSlider {
+                                tip: "Feature detector sensitivity. Lower = more (weaker) features detected.";
+                                label: "AKAZE threshold";
+                                minimum: 0.00005;
+                                maximum: 0.005;
+                                value <=> root.cal-akaze-threshold;
+                                decimals: 4;
+                                step: 0.0001;
+                                changed(v) => {}
+                            }
+
+                            LabeledSlider {
+                                tip: "Top edge of the vertical region used for feature detection (fraction of frame height).";
+                                label: "Detect Y min";
+                                minimum: 0;
+                                maximum: 0.5;
+                                value <=> root.cal-detect-y-min;
+                                decimals: 2;
+                                step: 0.01;
+                                changed(v) => {}
+                            }
+
+                            LabeledSlider {
+                                tip: "Bottom edge of the vertical region used for feature detection (fraction of frame height).";
+                                label: "Detect Y max";
+                                minimum: 0.5;
+                                maximum: 1.0;
+                                value <=> root.cal-detect-y-max;
+                                decimals: 2;
+                                step: 0.01;
+                                changed(v) => {}
+                            }
+
+                            LabeledSlider {
+                                tip: "Seconds to skip at the end of the clip when sampling calibration frames.";
+                                label: "Skip end";
+                                minimum: 0;
+                                maximum: 60;
+                                value <=> root.cal-skip-end-secs;
+                                suffix: "s";
+                                decimals: 0;
+                                step: 1;
+                                changed(v) => {}
+                            }
+
+                            Tip {
+                                tip: "Solve the right camera's independent pitch (x_rx), even without IMU data. Normally only auto-enabled when the IMU detects >2 deg differential pitch - cameras without a native gyro never get that seed. Try this if the two images still look rotated relative to each other after calibrating.";
+                                CheckBox {
+                                    text: "Force extra rotation fit (x_rx)";
+                                    checked <=> root.force-x-rx;
+                                    enabled: !root.calibrating;
+                                }
+                            }
+                            Tip {
+                                tip: "Solve the left camera's independent roll (z_rz). There's no IMU signal for this angle, so it's always off unless checked here. Try this if the stitch still looks rotated after enabling Force extra rotation fit (x_rx).";
+                                CheckBox {
+                                    text: "Force extra rotation fit (z_rz)";
+                                    checked <=> root.force-z-rz;
+                                    enabled: !root.calibrating;
+                                }
+                            }
+                            Tip {
+                                tip: "Detect features at full video resolution instead of downscaling to 1920px wide. More precise on 4K+ footage, but slower.";
+                                CheckBox {
+                                    text: "Full-resolution features (slower)";
+                                    checked <=> root.cal-full-res-features;
+                                    enabled: !root.calibrating;
+                                }
+                            }
+                        }
+                    }
+
+                    if root.has-both-videos: Rectangle { height: 1px; background: #2a2a2a; }
 
                     // ── Stats (collapsible, hidden in lens preview) ──
                     if !root.lens-preview-active: VerticalLayout {
@@ -1585,105 +2208,329 @@ export component RecoApp inherits Window {
 
         }
 
-        // ── Transport bar (single inline row) ──
+        // ── Transport bar: full-width scrubber row, then a control row
+        // with three balanced zones (playhead info / transport buttons /
+        // recording+format) separated by thin dividers. The content is
+        // inset to line up with the preview column above it (not the
+        // side panels), but the bar's own background still spans the
+        // full width so there's no color seam under the side panels. ──
         Rectangle {
+            // padding-top(4) + scrubber row(20) + spacing(4) +
+            // control row(24) + padding-bottom(4) = 56px content height;
+            // 58px leaves a couple px of slack instead of sitting right at
+            // the edge. Too little here and the control row (frame field,
+            // buttons, Rec/format controls) overflows into the status bar
+            // below it instead of clipping or reflowing.
+            height: 58px;
             background: root.bg-bar;
-            height: 44px;
 
-            HorizontalLayout {
+            Rectangle {
+                x: preview-column.x;
+                width: preview-column.width;
+                height: 100%;
+
+            VerticalLayout {
                 padding-left: 8px;
                 padding-right: 8px;
                 padding-top: 4px;
                 padding-bottom: 4px;
-                spacing: 6px;
+                spacing: 4px;
 
-                // Playback buttons
-                Button { text: "|<"; enabled: root.files-loaded; clicked => { root.step-backward(); } }
-                Button { text: root.playing ? "||" : "▶"; enabled: root.files-loaded; clicked => { root.toggle-playback(); } }
-                Button { text: ">|"; enabled: root.files-loaded; clicked => { root.step-forward(); } }
+                // ── Scrubber row: current time, timeline, total time ──
+                HorizontalLayout {
+                    spacing: 6px;
 
-                Text {
-                    text: root.current-time-text;
-                    color: #aaa;
-                    font-size: 11px;
-                    vertical-alignment: center;
-                    width: 44px;
-                    horizontal-alignment: right;
-                }
-
-                Rectangle {
-                    horizontal-stretch: 1;
-                    height: 24px;
-
-                    // Export range indicator (green tint behind the slider)
-                    if root.export-start-secs > 0 || root.export-end-secs < root.clip-duration-secs: Rectangle {
-                        property <float> start-frac: root.clip-duration-secs > 0
-                            ? root.export-start-secs / root.clip-duration-secs : 0;
-                        property <float> end-frac: root.clip-duration-secs > 0
-                            ? root.export-end-secs / root.clip-duration-secs : 1.0;
-
-                        x: parent.width * start-frac;
-                        width: parent.width * (end-frac - start-frac);
-                        height: parent.height;
-                        background: #4a7a4a33;
-                        border-radius: 2px;
+                    Text {
+                        text: root.current-time-text;
+                        color: #aaa;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        width: 56px;
+                        horizontal-alignment: right;
                     }
 
-                    Slider {
-                        width: 100%;
-                        minimum: 0;
-                        maximum: root.total-frames == 0 ? 1.0 : 1.0 * root.total-frames;
-                        value: 1.0 * root.current-frame;
-                        enabled: root.files-loaded;
-                        released(val) => {
-                            if root.total-frames > 0 { root.seek(val / root.total-frames); }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 20px;
+
+                        // Export range indicator (green tint behind the slider)
+                        if root.export-start-secs > 0 || root.export-end-secs < root.clip-duration-secs: Rectangle {
+                            property <float> start-frac: root.clip-duration-secs > 0
+                                ? root.export-start-secs / root.clip-duration-secs : 0;
+                            property <float> end-frac: root.clip-duration-secs > 0
+                                ? root.export-end-secs / root.clip-duration-secs : 1.0;
+
+                            x: parent.width * start-frac;
+                            width: parent.width * (end-frac - start-frac);
+                            height: parent.height;
+                            background: #4a7a4a33;
+                            border-radius: 2px;
+                        }
+
+                        Slider {
+                            width: 100%;
+                            minimum: 0;
+                            maximum: root.total-frames == 0 ? 1.0 : 1.0 * root.total-frames;
+                            value: 1.0 * root.current-frame;
+                            enabled: root.files-loaded;
+                            released(val) => {
+                                if root.total-frames > 0 { root.seek(val / root.total-frames); }
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: root.total-time-text;
+                        color: #666;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        width: 56px;
+                    }
+                }
+
+                // ── Control row: playhead info (left) / transport buttons
+                // (true-centered) / recording + format (right), divided by
+                // thin translucent-white rules - same convention as the
+                // audio-waveform grid lines above.
+                control-row := Rectangle {
+                    height: 24px;
+
+                    left-zone := HorizontalLayout {
+                        x: 0px;
+                        width: self.preferred-width;
+                        height: parent.height;
+                        spacing: 10px;
+
+                        // Plain-Text/LineEdit swap (not a single persistent
+                        // LineEdit bound to `current-frame`): Slint's
+                        // built-in text widgets break a one-way `text:
+                        // expr` binding the moment the user types into
+                        // them, so a persistent LineEdit here would
+                        // permanently stop reflecting the playhead after
+                        // the first edit. Re-instantiating on each edit
+                        // (like LabeledSlider) gives a fresh binding every
+                        // time instead.
+                        //
+                        // Not wrapped in `Tip`: `Tip` owns a hover-
+                        // triggered `PopupWindow` that only closes via its
+                        // own `changed has-hover` binding. Wrapping this
+                        // toggleable region orphans that popup permanently
+                        // on-screen, because clicking to enter edit mode
+                        // destroys the `Tip` instance (and its hover
+                        // binding) while the popup is still showing, so
+                        // `popup.close()` never runs.
+                        if !root.frame-input-editing: TouchArea {
+                            mouse-cursor: pointer;
+                            // TouchArea doesn't auto-size to its child
+                            // within a layout - without an explicit width
+                            // this collapses to ~0px, silently hiding the
+                            // field.
+                            width: 60px;
+                            height: 22px;
+                            clicked => { root.frame-input-editing = true; }
+                            Rectangle {
+                                width: 100%;
+                                height: 100%;
+                                background: root.bg-panel;
+                                border-radius: 3px;
+                                border-width: 1px;
+                                border-color: #444;
+                                Text {
+                                    text: root.current-frame;
+                                    color: white;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    width: 100%;
+                                    height: 100%;
+                                }
+                            }
+                        }
+                        if root.frame-input-editing: HorizontalLayout {
+                            frame-input := LineEdit {
+                                text: root.current-frame;
+                                width: 60px;
+                                enabled: root.files-loaded;
+                                font-size: 11px;
+                                function commit() {
+                                    if root.total-frames > 0 {
+                                        root.seek(clamp(self.text.to-float(), 0.0, 1.0 * (root.total-frames - 1)) / root.total-frames);
+                                    }
+                                    root.frame-input-editing = false;
+                                }
+                                accepted => { self.commit(); }
+                                changed has-focus => {
+                                    if !self.has-focus && root.frame-input-editing {
+                                        self.commit();
+                                    }
+                                }
+                            }
+                            // Deferred focus: focusing synchronously from
+                            // `init` (mid-layout-pass, since this branch
+                            // was just mounted by the `if` toggle above)
+                            // hits a Slint "Recursion detected" panic -
+                            // see the same pattern on `LabeledSlider`'s
+                            // edit-mode LineEdit.
+                            frame-focus-timer := Timer {
+                                interval: 1ms;
+                                running: true;
+                                triggered => {
+                                    self.running = false;
+                                    frame-input.focus();
+                                    frame-input.select-all();
+                                }
+                            }
+                        }
+
+                        // Playback speed multiplier. Same click-to-edit
+                        // swap as LabeledSlider's value field: a LineEdit
+                        // permanently bound one-way to an externally-
+                        // updated value (e.g. resynced to 1.0x on loading
+                        // a new clip) would stop reflecting it the moment
+                        // the user types into it.
+                        HorizontalLayout {
+                            spacing: 3px;
+                            Tip {
+                                tip: "Playback speed multiplier. Click the box to type an exact value.";
+                                Text { text: "Speed:"; color: #777; font-size: 10px; vertical-alignment: center; }
+                            }
+                            if !root.speed-input-editing: TouchArea {
+                                mouse-cursor: pointer;
+                                width: 40px;
+                                height: 20px;
+                                clicked => { root.speed-input-editing = true; }
+                                Rectangle {
+                                    width: 100%;
+                                    height: 100%;
+                                    background: root.bg-panel;
+                                    border-radius: 3px;
+                                    border-width: 1px;
+                                    border-color: #444;
+                                    Text {
+                                        text: root.playback-speed;
+                                        color: white;
+                                        font-size: 11px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        width: 100%;
+                                        height: 100%;
+                                    }
+                                }
+                            }
+                            if root.speed-input-editing: HorizontalLayout {
+                                speed-input := LineEdit {
+                                    text: root.playback-speed;
+                                    width: 40px;
+                                    enabled: root.files-loaded;
+                                    font-size: 11px;
+                                    function commit() {
+                                        root.playback-speed = self.text.to-float();
+                                        root.changed-playback-speed(root.playback-speed);
+                                        root.speed-input-editing = false;
+                                    }
+                                    accepted => { self.commit(); }
+                                    changed has-focus => {
+                                        if !self.has-focus && root.speed-input-editing {
+                                            self.commit();
+                                        }
+                                    }
+                                }
+                                speed-focus-timer := Timer {
+                                    interval: 1ms;
+                                    running: true;
+                                    triggered => {
+                                        self.running = false;
+                                        speed-input.focus();
+                                        speed-input.select-all();
+                                    }
+                                }
+                            }
+                            Text { text: "x"; color: #777; font-size: 10px; vertical-alignment: center; }
+                        }
+                    }
+
+                    // Divider between the playhead-info zone and the
+                    // transport buttons.
+                    Rectangle {
+                        x: left-zone.x + left-zone.width + 8px;
+                        y: 1px;
+                        width: 1px;
+                        height: parent.height - 2px;
+                        background: #ffffff22;
+                    }
+
+                    // Playback buttons: jump-to-start / step-back /
+                    // play-pause / step-forward / stop (pause-in-place) /
+                    // jump-to-end - matches the reference NLE-style
+                    // transport bar. True-centered on the row (not just
+                    // stretch-centered), same as the timeline above it,
+                    // regardless of how wide the left/right zones are.
+                    center-zone := HorizontalLayout {
+                        x: (parent.width - self.width) / 2;
+                        width: self.preferred-width;
+                        height: parent.height;
+                        spacing: 2px;
+                        Tip { tip: "Jump to first frame."; TransportButton { text: "|<"; enabled: root.files-loaded; clicked => { root.seek(0.0); } } }
+                        Tip { tip: "Step back one frame."; TransportButton { text: "<"; enabled: root.files-loaded; clicked => { root.step-backward(); } } }
+                        Tip { tip: "Play or pause."; TransportButton { text: root.playing ? "||" : "▶"; emphasized: true; enabled: root.files-loaded; clicked => { root.toggle-playback(); } } }
+                        Tip { tip: "Step forward one frame."; TransportButton { text: ">"; enabled: root.files-loaded; clicked => { root.step-forward(); } } }
+                        Tip { tip: "Stop (pause in place)."; TransportButton { text: "■"; enabled: root.files-loaded; clicked => { root.pause-playback(); } } }
+                        Tip { tip: "Jump to last frame."; TransportButton { text: ">|"; enabled: root.files-loaded; clicked => { root.seek(1.0); } } }
+                    }
+
+                    // Divider between the transport buttons and the
+                    // recording/format zone.
+                    Rectangle {
+                        x: right-zone.x - 8px - 1px;
+                        y: 1px;
+                        width: 1px;
+                        height: parent.height - 2px;
+                        background: #ffffff22;
+                    }
+
+                    right-zone := HorizontalLayout {
+                        x: parent.width - self.width;
+                        width: self.preferred-width;
+                        height: parent.height;
+                        spacing: 8px;
+
+                        // Record button
+                        Rectangle {
+                            width: rec-layout.preferred-width + 12px;
+                            border-radius: 5px;
+                            background: root.recording ? #4a1010 : rec-touch.has-hover ? #3a2020 : #2a1a1a;
+                            border-width: 1px;
+                            border-color: root.recording ? #e04040 : #553333;
+                            rec-touch := TouchArea {
+                                enabled: root.files-loaded && !root.export-in-progress;
+                                clicked => { root.toggle-recording(root.recording-codec, root.recording-quality); }
+                            }
+                            rec-layout := HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 5px;
+                                Rectangle { width: 7px; height: 7px; y: (parent.height - self.height) / 2; border-radius: 4px; background: root.recording ? #ff3030 : #883030; }
+                                Text { text: root.recording ? "Stop" : "Rec*"; color: root.recording ? #ff6060 : #cc8888; font-size: 11px; font-weight: 600; vertical-alignment: center; }
+                            }
+                        }
+
+                        if !root.recording: ComboBox {
+                            model: ["fast", "balanced", "high"];
+                            current-value <=> root.recording-quality;
+                            enabled: root.files-loaded && !root.export-in-progress;
+                            width: 82px;
+                        }
+
+                        ComboBox {
+                            model: ["auto", "16:9", "4:3", "21:9"];
+                            current-value <=> root.preview-aspect;
+                            enabled: root.files-loaded;
+                            width: 78px;
+                            selected(v) => { root.changed-preview-aspect(v); }
                         }
                     }
                 }
-
-                Text {
-                    text: root.total-time-text;
-                    color: #666;
-                    font-size: 11px;
-                    vertical-alignment: center;
-                    width: 44px;
-                }
-
-                // Record button
-                Rectangle {
-                    width: rec-layout.preferred-width + 12px;
-                    height: 28px;
-                    border-radius: 5px;
-                    background: root.recording ? #4a1010 : rec-touch.has-hover ? #3a2020 : #2a1a1a;
-                    border-width: 1px;
-                    border-color: root.recording ? #e04040 : #553333;
-                    rec-touch := TouchArea {
-                        enabled: root.files-loaded && !root.export-in-progress;
-                        clicked => { root.toggle-recording(root.recording-codec, root.recording-quality); }
-                    }
-                    rec-layout := HorizontalLayout {
-                        padding-left: 8px;
-                        padding-right: 8px;
-                        spacing: 5px;
-                        Rectangle { width: 7px; height: 7px; y: (parent.height - self.height) / 2; border-radius: 4px; background: root.recording ? #ff3030 : #883030; }
-                        Text { text: root.recording ? "Stop" : "Rec*"; color: root.recording ? #ff6060 : #cc8888; font-size: 11px; font-weight: 600; vertical-alignment: center; }
-                    }
-                }
-
-                if !root.recording: ComboBox {
-                    model: ["fast", "balanced", "high"];
-                    current-value <=> root.recording-quality;
-                    enabled: root.files-loaded && !root.export-in-progress;
-                    width: 82px;
-                }
-
-                ComboBox {
-                    model: ["auto", "16:9", "4:3", "21:9"];
-                    current-value <=> root.preview-aspect;
-                    enabled: root.files-loaded;
-                    width: 78px;
-                    selected(v) => { root.changed-preview-aspect(v); }
-                }
+            }
             }
         }
 
@@ -1723,12 +2570,12 @@ export component RecoApp inherits Window {
                     horizontal-stretch: 1;
                 }
 
-                if root.export-in-progress: Button {
+                if root.export-in-progress: FlatButton {
                     text: "Cancel";
                     clicked => { root.cancel-export(); }
                 }
 
-                if !root.export-in-progress && root.last-output-path != "": Button {
+                if !root.export-in-progress && root.last-output-path != "": FlatButton {
                     text: "Show in folder";
                     clicked => { root.show-in-folder(root.last-output-path); }
                 }
@@ -1800,7 +2647,7 @@ export component RecoApp inherits Window {
                             font-size: 16px;
                             font-weight: 600;
                         }
-                        Button {
+                        FlatButton {
                             text: "Clear all";
                             clicked => {
                                 root.clear-recent-files();
@@ -1942,7 +2789,7 @@ export component RecoApp inherits Window {
 
                     HorizontalLayout {
                         alignment: end;
-                        Button {
+                        FlatButton {
                             text: "Close";
                             clicked => { root.recent-dialog-open = false; }
                         }
@@ -2014,10 +2861,10 @@ export component RecoApp inherits Window {
 
                     HorizontalLayout {
                         spacing: 8px;
-                        Button { text: "Website"; clicked => { root.open-website(); } }
-                        Button { text: "Forum"; clicked => { root.open-forum(); } }
+                        FlatButton { text: "Website"; clicked => { root.open-website(); } }
+                        FlatButton { text: "Forum"; clicked => { root.open-forum(); } }
                         Rectangle { horizontal-stretch: 1; }
-                        Button {
+                        FlatButton {
                             text: "Close";
                             clicked => { root.shortcuts-dialog-open = false; }
                         }
@@ -2093,7 +2940,7 @@ export component RecoApp inherits Window {
                             placeholder-text: "Path to .onnx, or leave empty";
                             horizontal-stretch: 1;
                         }
-                        Button {
+                        FlatButton {
                             text: "Browse…";
                             clicked => { root.pick-prefs-model(); }
                         }
@@ -2133,7 +2980,7 @@ export component RecoApp inherits Window {
                             placeholder-text: "Same as source video (default)";
                             horizontal-stretch: 1;
                         }
-                        Button {
+                        FlatButton {
                             text: "Browse…";
                             clicked => { root.pick-recording-folder(); }
                         }
@@ -2170,11 +3017,11 @@ export component RecoApp inherits Window {
                     HorizontalLayout {
                         alignment: end;
                         spacing: 8px;
-                        Button {
+                        FlatButton {
                             text: "Cancel";
                             clicked => { root.prefs-dialog-open = false; }
                         }
-                        Button {
+                        FlatButton {
                             text: "Save";
                             primary: true;
                             clicked => {
@@ -2240,8 +3087,8 @@ export component RecoApp inherits Window {
                     HorizontalLayout {
                         spacing: 8px;
                         alignment: end;
-                        Button { text: "Cancel"; clicked => { root.bug-dialog-open = false; } }
-                        Button {
+                        FlatButton { text: "Cancel"; clicked => { root.bug-dialog-open = false; } }
+                        FlatButton {
                             text: "Send Report";
                             primary: true;
                             enabled: bug-msg.text != "";
@@ -2316,7 +3163,7 @@ export component RecoApp inherits Window {
                             placeholder-text: "Pick a destination file, or type a path…";
                             horizontal-stretch: 1;
                         }
-                        Button {
+                        FlatButton {
                             text: "Save to…";
                             clicked => { root.pick-export-output(); }
                         }
@@ -2503,7 +3350,7 @@ export component RecoApp inherits Window {
                                 read-only: true;
                                 horizontal-stretch: 1;
                             }
-                            Button {
+                            FlatButton {
                                 text: "Model…";
                                 clicked => { root.pick-export-model(); }
                             }
@@ -2713,12 +3560,12 @@ export component RecoApp inherits Window {
                             horizontal-stretch: 1;
                         }
 
-                        Button {
+                        FlatButton {
                             text: "Cancel";
                             clicked => { root.export-dialog-open = false; root.export-error-text = ""; }
                         }
 
-                        Button {
+                        FlatButton {
                             text: "Start Export";
                             primary: true;
                             // Block when AI tracking is on but no model is
@@ -2828,11 +3675,11 @@ export component RecoApp inherits Window {
                     HorizontalLayout {
                         spacing: 8px;
                         alignment: end;
-                        Button {
+                        FlatButton {
                             text: "Load from file...";
                             clicked => { root.lens-pick-file(); }
                         }
-                        Button {
+                        FlatButton {
                             text: "Close";
                             clicked => { root.lens-picker-open = false; }
                         }

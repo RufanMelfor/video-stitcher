@@ -151,6 +151,33 @@ impl GuiSettings {
         }
     }
 
+    /// Most recently used left video, if any and if it still exists on disk.
+    pub fn last_left(&self) -> Option<PathBuf> {
+        self.recent_left
+            .entries()
+            .first()
+            .filter(|p| p.exists())
+            .cloned()
+    }
+
+    /// Most recently used right video, if any and if it still exists on disk.
+    pub fn last_right(&self) -> Option<PathBuf> {
+        self.recent_right
+            .entries()
+            .first()
+            .filter(|p| p.exists())
+            .cloned()
+    }
+
+    /// Most recently used calibration file, if any and if it still exists on disk.
+    pub fn last_calibration(&self) -> Option<PathBuf> {
+        self.recent_calibration
+            .entries()
+            .first()
+            .filter(|p| p.exists())
+            .cloned()
+    }
+
     /// Convenience: push a newly-picked left video into MRU and save.
     pub fn push_left(&mut self, path: PathBuf) {
         self.recent_left.push(path);
