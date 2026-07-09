@@ -34,13 +34,18 @@
     "xRz": 0.009587,
     "zRx": -0.0182,
     "xRx": 0.0,
-    "zRz": 0.0
+    "zRz": 0.0,
+    "groundTiltX": -0.0020000000949949026,
+    "groundTiltZ": 0.0060000005178153515
   },
   "rig_tilt": 0.33161255787892263,
   "rig_roll": 0.0,
-  "sync_offset": 0,
+  "sync_offset": 8,
   "field_roi": {
     "left": [],
     "right": []
-  }
+  },
+  "lens_correction_amount": 1.0,
+  "blend_width": 0.05,
+  "blend_flip_direction": true
 }

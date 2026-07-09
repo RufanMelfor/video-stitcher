@@ -47,7 +47,18 @@ pub struct Playback {
     /// frame index at that moment. Used to compute the ideal target
     /// frame index without drift.
     playback_anchor: Option<(Instant, u64)>,
+    /// Playback speed multiplier (1.0 = normal). Scales how fast wall-
+    /// clock time advances the target frame index in `tick()`; the
+    /// target is always a whole frame count derived from the source's
+    /// real `frame_duration`, so any speed value stays frame-accurate.
+    speed: f64,
 }
+
+/// Clamp range for [`Playback::set_speed`]. Below `0.05x` a "tick" would
+/// almost never advance a frame; above `8x` decode throughput can't keep
+/// up on typical hardware, so the pacing target would run away from what
+/// can actually be decoded.
+const SPEED_RANGE: (f64, f64) = (0.05, 8.0);
 
 impl Playback {
     /// Create an empty playback controller (no source loaded).
@@ -61,6 +72,7 @@ impl Playback {
             total_frames: None,
             frame_duration: Duration::from_millis(33), // ~30fps default
             playback_anchor: None,
+            speed: 1.0,
         }
     }
 
@@ -149,9 +161,13 @@ impl Playback {
         };
 
         // Drift-free target: where the playhead SHOULD be based on wall
-        // clock, not based on when the last advance happened.
+        // clock, not based on when the last advance happened. Scaling
+        // elapsed time by `speed` before dividing by the real frame
+        // duration keeps the target frame-accurate at any speed - it's
+        // still always a whole multiple of the source's actual FPS.
         let elapsed = now.duration_since(start);
-        let frames_since_start = (elapsed.as_secs_f64() / self.frame_duration.as_secs_f64()) as u64;
+        let frames_since_start =
+            (elapsed.as_secs_f64() * self.speed / self.frame_duration.as_secs_f64()) as u64;
         let target_frame = start_frame + frames_since_start;
 
         if self.frame_index >= target_frame {
@@ -254,7 +270,41 @@ impl Playback {
         self.info.as_ref().map_or(0.0, |i| i.fps)
     }
 
+    /// Set the playback speed multiplier (1.0 = normal), clamped to
+    /// [`SPEED_RANGE`]. Resets the pacing anchor so the new speed takes
+    /// effect immediately instead of "catching up" time accumulated at
+    /// the old speed (same reset `seek()` does after jumping).
+    pub fn set_speed(&mut self, speed: f64) {
+        self.speed = speed.clamp(SPEED_RANGE.0, SPEED_RANGE.1);
+        self.playback_anchor = None;
+    }
+
+    pub fn speed(&self) -> f64 {
+        self.speed
+    }
+
     pub fn input_dimensions(&self) -> Option<(u32, u32)> {
         self.info.as_ref().map(|i| (i.width, i.height))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_speed_clamps_to_range() {
+        let mut p = Playback::new();
+        p.set_speed(100.0);
+        assert_eq!(p.speed(), SPEED_RANGE.1);
+        p.set_speed(0.0);
+        assert_eq!(p.speed(), SPEED_RANGE.0);
+        p.set_speed(1.5);
+        assert_eq!(p.speed(), 1.5);
+    }
+
+    #[test]
+    fn default_speed_is_normal() {
+        assert_eq!(Playback::new().speed(), 1.0);
     }
 }
