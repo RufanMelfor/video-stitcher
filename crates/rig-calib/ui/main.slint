@@ -1126,6 +1126,7 @@ export component CalibrateApp inherits Window {
                                     tip: "Width of the feathered blend at the seam between the two cameras.";
                                     label: "Blend width";
                                     minimum: 0.0; maximum: 0.5; decimals: 3;
+                                    step: 0.001;
                                     value <=> root.blend-width;
                                     changed(v) => { root.changed-blend-width(v); }
                                 }
@@ -1141,6 +1142,7 @@ export component CalibrateApp inherits Window {
                                     tip: "Forward/backward lean of the camera rig; straightens vertical lines at the panorama edges.";
                                     label: "Rig tilt"; suffix: "°";
                                     minimum: -30.0; maximum: 30.0; decimals: 2;
+                                    step: 0.01;
                                     value <=> root.rig-tilt;
                                     changed(v) => { root.changed-rig-tilt(v); }
                                 }
@@ -1148,6 +1150,7 @@ export component CalibrateApp inherits Window {
                                     tip: "Side-to-side tilt of the camera rig.";
                                     label: "Rig roll"; suffix: "°";
                                     minimum: -30.0; maximum: 30.0; decimals: 2;
+                                    step: 0.01;
                                     value <=> root.rig-roll;
                                     changed(v) => { root.changed-rig-roll(v); }
                                 }
@@ -1227,6 +1230,7 @@ export component CalibrateApp inherits Window {
                                     tip: "Overlap between the two camera planes; controls how much of each image is used.";
                                     label: "Intersect";
                                     minimum: 0.0; maximum: 1.0; decimals: 3;
+                                    step: 0.001;
                                     value <=> root.cal-intersect;
                                     changed(v) => { root.changed-cal-intersect(v); }
                                 }
@@ -1234,6 +1238,7 @@ export component CalibrateApp inherits Window {
                                     tip: "Distance of the virtual camera from the stitch origin; affects parallax at the seam.";
                                     label: "Camera axis offset";
                                     minimum: -0.6; maximum: 0.6; decimals: 3;
+                                    step: 0.001;
                                     value <=> root.cal-camera-axis-offset;
                                     changed(v) => { root.changed-cal-camera-axis-offset(v); }
                                 }
@@ -1241,6 +1246,7 @@ export component CalibrateApp inherits Window {
                                     tip: "Vertical alignment correction between the two camera planes.";
                                     label: "x_ty";
                                     minimum: -0.1; maximum: 0.1; decimals: 3;
+                                    step: 0.001;
                                     value <=> root.cal-x-ty;
                                     changed(v) => { root.changed-cal-x-ty(v); }
                                 }
@@ -1299,24 +1305,28 @@ export component CalibrateApp inherits Window {
                                     tip: "Feature detector sensitivity. Lower = more (weaker) features detected.";
                                     label: "AKAZE threshold"; decimals: 5;
                                     minimum: 0.00001; maximum: 0.001;
+                                    step: 0.00001;
                                     value <=> root.cal-akaze-threshold;
                                 }
                                 LabeledSlider {
                                     tip: "Top edge of the vertical region used for feature detection (fraction of frame height).";
                                     label: "Detect Y min";
                                     minimum: 0.0; maximum: 1.0; decimals: 2;
+                                    step: 0.01;
                                     value <=> root.cal-detect-y-min;
                                 }
                                 LabeledSlider {
                                     tip: "Bottom edge of the vertical region used for feature detection (fraction of frame height).";
                                     label: "Detect Y max";
                                     minimum: 0.0; maximum: 1.0; decimals: 2;
+                                    step: 0.01;
                                     value <=> root.cal-detect-y-max;
                                 }
                                 LabeledSlider {
                                     tip: "Seconds to skip at the end of the clip when sampling calibration frames.";
                                     label: "Skip end (s)";
                                     minimum: 0.0; maximum: 30.0; decimals: 1;
+                                    step: 0.1;
                                     value <=> root.cal-skip-end-secs;
                                 }
                                 Tip {
@@ -1442,6 +1452,7 @@ export component CalibrateApp inherits Window {
                                         tip: "Horizontal focal length in pixels.";
                                         label: "fx";
                                         minimum: root.lens-fx-min; maximum: root.lens-fx-max; decimals: 1;
+                                        step: 0.1;
                                         value <=> root.lens-left-fx;
                                         changed(v) => { root.changed-lens-param(); }
                                     }
@@ -1449,6 +1460,7 @@ export component CalibrateApp inherits Window {
                                         tip: "Vertical focal length in pixels.";
                                         label: "fy";
                                         minimum: root.lens-fy-min; maximum: root.lens-fy-max; decimals: 1;
+                                        step: 0.1;
                                         value <=> root.lens-left-fy;
                                         changed(v) => { root.changed-lens-param(); }
                                     }
@@ -1456,6 +1468,7 @@ export component CalibrateApp inherits Window {
                                         tip: "Horizontal optical center in pixels.";
                                         label: "cx";
                                         minimum: root.lens-cx-min; maximum: root.lens-cx-max; decimals: 1;
+                                        step: 0.1;
                                         value <=> root.lens-left-cx;
                                         changed(v) => { root.changed-lens-param(); }
                                     }
@@ -1463,6 +1476,7 @@ export component CalibrateApp inherits Window {
                                         tip: "Vertical optical center in pixels.";
                                         label: "cy";
                                         minimum: root.lens-cy-min; maximum: root.lens-cy-max; decimals: 1;
+                                        step: 0.1;
                                         value <=> root.lens-left-cy;
                                         changed(v) => { root.changed-lens-param(); }
                                     }
@@ -1470,6 +1484,7 @@ export component CalibrateApp inherits Window {
                                         tip: "Fisheye distortion coefficient 1 (KB4 model).";
                                         label: "k1"; decimals: 4;
                                         minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                        step: 0.0001;
                                         value <=> root.lens-left-k1;
                                         changed(v) => { root.changed-lens-param(); }
                                     }
@@ -1477,6 +1492,7 @@ export component CalibrateApp inherits Window {
                                         tip: "Fisheye distortion coefficient 2 (KB4 model).";
                                         label: "k2"; decimals: 4;
                                         minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                        step: 0.0001;
                                         value <=> root.lens-left-k2;
                                         changed(v) => { root.changed-lens-param(); }
                                     }
@@ -1484,6 +1500,7 @@ export component CalibrateApp inherits Window {
                                         tip: "Fisheye distortion coefficient 3 (KB4 model).";
                                         label: "k3"; decimals: 4;
                                         minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                        step: 0.0001;
                                         value <=> root.lens-left-k3;
                                         changed(v) => { root.changed-lens-param(); }
                                     }
@@ -1491,6 +1508,7 @@ export component CalibrateApp inherits Window {
                                         tip: "Fisheye distortion coefficient 4 (KB4 model).";
                                         label: "k4"; decimals: 4;
                                         minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                        step: 0.0001;
                                         value <=> root.lens-left-k4;
                                         changed(v) => { root.changed-lens-param(); }
                                     }
@@ -1502,6 +1520,7 @@ export component CalibrateApp inherits Window {
                                         tip: "Horizontal focal length in pixels.";
                                         label: "fx";
                                         minimum: root.lens-fx-min; maximum: root.lens-fx-max; decimals: 1;
+                                        step: 0.1;
                                         value <=> root.lens-right-fx;
                                         changed(v) => { root.changed-lens-param(); }
                                     }
@@ -1509,6 +1528,7 @@ export component CalibrateApp inherits Window {
                                         tip: "Vertical focal length in pixels.";
                                         label: "fy";
                                         minimum: root.lens-fy-min; maximum: root.lens-fy-max; decimals: 1;
+                                        step: 0.1;
                                         value <=> root.lens-right-fy;
                                         changed(v) => { root.changed-lens-param(); }
                                     }
@@ -1516,6 +1536,7 @@ export component CalibrateApp inherits Window {
                                         tip: "Horizontal optical center in pixels.";
                                         label: "cx";
                                         minimum: root.lens-cx-min; maximum: root.lens-cx-max; decimals: 1;
+                                        step: 0.1;
                                         value <=> root.lens-right-cx;
                                         changed(v) => { root.changed-lens-param(); }
                                     }
@@ -1523,6 +1544,7 @@ export component CalibrateApp inherits Window {
                                         tip: "Vertical optical center in pixels.";
                                         label: "cy";
                                         minimum: root.lens-cy-min; maximum: root.lens-cy-max; decimals: 1;
+                                        step: 0.1;
                                         value <=> root.lens-right-cy;
                                         changed(v) => { root.changed-lens-param(); }
                                     }
@@ -1530,6 +1552,7 @@ export component CalibrateApp inherits Window {
                                         tip: "Fisheye distortion coefficient 1 (KB4 model).";
                                         label: "k1"; decimals: 4;
                                         minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                        step: 0.0001;
                                         value <=> root.lens-right-k1;
                                         changed(v) => { root.changed-lens-param(); }
                                     }
@@ -1537,6 +1560,7 @@ export component CalibrateApp inherits Window {
                                         tip: "Fisheye distortion coefficient 2 (KB4 model).";
                                         label: "k2"; decimals: 4;
                                         minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                        step: 0.0001;
                                         value <=> root.lens-right-k2;
                                         changed(v) => { root.changed-lens-param(); }
                                     }
@@ -1544,6 +1568,7 @@ export component CalibrateApp inherits Window {
                                         tip: "Fisheye distortion coefficient 3 (KB4 model).";
                                         label: "k3"; decimals: 4;
                                         minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                        step: 0.0001;
                                         value <=> root.lens-right-k3;
                                         changed(v) => { root.changed-lens-param(); }
                                     }
@@ -1551,6 +1576,7 @@ export component CalibrateApp inherits Window {
                                         tip: "Fisheye distortion coefficient 4 (KB4 model).";
                                         label: "k4"; decimals: 4;
                                         minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                        step: 0.0001;
                                         value <=> root.lens-right-k4;
                                         changed(v) => { root.changed-lens-param(); }
                                     }
