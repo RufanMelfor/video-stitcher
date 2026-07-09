@@ -348,6 +348,18 @@ pub struct MatchCalibration {
     /// previous hard-coded renderer default.
     #[serde(default = "default_blend_width")]
     pub blend_width: f32,
+
+    /// Flip which camera's content fades over the other at the blend seam.
+    ///
+    /// `false` (default) = right camera fades in over a fixed left.
+    /// `true` = left camera fades in over a fixed right. Purely a
+    /// rendering choice - doesn't move the seam or affect calibration
+    /// geometry (unlike `PlaneLayout::intersect`). Persisted so a hand-
+    /// picked direction survives save/reload. Defaults to `false` for
+    /// older calibrations that predate this field, matching the previous
+    /// (only) behavior.
+    #[serde(default)]
+    pub blend_flip_direction: bool,
 }
 
 /// Backward-compatible default for [`MatchCalibration::lens_correction_amount`]

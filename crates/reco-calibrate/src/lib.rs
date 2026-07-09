@@ -621,6 +621,7 @@ pub fn calibrate_with_reporting(
         field_roi: None,             // set manually or by a future field detection pipeline
         lens_correction_amount: 1.0, // full correction; user-tunable in the GUI
         blend_width: 0.05,           // renderer default; user-tunable in the GUI
+        blend_flip_direction: false, // renderer default; user-tunable in the GUI
     };
 
     Ok(CalibrationResult {

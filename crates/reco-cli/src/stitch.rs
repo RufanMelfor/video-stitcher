@@ -24,6 +24,9 @@ pub struct StitchArgs<'a> {
     pub width: u32,
     pub height: u32,
     pub blend: f32,
+    /// Flip which camera fades in over the other at the blend seam. See
+    /// `reco_core::render::viewport::ViewportConfig::blend_flip_direction`.
+    pub blend_flip_direction: bool,
     pub start_time: Option<f64>,
     pub end_time: Option<f64>,
     pub max_frames: Option<u64>,
@@ -117,6 +120,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
     .quality(parse_quality(args.quality))
     .resolution(args.width, args.height)
     .blend_width(args.blend)
+    .blend_flip_direction(args.blend_flip_direction)
     .on_progress(move |p: &reco_core::session::types::FrameProgress| {
         // Use the session's own elapsed clock so the reported
         // rate excludes one-time GPU / encoder / ORT init and

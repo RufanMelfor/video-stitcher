@@ -426,6 +426,12 @@ impl StitchRenderer {
         self.pipeline.viewport.blend_width = w;
     }
 
+    /// Flip which camera fades over the other at the blend seam. See
+    /// [`crate::render::viewport::ViewportConfig::blend_flip_direction`].
+    pub fn set_blend_flip_direction(&mut self, flip: bool) {
+        self.pipeline.viewport.blend_flip_direction = flip;
+    }
+
     pub fn set_rig_tilt(&mut self, radians: f32) {
         self.pipeline.viewport.rig_tilt = radians;
     }

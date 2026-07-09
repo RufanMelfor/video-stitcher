@@ -910,6 +910,19 @@ impl Renderer {
         );
         right_uniforms.lens_preview[0] = correction;
 
+        // Seam blend direction: which plane fades in over the other at the
+        // seam. `false` (default) = right fades over a fixed left, drawn
+        // left-then-right so "over" compositing works (the fading plane
+        // must draw second, on top of the opaque one). `true` flips both
+        // which plane fades (`ground_tilt.w`, otherwise-unused - see
+        // `GroundTilt`'s doc and the shader's alpha-blend comment) and the
+        // draw order, so left fades over a fixed right instead. Purely a
+        // rendering choice: doesn't move the seam or touch calibration
+        // geometry, unlike `calibration.layout.intersect`.
+        let flip = viewport.config.blend_flip_direction;
+        left_uniforms.ground_tilt[3] = if flip { 1.0 } else { 0.0 };
+        right_uniforms.ground_tilt[3] = if flip { 0.0 } else { 1.0 };
+
         gpu.queue.write_buffer(
             &self.left.uniform_buffer,
             0,
@@ -948,12 +961,17 @@ impl Renderer {
             pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
 
-            pass.set_bind_group(0, &self.left.texture_bind_group, &[]);
-            pass.set_bind_group(1, &self.left.uniform_bind_group, &[]);
+            let (first, second) = if flip {
+                (&self.right, &self.left)
+            } else {
+                (&self.left, &self.right)
+            };
+            pass.set_bind_group(0, &first.texture_bind_group, &[]);
+            pass.set_bind_group(1, &first.uniform_bind_group, &[]);
             pass.draw(0..6, 0..1);
 
-            pass.set_bind_group(0, &self.right.texture_bind_group, &[]);
-            pass.set_bind_group(1, &self.right.uniform_bind_group, &[]);
+            pass.set_bind_group(0, &second.texture_bind_group, &[]);
+            pass.set_bind_group(1, &second.uniform_bind_group, &[]);
             pass.draw(0..6, 0..1);
         }
 
