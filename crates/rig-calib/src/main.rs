@@ -92,7 +92,7 @@ const SEEK_DEBOUNCE_MS: u64 = 120;
 /// fixed duration) because the whole point is spotting a frame-scale
 /// `sync_offset` error as a shifted transient; a multi-second window
 /// dilutes that shift into a barely-visible fraction of the display.
-const AUDIO_WAVEFORM_WINDOW_FRAMES: f64 = 10.0;
+const AUDIO_WAVEFORM_WINDOW_FRAMES: f64 = 1.0;
 /// Clamp range for the user-adjustable waveform window width (frames).
 const AUDIO_WAVEFORM_WINDOW_FRAMES_RANGE: (f64, f64) = (1.0, 300.0);
 /// Number of bars drawn per waveform track.
@@ -150,6 +150,11 @@ struct AppState {
     lens_preview_side: String,
     lens_correction_amount: f32,
     auto_calibrate: Option<AutoCalibrateHandle>,
+    /// Standalone sync-offset detection job (see `on_compute_sync_offset`).
+    /// Separate from `auto_calibrate` since it's a much lighter operation
+    /// (IMU/audio cross-correlation only, no feature matching/optimizer).
+    sync_offset_job:
+        Option<std::sync::mpsc::Receiver<Result<calibration::SyncOffsetResult, String>>>,
     /// Free-fly mode (F key): WASD/E/C translate the virtual camera through
     /// the 3D scene; mouse-drag still looks around. Debug navigation aid for
     /// inspecting stitch geometry - not part of the normal calibration flow.
@@ -221,6 +226,7 @@ impl AppState {
             lens_preview_side: "left".into(),
             lens_correction_amount: 1.0,
             auto_calibrate: None,
+            sync_offset_job: None,
             fly_mode: false,
             keys_down: std::collections::HashSet::new(),
             fly_shift: false,
@@ -315,6 +321,7 @@ impl AppState {
             out.left = pipeline.calibration().left.clone();
             out.right = pipeline.calibration().right.clone();
             out.blend_width = pipeline.viewport().blend_width;
+            out.blend_flip_direction = pipeline.viewport().blend_flip_direction;
         }
         let json = serde_json::to_string_pretty(&out).map_err(|e| format!("serialize: {e}"))?;
         std::fs::write(&path, json).map_err(|e| format!("write {}: {e}", path.display()))?;
@@ -589,6 +596,13 @@ impl AppState {
         }
     }
 
+    fn set_blend_flip_direction(&mut self, flip: bool) {
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge.renderer_mut().set_blend_flip_direction(flip);
+            self.preview_dirty = true;
+        }
+    }
+
     fn set_rig_tilt(&mut self, deg: f32) {
         if let Some(cal) = self.calibration.as_mut() {
             cal.rig_tilt = (deg as f64).to_radians();
@@ -701,23 +715,38 @@ impl AppState {
         self.audio_envelope_center_secs = center_secs;
         self.audio_envelope_triggered_at = Some(Instant::now());
 
+        // `playback.frame_index()` is a synced-timeline index: frame k of
+        // the synced stream is raw left frame `k + max(-sync_offset, 0)`
+        // and raw right frame `k + max(sync_offset, 0)` (see
+        // `adapters::spawn_decode_pipeline_from_inputs`, which skips
+        // frames from whichever camera started first). Extracting both
+        // channels' audio windows at the same raw `center_secs` - as if
+        // `sync_offset` were always 0 - would make the waveform blind to
+        // the very thing it exists to verify: a correct offset should
+        // pull the two traces' transients into alignment, and a wrong one
+        // should show a residual shift.
+        let sync_offset = self.calibration.as_ref().map_or(0, |c| c.sync_offset);
+        let left_center_secs = center_secs + (-sync_offset).max(0) as f64 / fps;
+        let right_center_secs = center_secs + sync_offset.max(0) as f64 / fps;
+
         let (tx, rx) = std::sync::mpsc::channel();
         self.audio_envelope_rx = Some(rx);
         std::thread::spawn(move || {
-            let left = crate::waveform::extract_window_envelope(
+            let mut left = crate::waveform::extract_window_envelope(
                 &left_path,
-                center_secs,
+                left_center_secs,
                 window_secs,
                 AUDIO_WAVEFORM_BUCKETS,
             )
             .unwrap_or_default();
-            let right = crate::waveform::extract_window_envelope(
+            let mut right = crate::waveform::extract_window_envelope(
                 &right_path,
-                center_secs,
+                right_center_secs,
                 window_secs,
                 AUDIO_WAVEFORM_BUCKETS,
             )
             .unwrap_or_default();
+            crate::waveform::normalize_pair_to_peak(&mut left, &mut right);
             let _ = tx.send((left, right));
         });
     }
@@ -999,6 +1028,10 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Cal
                 .bridge
                 .as_ref()
                 .map(|b| b.renderer().pipeline().viewport().blend_width);
+            let blend_flip_direction = s
+                .bridge
+                .as_ref()
+                .map(|b| b.renderer().pipeline().viewport().blend_flip_direction);
             let lens_correction = s.calibration.as_ref().map(|c| c.lens_correction_amount);
             if let Some(lc) = lens_correction {
                 s.lens_correction_amount = lc;
@@ -1035,6 +1068,9 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Cal
                 }
                 if let Some(bw) = blend_width {
                     app.set_blend_width(bw);
+                }
+                if let Some(flip) = blend_flip_direction {
+                    app.set_blend_flip_direction(flip);
                 }
                 if let Some(lc) = lens_correction {
                     app.set_lens_correction_amount(lc);
@@ -1131,6 +1167,10 @@ fn handle_calibration_result(
                         .bridge
                         .as_ref()
                         .map(|b| b.renderer().pipeline().viewport().blend_width);
+                    let blend_flip_direction = state
+                        .bridge
+                        .as_ref()
+                        .map(|b| b.renderer().pipeline().viewport().blend_flip_direction);
                     let lens_correction =
                         state.calibration.as_ref().map(|c| c.lens_correction_amount);
                     if let Some(lc) = lens_correction {
@@ -1176,6 +1216,9 @@ fn handle_calibration_result(
                         }
                         if let Some(bw) = blend_width {
                             app.set_blend_width(bw);
+                        }
+                        if let Some(flip) = blend_flip_direction {
+                            app.set_blend_flip_direction(flip);
                         }
                         if let Some(lc) = lens_correction {
                             app.set_lens_correction_amount(lc);
@@ -1591,6 +1634,29 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_compute_sync_offset(move || {
+        let s = state_ref.borrow();
+        let (left, right) = match (&s.left_path, &s.right_path) {
+            (Some(l), Some(r)) => (l.clone(), r.clone()),
+            _ => return,
+        };
+        drop(s);
+
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        app.set_detecting_sync(true);
+        set_status(
+            &app,
+            StatusLine::info("Detecting sync offset (IMU, falling back to audio)..."),
+        );
+
+        let rx = calibration::spawn_compute_sync_offset(left, right);
+        state_ref.borrow_mut().sync_offset_job = Some(rx);
+    });
+
     // ── Playback callbacks ──
 
     let app_weak = app.as_weak();
@@ -1600,6 +1666,18 @@ fn main() -> anyhow::Result<()> {
         let new_state = s.playback.toggle();
         if let Some(app) = app_weak.upgrade() {
             app.set_playing(new_state == PlayState::Playing);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_pause_playback(move || {
+        let mut s = state_ref.borrow_mut();
+        if s.playback.state() == PlayState::Playing {
+            s.playback.toggle();
+        }
+        if let Some(app) = app_weak.upgrade() {
+            app.set_playing(false);
         }
     });
 
@@ -1729,6 +1807,15 @@ fn main() -> anyhow::Result<()> {
     let app_weak = app.as_weak();
     app.on_changed_blend_width(move |w| {
         state_ref.borrow_mut().set_blend_width(w);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let state_ref = Rc::clone(&state);
+    let app_weak = app.as_weak();
+    app.on_changed_blend_flip_direction(move |flip| {
+        state_ref.borrow_mut().set_blend_flip_direction(flip);
         if let Some(app) = app_weak.upgrade() {
             app.set_cal_dirty(true);
         }
@@ -2228,6 +2315,36 @@ fn main() -> anyhow::Result<()> {
                     handle_calibration_result(result, &mut s, &app_weak);
                     return;
                 }
+            }
+
+            if let Some(rx) = s.sync_offset_job.as_ref()
+                && let Ok(result) = rx.try_recv()
+            {
+                s.sync_offset_job = None;
+                if let Some(app) = app_weak.upgrade() {
+                    app.set_detecting_sync(false);
+                    match result {
+                        Ok(r) => {
+                            s.set_sync_offset(r.frames as i32);
+                            app.set_sync_offset(r.frames as i32);
+                            app.set_cal_dirty(true);
+                            set_status(
+                                &app,
+                                StatusLine::info(format!(
+                                    "Sync offset detected: {} frames ({})",
+                                    r.frames, r.method
+                                )),
+                            );
+                        }
+                        Err(e) => {
+                            set_status(
+                                &app,
+                                StatusLine::error(format!("Sync-offset detection failed: {e}")),
+                            );
+                        }
+                    }
+                }
+                return;
             }
 
             if let Some((frac, requested_at)) = s.pending_seek

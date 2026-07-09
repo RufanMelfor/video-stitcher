@@ -3,133 +3,6 @@
 
 import { Button, VerticalBox, HorizontalBox, Slider, ScrollView, CheckBox, LineEdit } from "std-widgets.slint";
 
-/// One labeled slider row for the controls panel. The value display
-/// doubles as a text input: double-click it to type an exact value
-/// instead of dragging the slider. Commits on Enter or on clicking away;
-/// clamped to [minimum, maximum] like the slider itself.
-component LabeledSlider inherits VerticalLayout {
-    in property <string> label;
-    in property <float> minimum;
-    in property <float> maximum;
-    in-out property <float> value;
-    in property <string> suffix: "";
-    in property <int> decimals: 2;
-    in-out property <bool> editing: false;
-    callback changed(float);
-
-    spacing: 2px;
-
-    property <float> scale:
-        root.decimals <= 0 ? 1
-      : root.decimals == 1 ? 10
-      : root.decimals == 2 ? 100
-      : root.decimals == 3 ? 1000
-      : root.decimals == 4 ? 10000
-      : 100000;
-    property <float> display-value:
-        root.decimals == 0 ? round(root.value) : round(root.value * root.scale) / root.scale;
-
-    // Takes the typed text rather than reaching into the (conditionally
-    // instantiated, so not name-addressable from outside its own `if`
-    // branch) LineEdit - both call sites below already have `self.text`
-    // in scope since they're callbacks on the LineEdit itself.
-    function commit-edit(text: string) {
-        root.value = clamp(text.to-float(), root.minimum, root.maximum);
-        root.changed(root.value);
-        root.editing = false;
-    }
-
-    HorizontalLayout {
-        Text {
-            text: root.label;
-            color: #bbb;
-            font-size: 13px;
-            vertical-alignment: center;
-            horizontal-stretch: 1;
-        }
-
-        if !root.editing: TouchArea {
-            mouse-cursor: pointer;
-            double-clicked => { root.editing = true; }
-
-            Text {
-                text: root.display-value + root.suffix;
-                color: #888;
-                font-size: 13px;
-                vertical-alignment: center;
-            }
-        }
-
-        if root.editing: HorizontalLayout {
-            spacing: 3px;
-            LineEdit {
-                text: root.display-value;
-                width: 56px;
-                font-size: 13px;
-                init => {
-                    self.focus();
-                    self.select-all();
-                }
-                accepted => { root.commit-edit(self.text); }
-                changed has-focus => {
-                    if !self.has-focus && root.editing {
-                        root.commit-edit(self.text);
-                    }
-                }
-            }
-            Text { text: root.suffix; color: #888; font-size: 13px; vertical-alignment: center; }
-        }
-    }
-
-    Slider {
-        minimum: root.minimum;
-        maximum: root.maximum;
-        value <=> root.value;
-        changed(v) => { root.changed(v); }
-    }
-}
-
-/// Collapsible section header with clear hover feedback.
-component SectionHeader inherits Rectangle {
-    in property <string> title;
-    in-out property <bool> expanded: false;
-
-    height: 30px;
-    border-radius: 4px;
-    background: section-touch.has-hover ? #2e2e2e : #1e1e1e;
-
-    section-touch := TouchArea {
-        clicked => { root.expanded = !root.expanded; }
-        mouse-cursor: pointer;
-    }
-
-    HorizontalLayout {
-        padding-left: 6px;
-        padding-right: 6px;
-        spacing: 6px;
-
-        // Expanded/collapsed state marker: filled yellow when open, so an
-        // open panel is unmistakable even from a glance across the whole
-        // stack of section headers.
-        Rectangle {
-            width: 9px;
-            height: 9px;
-            border-radius: 2px;
-            background: root.expanded ? #e8c020 : transparent;
-            border-width: 1px;
-            border-color: root.expanded ? #e8c020 : #555;
-        }
-        Text {
-            text: root.title;
-            color: #eee;
-            font-size: 15px;
-            font-weight: 600;
-            vertical-alignment: center;
-            horizontal-stretch: 1;
-        }
-    }
-}
-
 /// Wraps a control with a hover tooltip: shows `tip` in a small popup
 /// after a brief hover delay, closes as soon as the pointer leaves.
 /// Wrapping (rather than baking hover into every control) keeps this
@@ -194,6 +67,165 @@ component Tip inherits TouchArea {
     }
 }
 
+/// One labeled slider row for the controls panel. The value display
+/// doubles as a text input: double-click it to type an exact value
+/// instead of dragging the slider. Commits on Enter or on clicking away;
+/// clamped to [minimum, maximum] like the slider itself.
+///
+/// Takes its own optional `tip` and wraps only the label in `Tip`
+/// internally, rather than callers wrapping the whole `LabeledSlider` in
+/// a `Tip`. `Tip` inherits `TouchArea` and mirrors its size from its
+/// child's layout info; wrapping it around the double-click-to-edit
+/// value (whose subtree shape toggles between a `TouchArea` and a
+/// `LineEdit` row) risked the same class of geometry re-entrancy as the
+/// bug documented below, so it's kept scoped to the static label.
+///
+/// Separately: the edit-mode `LineEdit` defers its focus() call by one
+/// tick (see the `Timer` below) instead of calling it from `init`.
+/// Calling `.focus()` synchronously from `init` re-enters Slint's
+/// geometry evaluation *while the current layout pass (triggered by this
+/// same `if !editing -> editing` branch swap) hasn't finished settling*
+/// - inside a `ScrollView`, focusing a widget also computes clip-rect
+/// geometry up the whole ancestor chain to scroll it into view, and
+/// doing that mid-layout-pass hit a real Slint 1.15.1 "Recursion
+/// detected" panic that killed the whole app. Reproduced with
+/// `RUST_BACKTRACE=1`: just double-clicking a value crashed it, before
+/// any typing - the panic is in `item_geometry`/
+/// `absolute_clip_rect_and_geometry`, not in anything commit-edit-related.
+component LabeledSlider inherits VerticalLayout {
+    in property <string> label;
+    in property <string> tip: "";
+    in property <float> minimum;
+    in property <float> maximum;
+    in-out property <float> value;
+    in property <string> suffix: "";
+    in property <int> decimals: 2;
+    in-out property <bool> editing: false;
+    callback changed(float);
+
+    spacing: 2px;
+
+    property <float> scale:
+        root.decimals <= 0 ? 1
+      : root.decimals == 1 ? 10
+      : root.decimals == 2 ? 100
+      : root.decimals == 3 ? 1000
+      : root.decimals == 4 ? 10000
+      : 100000;
+    property <float> display-value:
+        root.decimals == 0 ? round(root.value) : round(root.value * root.scale) / root.scale;
+
+    // Takes the typed text rather than reaching into the (conditionally
+    // instantiated, so not name-addressable from outside its own `if`
+    // branch) LineEdit - both call sites below already have `self.text`
+    // in scope since they're callbacks on the LineEdit itself.
+    function commit-edit(text: string) {
+        root.value = clamp(text.to-float(), root.minimum, root.maximum);
+        root.changed(root.value);
+        root.editing = false;
+    }
+
+    HorizontalLayout {
+        Tip {
+            tip: root.tip;
+            horizontal-stretch: 1;
+            Text {
+                text: root.label;
+                color: #bbb;
+                font-size: 13px;
+                vertical-alignment: center;
+            }
+        }
+
+        if !root.editing: TouchArea {
+            mouse-cursor: pointer;
+            double-clicked => { root.editing = true; }
+
+            Text {
+                text: root.display-value + root.suffix;
+                color: #888;
+                font-size: 13px;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.editing: HorizontalLayout {
+            spacing: 3px;
+            edit-field := LineEdit {
+                text: root.display-value;
+                width: 56px;
+                font-size: 13px;
+                accepted => { root.commit-edit(self.text); }
+                changed has-focus => {
+                    if !self.has-focus && root.editing {
+                        root.commit-edit(self.text);
+                    }
+                }
+            }
+            Text { text: root.suffix; color: #888; font-size: 13px; vertical-alignment: center; }
+            // Single-shot, fires once the branch-swap layout pass has
+            // settled (see the doc comment above `LabeledSlider`).
+            focus-timer := Timer {
+                interval: 1ms;
+                running: true;
+                triggered => {
+                    self.running = false;
+                    edit-field.focus();
+                    edit-field.select-all();
+                }
+            }
+        }
+    }
+
+    Slider {
+        minimum: root.minimum;
+        maximum: root.maximum;
+        value <=> root.value;
+        changed(v) => { root.changed(v); }
+    }
+}
+
+/// Collapsible section header with clear hover feedback.
+component SectionHeader inherits Rectangle {
+    in property <string> title;
+    in-out property <bool> expanded: false;
+
+    height: 30px;
+    border-radius: 4px;
+    background: section-touch.has-hover ? #2e2e2e : #1e1e1e;
+
+    section-touch := TouchArea {
+        clicked => { root.expanded = !root.expanded; }
+        mouse-cursor: pointer;
+    }
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: 6px;
+
+        // Expanded/collapsed state marker: filled yellow when open, so an
+        // open panel is unmistakable even from a glance across the whole
+        // stack of section headers.
+        Rectangle {
+            width: 9px;
+            height: 9px;
+            border-radius: 2px;
+            background: root.expanded ? #e8c020 : transparent;
+            border-width: 1px;
+            border-color: root.expanded ? #e8c020 : #555;
+        }
+        Text {
+            text: root.title;
+            color: #eee;
+            font-size: 15px;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
 export component CalibrateApp inherits Window {
     title: "RIG CALIB - Powered by RECO";
     icon: @image-url("../assets/icon.png");
@@ -229,6 +261,7 @@ export component CalibrateApp inherits Window {
     in-out property <string> status-text: "Load left + right videos to begin";
     in-out property <bool> status-is-error: false;
     in-out property <int> current-frame: 0;
+    property <bool> frame-input-editing: false;
     in-out property <int> total-frames: 0;
     in-out property <string> current-time-text: "0:00.000";
     in-out property <string> total-time-text: "0:00.000";
@@ -242,12 +275,17 @@ export component CalibrateApp inherits Window {
     in-out property <[float]> audio-envelope-right: [];
     // User-adjustable window width (frames) and display height for the
     // audio-sync waveform panel below.
-    in-out property <float> audio-window-frames: 10.0;
-    in-out property <float> audio-waveform-height-px: 90.0;
+    in-out property <float> audio-window-frames: 1.0;
+    in-out property <float> audio-waveform-height-px: 300.0;
     // Playback speed multiplier, adjustable to frame accuracy (see
     // `Playback::set_speed`). 1.0 = normal speed.
     in-out property <float> playback-speed: 1.0;
     in-out property <bool> calibrating: false;
+    // Standalone sync-offset detection (IMU-then-audio, same priority
+    // Auto-Calibrate uses internally) - stops there instead of continuing
+    // into feature matching/optimization, so it has its own lightweight
+    // busy flag rather than reusing `calibrating`.
+    in-out property <bool> detecting-sync: false;
     in-out property <string> calibration-step: "";
     // Fraction (0.0-1.0) of the current calibration step completed, or
     // -1.0 when the current step has no meaningful fraction (e.g.
@@ -268,6 +306,10 @@ export component CalibrateApp inherits Window {
 
     // Rig calibration.
     in-out property <float> blend-width: 0.05;
+    // `false` (default) = right camera fades in over a fixed left.
+    // `true` = left camera fades in over a fixed right. Purely a
+    // rendering choice - doesn't move the seam itself.
+    in-out property <bool> blend-flip-direction: false;
     in-out property <float> rig-tilt: 0.0;
     in-out property <float> rig-roll: 0.0;
     in-out property <int> sync-offset: 0;
@@ -370,6 +412,7 @@ export component CalibrateApp inherits Window {
     callback auto-calibrate();
     callback cancel-calibrate();
     callback toggle-playback();
+    callback pause-playback();
     callback step-forward();
     callback step-backward();
     callback seek(float);
@@ -384,9 +427,11 @@ export component CalibrateApp inherits Window {
     callback fly-toggle();
     callback fly-key(string, bool, bool);
     callback changed-blend-width(float);
+    callback changed-blend-flip-direction(bool);
     callback changed-rig-tilt(float);
     callback changed-rig-roll(float);
     callback changed-sync-offset(int);
+    callback compute-sync-offset();
     callback changed-cal-intersect(float);
     callback changed-cal-camera-axis-offset(float);
     callback changed-cal-x-ty(float);
@@ -610,9 +655,13 @@ export component CalibrateApp inherits Window {
                     HorizontalBox {
                         height: 36px;
                         spacing: 6px;
-                        Tip { tip: "Step back one frame."; Button { text: "|<"; enabled: root.files-loaded; clicked => { root.step-backward(); } } }
-                        Tip { tip: "Play or pause."; Button { text: root.playing ? "||" : "▶"; enabled: root.files-loaded; clicked => { root.toggle-playback(); } } }
-                        Tip { tip: "Step forward one frame."; Button { text: ">|"; enabled: root.files-loaded; clicked => { root.step-forward(); } } }
+                        Text {
+                            text: root.current-time-text;
+                            color: root.text-muted;
+                            vertical-alignment: center;
+                            width: 64px;
+                            horizontal-alignment: right;
+                        }
                         Tip {
                             tip: "Playback speed multiplier.";
                             HorizontalLayout {
@@ -629,12 +678,18 @@ export component CalibrateApp inherits Window {
                                 Text { text: "x"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
                             }
                         }
-                        Text {
-                            text: root.current-time-text;
-                            color: root.text-muted;
-                            vertical-alignment: center;
-                            width: 64px;
-                            horizontal-alignment: right;
+                        // Transport group: jump-to-start / step-back / play-
+                        // pause / step-forward / stop (pause-in-place) /
+                        // jump-to-end - the 6-button layout requested to match
+                        // the reference NLE-style transport bar.
+                        HorizontalLayout {
+                            spacing: 2px;
+                            Tip { tip: "Jump to first frame."; Button { text: "|<"; enabled: root.files-loaded; clicked => { root.seek(0.0); } } }
+                            Tip { tip: "Step back one frame."; Button { text: "<"; enabled: root.files-loaded; clicked => { root.step-backward(); } } }
+                            Tip { tip: "Play or pause."; Button { text: root.playing ? "||" : "▶"; enabled: root.files-loaded; clicked => { root.toggle-playback(); } } }
+                            Tip { tip: "Step forward one frame."; Button { text: ">"; enabled: root.files-loaded; clicked => { root.step-forward(); } } }
+                            Tip { tip: "Stop (pause in place)."; Button { text: "■"; enabled: root.files-loaded; clicked => { root.pause-playback(); } } }
+                            Tip { tip: "Jump to last frame."; Button { text: ">|"; enabled: root.files-loaded; clicked => { root.seek(1.0); } } }
                         }
                         Slider {
                             enabled: root.files-loaded;
@@ -652,12 +707,70 @@ export component CalibrateApp inherits Window {
                             vertical-alignment: center;
                             width: 64px;
                         }
-                        Text {
-                            text: "#" + root.current-frame;
-                            color: root.text-muted;
-                            font-size: 10px;
-                            vertical-alignment: center;
-                            width: 50px;
+                        Tip {
+                            tip: "Jump to an exact frame number. Click to type.";
+                            HorizontalLayout {
+                                spacing: 3px;
+                                Text { text: "#"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
+
+                                // Plain-Text/LineEdit swap (not a single
+                                // persistent LineEdit bound to
+                                // `current-frame`): Slint's built-in text
+                                // widgets break a one-way `text: expr`
+                                // binding the moment the user types into
+                                // them, so a persistent LineEdit here would
+                                // permanently stop reflecting the playhead
+                                // after the first edit - exactly the "frame
+                                // number doesn't update on step" bug this
+                                // fixes. Re-instantiating on each edit (like
+                                // `LabeledSlider`) gives a fresh binding
+                                // every time instead.
+                                if !root.frame-input-editing: TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.frame-input-editing = true; }
+                                    Text {
+                                        text: root.current-frame;
+                                        color: root.text-muted;
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                        width: 70px;
+                                    }
+                                }
+                                if root.frame-input-editing: HorizontalLayout {
+                                    frame-input := LineEdit {
+                                        text: root.current-frame;
+                                        width: 70px;
+                                        enabled: root.files-loaded;
+                                        function commit() {
+                                            if root.total-frames > 0 {
+                                                root.seek(clamp(self.text.to-float(), 0.0, 1.0 * (root.total-frames - 1)) / root.total-frames);
+                                            }
+                                            root.frame-input-editing = false;
+                                        }
+                                        accepted => { self.commit(); }
+                                        changed has-focus => {
+                                            if !self.has-focus && root.frame-input-editing {
+                                                self.commit();
+                                            }
+                                        }
+                                    }
+                                    // Deferred focus: focusing synchronously
+                                    // from `init` (mid-layout-pass, since
+                                    // this branch was just mounted by the
+                                    // `if` toggle above) hits the same
+                                    // Slint "Recursion detected" panic
+                                    // documented on `LabeledSlider` above.
+                                    focus-timer := Timer {
+                                        interval: 1ms;
+                                        running: true;
+                                        triggered => {
+                                            self.running = false;
+                                            frame-input.focus();
+                                            frame-input.select-all();
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -811,8 +924,8 @@ export component CalibrateApp inherits Window {
                                     for v[idx] in root.audio-envelope-left: Rectangle {
                                         x: idx * waveform-area.bar-w;
                                         width: waveform-area.bar-w;
-                                        height: 2px;
-                                        y: waveform-area.height * (1.0 - v) - 1px;
+                                        height: 1px;
+                                        y: waveform-area.height * (1.0 - v) - 0.5px;
                                         background: #5fb8ff;
                                     }
                                     for v[idx] in root.audio-envelope-left: Rectangle {
@@ -821,17 +934,17 @@ export component CalibrateApp inherits Window {
                                         property <length> y0: waveform-area.height * (1.0 - v);
                                         property <length> y1: waveform-area.height * (1.0 - next-v);
                                         visible: has-next;
-                                        x: (idx + 1) * waveform-area.bar-w - 1px;
-                                        width: 2px;
+                                        x: (idx + 1) * waveform-area.bar-w - 0.5px;
+                                        width: 1px;
                                         y: min(y0, y1);
-                                        height: max(y0, y1) - min(y0, y1) + 2px;
+                                        height: max(y0, y1) - min(y0, y1) + 1px;
                                         background: #5fb8ff;
                                     }
                                     for v[idx] in root.audio-envelope-right: Rectangle {
                                         x: idx * waveform-area.bar-w;
                                         width: waveform-area.bar-w;
-                                        height: 2px;
-                                        y: waveform-area.height * (1.0 - v) - 1px;
+                                        height: 1px;
+                                        y: waveform-area.height * (1.0 - v) - 0.5px;
                                         background: #ff9f5f;
                                     }
                                     for v[idx] in root.audio-envelope-right: Rectangle {
@@ -840,10 +953,10 @@ export component CalibrateApp inherits Window {
                                         property <length> y0: waveform-area.height * (1.0 - v);
                                         property <length> y1: waveform-area.height * (1.0 - next-v);
                                         visible: has-next;
-                                        x: (idx + 1) * waveform-area.bar-w - 1px;
-                                        width: 2px;
+                                        x: (idx + 1) * waveform-area.bar-w - 0.5px;
+                                        width: 1px;
                                         y: min(y0, y1);
-                                        height: max(y0, y1) - min(y0, y1) + 2px;
+                                        height: max(y0, y1) - min(y0, y1) + 1px;
                                         background: #ff9f5f;
                                     }
 
@@ -869,32 +982,34 @@ export component CalibrateApp inherits Window {
                                 padding: 4px;
                                 spacing: 8px;
 
-                                Tip {
+                                LabeledSlider {
                                     tip: "Width of the feathered blend at the seam between the two cameras.";
-                                    LabeledSlider {
-                                        label: "Blend width";
-                                        minimum: 0.0; maximum: 0.5; decimals: 3;
-                                        value <=> root.blend-width;
-                                        changed(v) => { root.changed-blend-width(v); }
-                                    }
+                                    label: "Blend width";
+                                    minimum: 0.0; maximum: 0.5; decimals: 3;
+                                    value <=> root.blend-width;
+                                    changed(v) => { root.changed-blend-width(v); }
                                 }
                                 Tip {
+                                    tip: "Which camera fades in over the other at the seam. Off (default): right fades over a fixed left. On: left fades over a fixed right. Doesn't move the seam itself.";
+                                    CheckBox {
+                                        text: "Flip blend direction (left over right)";
+                                        checked <=> root.blend-flip-direction;
+                                        toggled => { root.changed-blend-flip-direction(self.checked); }
+                                    }
+                                }
+                                LabeledSlider {
                                     tip: "Forward/backward lean of the camera rig; straightens vertical lines at the panorama edges.";
-                                    LabeledSlider {
-                                        label: "Rig tilt"; suffix: "°";
-                                        minimum: -30.0; maximum: 30.0; decimals: 2;
-                                        value <=> root.rig-tilt;
-                                        changed(v) => { root.changed-rig-tilt(v); }
-                                    }
+                                    label: "Rig tilt"; suffix: "°";
+                                    minimum: -30.0; maximum: 30.0; decimals: 2;
+                                    value <=> root.rig-tilt;
+                                    changed(v) => { root.changed-rig-tilt(v); }
                                 }
-                                Tip {
+                                LabeledSlider {
                                     tip: "Side-to-side tilt of the camera rig.";
-                                    LabeledSlider {
-                                        label: "Rig roll"; suffix: "°";
-                                        minimum: -30.0; maximum: 30.0; decimals: 2;
-                                        value <=> root.rig-roll;
-                                        changed(v) => { root.changed-rig-roll(v); }
-                                    }
+                                    label: "Rig roll"; suffix: "°";
+                                    minimum: -30.0; maximum: 30.0; decimals: 2;
+                                    value <=> root.rig-roll;
+                                    changed(v) => { root.changed-rig-roll(v); }
                                 }
                                 Tip {
                                     tip: "Frame offset between the two videos, to align them in time.";
@@ -912,49 +1027,49 @@ export component CalibrateApp inherits Window {
                                     }
                                 }
                                 Tip {
+                                    tip: "Detect the sync offset only (IMU telemetry, falling back to audio cross-correlation) - the same detection Auto-Calibrate uses internally, without running feature matching/optimization. Can take up to a minute or two on footage with heavy IMU telemetry (e.g. DJI Action 4).";
+                                    HorizontalBox {
+                                        Button {
+                                            text: root.detecting-sync ? "Detecting…" : "Detect Sync Offset";
+                                            enabled: root.files-loaded && !root.detecting-sync && !root.calibrating;
+                                            clicked => { root.compute-sync-offset(); }
+                                        }
+                                    }
+                                }
+                                LabeledSlider {
                                     tip: "Overlap between the two camera planes; controls how much of each image is used.";
-                                    LabeledSlider {
-                                        label: "Intersect";
-                                        minimum: 0.0; maximum: 1.0; decimals: 3;
-                                        value <=> root.cal-intersect;
-                                        changed(v) => { root.changed-cal-intersect(v); }
-                                    }
+                                    label: "Intersect";
+                                    minimum: 0.0; maximum: 1.0; decimals: 3;
+                                    value <=> root.cal-intersect;
+                                    changed(v) => { root.changed-cal-intersect(v); }
                                 }
-                                Tip {
+                                LabeledSlider {
                                     tip: "Distance of the virtual camera from the stitch origin; affects parallax at the seam.";
-                                    LabeledSlider {
-                                        label: "Camera axis offset";
-                                        minimum: -0.6; maximum: 0.6; decimals: 3;
-                                        value <=> root.cal-camera-axis-offset;
-                                        changed(v) => { root.changed-cal-camera-axis-offset(v); }
-                                    }
+                                    label: "Camera axis offset";
+                                    minimum: -0.6; maximum: 0.6; decimals: 3;
+                                    value <=> root.cal-camera-axis-offset;
+                                    changed(v) => { root.changed-cal-camera-axis-offset(v); }
                                 }
-                                Tip {
+                                LabeledSlider {
                                     tip: "Vertical alignment correction between the two camera planes.";
-                                    LabeledSlider {
-                                        label: "x_ty";
-                                        minimum: -0.1; maximum: 0.1; decimals: 3;
-                                        value <=> root.cal-x-ty;
-                                        changed(v) => { root.changed-cal-x-ty(v); }
-                                    }
+                                    label: "x_ty";
+                                    minimum: -0.1; maximum: 0.1; decimals: 3;
+                                    value <=> root.cal-x-ty;
+                                    changed(v) => { root.changed-cal-x-ty(v); }
                                 }
-                                Tip {
+                                LabeledSlider {
                                     tip: "Near-field ground-plane tilt correction for the right camera's content (x-plane). Fixes a seam step in ground lines close to the camera that the flat two-plane model can't otherwise correct - only affects the bottom of frame, close to the camera; leaves everything else untouched. Fitted via reco-calibrate's manual field-line workflow (see FRICTION.md), not solved by auto-calibrate.";
-                                    LabeledSlider {
-                                        label: "ground_tilt_x";
-                                        minimum: -0.3; maximum: 0.3; decimals: 3;
-                                        value <=> root.cal-ground-tilt-x;
-                                        changed(v) => { root.changed-cal-ground-tilt-x(v); }
-                                    }
+                                    label: "ground_tilt_x";
+                                    minimum: -0.3; maximum: 0.3; decimals: 3;
+                                    value <=> root.cal-ground-tilt-x;
+                                    changed(v) => { root.changed-cal-ground-tilt-x(v); }
                                 }
-                                Tip {
+                                LabeledSlider {
                                     tip: "Same as ground_tilt_x, for the left camera's content (z-plane).";
-                                    LabeledSlider {
-                                        label: "ground_tilt_z";
-                                        minimum: -0.3; maximum: 0.3; decimals: 3;
-                                        value <=> root.cal-ground-tilt-z;
-                                        changed(v) => { root.changed-cal-ground-tilt-z(v); }
-                                    }
+                                    label: "ground_tilt_z";
+                                    minimum: -0.3; maximum: 0.3; decimals: 3;
+                                    value <=> root.cal-ground-tilt-z;
+                                    changed(v) => { root.changed-cal-ground-tilt-z(v); }
                                 }
 
                                 HorizontalBox {
@@ -991,37 +1106,29 @@ export component CalibrateApp inherits Window {
                                         Button { text: "+"; clicked => { root.calibration-frames = min(12, root.calibration-frames + 1); } }
                                     }
                                 }
-                                Tip {
+                                LabeledSlider {
                                     tip: "Feature detector sensitivity. Lower = more (weaker) features detected.";
-                                    LabeledSlider {
-                                        label: "AKAZE threshold"; decimals: 5;
-                                        minimum: 0.00001; maximum: 0.001;
-                                        value <=> root.cal-akaze-threshold;
-                                    }
+                                    label: "AKAZE threshold"; decimals: 5;
+                                    minimum: 0.00001; maximum: 0.001;
+                                    value <=> root.cal-akaze-threshold;
                                 }
-                                Tip {
+                                LabeledSlider {
                                     tip: "Top edge of the vertical region used for feature detection (fraction of frame height).";
-                                    LabeledSlider {
-                                        label: "Detect Y min";
-                                        minimum: 0.0; maximum: 1.0; decimals: 2;
-                                        value <=> root.cal-detect-y-min;
-                                    }
+                                    label: "Detect Y min";
+                                    minimum: 0.0; maximum: 1.0; decimals: 2;
+                                    value <=> root.cal-detect-y-min;
                                 }
-                                Tip {
+                                LabeledSlider {
                                     tip: "Bottom edge of the vertical region used for feature detection (fraction of frame height).";
-                                    LabeledSlider {
-                                        label: "Detect Y max";
-                                        minimum: 0.0; maximum: 1.0; decimals: 2;
-                                        value <=> root.cal-detect-y-max;
-                                    }
+                                    label: "Detect Y max";
+                                    minimum: 0.0; maximum: 1.0; decimals: 2;
+                                    value <=> root.cal-detect-y-max;
                                 }
-                                Tip {
+                                LabeledSlider {
                                     tip: "Seconds to skip at the end of the clip when sampling calibration frames.";
-                                    LabeledSlider {
-                                        label: "Skip end (s)";
-                                        minimum: 0.0; maximum: 30.0; decimals: 1;
-                                        value <=> root.cal-skip-end-secs;
-                                    }
+                                    label: "Skip end (s)";
+                                    minimum: 0.0; maximum: 30.0; decimals: 1;
+                                    value <=> root.cal-skip-end-secs;
                                 }
                                 Tip {
                                     tip: "Seed the optimizer with the camera's IMU-derived rotation, if the footage has it.";
@@ -1142,153 +1249,121 @@ export component CalibrateApp inherits Window {
 
                                 if root.lens-selected-camera == "left" || root.lens-selected-camera == "both": VerticalLayout {
                                     spacing: 6px;
-                                    Tip {
+                                    LabeledSlider {
                                         tip: "Horizontal focal length in pixels.";
-                                        LabeledSlider {
-                                            label: "fx";
-                                            minimum: root.lens-fx-min; maximum: root.lens-fx-max; decimals: 1;
-                                            value <=> root.lens-left-fx;
-                                            changed(v) => { root.changed-lens-param(); }
-                                        }
+                                        label: "fx";
+                                        minimum: root.lens-fx-min; maximum: root.lens-fx-max; decimals: 1;
+                                        value <=> root.lens-left-fx;
+                                        changed(v) => { root.changed-lens-param(); }
                                     }
-                                    Tip {
+                                    LabeledSlider {
                                         tip: "Vertical focal length in pixels.";
-                                        LabeledSlider {
-                                            label: "fy";
-                                            minimum: root.lens-fy-min; maximum: root.lens-fy-max; decimals: 1;
-                                            value <=> root.lens-left-fy;
-                                            changed(v) => { root.changed-lens-param(); }
-                                        }
+                                        label: "fy";
+                                        minimum: root.lens-fy-min; maximum: root.lens-fy-max; decimals: 1;
+                                        value <=> root.lens-left-fy;
+                                        changed(v) => { root.changed-lens-param(); }
                                     }
-                                    Tip {
+                                    LabeledSlider {
                                         tip: "Horizontal optical center in pixels.";
-                                        LabeledSlider {
-                                            label: "cx";
-                                            minimum: root.lens-cx-min; maximum: root.lens-cx-max; decimals: 1;
-                                            value <=> root.lens-left-cx;
-                                            changed(v) => { root.changed-lens-param(); }
-                                        }
+                                        label: "cx";
+                                        minimum: root.lens-cx-min; maximum: root.lens-cx-max; decimals: 1;
+                                        value <=> root.lens-left-cx;
+                                        changed(v) => { root.changed-lens-param(); }
                                     }
-                                    Tip {
+                                    LabeledSlider {
                                         tip: "Vertical optical center in pixels.";
-                                        LabeledSlider {
-                                            label: "cy";
-                                            minimum: root.lens-cy-min; maximum: root.lens-cy-max; decimals: 1;
-                                            value <=> root.lens-left-cy;
-                                            changed(v) => { root.changed-lens-param(); }
-                                        }
+                                        label: "cy";
+                                        minimum: root.lens-cy-min; maximum: root.lens-cy-max; decimals: 1;
+                                        value <=> root.lens-left-cy;
+                                        changed(v) => { root.changed-lens-param(); }
                                     }
-                                    Tip {
+                                    LabeledSlider {
                                         tip: "Fisheye distortion coefficient 1 (KB4 model).";
-                                        LabeledSlider {
-                                            label: "k1"; decimals: 4;
-                                            minimum: -root.lens-k-range; maximum: root.lens-k-range;
-                                            value <=> root.lens-left-k1;
-                                            changed(v) => { root.changed-lens-param(); }
-                                        }
+                                        label: "k1"; decimals: 4;
+                                        minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                        value <=> root.lens-left-k1;
+                                        changed(v) => { root.changed-lens-param(); }
                                     }
-                                    Tip {
+                                    LabeledSlider {
                                         tip: "Fisheye distortion coefficient 2 (KB4 model).";
-                                        LabeledSlider {
-                                            label: "k2"; decimals: 4;
-                                            minimum: -root.lens-k-range; maximum: root.lens-k-range;
-                                            value <=> root.lens-left-k2;
-                                            changed(v) => { root.changed-lens-param(); }
-                                        }
+                                        label: "k2"; decimals: 4;
+                                        minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                        value <=> root.lens-left-k2;
+                                        changed(v) => { root.changed-lens-param(); }
                                     }
-                                    Tip {
+                                    LabeledSlider {
                                         tip: "Fisheye distortion coefficient 3 (KB4 model).";
-                                        LabeledSlider {
-                                            label: "k3"; decimals: 4;
-                                            minimum: -root.lens-k-range; maximum: root.lens-k-range;
-                                            value <=> root.lens-left-k3;
-                                            changed(v) => { root.changed-lens-param(); }
-                                        }
+                                        label: "k3"; decimals: 4;
+                                        minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                        value <=> root.lens-left-k3;
+                                        changed(v) => { root.changed-lens-param(); }
                                     }
-                                    Tip {
+                                    LabeledSlider {
                                         tip: "Fisheye distortion coefficient 4 (KB4 model).";
-                                        LabeledSlider {
-                                            label: "k4"; decimals: 4;
-                                            minimum: -root.lens-k-range; maximum: root.lens-k-range;
-                                            value <=> root.lens-left-k4;
-                                            changed(v) => { root.changed-lens-param(); }
-                                        }
+                                        label: "k4"; decimals: 4;
+                                        minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                        value <=> root.lens-left-k4;
+                                        changed(v) => { root.changed-lens-param(); }
                                     }
                                 }
 
                                 if root.lens-selected-camera == "right": VerticalLayout {
                                     spacing: 6px;
-                                    Tip {
+                                    LabeledSlider {
                                         tip: "Horizontal focal length in pixels.";
-                                        LabeledSlider {
-                                            label: "fx";
-                                            minimum: root.lens-fx-min; maximum: root.lens-fx-max; decimals: 1;
-                                            value <=> root.lens-right-fx;
-                                            changed(v) => { root.changed-lens-param(); }
-                                        }
+                                        label: "fx";
+                                        minimum: root.lens-fx-min; maximum: root.lens-fx-max; decimals: 1;
+                                        value <=> root.lens-right-fx;
+                                        changed(v) => { root.changed-lens-param(); }
                                     }
-                                    Tip {
+                                    LabeledSlider {
                                         tip: "Vertical focal length in pixels.";
-                                        LabeledSlider {
-                                            label: "fy";
-                                            minimum: root.lens-fy-min; maximum: root.lens-fy-max; decimals: 1;
-                                            value <=> root.lens-right-fy;
-                                            changed(v) => { root.changed-lens-param(); }
-                                        }
+                                        label: "fy";
+                                        minimum: root.lens-fy-min; maximum: root.lens-fy-max; decimals: 1;
+                                        value <=> root.lens-right-fy;
+                                        changed(v) => { root.changed-lens-param(); }
                                     }
-                                    Tip {
+                                    LabeledSlider {
                                         tip: "Horizontal optical center in pixels.";
-                                        LabeledSlider {
-                                            label: "cx";
-                                            minimum: root.lens-cx-min; maximum: root.lens-cx-max; decimals: 1;
-                                            value <=> root.lens-right-cx;
-                                            changed(v) => { root.changed-lens-param(); }
-                                        }
+                                        label: "cx";
+                                        minimum: root.lens-cx-min; maximum: root.lens-cx-max; decimals: 1;
+                                        value <=> root.lens-right-cx;
+                                        changed(v) => { root.changed-lens-param(); }
                                     }
-                                    Tip {
+                                    LabeledSlider {
                                         tip: "Vertical optical center in pixels.";
-                                        LabeledSlider {
-                                            label: "cy";
-                                            minimum: root.lens-cy-min; maximum: root.lens-cy-max; decimals: 1;
-                                            value <=> root.lens-right-cy;
-                                            changed(v) => { root.changed-lens-param(); }
-                                        }
+                                        label: "cy";
+                                        minimum: root.lens-cy-min; maximum: root.lens-cy-max; decimals: 1;
+                                        value <=> root.lens-right-cy;
+                                        changed(v) => { root.changed-lens-param(); }
                                     }
-                                    Tip {
+                                    LabeledSlider {
                                         tip: "Fisheye distortion coefficient 1 (KB4 model).";
-                                        LabeledSlider {
-                                            label: "k1"; decimals: 4;
-                                            minimum: -root.lens-k-range; maximum: root.lens-k-range;
-                                            value <=> root.lens-right-k1;
-                                            changed(v) => { root.changed-lens-param(); }
-                                        }
+                                        label: "k1"; decimals: 4;
+                                        minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                        value <=> root.lens-right-k1;
+                                        changed(v) => { root.changed-lens-param(); }
                                     }
-                                    Tip {
+                                    LabeledSlider {
                                         tip: "Fisheye distortion coefficient 2 (KB4 model).";
-                                        LabeledSlider {
-                                            label: "k2"; decimals: 4;
-                                            minimum: -root.lens-k-range; maximum: root.lens-k-range;
-                                            value <=> root.lens-right-k2;
-                                            changed(v) => { root.changed-lens-param(); }
-                                        }
+                                        label: "k2"; decimals: 4;
+                                        minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                        value <=> root.lens-right-k2;
+                                        changed(v) => { root.changed-lens-param(); }
                                     }
-                                    Tip {
+                                    LabeledSlider {
                                         tip: "Fisheye distortion coefficient 3 (KB4 model).";
-                                        LabeledSlider {
-                                            label: "k3"; decimals: 4;
-                                            minimum: -root.lens-k-range; maximum: root.lens-k-range;
-                                            value <=> root.lens-right-k3;
-                                            changed(v) => { root.changed-lens-param(); }
-                                        }
+                                        label: "k3"; decimals: 4;
+                                        minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                        value <=> root.lens-right-k3;
+                                        changed(v) => { root.changed-lens-param(); }
                                     }
-                                    Tip {
+                                    LabeledSlider {
                                         tip: "Fisheye distortion coefficient 4 (KB4 model).";
-                                        LabeledSlider {
-                                            label: "k4"; decimals: 4;
-                                            minimum: -root.lens-k-range; maximum: root.lens-k-range;
-                                            value <=> root.lens-right-k4;
-                                            changed(v) => { root.changed-lens-param(); }
-                                        }
+                                        label: "k4"; decimals: 4;
+                                        minimum: -root.lens-k-range; maximum: root.lens-k-range;
+                                        value <=> root.lens-right-k4;
+                                        changed(v) => { root.changed-lens-param(); }
                                     }
                                 }
 

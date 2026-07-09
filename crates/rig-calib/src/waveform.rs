@@ -40,20 +40,23 @@ pub fn compute_envelope(samples: &[i16], buckets: usize) -> Vec<f32> {
         .collect()
 }
 
-/// Rescale `envelope` in place so its tallest bucket reaches `1.0`.
+/// Rescale `left` and `right` in place using one shared peak (the louder
+/// of the two), instead of each independently reaching `1.0`.
 ///
-/// Raw envelope values are normalized against the theoretical maximum PCM
-/// amplitude (`i16::MAX`), so quiet audio - ambient crowd/wind noise well
-/// below full scale - would otherwise draw as barely-visible slivers even
-/// though there's a real, comparable transient to see. Left/right are
-/// normalized independently (each call site handles one side), which is
-/// also the right behavior here: the two camera mics can have quite
-/// different absolute gain, and this view only cares about *where* each
-/// side's peaks fall in time, not their relative loudness.
-fn normalize_to_peak(envelope: &mut [f32]) {
-    let peak = envelope.iter().copied().fold(0.0f32, f32::max);
+/// Normalizing each channel independently would hide a real amplitude
+/// mismatch between the two camera mics - e.g. one camera's audio
+/// genuinely quieter, which is itself a sign something's off - by
+/// stretching both to look equally loud. A shared peak keeps that
+/// difference visible while still auto-scaling the pair away from
+/// barely-visible slivers when both are quiet.
+pub fn normalize_pair_to_peak(left: &mut [f32], right: &mut [f32]) {
+    let peak = left
+        .iter()
+        .chain(right.iter())
+        .copied()
+        .fold(0.0f32, f32::max);
     if peak > 1e-6 {
-        for v in envelope.iter_mut() {
+        for v in left.iter_mut().chain(right.iter_mut()) {
             *v /= peak;
         }
     }
@@ -87,9 +90,11 @@ fn smooth_envelope(envelope: &[f32], radius: usize) -> Vec<f32> {
 }
 
 /// Extract a peak-amplitude envelope for a window of audio centered on
-/// `center_secs` in the file at `path`, smoothed (see [`smooth_envelope`])
-/// and auto-scaled so its loudest point reaches the top of the display
-/// (see [`normalize_to_peak`]).
+/// `center_secs` in the file at `path`, smoothed (see [`smooth_envelope`]).
+///
+/// Not normalized - the two channels of a L/R pair should be scaled
+/// together afterwards via [`normalize_pair_to_peak`], not independently,
+/// so a real amplitude mismatch between the two mics stays visible.
 pub fn extract_window_envelope(
     path: &Path,
     center_secs: f64,
@@ -104,9 +109,7 @@ pub fn extract_window_envelope(
         window_secs,
     )?;
     let envelope = compute_envelope(&samples, buckets);
-    let mut envelope = smooth_envelope(&envelope, SMOOTHING_RADIUS);
-    normalize_to_peak(&mut envelope);
-    Ok(envelope)
+    Ok(smooth_envelope(&envelope, SMOOTHING_RADIUS))
 }
 
 #[cfg(test)]
@@ -148,21 +151,43 @@ mod tests {
     }
 
     #[test]
-    fn normalize_to_peak_scales_quiet_envelope_up() {
-        let mut env = vec![0.0, 0.05, 0.02, 0.1];
-        normalize_to_peak(&mut env);
-        assert!((env[3] - 1.0).abs() < 1e-6, "loudest bucket should hit 1.0");
+    fn normalize_pair_to_peak_scales_quiet_pair_up() {
+        let mut left = vec![0.0, 0.05, 0.02, 0.1];
+        let mut right = vec![0.0; 4];
+        normalize_pair_to_peak(&mut left, &mut right);
         assert!(
-            (env[1] - 0.5).abs() < 1e-6,
+            (left[3] - 1.0).abs() < 1e-6,
+            "the pair's loudest bucket should hit 1.0"
+        );
+        assert!(
+            (left[1] - 0.5).abs() < 1e-6,
             "other buckets scale by the same factor"
         );
     }
 
     #[test]
-    fn normalize_to_peak_leaves_silence_untouched() {
-        let mut env = vec![0.0; 4];
-        normalize_to_peak(&mut env);
-        assert_eq!(env, vec![0.0; 4], "no division by zero on pure silence");
+    fn normalize_pair_to_peak_leaves_silence_untouched() {
+        let mut left = vec![0.0; 4];
+        let mut right = vec![0.0; 4];
+        normalize_pair_to_peak(&mut left, &mut right);
+        assert_eq!(left, vec![0.0; 4], "no division by zero on pure silence");
+        assert_eq!(right, vec![0.0; 4]);
+    }
+
+    #[test]
+    fn normalize_pair_to_peak_preserves_relative_loudness_between_channels() {
+        // Right is genuinely quieter than left - a real mic-level
+        // mismatch, not just a display artifact - so it must stay
+        // quieter after normalization instead of being independently
+        // stretched to also reach 1.0.
+        let mut left = vec![0.0, 1.0, 0.5];
+        let mut right = vec![0.0, 0.4, 0.2];
+        normalize_pair_to_peak(&mut left, &mut right);
+        assert!((left[1] - 1.0).abs() < 1e-6, "louder channel hits 1.0");
+        assert!(
+            (right[1] - 0.4).abs() < 1e-6,
+            "quieter channel stays proportionally quieter, not re-stretched to 1.0"
+        );
     }
 
     #[test]
