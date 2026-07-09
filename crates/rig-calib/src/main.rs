@@ -638,9 +638,20 @@ impl AppState {
         if let (Some(left), Some(right)) = (&self.left_path, &self.right_path) {
             let left = InputPath::Single(left.clone());
             let right = InputPath::Single(right.clone());
+            let resume_frame = self.playback.frame_index();
             if let Err(e) = self.playback.open(&left, &right, offset) {
                 log::error!("Failed to reopen playback with sync offset {offset}: {e}");
                 return;
+            }
+            // `open()` always resets to frame 0 (it builds a fresh decode
+            // pipeline to apply the new frame-skip alignment) - restore
+            // the playhead so changing the sync offset doesn't jerk the
+            // user back to the start of the clip.
+            if let Some(total) = self.playback.total_frames().filter(|&t| t > 0) {
+                let fraction = resume_frame.min(total - 1) as f32 / total as f32;
+                if let Err(e) = self.playback.seek(fraction) {
+                    log::error!("Failed to restore playhead after sync offset change: {e}");
+                }
             }
             log::info!("Sync offset changed to {offset} frames");
             self.preview_dirty = true;
