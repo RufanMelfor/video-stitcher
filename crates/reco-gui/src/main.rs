@@ -25,6 +25,7 @@ mod toast;
 mod waveform;
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -1402,6 +1403,52 @@ fn sync_roi_points(state: &AppState, app: &RecoApp) {
     app.set_roi_points_y(slint::ModelRc::new(slint::VecModel::from(ys)));
 }
 
+/// Ring buffer backing the in-app Debug panel. Capped so long sessions
+/// don't grow memory unbounded; separate from (and much shorter than)
+/// the on-disk log file used for bug reports (see `log_file_path`).
+static DEBUG_LOG_BUFFER: std::sync::LazyLock<Mutex<VecDeque<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(VecDeque::new()));
+
+const DEBUG_LOG_CAPACITY: usize = 500;
+
+/// Snapshot of the current ring-buffer contents, newest line last, joined
+/// for display in the Debug panel's scrollable text area.
+fn debug_log_snapshot() -> String {
+    DEBUG_LOG_BUFFER
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `tracing_subscriber::fmt::layer()` writer that appends formatted lines
+/// to `DEBUG_LOG_BUFFER` instead of a file/stream. A bare fn (not a
+/// closure) so it satisfies the `MakeWriter` blanket impl for `Fn() -> W`.
+fn debug_log_writer() -> DebugLogWriter {
+    DebugLogWriter
+}
+
+struct DebugLogWriter;
+
+impl std::io::Write for DebugLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut log = DEBUG_LOG_BUFFER.lock().unwrap();
+        for line in String::from_utf8_lossy(buf).lines() {
+            if log.len() >= DEBUG_LOG_CAPACITY {
+                log.pop_front();
+            }
+            log.push_back(line.to_string());
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Install the standard tracing subscriber + log bridge.
 ///
 /// Replaces the previous `env_logger::init()`. Bridges `log::*` calls
@@ -1416,6 +1463,17 @@ fn init_tracing() {
     let _ = tracing_log::LogTracer::init();
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,ort::logging=warn"));
+
+    // Feeds the in-app Debug panel (see `debug_log_snapshot`) - attached
+    // to every branch below in addition to the file/stderr writer(s),
+    // since release builds have no visible console
+    // (`windows_subsystem = "windows"`).
+    let debug_panel_layer = fmt::layer()
+        .with_target(false)
+        .with_level(true)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(debug_log_writer);
 
     // In release builds, write logs to a file so bug reports have context.
     // Debug builds just use stderr.
@@ -1457,6 +1515,7 @@ fn init_tracing() {
                             .with_ansi(false)
                             .with_writer(file),
                     )
+                    .with(debug_panel_layer)
                     .try_init();
                 eprintln!("Log file: {}", log_path.display());
                 return;
@@ -1479,6 +1538,7 @@ fn init_tracing() {
                             .with_level(true)
                             .with_writer(std::io::stderr),
                     )
+                    .with(debug_panel_layer)
                     .try_init();
                 eprintln!("Log file: {}", log_path.display());
                 return;
@@ -1489,6 +1549,7 @@ fn init_tracing() {
     let _ = tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_target(true).with_level(true))
+        .with(debug_panel_layer)
         .try_init();
 }
 
@@ -4321,6 +4382,25 @@ fn main() -> anyhow::Result<()> {
                 && (app.get_playing() || s.pending_seek.is_some() || s.preview_dirty)
             {
                 app.window().request_redraw();
+            }
+        },
+    );
+
+    // ── Debug log panel refresh timer ──
+    //
+    // Only pushes a snapshot while the dialog is open - the ring buffer
+    // itself (`DEBUG_LOG_BUFFER`) keeps accumulating in the background
+    // regardless via the tracing layer installed in `init_tracing`.
+    let debug_log_timer = slint::Timer::default();
+    let app_weak = app.as_weak();
+    debug_log_timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(500),
+        move || {
+            if let Some(app) = app_weak.upgrade()
+                && app.get_debug_dialog_open()
+            {
+                app.set_debug_log_text(debug_log_snapshot().into());
             }
         },
     );

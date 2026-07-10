@@ -67,10 +67,81 @@ component Tip inherits TouchArea {
     }
 }
 
+/// Minimal boxed number-entry field: a bare `TextInput` in a bordered
+/// `Rectangle`, styled to match this app's existing "boxed" display
+/// widgets (see the non-editing states of the frame/speed/sync fields
+/// below). Deliberately not `std-widgets`' `LineEdit` - its `fluent`
+/// style draws a clear ("×") icon inside the field whenever it has focus
+/// and non-empty text, with no public property to suppress it. Every
+/// numeric field in this app wants Enter-to-commit / Escape-to-cancel
+/// editing, not a mouse-only clear button, so callers handle `accepted`
+/// (Enter) themselves and `escaped` (Escape) to revert/cancel.
+component NumEdit inherits Rectangle {
+    in property <bool> enabled: true;
+    in-out property <string> text;
+    in property <string> placeholder-text: "";
+    in property <length> num-font-size: 11px;
+    in property <TextHorizontalAlignment> horizontal-alignment: center;
+    out property <bool> has-focus: input.has-focus;
+    callback accepted(string);
+    callback edited(string);
+    callback escaped();
+
+    forward-focus: input;
+    height: 22px;
+    background: root.enabled ? #2a2a2a : #202020;
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: input.has-focus ? #6a9fd8 : #444;
+
+    public function select-all() {
+        input.select-all();
+    }
+
+    Rectangle {
+        x: 6px;
+        width: parent.width - 12px;
+        height: 100%;
+        clip: true;
+
+        placeholder := Text {
+            text: root.text == "" ? root.placeholder-text : "";
+            color: #666;
+            font-size: root.num-font-size;
+            horizontal-alignment: root.horizontal-alignment;
+            vertical-alignment: center;
+            width: 100%;
+            height: 100%;
+        }
+
+        input := TextInput {
+            text <=> root.text;
+            enabled: root.enabled;
+            color: root.enabled ? white : #666;
+            font-size: root.num-font-size;
+            horizontal-alignment: root.horizontal-alignment;
+            vertical-alignment: center;
+            single-line: true;
+            width: 100%;
+            height: 100%;
+            accepted => { root.accepted(self.text); }
+            edited => { root.edited(self.text); }
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.escaped();
+                    return accept;
+                }
+                return reject;
+            }
+        }
+    }
+}
+
 /// One labeled slider row for the controls panel. The value display
 /// doubles as a text input: double-click it to type an exact value
-/// instead of dragging the slider. Commits on Enter or on clicking away;
-/// clamped to [minimum, maximum] like the slider itself.
+/// instead of dragging the slider. Commits on Enter or on clicking away,
+/// Escape cancels and reverts to the last committed value; clamped to
+/// [minimum, maximum] like the slider itself.
 ///
 /// Takes its own optional `tip` and wraps only the label in `Tip`
 /// internally, rather than callers wrapping the whole `LabeledSlider` in
@@ -156,11 +227,12 @@ component LabeledSlider inherits VerticalLayout {
 
         if root.editing: HorizontalLayout {
             spacing: 3px;
-            edit-field := LineEdit {
+            edit-field := NumEdit {
                 text: root.display-value;
                 width: 56px;
-                font-size: 11px;
+                num-font-size: 11px;
                 accepted => { root.commit-edit(self.text); }
+                escaped => { root.editing = false; }
                 changed has-focus => {
                     if !self.has-focus && root.editing {
                         root.commit-edit(self.text);
@@ -950,6 +1022,15 @@ export component RecoApp inherits Window {
     // Keyboard shortcut help modal.
     in-out property <bool> shortcuts-dialog-open: false;
 
+    // Debug panel: live tail of the app's tracing log, refreshed
+    // periodically from Rust (see `debug_log_snapshot` in main.rs) -
+    // release builds have no visible console
+    // (`windows_subsystem = "windows"`), so this is the only way a user
+    // can see log output without digging up the log file for a bug
+    // report.
+    in-out property <bool> debug-dialog-open: false;
+    in-out property <string> debug-log-text: "";
+
     // Preferences dialog state.
     in-out property <bool> prefs-dialog-open: false;
     in-out property <string> prefs-default-codec: "h264";
@@ -1219,6 +1300,7 @@ export component RecoApp inherits Window {
 
                 Rectangle { horizontal-stretch: 1; }
 
+                FlatButton { text: "Debug"; clicked => { root.debug-dialog-open = true; } }
                 FlatButton { text: "?"; clicked => { root.shortcuts-dialog-open = true; } }
                 FlatButton { text: "⚙"; clicked => { root.open-prefs-dialog(); } }
 
@@ -1229,35 +1311,14 @@ export component RecoApp inherits Window {
                     clicked => { root.open-export-dialog(); }
                 }
 
-                // Right controls-panel toggle, at the end of the toolbar row
-                // (was a bare Rectangle with no x, which Slint centered - it
-                // floated in the middle of the toolbar). has-both-videos (not
-                // files-loaded): the right panel also holds the auto-calibrate
-                // tuning knobs, reachable before the first calibration exists.
-                Rectangle {
-                    width: 30px;
-                    height: 28px;
-                    y: (parent.height - self.height) / 2;
-                    border-radius: 7px;
-                    border-width: 1px;
-                    border-color: panel-toggle-touch.has-hover && root.has-both-videos ? #34393f : transparent;
-                    background: panel-toggle-touch.has-hover && root.has-both-videos ? root.bg-hover : transparent;
-
-                    panel-toggle-touch := TouchArea {
-                        enabled: root.has-both-videos;
-                        clicked => { root.controls-open = !root.controls-open; }
-                        mouse-cursor: root.has-both-videos ? pointer : default;
-                    }
-
-                    Text {
-                        text: root.controls-open ? "⇥" : "⇤";
-                        color: root.has-both-videos ? root.text-secondary : root.text-faint;
-                        font-size: 15px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                        width: 100%;
-                        height: 100%;
-                    }
+                // Right controls-panel toggle, at the end of the toolbar row.
+                // has-both-videos (not files-loaded): the right panel also
+                // holds the auto-calibrate tuning knobs, reachable before
+                // the first calibration exists.
+                FlatButton {
+                    text: root.controls-open ? "◀ Expert Mode" : "Expert Mode ▶";
+                    enabled: root.has-both-videos;
+                    clicked => { root.controls-open = !root.controls-open; }
                 }
             }
         }
@@ -1440,10 +1501,11 @@ export component RecoApp inherits Window {
                         if root.files-loaded: HorizontalLayout {
                             spacing: 4px;
                             Text { text: "Sync offset"; color: #aaa; font-size: 11px; vertical-alignment: center; }
-                            sync-input := LineEdit {
+                            sync-input := NumEdit {
                                 text: root.sync-offset;
                                 width: 70px;
                                 accepted => { root.sync-offset = self.text.to-float(); root.changed-sync-offset(self.text.to-float()); }
+                                escaped => { self.text = root.sync-offset; }
                             }
                             Text { text: "frames"; color: #777; font-size: 10px; vertical-alignment: center; }
                             FlatButton { text: "Apply"; clicked => { root.sync-offset = sync-input.text.to-float(); root.changed-sync-offset(sync-input.text.to-float()); } }
@@ -1734,6 +1796,163 @@ export component RecoApp inherits Window {
 
                     if !root.lens-preview-active: Rectangle { height: 1px; background: root.border-subtle; }
 
+                    // ── Audio Sync (collapsible): overlaid L/R waveform ──
+                    // around the playhead, so a sync_offset error shows up
+                    // as a visible shift between the two traces. Placed
+                    // above Lens - sync is checked/adjusted more often
+                    // than lens fine-tuning during a normal calibration
+                    // pass.
+                    audio-section := SectionHeader {
+                        title: "Audio Sync Waveform";
+                        expanded <=> root.audio-sync-expanded;
+                    }
+
+                    if audio-section.expanded: VerticalLayout {
+                        spacing: 4px;
+
+                        Text {
+                            text: "L (blue) / R (orange), " + root.audio-window-frames + " frames around playhead. Aligned peaks = in sync.";
+                            color: root.text-muted; font-size: 11px; wrap: word-wrap;
+                        }
+
+                        HorizontalBox {
+                            padding: 0px;
+                            spacing: 12px;
+                            HorizontalLayout {
+                                spacing: 3px;
+                                Tip {
+                                    tip: "Number of frames of audio shown around the playhead.";
+                                    Text { text: "Window:"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
+                                }
+                                // Deliberately outside the `Tip` above: `Tip` inherits
+                                // `TouchArea`, which grabs mouse presses before a nested
+                                // `NumEdit` can claim keyboard focus, making it very
+                                // hard to reliably click into and type in.
+                                NumEdit {
+                                    text: root.audio-window-frames;
+                                    width: 64px;
+                                    accepted => {
+                                        root.audio-window-frames = self.text.to-float();
+                                        root.changed-audio-window-frames(self.text.to-float());
+                                    }
+                                    escaped => { self.text = root.audio-window-frames; }
+                                }
+                                Text { text: "frames"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
+                            }
+                            HorizontalLayout {
+                                spacing: 3px;
+                                Tip {
+                                    tip: "Height of the waveform display.";
+                                    Text { text: "Height:"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
+                                }
+                                NumEdit {
+                                    text: root.audio-waveform-height-px;
+                                    width: 64px;
+                                    accepted => {
+                                        root.audio-waveform-height-px = min(300, max(40, self.text.to-float()));
+                                    }
+                                    escaped => { self.text = root.audio-waveform-height-px; }
+                                }
+                                Text { text: "px"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
+                            }
+                        }
+
+                        waveform-area := Rectangle {
+                            height: root.audio-waveform-height-px * 1px;
+                            background: root.bg-base;
+                            border-radius: 4px;
+                            clip: true;
+
+                            property <float> bucket-count: max(1, root.audio-envelope-left.length) * 1.0;
+                            property <length> bar-w: waveform-area.width / bucket-count;
+
+                            // Background grid, purely a reading aid:
+                            // horizontal thirds + a vertical line
+                            // every 8 buckets.
+                            for row in [0.25, 0.5, 0.75]: Rectangle {
+                                x: 0px; width: waveform-area.width;
+                                y: waveform-area.height * row; height: 1px;
+                                background: #ffffff16;
+                            }
+                            for i in 9: Rectangle {
+                                x: waveform-area.width * (i + 1) / 10; width: 1px;
+                                y: 0px; height: waveform-area.height;
+                                background: #ffffff10;
+                            }
+
+                            // Both channels are plain (unmirrored)
+                            // lines sharing one axis - 0 at the
+                            // bottom, loudest point at the top - so a
+                            // real sync offset reads as a horizontal
+                            // shift between the two lines' peaks,
+                            // same as any two-series line chart.
+                            //
+                            // Each point is a thin horizontal marker
+                            // PLUS a vertical connector to the next
+                            // point's height, so consecutive buckets
+                            // join into a continuous "staircase" line
+                            // instead of reading as scattered dots.
+                            // Not a `Path`: Slint fits a `Path`'s
+                            // viewbox uniformly, which would squash a
+                            // wide/short envelope flat; and Rectangle
+                            // has no rotation for a true diagonal
+                            // stroke, so this approximates one.
+                            for v[idx] in root.audio-envelope-left: Rectangle {
+                                x: idx * waveform-area.bar-w;
+                                width: waveform-area.bar-w;
+                                height: 1px;
+                                y: waveform-area.height * (1.0 - v) - 0.5px;
+                                background: #5fb8ff;
+                            }
+                            for v[idx] in root.audio-envelope-left: Rectangle {
+                                property <bool> has-next: idx + 1 < root.audio-envelope-left.length;
+                                property <float> next-v: has-next ? root.audio-envelope-left[idx + 1] : v;
+                                property <length> y0: waveform-area.height * (1.0 - v);
+                                property <length> y1: waveform-area.height * (1.0 - next-v);
+                                visible: has-next;
+                                x: (idx + 1) * waveform-area.bar-w - 0.5px;
+                                width: 1px;
+                                y: min(y0, y1);
+                                height: max(y0, y1) - min(y0, y1) + 1px;
+                                background: #5fb8ff;
+                            }
+                            for v[idx] in root.audio-envelope-right: Rectangle {
+                                x: idx * waveform-area.bar-w;
+                                width: waveform-area.bar-w;
+                                height: 1px;
+                                y: waveform-area.height * (1.0 - v) - 0.5px;
+                                background: #ff9f5f;
+                            }
+                            for v[idx] in root.audio-envelope-right: Rectangle {
+                                property <bool> has-next: idx + 1 < root.audio-envelope-right.length;
+                                property <float> next-v: has-next ? root.audio-envelope-right[idx + 1] : v;
+                                property <length> y0: waveform-area.height * (1.0 - v);
+                                property <length> y1: waveform-area.height * (1.0 - next-v);
+                                visible: has-next;
+                                x: (idx + 1) * waveform-area.bar-w - 0.5px;
+                                width: 1px;
+                                y: min(y0, y1);
+                                height: max(y0, y1) - min(y0, y1) + 1px;
+                                background: #ff9f5f;
+                            }
+
+                            Rectangle {
+                                x: waveform-area.width * 0.5 - 1px;
+                                width: 2px;
+                                height: waveform-area.height;
+                                background: #ffffff55;
+                            }
+
+                            if root.audio-envelope-left.length == 0 && root.audio-envelope-right.length == 0: Text {
+                                text: "Computing…";
+                                color: root.text-muted; font-size: 10px;
+                                x: 6px; y: 6px;
+                            }
+                        }
+                    }
+
+                    if !audio-section.expanded: Rectangle { height: 1px; background: #2a2a2a; }
+
                     // ── Lens (collapsible: info always, sliders on demand) ──
                     lens-section := SectionHeader {
                         title: root.lens-info-available
@@ -1837,158 +2056,6 @@ export component RecoApp inherits Window {
                     }
 
                     if !lens-section.expanded: Rectangle { height: 1px; background: #2a2a2a; }
-
-                    // ── Audio Sync (collapsible): overlaid L/R waveform ──
-                    // around the playhead, so a sync_offset error shows up
-                    // as a visible shift between the two traces.
-                    audio-section := SectionHeader {
-                        title: "Audio Sync Waveform";
-                        expanded <=> root.audio-sync-expanded;
-                    }
-
-                    if audio-section.expanded: VerticalLayout {
-                        spacing: 4px;
-
-                        Text {
-                            text: "L (blue) / R (orange), " + root.audio-window-frames + " frames around playhead. Aligned peaks = in sync.";
-                            color: root.text-muted; font-size: 11px; wrap: word-wrap;
-                        }
-
-                        HorizontalBox {
-                            padding: 0px;
-                            spacing: 12px;
-                            HorizontalLayout {
-                                spacing: 3px;
-                                Tip {
-                                    tip: "Number of frames of audio shown around the playhead.";
-                                    Text { text: "Window:"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
-                                }
-                                // Deliberately outside the `Tip` above: `Tip` inherits
-                                // `TouchArea`, which grabs mouse presses before a nested
-                                // `LineEdit` can claim keyboard focus, making it very
-                                // hard to reliably click into and type in.
-                                LineEdit {
-                                    text: root.audio-window-frames;
-                                    width: 64px;
-                                    accepted => {
-                                        root.audio-window-frames = self.text.to-float();
-                                        root.changed-audio-window-frames(self.text.to-float());
-                                    }
-                                }
-                                Text { text: "frames"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
-                            }
-                            HorizontalLayout {
-                                spacing: 3px;
-                                Tip {
-                                    tip: "Height of the waveform display.";
-                                    Text { text: "Height:"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
-                                }
-                                LineEdit {
-                                    text: root.audio-waveform-height-px;
-                                    width: 64px;
-                                    accepted => {
-                                        root.audio-waveform-height-px = min(300, max(40, self.text.to-float()));
-                                    }
-                                }
-                                Text { text: "px"; color: root.text-muted; font-size: 10px; vertical-alignment: center; }
-                            }
-                        }
-
-                        waveform-area := Rectangle {
-                            height: root.audio-waveform-height-px * 1px;
-                            background: root.bg-base;
-                            border-radius: 4px;
-                            clip: true;
-
-                            property <float> bucket-count: max(1, root.audio-envelope-left.length) * 1.0;
-                            property <length> bar-w: waveform-area.width / bucket-count;
-
-                            // Background grid, purely a reading aid:
-                            // horizontal thirds + a vertical line
-                            // every 8 buckets.
-                            for row in [0.25, 0.5, 0.75]: Rectangle {
-                                x: 0px; width: waveform-area.width;
-                                y: waveform-area.height * row; height: 1px;
-                                background: #ffffff16;
-                            }
-                            for i in 9: Rectangle {
-                                x: waveform-area.width * (i + 1) / 10; width: 1px;
-                                y: 0px; height: waveform-area.height;
-                                background: #ffffff10;
-                            }
-
-                            // Both channels are plain (unmirrored)
-                            // lines sharing one axis - 0 at the
-                            // bottom, loudest point at the top - so a
-                            // real sync offset reads as a horizontal
-                            // shift between the two lines' peaks,
-                            // same as any two-series line chart.
-                            //
-                            // Each point is a thin horizontal marker
-                            // PLUS a vertical connector to the next
-                            // point's height, so consecutive buckets
-                            // join into a continuous "staircase" line
-                            // instead of reading as scattered dots.
-                            // Not a `Path`: Slint fits a `Path`'s
-                            // viewbox uniformly, which would squash a
-                            // wide/short envelope flat; and Rectangle
-                            // has no rotation for a true diagonal
-                            // stroke, so this approximates one.
-                            for v[idx] in root.audio-envelope-left: Rectangle {
-                                x: idx * waveform-area.bar-w;
-                                width: waveform-area.bar-w;
-                                height: 1px;
-                                y: waveform-area.height * (1.0 - v) - 0.5px;
-                                background: #5fb8ff;
-                            }
-                            for v[idx] in root.audio-envelope-left: Rectangle {
-                                property <bool> has-next: idx + 1 < root.audio-envelope-left.length;
-                                property <float> next-v: has-next ? root.audio-envelope-left[idx + 1] : v;
-                                property <length> y0: waveform-area.height * (1.0 - v);
-                                property <length> y1: waveform-area.height * (1.0 - next-v);
-                                visible: has-next;
-                                x: (idx + 1) * waveform-area.bar-w - 0.5px;
-                                width: 1px;
-                                y: min(y0, y1);
-                                height: max(y0, y1) - min(y0, y1) + 1px;
-                                background: #5fb8ff;
-                            }
-                            for v[idx] in root.audio-envelope-right: Rectangle {
-                                x: idx * waveform-area.bar-w;
-                                width: waveform-area.bar-w;
-                                height: 1px;
-                                y: waveform-area.height * (1.0 - v) - 0.5px;
-                                background: #ff9f5f;
-                            }
-                            for v[idx] in root.audio-envelope-right: Rectangle {
-                                property <bool> has-next: idx + 1 < root.audio-envelope-right.length;
-                                property <float> next-v: has-next ? root.audio-envelope-right[idx + 1] : v;
-                                property <length> y0: waveform-area.height * (1.0 - v);
-                                property <length> y1: waveform-area.height * (1.0 - next-v);
-                                visible: has-next;
-                                x: (idx + 1) * waveform-area.bar-w - 0.5px;
-                                width: 1px;
-                                y: min(y0, y1);
-                                height: max(y0, y1) - min(y0, y1) + 1px;
-                                background: #ff9f5f;
-                            }
-
-                            Rectangle {
-                                x: waveform-area.width * 0.5 - 1px;
-                                width: 2px;
-                                height: waveform-area.height;
-                                background: #ffffff55;
-                            }
-
-                            if root.audio-envelope-left.length == 0 && root.audio-envelope-right.length == 0: Text {
-                                text: "Computing…";
-                                color: root.text-muted; font-size: 10px;
-                                x: 6px; y: 6px;
-                            }
-                        }
-                    }
-
-                    if !audio-section.expanded: Rectangle { height: 1px; background: #2a2a2a; }
 
                     // ── Calibration (collapsible) ──
                     cal-section := SectionHeader {
@@ -2216,12 +2283,14 @@ export component RecoApp inherits Window {
         // full width so there's no color seam under the side panels. ──
         Rectangle {
             // padding-top(4) + scrubber row(20) + spacing(4) +
-            // control row(24) + padding-bottom(4) = 56px content height;
-            // 58px leaves a couple px of slack instead of sitting right at
+            // control row(36) + padding-bottom(4) = 68px content height;
+            // 70px leaves a couple px of slack instead of sitting right at
             // the edge. Too little here and the control row (frame field,
             // buttons, Rec/format controls) overflows into the status bar
-            // below it instead of clipping or reflowing.
-            height: 58px;
+            // below it instead of clipping or reflowing. Control row is
+            // 36px (not 24px) to fit the "FRAME" caption under the frame
+            // number field.
+            height: 70px;
             background: root.bg-bar;
 
             Rectangle {
@@ -2293,7 +2362,7 @@ export component RecoApp inherits Window {
                 // thin translucent-white rules - same convention as the
                 // audio-waveform grid lines above.
                 control-row := Rectangle {
-                    height: 24px;
+                    height: 36px;
 
                     left-zone := HorizontalLayout {
                         x: 0px;
@@ -2319,86 +2388,19 @@ export component RecoApp inherits Window {
                         // destroys the `Tip` instance (and its hover
                         // binding) while the popup is still showing, so
                         // `popup.close()` never runs.
-                        if !root.frame-input-editing: TouchArea {
-                            mouse-cursor: pointer;
-                            // TouchArea doesn't auto-size to its child
-                            // within a layout - without an explicit width
-                            // this collapses to ~0px, silently hiding the
-                            // field.
-                            width: 60px;
-                            height: 22px;
-                            clicked => { root.frame-input-editing = true; }
-                            Rectangle {
-                                width: 100%;
-                                height: 100%;
-                                background: root.bg-panel;
-                                border-radius: 3px;
-                                border-width: 1px;
-                                border-color: #444;
-                                Text {
-                                    text: root.current-frame;
-                                    color: white;
-                                    font-size: 11px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    width: 100%;
-                                    height: 100%;
-                                }
-                            }
-                        }
-                        if root.frame-input-editing: HorizontalLayout {
-                            frame-input := LineEdit {
-                                text: root.current-frame;
-                                width: 60px;
-                                enabled: root.files-loaded;
-                                font-size: 11px;
-                                function commit() {
-                                    if root.total-frames > 0 {
-                                        root.seek(clamp(self.text.to-float(), 0.0, 1.0 * (root.total-frames - 1)) / root.total-frames);
-                                    }
-                                    root.frame-input-editing = false;
-                                }
-                                accepted => { self.commit(); }
-                                changed has-focus => {
-                                    if !self.has-focus && root.frame-input-editing {
-                                        self.commit();
-                                    }
-                                }
-                            }
-                            // Deferred focus: focusing synchronously from
-                            // `init` (mid-layout-pass, since this branch
-                            // was just mounted by the `if` toggle above)
-                            // hits a Slint "Recursion detected" panic -
-                            // see the same pattern on `LabeledSlider`'s
-                            // edit-mode LineEdit.
-                            frame-focus-timer := Timer {
-                                interval: 1ms;
-                                running: true;
-                                triggered => {
-                                    self.running = false;
-                                    frame-input.focus();
-                                    frame-input.select-all();
-                                }
-                            }
-                        }
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
 
-                        // Playback speed multiplier. Same click-to-edit
-                        // swap as LabeledSlider's value field: a LineEdit
-                        // permanently bound one-way to an externally-
-                        // updated value (e.g. resynced to 1.0x on loading
-                        // a new clip) would stop reflecting it the moment
-                        // the user types into it.
-                        HorizontalLayout {
-                            spacing: 3px;
-                            Tip {
-                                tip: "Playback speed multiplier. Click the box to type an exact value.";
-                                Text { text: "Speed:"; color: #777; font-size: 10px; vertical-alignment: center; }
-                            }
-                            if !root.speed-input-editing: TouchArea {
+                            if !root.frame-input-editing: TouchArea {
                                 mouse-cursor: pointer;
-                                width: 40px;
-                                height: 20px;
-                                clicked => { root.speed-input-editing = true; }
+                                // TouchArea doesn't auto-size to its child
+                                // within a layout - without an explicit width
+                                // this collapses to ~0px, silently hiding the
+                                // field.
+                                width: 60px;
+                                height: 22px;
+                                clicked => { root.frame-input-editing = true; }
                                 Rectangle {
                                     width: 100%;
                                     height: 100%;
@@ -2407,7 +2409,7 @@ export component RecoApp inherits Window {
                                     border-width: 1px;
                                     border-color: #444;
                                     Text {
-                                        text: root.playback-speed;
+                                        text: root.current-frame;
                                         color: white;
                                         font-size: 11px;
                                         horizontal-alignment: center;
@@ -2417,36 +2419,56 @@ export component RecoApp inherits Window {
                                     }
                                 }
                             }
-                            if root.speed-input-editing: HorizontalLayout {
-                                speed-input := LineEdit {
-                                    text: root.playback-speed;
-                                    width: 40px;
+                            if root.frame-input-editing: HorizontalLayout {
+                                frame-input := NumEdit {
+                                    text: root.current-frame;
+                                    width: 60px;
+                                    height: 22px;
                                     enabled: root.files-loaded;
-                                    font-size: 11px;
+                                    num-font-size: 11px;
                                     function commit() {
-                                        root.playback-speed = self.text.to-float();
-                                        root.changed-playback-speed(root.playback-speed);
-                                        root.speed-input-editing = false;
+                                        if root.total-frames > 0 {
+                                            root.seek(clamp(self.text.to-float(), 0.0, 1.0 * (root.total-frames - 1)) / root.total-frames);
+                                        }
+                                        root.frame-input-editing = false;
                                     }
                                     accepted => { self.commit(); }
+                                    escaped => { root.frame-input-editing = false; }
                                     changed has-focus => {
-                                        if !self.has-focus && root.speed-input-editing {
+                                        if !self.has-focus && root.frame-input-editing {
                                             self.commit();
                                         }
                                     }
                                 }
-                                speed-focus-timer := Timer {
+                                // Deferred focus: focusing synchronously from
+                                // `init` (mid-layout-pass, since this branch
+                                // was just mounted by the `if` toggle above)
+                                // hits a Slint "Recursion detected" panic -
+                                // see the same pattern on `LabeledSlider`'s
+                                // edit-mode field.
+                                frame-focus-timer := Timer {
                                     interval: 1ms;
                                     running: true;
                                     triggered => {
                                         self.running = false;
-                                        speed-input.focus();
-                                        speed-input.select-all();
+                                        frame-input.focus();
+                                        frame-input.select-all();
                                     }
                                 }
                             }
-                            Text { text: "x"; color: #777; font-size: 10px; vertical-alignment: center; }
+
+                            Text {
+                                text: "FRAME";
+                                color: #666;
+                                font-size: 8px;
+                                font-weight: 600;
+                                letter-spacing: 0.5px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                width: 60px;
+                            }
                         }
+
                     }
 
                     // Divider between the playhead-info zone and the
@@ -2493,6 +2515,75 @@ export component RecoApp inherits Window {
                         width: self.preferred-width;
                         height: parent.height;
                         spacing: 8px;
+
+                        // Playback speed multiplier, placed just before the
+                        // Rec button. Same click-to-edit swap as
+                        // LabeledSlider's value field: a LineEdit
+                        // permanently bound one-way to an externally-
+                        // updated value (e.g. resynced to 1.0x on loading
+                        // a new clip) would stop reflecting it the moment
+                        // the user types into it.
+                        HorizontalLayout {
+                            spacing: 3px;
+                            Tip {
+                                tip: "Playback speed multiplier. Click the box to type an exact value.";
+                                Text { text: "Speed:"; color: #777; font-size: 10px; vertical-alignment: center; }
+                            }
+                            if !root.speed-input-editing: TouchArea {
+                                mouse-cursor: pointer;
+                                width: 40px;
+                                height: 20px;
+                                clicked => { root.speed-input-editing = true; }
+                                Rectangle {
+                                    width: 100%;
+                                    height: 100%;
+                                    background: root.bg-panel;
+                                    border-radius: 3px;
+                                    border-width: 1px;
+                                    border-color: #444;
+                                    Text {
+                                        text: root.playback-speed;
+                                        color: white;
+                                        font-size: 11px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        width: 100%;
+                                        height: 100%;
+                                    }
+                                }
+                            }
+                            if root.speed-input-editing: HorizontalLayout {
+                                speed-input := NumEdit {
+                                    text: root.playback-speed;
+                                    width: 40px;
+                                    height: 20px;
+                                    enabled: root.files-loaded;
+                                    num-font-size: 11px;
+                                    function commit() {
+                                        root.playback-speed = self.text.to-float();
+                                        root.changed-playback-speed(root.playback-speed);
+                                        root.speed-input-editing = false;
+                                    }
+                                    accepted => { self.commit(); }
+                                    escaped => { root.speed-input-editing = false; }
+                                    changed has-focus => {
+                                        if !self.has-focus && root.speed-input-editing {
+                                            self.commit();
+                                        }
+                                    }
+                                }
+                                speed-focus-timer := Timer {
+                                    interval: 1ms;
+                                    running: true;
+                                    triggered => {
+                                        self.running = false;
+                                        speed-input.focus();
+                                        speed-input.select-all();
+                                    }
+                                }
+                            }
+                            Text { text: "x"; color: #777; font-size: 10px; vertical-alignment: center; }
+                        }
 
                         // Record button
                         Rectangle {
@@ -2799,6 +2890,75 @@ export component RecoApp inherits Window {
         }
 
         // ── Keyboard shortcuts dialog (modal) ──
+        // ── Debug log dialog (modal) ──
+        //
+        // Live tail of the tracing log (see `debug_log_snapshot` in
+        // main.rs), refreshed periodically from Rust while this dialog is
+        // open. Read-only `TextInput` (not `Text`) so the log stays
+        // selectable/copyable for pasting into a bug report.
+        if root.debug-dialog-open: Rectangle {
+            background: root.bg-scrim;
+            TouchArea {
+                clicked => { root.debug-dialog-open = false; }
+            }
+
+            Rectangle {
+                width: min(parent.width - 60px, 640px);
+                height: min(parent.height - 60px, 520px);
+                background: root.bg-surface;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: root.border-mid;
+                TouchArea {}
+
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 8px;
+
+                    Text {
+                        text: "Debug log";
+                        color: root.text-heading;
+                        font-size: 16px;
+                        font-weight: 600;
+                    }
+
+                    Rectangle { height: 1px; background: root.border-subtle; }
+
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: root.bg-base;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: root.border-subtle;
+                        clip: true;
+
+                        ScrollView {
+                            TextInput {
+                                x: 8px;
+                                width: parent.width - 16px;
+                                text: root.debug-log-text == "" ? "(no log output yet)" : root.debug-log-text;
+                                color: #ccc;
+                                font-size: 10px;
+                                font-family: "Consolas";
+                                read-only: true;
+                                wrap: word-wrap;
+                                single-line: false;
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle { horizontal-stretch: 1; }
+                        FlatButton {
+                            text: "Close";
+                            clicked => { root.debug-dialog-open = false; }
+                        }
+                    }
+                }
+            }
+        }
+
         if root.shortcuts-dialog-open: Rectangle {
             background: root.bg-scrim;
             TouchArea {
@@ -3259,12 +3419,13 @@ export component RecoApp inherits Window {
                                     if v > root.export-end-secs { root.export-start-secs = root.export-end-secs; }
                                 }
                             }
-                            LineEdit {
+                            NumEdit {
                                 text: root.export-start-secs == 0 ? "" : root.export-start-secs;
                                 placeholder-text: "0:00";
                                 edited(v) => {
                                     root.export-start-secs = Math.min(max(0, v.to-float()), root.export-end-secs);
                                 }
+                                escaped => { self.text = root.export-start-secs == 0 ? "" : root.export-start-secs; }
                             }
                         }
 
@@ -3281,12 +3442,12 @@ export component RecoApp inherits Window {
                                     if v < root.export-start-secs { root.export-end-secs = root.export-start-secs; }
                                 }
                             }
-                            LineEdit {
+                            NumEdit {
                                 text: root.export-end-secs;
-                                placeholder-text: "";
                                 edited(v) => {
                                     root.export-end-secs = Math.max(Math.min(v.to-float(), root.clip-duration-secs), root.export-start-secs);
                                 }
+                                escaped => { self.text = root.export-end-secs; }
                             }
                         }
                     }
