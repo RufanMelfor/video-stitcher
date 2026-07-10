@@ -470,6 +470,10 @@ export component CalibrateApp inherits Window {
     callback clear-calibration();
     callback auto-calibrate();
     callback cancel-calibrate();
+    // Fired whenever an AKAZE tuning slider/checkbox changes, so Rust can
+    // re-run detection on the current frame and show the result live
+    // without a full Auto-Calibrate run.
+    callback detect-preview-tick();
     callback toggle-playback();
     callback pause-playback();
     callback step-forward();
@@ -1302,25 +1306,28 @@ export component CalibrateApp inherits Window {
                                     }
                                 }
                                 LabeledSlider {
-                                    tip: "Feature detector sensitivity. Lower = more (weaker) features detected.";
+                                    tip: "Feature detector sensitivity. Lower = more (weaker) features detected. Updates the preview live.";
                                     label: "AKAZE threshold"; decimals: 5;
                                     minimum: 0.00001; maximum: 0.001;
                                     step: 0.00001;
                                     value <=> root.cal-akaze-threshold;
+                                    changed => { root.detect-preview-tick(); }
                                 }
                                 LabeledSlider {
-                                    tip: "Top edge of the vertical region used for feature detection (fraction of frame height).";
+                                    tip: "Top edge of the vertical region used for feature detection (fraction of frame height). Updates the preview live.";
                                     label: "Detect Y min";
                                     minimum: 0.0; maximum: 1.0; decimals: 2;
                                     step: 0.01;
                                     value <=> root.cal-detect-y-min;
+                                    changed => { root.detect-preview-tick(); }
                                 }
                                 LabeledSlider {
-                                    tip: "Bottom edge of the vertical region used for feature detection (fraction of frame height).";
+                                    tip: "Bottom edge of the vertical region used for feature detection (fraction of frame height). Updates the preview live.";
                                     label: "Detect Y max";
                                     minimum: 0.0; maximum: 1.0; decimals: 2;
                                     step: 0.01;
                                     value <=> root.cal-detect-y-max;
+                                    changed => { root.detect-preview-tick(); }
                                 }
                                 LabeledSlider {
                                     tip: "Seconds to skip at the end of the clip when sampling calibration frames.";
@@ -1351,10 +1358,11 @@ export component CalibrateApp inherits Window {
                                     }
                                 }
                                 Tip {
-                                    tip: "Detect features at full video resolution instead of downscaling to 1920px wide. More precise on 4K+ footage, but slower.";
+                                    tip: "Detect features at full video resolution instead of downscaling to 1920px wide. More precise on 4K+ footage, but slower. Updates the preview live.";
                                     CheckBox {
                                         text: "Full-resolution features (slower)";
                                         checked <=> root.cal-full-res-features;
+                                        toggled => { root.detect-preview-tick(); }
                                     }
                                 }
                                 Tip {

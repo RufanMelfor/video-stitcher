@@ -20,6 +20,7 @@
 //! textures with no CPU readback (see `preview::PreviewBridge`).
 
 mod calibration;
+mod detect_preview;
 mod playback;
 mod preview;
 mod settings;
@@ -32,7 +33,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use reco_calibrate::{LensProfileInfo, ProfileSource};
+use reco_calibrate::{CalibrationConfig, LensProfileInfo, ProfileSource};
 use reco_control::pose_control::{PoseControl, PoseControlConfig};
 use reco_control::{ControlIntent, IntentTranslator, PoseIntent};
 use reco_core::calibration::{CameraParams, MatchCalibration, PlaneLayout};
@@ -1666,6 +1667,76 @@ fn main() -> anyhow::Result<()> {
 
         let rx = calibration::spawn_compute_sync_offset(left, right);
         state_ref.borrow_mut().sync_offset_job = Some(rx);
+    });
+
+    // Live AKAZE detection preview: fires on every AKAZE tuning-slider
+    // change so "does this threshold find features?" is visible on the
+    // current frame immediately, instead of only after a full
+    // Auto-Calibrate run. See `detect_preview` module doc for why this
+    // reuses one long-lived GPU context instead of `spawn_auto_calibrate`'s
+    // fresh-context-per-run approach.
+    let app_weak_preview = app.as_weak();
+    let detect_preview_worker = detect_preview::DetectPreviewWorker::spawn(move |preview| {
+        let weak = app_weak_preview.clone();
+        slint::invoke_from_event_loop(move || {
+            if let Some(app) = weak.upgrade() {
+                app.set_preview_frame(detection_preview_to_slint_image(&preview));
+            }
+        })
+        .ok();
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_detect_preview_tick(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let s = state_ref.borrow();
+        let Some(frame) = s.playback.current_frame() else {
+            return;
+        };
+        let Some((width, height)) = s.playback.input_dimensions() else {
+            return;
+        };
+        // Needs known lens intrinsics to undistort with - falls back to
+        // the baseline captured right after files load (see
+        // `try_init_and_update`), same resolution order as `on_auto_calibrate`.
+        let (left_params, right_params) = match (
+            s.calibration.as_ref(),
+            s.cal_baseline_left_params.as_ref(),
+            s.cal_baseline_right_params.as_ref(),
+        ) {
+            (Some(cal), _, _) => (cal.left.clone(), cal.right.clone()),
+            (None, Some(l), Some(r)) => (l.clone(), r.clone()),
+            _ => return,
+        };
+
+        let mut config = CalibrationConfig::default();
+        config.akaze.threshold = app.get_cal_akaze_threshold() as f64;
+        config.akaze.detect_y_min = app.get_cal_detect_y_min() as f64;
+        config.akaze.detect_y_max = app.get_cal_detect_y_max() as f64;
+        config.akaze.detect_max_width = if app.get_cal_full_res_features() {
+            0
+        } else {
+            1920
+        };
+
+        let req = detect_preview::PreviewRequest {
+            left_y: frame.left.y.clone(),
+            left_u: frame.left.u.clone(),
+            left_v: frame.left.v.clone(),
+            right_y: frame.right.y.clone(),
+            right_u: frame.right.u.clone(),
+            right_v: frame.right.v.clone(),
+            width,
+            height,
+            left_params,
+            right_params,
+            config,
+        };
+        drop(s);
+        detect_preview_worker.request(req);
     });
 
     // ── Playback callbacks ──

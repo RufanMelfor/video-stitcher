@@ -15,6 +15,7 @@
 //! so reco-core renders stitched frames directly into Slint-owned
 //! textures with no CPU readback.
 
+mod detect_preview;
 mod export;
 mod playback;
 mod preview;
@@ -33,7 +34,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use reco_calibrate::{LensProfileInfo, ProfileSource};
+use reco_calibrate::{CalibrationConfig, LensProfileInfo, ProfileSource};
 use reco_control::pose_control::{PoseControl, PoseControlConfig};
 use reco_control::{ControlIntent, IntentTranslator, PoseIntent};
 use reco_core::calibration::MatchCalibration;
@@ -1345,6 +1346,17 @@ fn display_name(path: &std::path::Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Convert an annotated AKAZE detection preview (see
+/// `reco_calibrate::preview`) into a Slint image for display.
+fn detection_preview_to_slint_image(
+    preview: &reco_calibrate::preview::DetectionPreview,
+) -> slint::Image {
+    let mut buffer =
+        slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(preview.width, preview.height);
+    buffer.make_mut_bytes().copy_from_slice(&preview.rgba);
+    slint::Image::from_rgba8(buffer)
 }
 
 /// Push the current MRU lists into the Slint properties that back the
@@ -2904,6 +2916,76 @@ fn main() -> anyhow::Result<()> {
             };
             tx.send(cal_result).ok();
         });
+    });
+
+    // Live AKAZE detection preview: fires on every AKAZE tuning-slider
+    // change so "does this threshold find features?" is visible on the
+    // current frame immediately, instead of only after a full
+    // Auto-Calibrate run. See `detect_preview` module doc for why this
+    // reuses one long-lived GPU context instead of Auto-Calibrate's
+    // fresh-context-per-run approach.
+    let app_weak_preview = app.as_weak();
+    let detect_preview_worker = detect_preview::DetectPreviewWorker::spawn(move |preview| {
+        let weak = app_weak_preview.clone();
+        slint::invoke_from_event_loop(move || {
+            if let Some(app) = weak.upgrade() {
+                app.set_preview_frame(detection_preview_to_slint_image(&preview));
+            }
+        })
+        .ok();
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_detect_preview_tick(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let s = state_ref.borrow();
+        let Some(frame) = s.playback.current_frame() else {
+            return;
+        };
+        let Some((width, height)) = s.playback.input_dimensions() else {
+            return;
+        };
+        // Needs known lens intrinsics to undistort with - falls back to
+        // the baseline captured right after files load, same resolution
+        // order as `on_auto_calibrate`.
+        let (left_params, right_params) = match (
+            s.calibration.as_ref(),
+            s.cal_baseline_left_params.as_ref(),
+            s.cal_baseline_right_params.as_ref(),
+        ) {
+            (Some(cal), _, _) => (cal.left.clone(), cal.right.clone()),
+            (None, Some(l), Some(r)) => (l.clone(), r.clone()),
+            _ => return,
+        };
+
+        let mut config = CalibrationConfig::default();
+        config.akaze.threshold = app.get_cal_akaze_threshold() as f64;
+        config.akaze.detect_y_min = app.get_cal_detect_y_min() as f64;
+        config.akaze.detect_y_max = app.get_cal_detect_y_max() as f64;
+        config.akaze.detect_max_width = if app.get_cal_full_res_features() {
+            0
+        } else {
+            1920
+        };
+
+        let req = detect_preview::PreviewRequest {
+            left_y: frame.left.y.clone(),
+            left_u: frame.left.u.clone(),
+            left_v: frame.left.v.clone(),
+            right_y: frame.right.y.clone(),
+            right_u: frame.right.u.clone(),
+            right_v: frame.right.v.clone(),
+            width,
+            height,
+            left_params,
+            right_params,
+            config,
+        };
+        drop(s);
+        detect_preview_worker.request(req);
     });
 
     // ── Playback callbacks ──

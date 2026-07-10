@@ -339,6 +339,37 @@ fn process_undistorted_pair(
     )
 }
 
+/// Render an AKAZE detection preview for a single pre-undistorted RGBA
+/// frame pair, using the detector/matcher/region settings from `config`.
+///
+/// Runs detection, matching, and the spatial-overlap filter (the same
+/// stages [`calibrate`] uses to build its live diagnostic preview) but
+/// stops there - no RANSAC, no optimizer. Meant for callers that want to
+/// show "what would auto-calibrate see with these settings" on a single
+/// frame while the user is still tuning AKAZE parameters, without paying
+/// for a full multi-frame calibration run.
+pub fn preview_akaze_detection(
+    left_rgba: &[u8],
+    lw: u32,
+    lh: u32,
+    right_rgba: &[u8],
+    rw: u32,
+    rh: u32,
+    config: &CalibrationConfig,
+) -> preview::DetectionPreview {
+    let detector = defaults::AkazeDetector::with_border_margin(
+        config.akaze.threshold,
+        30,
+        config.akaze.detect_max_width,
+    );
+    let matcher = defaults::HammingMatcher::new(config.matching.lowe_ratio);
+    let filter = defaults::NoOpFilter;
+    process_undistorted_pair(
+        left_rgba, right_rgba, lw, lh, rw, rh, 0, config, &detector, &matcher, &filter,
+    )
+    .1
+}
+
 /// Run the full calibration pipeline with default implementations.
 ///
 /// Uses AKAZE detection, Hamming matching, and a no-op point filter
