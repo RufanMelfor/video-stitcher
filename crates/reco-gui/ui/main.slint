@@ -1104,6 +1104,10 @@ export component RecoApp inherits Window {
     callback pick-right-video();
     callback pick-calibration();
     callback auto-calibrate();
+    // Fired whenever an AKAZE tuning slider/checkbox changes, so Rust can
+    // re-run detection on the current frame and show the result live
+    // without a full Auto-Calibrate run.
+    callback detect-preview-tick();
     callback toggle-playback();
     callback pause-playback();
     callback step-forward();
@@ -2166,36 +2170,36 @@ export component RecoApp inherits Window {
                             }
 
                             LabeledSlider {
-                                tip: "Feature detector sensitivity. Lower = more (weaker) features detected.";
+                                tip: "Feature detector sensitivity. Lower = more (weaker) features detected. Updates the preview live.";
                                 label: "AKAZE threshold";
                                 minimum: 0.00005;
                                 maximum: 0.005;
                                 value <=> root.cal-akaze-threshold;
                                 decimals: 4;
                                 step: 0.0001;
-                                changed(v) => {}
+                                changed(v) => { root.detect-preview-tick(); }
                             }
 
                             LabeledSlider {
-                                tip: "Top edge of the vertical region used for feature detection (fraction of frame height).";
+                                tip: "Top edge of the vertical region used for feature detection (fraction of frame height). Updates the preview live.";
                                 label: "Detect Y min";
                                 minimum: 0;
                                 maximum: 0.5;
                                 value <=> root.cal-detect-y-min;
                                 decimals: 2;
                                 step: 0.01;
-                                changed(v) => {}
+                                changed(v) => { root.detect-preview-tick(); }
                             }
 
                             LabeledSlider {
-                                tip: "Bottom edge of the vertical region used for feature detection (fraction of frame height).";
+                                tip: "Bottom edge of the vertical region used for feature detection (fraction of frame height). Updates the preview live.";
                                 label: "Detect Y max";
                                 minimum: 0.5;
                                 maximum: 1.0;
                                 value <=> root.cal-detect-y-max;
                                 decimals: 2;
                                 step: 0.01;
-                                changed(v) => {}
+                                changed(v) => { root.detect-preview-tick(); }
                             }
 
                             LabeledSlider {
@@ -2458,7 +2462,7 @@ export component RecoApp inherits Window {
                             }
 
                             Text {
-                                text: "FRAME";
+                                text: "FRAME #";
                                 color: #666;
                                 font-size: 8px;
                                 font-weight: 600;
@@ -2536,18 +2540,19 @@ export component RecoApp inherits Window {
                                 clicked => { root.speed-input-editing = true; }
                                 Rectangle {
                                     width: 100%;
-                                    height: 100%;
+                                    height: 25px;
                                     background: root.bg-panel;
                                     border-radius: 3px;
                                     border-width: 1px;
                                     border-color: #444;
+
                                     Text {
                                         text: root.playback-speed;
                                         color: white;
                                         font-size: 11px;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
-                                        width: 100%;
+                                        width: 50px;
                                         height: 100%;
                                     }
                                 }
@@ -2628,7 +2633,7 @@ export component RecoApp inherits Window {
         // ── Status bar (or export progress when active) ──
         Rectangle {
             background: root.bg-bar;
-            min-height: 28px;
+            min-height: 20px;
 
             HorizontalLayout {
                 padding-left: 12px;
@@ -2645,7 +2650,7 @@ export component RecoApp inherits Window {
                     // wrap onto extra lines instead of clipping the tail.
                     wrap: word-wrap;
                     horizontal-stretch: 1;
-                }
+ Rectangle { min-width: 16px; min-height: 16px; /* @lsp:ignore-node */ }                }
 
                 if root.export-in-progress: Text {
                     text: "Exporting: " + root.export-status-text;
