@@ -56,6 +56,8 @@ pub struct StitchJob {
     blend_width: f32,
     blend_flip_direction: bool,
     multiband_blend_enabled: bool,
+    show_seam_line: bool,
+    seam_offset: f32,
 
     // Callbacks
     on_progress: Option<ProgressCallback>,
@@ -252,6 +254,8 @@ impl StitchJob {
             blend_width: 0.15,
             blend_flip_direction: false,
             multiband_blend_enabled: false,
+            show_seam_line: false,
+            seam_offset: 0.0,
             on_progress: None,
             on_finalizing: None,
             session_hooks: Vec::new(),
@@ -389,6 +393,21 @@ impl StitchJob {
     /// Default: false.
     pub fn multiband_blend_enabled(mut self, enabled: bool) -> Self {
         self.multiband_blend_enabled = enabled;
+        self
+    }
+
+    /// Draw a debug line at the exact geometric seam position. See
+    /// `reco_core::render::viewport::ViewportConfig::show_seam_line`.
+    /// Default: false.
+    pub fn show_seam_line(mut self, show: bool) -> Self {
+        self.show_seam_line = show;
+        self
+    }
+
+    /// Manual seam nudge. See
+    /// `reco_core::render::viewport::ViewportConfig::seam_offset`. Default: `0.0`.
+    pub fn seam_offset(mut self, offset: f32) -> Self {
+        self.seam_offset = offset;
         self
     }
 
@@ -611,6 +630,8 @@ impl StitchJob {
             blend_width: self.blend_width,
             blend_flip_direction: self.blend_flip_direction,
             multiband_blend_enabled: self.multiband_blend_enabled,
+            show_seam_line: self.show_seam_line,
+            seam_offset: self.seam_offset,
             rig_tilt: cal.rig_tilt as f32,
             rig_roll: cal.rig_roll as f32,
             ..Default::default()

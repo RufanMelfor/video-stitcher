@@ -191,6 +191,23 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         multiband: bool,
 
+        /// Draw a thin debug line at the exact geometric seam position,
+        /// independent of how wide `--blend` currently feathers it. Pure
+        /// visualization aid for tuning calibration - has no effect on the
+        /// blend math itself.
+        #[arg(long, default_value_t = false)]
+        show_seam_line: bool,
+
+        /// Manual nudge of the seam position, in plane-local UV units
+        /// (same space as `--blend`). `0.0` (default) = seam sits exactly
+        /// where the calibration's geometry puts it. Positive/negative
+        /// shrinks/grows the fading camera's own visible extent - see
+        /// `MatchCalibration::seam_offset`'s doc. Not read from the
+        /// calibration file automatically; pass the value you saved from
+        /// the GUI explicitly, same as `--blend`.
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        seam_offset: f32,
+
         /// Frame offset for temporal sync between cameras.
         /// Positive: skip N right frames (right started first).
         /// Negative: skip N left frames (left started first).
@@ -834,6 +851,8 @@ fn main() -> anyhow::Result<()> {
             blend,
             blend_flip_direction,
             multiband,
+            show_seam_line,
+            seam_offset,
             sync_offset,
             model,
             detection_interval,
@@ -861,6 +880,8 @@ fn main() -> anyhow::Result<()> {
                 blend,
                 blend_flip_direction,
                 multiband,
+                show_seam_line,
+                seam_offset,
                 start_time,
                 end_time,
                 max_frames,

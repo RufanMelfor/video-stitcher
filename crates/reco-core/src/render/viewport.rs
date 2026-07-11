@@ -99,6 +99,17 @@ pub struct ViewportConfig {
     /// uniformly across every render path including BGRA and GPU
     /// zero-copy. Default: `false`.
     pub multiband_blend_enabled: bool,
+    /// Draw a thin debug line at the seam position (`seam_offset` included)
+    /// on whichever plane fades this frame. Purely a visualization aid for
+    /// tuning `seam_offset` and `blend_flip_direction` - has no effect on
+    /// calibration or the actual blend math. Like `multiband_blend_enabled`,
+    /// a pure GPU technique that applies uniformly across every render
+    /// path. Default: `false`.
+    pub show_seam_line: bool,
+    /// Live copy of [`crate::calibration::MatchCalibration::seam_offset`] -
+    /// see that field's doc for why this exists instead of reusing
+    /// `PlaneLayout::intersect`. Default: `0.0`.
+    pub seam_offset: f32,
 }
 
 impl Default for ViewportConfig {
@@ -121,6 +132,8 @@ impl Default for ViewportConfig {
             color_match_max_y_offset: 0.06,
             color_match_max_chroma_offset: 0.04,
             multiband_blend_enabled: false,
+            show_seam_line: false,
+            seam_offset: 0.0,
         }
     }
 }

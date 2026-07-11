@@ -353,14 +353,39 @@ pub struct MatchCalibration {
     ///
     /// `false` (default) = right camera fades in over a fixed left.
     /// `true` = left camera fades in over a fixed right. Purely a
-    /// rendering choice - doesn't move the seam or affect calibration
-    /// geometry (unlike `PlaneLayout::intersect`). Persisted so a hand-
-    /// picked direction survives save/reload. Defaults to `false` for
-    /// older calibrations that predate this field, matching the previous
-    /// (only) behavior.
+    /// rendering choice - doesn't move the seam or touch `PlaneLayout`.
+    /// Persisted so a hand-picked direction survives save/reload. Defaults
+    /// to `false` for older calibrations that predate this field, matching
+    /// the previous (only) behavior.
     #[serde(default)]
     pub blend_flip_direction: bool,
+
+    /// Manual nudge of the visible seam position, in the fading plane's own
+    /// local UV units (same space `blend_width` feathers). `0.0` (default,
+    /// no-op) = seam sits exactly where the calibrated geometry puts it.
+    ///
+    /// Deliberately *not* `PlaneLayout::intersect`: `intersect` repositions
+    /// the plane geometry itself, which changes how much the two cameras'
+    /// coverage overlaps - push it too far and you open a black gap where
+    /// neither camera has coverage (confirmed - see FRICTION.md). This
+    /// field only shifts where the alpha crossfade threshold sits *within*
+    /// the coverage the calibration already guarantees, so it's safe to
+    /// drag freely within `SEAM_OFFSET_RANGE` without breaking coverage.
+    /// Persisted so a hand-dragged seam survives save/reload. Defaults to
+    /// `0.0` for older calibrations that predate this field.
+    #[serde(default)]
+    pub seam_offset: f32,
 }
+
+/// Safe drag range for [`MatchCalibration::seam_offset`], in the same
+/// plane-local UV units as `blend_width`. Wide enough to give a visually
+/// meaningful nudge, narrow enough to stay inside the geometric overlap
+/// margin for typical calibrations (unlike `PlaneLayout::intersect`, this
+/// doesn't adapt to how much overlap a given calibration actually has, so
+/// an extreme drag can still walk the seam into an uncovered region on a
+/// tightly-calibrated rig - the same failure mode as `intersect`, just
+/// harder to reach).
+pub const SEAM_OFFSET_RANGE: std::ops::RangeInclusive<f32> = -0.3..=0.3;
 
 /// Backward-compatible default for [`MatchCalibration::lens_correction_amount`]
 /// when loading a calibration written before the field existed.
@@ -779,6 +804,7 @@ mod tests {
             lens_correction_amount: 1.0,
             blend_width: 0.05,
             blend_flip_direction: false,
+            seam_offset: 0.0,
         }
     }
 
@@ -966,6 +992,7 @@ mod tests {
             lens_correction_amount: 0.0,
             blend_width: 0.123,
             blend_flip_direction: true,
+            seam_offset: -0.077,
         };
 
         let json = serde_json::to_string(&cal).unwrap();
@@ -981,6 +1008,7 @@ mod tests {
         assert!((parsed.layout.ground_tilt_x - cal.layout.ground_tilt_x).abs() < f64::EPSILON);
         assert!((parsed.layout.ground_tilt_z - cal.layout.ground_tilt_z).abs() < f64::EPSILON);
         assert_eq!(parsed.blend_flip_direction, cal.blend_flip_direction);
+        assert!((parsed.seam_offset - cal.seam_offset).abs() < f32::EPSILON);
     }
 
     #[test]

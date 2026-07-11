@@ -668,6 +668,7 @@ impl AppState {
             out.right = pipeline.calibration().right.clone();
             out.blend_width = pipeline.viewport().blend_width;
             out.blend_flip_direction = pipeline.viewport().blend_flip_direction;
+            out.seam_offset = pipeline.viewport().seam_offset;
         }
         let json = serde_json::to_string_pretty(&out).map_err(|e| format!("serialize: {e}"))?;
         std::fs::write(path, json).map_err(|e| format!("write {}: {e}", path.display()))?;
@@ -997,6 +998,41 @@ impl AppState {
             bridge.renderer_mut().set_multiband_blend_enabled(enabled);
             self.preview_dirty = true;
         }
+    }
+
+    /// Show/hide the geometric seam-position debug line.
+    fn set_show_seam_line(&mut self, show: bool) {
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge.renderer_mut().set_show_seam_line(show);
+            self.preview_dirty = true;
+        }
+    }
+
+    /// Set the manual seam nudge to an absolute value (slider).
+    fn set_seam_offset(&mut self, offset: f32) {
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge.renderer_mut().set_seam_offset(offset);
+            self.preview_dirty = true;
+        }
+    }
+
+    /// Nudge the seam by a preview-width-normalized drag delta (dragging
+    /// the preview itself while Show seam line is active). Flips sign
+    /// under `blend_flip_direction` so a screen-space drag feels
+    /// consistent either way - see `fisheye.wgsl`'s `seam_offset` comment
+    /// for why the raw uniform's sign otherwise depends on which camera
+    /// is fading. Returns the new absolute value so the caller can push it
+    /// back to the "Seam position" slider.
+    fn seam_drag(&mut self, dx_normalized: f32) -> Option<f32> {
+        const SENSITIVITY: f32 = 0.6;
+        let bridge = self.bridge.as_mut()?;
+        let flip = bridge.renderer().pipeline().viewport().blend_flip_direction;
+        let sign = if flip { -1.0 } else { 1.0 };
+        let current = bridge.renderer().seam_offset();
+        let new_value = current + dx_normalized * SENSITIVITY * sign;
+        bridge.renderer_mut().set_seam_offset(new_value);
+        self.preview_dirty = true;
+        Some(bridge.renderer().seam_offset())
     }
 
     /// Enable/disable automatic per-camera exposure/color matching.
@@ -3226,6 +3262,30 @@ fn main() -> anyhow::Result<()> {
     let state_ref = Rc::clone(&state);
     app.on_changed_multiband_blend_enabled(move |enabled| {
         state_ref.borrow_mut().set_multiband_blend_enabled(enabled);
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_changed_show_seam_line(move |show| {
+        state_ref.borrow_mut().set_show_seam_line(show);
+    });
+
+    let state_ref = Rc::clone(&state);
+    let app_weak = app.as_weak();
+    app.on_changed_seam_offset(move |offset| {
+        state_ref.borrow_mut().set_seam_offset(offset);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let state_ref = Rc::clone(&state);
+    let app_weak = app.as_weak();
+    app.on_seam_drag(move |dx_normalized| {
+        let new_value = state_ref.borrow_mut().seam_drag(dx_normalized);
+        if let (Some(app), Some(v)) = (app_weak.upgrade(), new_value) {
+            app.set_seam_offset(v);
+            app.set_cal_dirty(true);
+        }
     });
 
     let state_ref = Rc::clone(&state);

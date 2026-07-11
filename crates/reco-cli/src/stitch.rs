@@ -30,6 +30,12 @@ pub struct StitchArgs<'a> {
     /// Use a 2-band spatial blend at the seam. See
     /// `reco_core::render::viewport::ViewportConfig::multiband_blend_enabled`.
     pub multiband: bool,
+    /// Draw a debug line at the exact geometric seam position. See
+    /// `reco_core::render::viewport::ViewportConfig::show_seam_line`.
+    pub show_seam_line: bool,
+    /// Manual seam nudge. See
+    /// `reco_core::render::viewport::ViewportConfig::seam_offset`.
+    pub seam_offset: f32,
     pub start_time: Option<f64>,
     pub end_time: Option<f64>,
     pub max_frames: Option<u64>,
@@ -125,6 +131,8 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
     .blend_width(args.blend)
     .blend_flip_direction(args.blend_flip_direction)
     .multiband_blend_enabled(args.multiband)
+    .show_seam_line(args.show_seam_line)
+    .seam_offset(args.seam_offset)
     .on_progress(move |p: &reco_core::session::types::FrameProgress| {
         // Use the session's own elapsed clock so the reported
         // rate excludes one-time GPU / encoder / ORT init and

@@ -1260,6 +1260,7 @@ impl Renderer {
     /// Returns the command encoder with the render pass already recorded.
     /// Callers handle submission, readback, or further encoding as needed.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn encode_stitch_pass(
         &self,
         gpu: &GpuContext,
@@ -1268,6 +1269,7 @@ impl Renderer {
         viewport: &ResolvedViewport,
         blend_width: f32,
         color_correction: ColorCorrection,
+        show_seam_line: bool,
         target_view: &wgpu::TextureView,
         aspect: f32,
         encoder_label: &str,
@@ -1355,10 +1357,27 @@ impl Renderer {
         // `GroundTilt`'s doc and the shader's alpha-blend comment) and the
         // draw order, so left fades over a fixed right instead. Purely a
         // rendering choice: doesn't move the seam or touch calibration
-        // geometry, unlike `calibration.layout.intersect`.
+        // geometry.
         let flip = viewport.config.blend_flip_direction;
         left_uniforms.ground_tilt[3] = if flip { 1.0 } else { 0.0 };
         right_uniforms.ground_tilt[3] = if flip { 0.0 } else { 1.0 };
+
+        // Seam-line debug overlay and the manual seam_offset nudge both
+        // only apply to the fading-designated plane, same convention as
+        // the fade flag above - see the shader's seam-line comment and
+        // `MatchCalibration::seam_offset`'s doc.
+        if show_seam_line {
+            if flip {
+                left_uniforms.lens_preview[2] = 1.0;
+            } else {
+                right_uniforms.lens_preview[2] = 1.0;
+            }
+        }
+        if flip {
+            left_uniforms.lens_preview[3] = viewport.config.seam_offset;
+        } else {
+            right_uniforms.lens_preview[3] = viewport.config.seam_offset;
+        }
 
         gpu.queue.write_buffer(
             &self.left.uniform_buffer,
@@ -1448,6 +1467,7 @@ impl Renderer {
         viewport: &ResolvedViewport,
         blend_width: f32,
         color_correction: ColorCorrection,
+        show_seam_line: bool,
         target_view: &wgpu::TextureView,
         target_width: u32,
         target_height: u32,
@@ -1533,6 +1553,25 @@ impl Renderer {
         };
         mask_uniforms.ground_tilt[3] = 1.0;
         mask_uniforms.color_offset_blend[3] = MASK_HARD_BLEND_WIDTH;
+        // The mask *is* what defines the composited seam position, so it
+        // must carry the manual offset - without this, seam_offset would
+        // have no effect at all in multiband mode (tex_a/tex_b never fade,
+        // so their own lens_preview.w is only used by the debug line).
+        mask_uniforms.lens_preview[3] = viewport.config.seam_offset;
+
+        // Seam-line debug overlay: set on tex_a/tex_b (whichever is the
+        // fading-designated side) *after* mask_uniforms was copied above,
+        // so the mask-only pass (never visibly composited) doesn't also
+        // carry the flag. See `encode_stitch_pass`'s matching comment.
+        if show_seam_line {
+            if fading_is_right {
+                right_uniforms.lens_preview[2] = 1.0;
+                right_uniforms.lens_preview[3] = viewport.config.seam_offset;
+            } else {
+                left_uniforms.lens_preview[2] = 1.0;
+                left_uniforms.lens_preview[3] = viewport.config.seam_offset;
+            }
+        }
 
         gpu.queue.write_buffer(
             &self.left.uniform_buffer,
@@ -1778,6 +1817,7 @@ impl Renderer {
         feature = "profiling",
         tracing::instrument(skip_all, name = "gpu_render_to_target")
     )]
+    #[allow(clippy::too_many_arguments)]
     pub fn render_to_target(
         &self,
         gpu: &GpuContext,
@@ -1787,6 +1827,7 @@ impl Renderer {
         blend_width: f32,
         color_correction: ColorCorrection,
         multiband_enabled: bool,
+        show_seam_line: bool,
     ) -> wgpu::CommandBuffer {
         let aspect = self.output_width as f32 / self.output_height as f32;
         let encoder = if multiband_enabled {
@@ -1797,6 +1838,7 @@ impl Renderer {
                 viewport,
                 blend_width,
                 color_correction,
+                show_seam_line,
                 &self.render_target_view,
                 self.output_width,
                 self.output_height,
@@ -1811,6 +1853,7 @@ impl Renderer {
                 viewport,
                 blend_width,
                 color_correction,
+                show_seam_line,
                 &self.render_target_view,
                 aspect,
                 "stitch_to_target",
@@ -1841,6 +1884,7 @@ impl Renderer {
         blend_width: f32,
         color_correction: ColorCorrection,
         multiband_enabled: bool,
+        show_seam_line: bool,
         target_view: &wgpu::TextureView,
     ) {
         let aspect = viewport.config.width as f32 / viewport.config.height as f32;
@@ -1852,6 +1896,7 @@ impl Renderer {
                 viewport,
                 blend_width,
                 color_correction,
+                show_seam_line,
                 target_view,
                 viewport.config.width,
                 viewport.config.height,
@@ -1866,6 +1911,7 @@ impl Renderer {
                 viewport,
                 blend_width,
                 color_correction,
+                show_seam_line,
                 target_view,
                 aspect,
                 "preview_frame",

@@ -648,6 +648,7 @@ impl StitchPipeline {
             self.viewport.blend_width,
             color_correction,
             self.viewport.multiband_blend_enabled,
+            self.viewport.show_seam_line,
             target_view,
         );
         Ok(())
@@ -688,6 +689,7 @@ impl StitchPipeline {
             self.viewport.blend_width,
             color_correction,
             self.viewport.multiband_blend_enabled,
+            self.viewport.show_seam_line,
             target_view,
         );
         Ok(())
@@ -732,6 +734,7 @@ impl StitchPipeline {
             self.viewport.blend_width,
             color_correction,
             self.viewport.multiband_blend_enabled,
+            self.viewport.show_seam_line,
         ))
     }
 
@@ -773,6 +776,7 @@ impl StitchPipeline {
             self.viewport.blend_width,
             color_correction,
             self.viewport.multiband_blend_enabled,
+            self.viewport.show_seam_line,
         ))
     }
 
@@ -817,6 +821,7 @@ impl StitchPipeline {
             self.viewport.blend_width,
             super::renderer::ColorCorrection::default(),
             self.viewport.multiband_blend_enabled,
+            self.viewport.show_seam_line,
         ))
     }
 
@@ -886,6 +891,7 @@ impl StitchPipeline {
             self.viewport.blend_width,
             super::renderer::ColorCorrection::default(),
             self.viewport.multiband_blend_enabled,
+            self.viewport.show_seam_line,
         )
     }
 

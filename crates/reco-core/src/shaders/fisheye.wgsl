@@ -27,6 +27,14 @@ struct Uniforms {
     flags: vec4<u32>,
     // lens_preview.x: correction_amount (0.0 = no correction, 1.0 = full KB4)
     // lens_preview.y: split_view (> 0.5 = left half uncorrected, right half corrected)
+    // lens_preview.z: show_seam_line (> 0.5 = draw a debug line at this
+    //   plane's seam-adjacent edge; see the seam-line comment in fs_main.
+    //   Only meaningful on whichever plane is fading this frame - see
+    //   ground_tilt.w below)
+    // lens_preview.w: seam_offset (MatchCalibration::seam_offset /
+    //   ViewportConfig::seam_offset) - manual nudge of the seam-adjacent
+    //   edge position, in this plane's own local UV units. 0.0 = no-op.
+    //   Only meaningful on whichever plane is fading this frame.
     lens_preview: vec4<f32>,
     // ground_tilt.x: tilt parameter c (tan(theta) of the extra near-field
     //   ground-plane tilt; 0.0 = no-op, matches PlaneLayout::ground_tilt_x/z)
@@ -313,19 +321,42 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // aligned with world +X, seam-adjacent edge at uv.x=0; the left
     // plane's quad is rotated 90 degrees so its local +X maps to world
     // -Z, putting its seam-adjacent edge at the opposite end, uv.x=1).
+    // `seam_offset` (see `Uniforms.lens_preview.w` above) shifts this
+    // threshold so a positive value always shrinks the *fading* plane's
+    // own visible extent (delays its fade-in), regardless of which plane
+    // is fading - a uniform, plane-relative meaning. The apparent on-screen
+    // direction that corresponds to therefore depends on
+    // `ViewportConfig::blend_flip_direction`; the CPU-side drag handler
+    // accounts for that so a screen-space drag feels consistent either way.
     var alpha = 1.0;
     let blend_width = u.color_offset_blend.w;
+    let seam_offset = u.lens_preview.w;
     if u.ground_tilt.w > 0.5 && blend_width > 0.0 {
         if u.flags.x == 1u {
-            alpha = smoothstep(0.0, blend_width, uv.x);
+            alpha = smoothstep(seam_offset, seam_offset + blend_width, uv.x);
         } else {
-            alpha = 1.0 - smoothstep(1.0 - blend_width, 1.0, uv.x);
+            alpha = 1.0 - smoothstep(1.0 - blend_width - seam_offset, 1.0 - seam_offset, uv.x);
         }
     }
 
     // Split-view separator line (1px white at the midpoint)
     if u.lens_preview.y > 0.5 && abs(uv.x - 0.5) < 0.001 {
         return vec4<f32>(1.0, 1.0, 1.0, alpha);
+    }
+
+    // Seam position debug line: highlights exactly where the alpha fade's
+    // threshold sits (including `seam_offset`'s manual nudge), independent
+    // of how wide `blend_width` currently feathers it. Only set on the
+    // fading-designated plane's uniforms CPU-side, so this never
+    // double-draws. `fwidth` keeps the line a consistent ~1.5px regardless
+    // of output resolution instead of a fixed UV-space width that would
+    // get thinner/thicker as the render target resizes.
+    if u.lens_preview.z > 0.5 {
+        let seam_dist = select(1.0 - uv.x - seam_offset, uv.x - seam_offset, u.flags.x == 1u);
+        let line_half_width = fwidth(seam_dist) * 1.5;
+        if abs(seam_dist) < line_half_width {
+            return vec4<f32>(1.0, 0.15, 0.15, 1.0);
+        }
     }
 
     return vec4<f32>(color, alpha);
