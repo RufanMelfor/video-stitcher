@@ -112,3 +112,49 @@ the field, so a consumer GUI slider is reflected on the very next rendered
 frame instead of waiting up to `color_match_interval_frames` frames - see
 `ColorMatchState::force_remeasure`. reco-gui exposes all of these as
 sliders under the right-panel "Color Mapping" section.
+
+## `PlaneLayout::intersect` is not a safe "move the seam" control
+
+**Symptom (confirmed 2026-07-11 on real DJI Osmo Action 4 footage):**
+lowering `intersect` by ~0.4 from a calibrated value opened a large black
+void between the two cameras' visible content - neither camera had
+coverage there anymore. The seam did move, but coupled with a coverage
+regression that makes `intersect` unsafe to drag freely.
+
+**Root cause:** `intersect` repositions the plane geometry itself
+(`PlaneLayout::intersect`'s doc: "each plane is translated by
+`(plane_width/2) × (1-intersect)`"), which changes how much the two
+cameras' angular coverage overlaps in 3D. Push it far enough and the
+overlap margin a given calibration happens to have runs out, leaving a
+gap neither plane covers. It's the right lever for the *auto-calibrate
+optimizer* (which searches this parameter jointly with the others against
+real feature matches, so it never wanders outside safe coverage) but the
+wrong lever for a human dragging a slider with no such constraint.
+
+**Fix: `MatchCalibration::seam_offset` / `ViewportConfig::seam_offset`
+(default `0.0`, safe range `SEAM_OFFSET_RANGE` = ±0.3).** A dedicated,
+render-time-only nudge that shifts *only* the alpha-crossfade threshold
+(`fisheye.wgsl`'s `seam_offset` uniform, `lens_preview.w`) within the
+coverage the calibration already guarantees - it never touches plane
+geometry, so it can't open a gap the way `intersect` can. Verified: at
+`seam_offset` -0.2 / 0.0 / +0.2 the seam line moved cleanly across ~36% /
+43% / 53% of frame width with full coverage throughout, vs. `intersect`'s
+black void at a much smaller perturbation.
+
+Persisted like `blend_width` (survives save/reload), and unlike
+`color_match_enabled` needs no CPU pixel access, so it applies uniformly
+across every render path. GUI: "Seam position" slider *or* drag directly
+on the preview while "Show seam line" is active (`reco-gui`'s `drag`
+`TouchArea` switches from panning to seam-editing based on that flag).
+The drag handler flips sign under `blend_flip_direction` so a
+screen-space drag always feels the same direction regardless of which
+camera is currently fading - see `AppState::seam_drag`'s doc for why the
+raw uniform's sign doesn't have that property on its own. CLI:
+`reco stitch --seam-offset`.
+
+**Companion debug aid: `ViewportConfig::show_seam_line`.** Draws a thin
+line at the exact seam position (offset included) by reusing the
+existing alpha-fade threshold math in `fisheye.wgsl` - no separate
+position calculation, so the line can never disagree with where the
+blend actually is. Works identically in single-band and multi-band mode
+since both reuse the same fragment shader for the per-camera renders.

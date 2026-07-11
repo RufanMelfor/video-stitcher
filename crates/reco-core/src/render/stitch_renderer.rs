@@ -497,6 +497,26 @@ impl StitchRenderer {
         self.pipeline.viewport.multiband_blend_enabled = enabled;
     }
 
+    /// See [`crate::render::viewport::ViewportConfig::show_seam_line`].
+    pub fn set_show_seam_line(&mut self, show: bool) {
+        self.pipeline.viewport.show_seam_line = show;
+    }
+
+    /// See [`crate::render::viewport::ViewportConfig::seam_offset`]. Clamped
+    /// to [`crate::calibration::SEAM_OFFSET_RANGE`].
+    pub fn set_seam_offset(&mut self, offset: f32) {
+        self.pipeline.viewport.seam_offset = offset.clamp(
+            *crate::calibration::SEAM_OFFSET_RANGE.start(),
+            *crate::calibration::SEAM_OFFSET_RANGE.end(),
+        );
+    }
+
+    /// Current seam offset - lets a drag handler compute a new absolute
+    /// value from the last one instead of tracking its own running total.
+    pub fn seam_offset(&self) -> f32 {
+        self.pipeline.viewport.seam_offset
+    }
+
     /// The color-match correction currently being applied (smoothed,
     /// post-clamp), without side effects. For a live diagnostic readout -
     /// lets a consumer confirm the mechanism is actually measuring

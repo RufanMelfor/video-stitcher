@@ -84,6 +84,7 @@ impl PreviewBridge {
             fov_degrees: 75.0,
             blend_width: calibration.blend_width,
             blend_flip_direction: calibration.blend_flip_direction,
+            seam_offset: calibration.seam_offset,
             rig_tilt: calibration.rig_tilt as f32,
             rig_roll: calibration.rig_roll as f32,
             ..ViewportConfig::default()

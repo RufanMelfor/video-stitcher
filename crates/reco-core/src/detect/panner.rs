@@ -271,6 +271,7 @@ mod tests {
             lens_correction_amount: 1.0,
             blend_width: 0.05,
             blend_flip_direction: false,
+            seam_offset: 0.0,
         }
     }
 

@@ -36,7 +36,11 @@ component Tip inherits TouchArea {
     }
 
     tip-timer := Timer {
-        interval: 600ms;
+        // Long delay is deliberate: a tooltip that appears while you're
+        // still moving toward a control (rather than lingering on it) just
+        // gets in the way. 5s only fires for a genuine "what does this do"
+        // pause, not a pass-through hover.
+        interval: 5000ms;
         running: false;
         triggered => {
             self.running = false;
@@ -44,9 +48,14 @@ component Tip inherits TouchArea {
         }
     }
 
+    // Positioned to the right of the wrapped element rather than below
+    // it: most Tip usages wrap a short label sitting directly above the
+    // actual slider/control it describes, so a popup below would land
+    // right on top of the thing you're about to click. To the side never
+    // covers either the label or what follows it.
     popup := PopupWindow {
-        x: 0px;
-        y: root.height + 4px;
+        x: root.width + 8px;
+        y: 0px;
         Rectangle {
             background: #2a2a2a;
             border-radius: 4px;
@@ -61,7 +70,7 @@ component Tip inherits TouchArea {
                 color: #eee;
                 font-size: 13px;
                 wrap: word-wrap;
-                width: 220px;
+                width: 200px;
             }
         }
     }
@@ -895,6 +904,8 @@ export component RecoApp inherits Window {
     in-out property <float> blend-width: 0.05;
     in-out property <bool> blend-flip-direction: false;
     in-out property <bool> multiband-blend-enabled: false;
+    in-out property <bool> show-seam-line: false;
+    in-out property <float> seam-offset: 0.0;
     in-out property <bool> color-match-enabled: true;
     in-out property <float> color-match-band-width: 0.15;
     in-out property <float> color-match-grid-cols: 8;
@@ -1138,6 +1149,12 @@ export component RecoApp inherits Window {
     callback changed-blend-width(float);
     callback changed-blend-flip-direction(bool);
     callback changed-multiband-blend-enabled(bool);
+    callback changed-show-seam-line(bool);
+    callback changed-seam-offset(float);
+    // Fired while dragging the preview with Show seam line active. `dx` is
+    // the horizontal drag delta normalized by preview width (dimensionless
+    // - not pixels), so sensitivity doesn't change with window/panel size.
+    callback seam-drag(float);
     callback changed-color-match-enabled(bool);
     callback changed-color-match-band-width(float);
     callback changed-color-match-grid-cols(float);
@@ -1508,6 +1525,26 @@ export component RecoApp inherits Window {
                             }
                         }
 
+                        if root.files-loaded: Tip {
+                            tip: "Draws a thin red line at the exact geometric seam position, independent of how wide the seam blend is. Purely a visual aid for tuning Seam position and Flip blend direction - doesn't affect the render otherwise.";
+                            CheckBox {
+                                text: "Show seam line";
+                                checked <=> root.show-seam-line;
+                                toggled => { root.changed-show-seam-line(self.checked); }
+                            }
+                        }
+
+                        if root.files-loaded: LabeledSlider {
+                            tip: "Moves the seam left/right by hand, independent of calibration - safe to drag freely, unlike Intersect (which can open a black gap if pushed too far). Or drag directly on the preview while Show seam line is on.";
+                            label: "Seam position";
+                            minimum: -0.3;
+                            maximum: 0.3;
+                            value <=> root.seam-offset;
+                            decimals: 3;
+                            step: 0.005;
+                            changed(v) => { root.changed-seam-offset(v); }
+                        }
+
                         if root.files-loaded: LabeledSlider {
                             tip: "Forward/backward lean of the camera rig; straightens vertical lines at the panorama edges.";
                             label: "Rig tilt";
@@ -1721,10 +1758,18 @@ export component RecoApp inherits Window {
 
                     moved => {
                         if (self.pressed) {
-                            root.pan(
-                                (self.mouse-x - self.last-x) / 1px,
-                                (self.mouse-y - self.last-y) / 1px,
-                            );
+                            if (root.show-seam-line) {
+                                // Seam-edit mode: horizontal drag nudges the
+                                // seam instead of panning, normalized by
+                                // width so sensitivity is independent of
+                                // window/panel size.
+                                root.seam-drag((self.mouse-x - self.last-x) / self.width);
+                            } else {
+                                root.pan(
+                                    (self.mouse-x - self.last-x) / 1px,
+                                    (self.mouse-y - self.last-y) / 1px,
+                                );
+                            }
                             self.last-x = self.mouse-x;
                             self.last-y = self.mouse-y;
                         }
