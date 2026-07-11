@@ -55,6 +55,7 @@ pub struct StitchJob {
     sync_offset: Option<i64>,
     blend_width: f32,
     blend_flip_direction: bool,
+    multiband_blend_enabled: bool,
 
     // Callbacks
     on_progress: Option<ProgressCallback>,
@@ -250,6 +251,7 @@ impl StitchJob {
             sync_offset: None,
             blend_width: 0.15,
             blend_flip_direction: false,
+            multiband_blend_enabled: false,
             on_progress: None,
             on_finalizing: None,
             session_hooks: Vec::new(),
@@ -378,6 +380,15 @@ impl StitchJob {
     /// Default: false (right fades over a fixed left).
     pub fn blend_flip_direction(mut self, flip: bool) -> Self {
         self.blend_flip_direction = flip;
+        self
+    }
+
+    /// Use a 2-band spatial blend at the seam instead of a single alpha
+    /// crossfade. See
+    /// `reco_core::render::viewport::ViewportConfig::multiband_blend_enabled`.
+    /// Default: false.
+    pub fn multiband_blend_enabled(mut self, enabled: bool) -> Self {
+        self.multiband_blend_enabled = enabled;
         self
     }
 
@@ -599,6 +610,7 @@ impl StitchJob {
             height: out_h,
             blend_width: self.blend_width,
             blend_flip_direction: self.blend_flip_direction,
+            multiband_blend_enabled: self.multiband_blend_enabled,
             rig_tilt: cal.rig_tilt as f32,
             rig_roll: cal.rig_roll as f32,
             ..Default::default()

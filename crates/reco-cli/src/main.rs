@@ -183,6 +183,14 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         blend_flip_direction: bool,
 
+        /// Use a 2-band spatial blend at the seam (blur low frequencies
+        /// over a wide band, keep high frequencies over a narrow band)
+        /// instead of a single alpha crossfade. Lets `--blend` read as
+        /// wider without doubling fine detail (ball, player edges, field
+        /// lines) - costs 10 render passes instead of 1. Experimental.
+        #[arg(long, default_value_t = false)]
+        multiband: bool,
+
         /// Frame offset for temporal sync between cameras.
         /// Positive: skip N right frames (right started first).
         /// Negative: skip N left frames (left started first).
@@ -825,6 +833,7 @@ fn main() -> anyhow::Result<()> {
             quality,
             blend,
             blend_flip_direction,
+            multiband,
             sync_offset,
             model,
             detection_interval,
@@ -851,6 +860,7 @@ fn main() -> anyhow::Result<()> {
                 height,
                 blend,
                 blend_flip_direction,
+                multiband,
                 start_time,
                 end_time,
                 max_frames,

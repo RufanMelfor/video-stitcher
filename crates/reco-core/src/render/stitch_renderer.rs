@@ -440,6 +440,74 @@ impl StitchRenderer {
         self.pipeline.viewport.rig_roll = radians;
     }
 
+    /// Enable/disable automatic per-camera exposure/color matching. See
+    /// [`crate::render::viewport::ViewportConfig::color_match_enabled`].
+    pub fn set_color_match_enabled(&mut self, enabled: bool) {
+        self.pipeline.viewport.color_match_enabled = enabled;
+        self.pipeline.force_color_match_remeasure();
+    }
+
+    /// See [`crate::render::viewport::ViewportConfig::color_match_band_width`].
+    /// Forces an immediate re-measurement so the change is visible on the
+    /// very next rendered frame instead of waiting for the next scheduled
+    /// measurement.
+    pub fn set_color_match_band_width(&mut self, w: f32) {
+        self.pipeline.viewport.color_match_band_width = w.clamp(0.01, 0.49);
+        self.pipeline.force_color_match_remeasure();
+    }
+
+    /// See [`crate::render::viewport::ViewportConfig::color_match_grid_cols`].
+    pub fn set_color_match_grid_cols(&mut self, cols: u32) {
+        self.pipeline.viewport.color_match_grid_cols = cols.max(1);
+        self.pipeline.force_color_match_remeasure();
+    }
+
+    /// See [`crate::render::viewport::ViewportConfig::color_match_grid_rows`].
+    pub fn set_color_match_grid_rows(&mut self, rows: u32) {
+        self.pipeline.viewport.color_match_grid_rows = rows.max(1);
+        self.pipeline.force_color_match_remeasure();
+    }
+
+    /// See [`crate::render::viewport::ViewportConfig::color_match_interval_frames`].
+    pub fn set_color_match_interval_frames(&mut self, frames: u32) {
+        self.pipeline.viewport.color_match_interval_frames = frames.max(1);
+        self.pipeline.force_color_match_remeasure();
+    }
+
+    /// See [`crate::render::viewport::ViewportConfig::color_match_ema_alpha`].
+    pub fn set_color_match_ema_alpha(&mut self, alpha: f32) {
+        self.pipeline.viewport.color_match_ema_alpha = alpha.clamp(0.01, 1.0);
+        self.pipeline.force_color_match_remeasure();
+    }
+
+    /// See [`crate::render::viewport::ViewportConfig::color_match_max_y_offset`].
+    pub fn set_color_match_max_y_offset(&mut self, v: f32) {
+        self.pipeline.viewport.color_match_max_y_offset = v.max(0.0);
+        self.pipeline.force_color_match_remeasure();
+    }
+
+    /// See [`crate::render::viewport::ViewportConfig::color_match_max_chroma_offset`].
+    pub fn set_color_match_max_chroma_offset(&mut self, v: f32) {
+        self.pipeline.viewport.color_match_max_chroma_offset = v.max(0.0);
+        self.pipeline.force_color_match_remeasure();
+    }
+
+    /// See [`crate::render::viewport::ViewportConfig::multiband_blend_enabled`].
+    pub fn set_multiband_blend_enabled(&mut self, enabled: bool) {
+        self.pipeline.viewport.multiband_blend_enabled = enabled;
+    }
+
+    /// The color-match correction currently being applied (smoothed,
+    /// post-clamp), without side effects. For a live diagnostic readout -
+    /// lets a consumer confirm the mechanism is actually measuring
+    /// something (both offsets frozen at exactly zero across parameter
+    /// changes means every sample point is mapping outside the raw frame,
+    /// not that the cameras already match) and that a parameter tweak is
+    /// having an effect.
+    pub fn color_match_correction(&self) -> super::renderer::ColorCorrection {
+        self.pipeline.color_match_correction()
+    }
+
     /// Access the current calibration (for saving after adjustments).
     pub fn calibration(&self) -> &crate::calibration::MatchCalibration {
         self.pipeline.calibration()

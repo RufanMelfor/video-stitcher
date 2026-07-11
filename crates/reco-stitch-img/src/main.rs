@@ -109,6 +109,7 @@ fn main() -> Result<()> {
         rig_tilt: calibration.rig_tilt as f32,
         rig_roll: calibration.rig_roll as f32,
         lens_correction_amount: calibration.lens_correction_amount,
+        ..ViewportConfig::default()
     };
 
     // InputFormat::Bgra: skips YUV→RGB conversion, samples RGBA directly.
