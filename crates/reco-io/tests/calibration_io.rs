@@ -99,8 +99,12 @@ fn extract_audio_window_returns_samples() {
 
 #[test]
 fn extract_audio_window_nonexistent_file_returns_error() {
-    let result =
-        calibration_io::extract_audio_pcm_window(Path::new("/nonexistent/video.mp4"), 44100, 0.0, 5.0);
+    let result = calibration_io::extract_audio_pcm_window(
+        Path::new("/nonexistent/video.mp4"),
+        44100,
+        0.0,
+        5.0,
+    );
     assert!(result.is_err());
 }
 

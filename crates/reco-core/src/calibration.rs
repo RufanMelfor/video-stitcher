@@ -778,6 +778,7 @@ mod tests {
             field_roi: None,
             lens_correction_amount: 1.0,
             blend_width: 0.05,
+            blend_flip_direction: false,
         }
     }
 
@@ -959,10 +960,12 @@ mod tests {
             rig_tilt: 0.3,
             rig_roll: -0.12,
             sync_offset: 67,
-            // Deliberately non-default (correction off, wide seam) so a
-            // dropped field would change the round-tripped value.
+            // Deliberately non-default (correction off, wide seam, flipped
+            // blend direction) so a dropped field would change the
+            // round-tripped value.
             lens_correction_amount: 0.0,
             blend_width: 0.123,
+            blend_flip_direction: true,
         };
 
         let json = serde_json::to_string(&cal).unwrap();
@@ -977,6 +980,7 @@ mod tests {
         assert!((parsed.blend_width - cal.blend_width).abs() < f32::EPSILON);
         assert!((parsed.layout.ground_tilt_x - cal.layout.ground_tilt_x).abs() < f64::EPSILON);
         assert!((parsed.layout.ground_tilt_z - cal.layout.ground_tilt_z).abs() < f64::EPSILON);
+        assert_eq!(parsed.blend_flip_direction, cal.blend_flip_direction);
     }
 
     #[test]

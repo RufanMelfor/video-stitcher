@@ -991,6 +991,77 @@ impl AppState {
         }
     }
 
+    /// Enable/disable the 2-band spatial seam blend.
+    fn set_multiband_blend_enabled(&mut self, enabled: bool) {
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge.renderer_mut().set_multiband_blend_enabled(enabled);
+            self.preview_dirty = true;
+        }
+    }
+
+    /// Enable/disable automatic per-camera exposure/color matching.
+    fn set_color_match_enabled(&mut self, enabled: bool) {
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge.renderer_mut().set_color_match_enabled(enabled);
+            self.preview_dirty = true;
+        }
+    }
+
+    fn set_color_match_band_width(&mut self, w: f32) {
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge.renderer_mut().set_color_match_band_width(w);
+            self.preview_dirty = true;
+        }
+    }
+
+    fn set_color_match_grid_cols(&mut self, cols: f32) {
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge
+                .renderer_mut()
+                .set_color_match_grid_cols(cols.round().max(1.0) as u32);
+            self.preview_dirty = true;
+        }
+    }
+
+    fn set_color_match_grid_rows(&mut self, rows: f32) {
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge
+                .renderer_mut()
+                .set_color_match_grid_rows(rows.round().max(1.0) as u32);
+            self.preview_dirty = true;
+        }
+    }
+
+    fn set_color_match_interval_frames(&mut self, frames: f32) {
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge
+                .renderer_mut()
+                .set_color_match_interval_frames(frames.round().max(1.0) as u32);
+            self.preview_dirty = true;
+        }
+    }
+
+    fn set_color_match_ema_alpha(&mut self, alpha: f32) {
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge.renderer_mut().set_color_match_ema_alpha(alpha);
+            self.preview_dirty = true;
+        }
+    }
+
+    fn set_color_match_max_y_offset(&mut self, v: f32) {
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge.renderer_mut().set_color_match_max_y_offset(v);
+            self.preview_dirty = true;
+        }
+    }
+
+    fn set_color_match_max_chroma_offset(&mut self, v: f32) {
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge.renderer_mut().set_color_match_max_chroma_offset(v);
+            self.preview_dirty = true;
+        }
+    }
+
     fn set_rig_tilt(&mut self, deg: f32) {
         if let Some(cal) = self.calibration.as_mut() {
             cal.rig_tilt = (deg as f64).to_radians();
@@ -3153,6 +3224,53 @@ fn main() -> anyhow::Result<()> {
     });
 
     let state_ref = Rc::clone(&state);
+    app.on_changed_multiband_blend_enabled(move |enabled| {
+        state_ref.borrow_mut().set_multiband_blend_enabled(enabled);
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_changed_color_match_enabled(move |enabled| {
+        state_ref.borrow_mut().set_color_match_enabled(enabled);
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_changed_color_match_band_width(move |w| {
+        state_ref.borrow_mut().set_color_match_band_width(w);
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_changed_color_match_grid_cols(move |cols| {
+        state_ref.borrow_mut().set_color_match_grid_cols(cols);
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_changed_color_match_grid_rows(move |rows| {
+        state_ref.borrow_mut().set_color_match_grid_rows(rows);
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_changed_color_match_interval_frames(move |frames| {
+        state_ref
+            .borrow_mut()
+            .set_color_match_interval_frames(frames);
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_changed_color_match_ema_alpha(move |alpha| {
+        state_ref.borrow_mut().set_color_match_ema_alpha(alpha);
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_changed_color_match_max_y_offset(move |v| {
+        state_ref.borrow_mut().set_color_match_max_y_offset(v);
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_changed_color_match_max_chroma_offset(move |v| {
+        state_ref.borrow_mut().set_color_match_max_chroma_offset(v);
+    });
+
+    let state_ref = Rc::clone(&state);
     let app_weak = app.as_weak();
     app.on_changed_rig_tilt(move |deg| {
         state_ref.borrow_mut().set_rig_tilt(deg);
@@ -4570,6 +4688,21 @@ fn vsync_render_tick(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<RecoA
         app.set_pitch(current.pitch);
         if let Some(fov) = current.fov_degrees {
             app.set_fov(fov);
+        }
+        if let Some(bridge) = s.bridge.as_ref() {
+            let c = bridge.renderer().color_match_correction();
+            app.set_color_match_status(
+                format!(
+                    "L: Y{:+.3} U{:+.3} V{:+.3}   R: Y{:+.3} U{:+.3} V{:+.3}",
+                    c.left_offset[0],
+                    c.left_offset[1],
+                    c.left_offset[2],
+                    c.right_offset[0],
+                    c.right_offset[1],
+                    c.right_offset[2],
+                )
+                .into(),
+            );
         }
         return true;
     }

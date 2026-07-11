@@ -30,6 +30,7 @@ use crate::gpu::GpuContext;
 
 use bytemuck::{Pod, Zeroable};
 use nalgebra::{Matrix4, Perspective3, Point3, UnitQuaternion};
+use std::cell::RefCell;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
@@ -87,6 +88,409 @@ pub(crate) struct GpuUniforms {
 pub struct GroundTilt {
     pub tilt: f32,
     pub k: f32,
+}
+
+/// Per-plane YUV offset applied by `apply_color_transfer` in `fisheye.wgsl`,
+/// computed by [`super::color_match`] from a seam-adjacent band of each
+/// camera's raw frame. Nudges both cameras toward a shared mean color so an
+/// exposure/white-balance mismatch between the two cameras doesn't show up
+/// as a visible seam independent of geometric alignment. `Default` (both
+/// zero) is a no-op - `apply_color_transfer` has an explicit identity
+/// fast-path for `scale == 1 && offset == 0`. `pub` (not `pub(crate)`):
+/// [`super::stitch_renderer::StitchRenderer::color_match_correction`]
+/// surfaces this to other crates (e.g. a GUI's live diagnostic readout).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ColorCorrection {
+    pub left_offset: [f32; 3],
+    pub right_offset: [f32; 3],
+}
+
+// ---- Multi-band (2-band) spatial seam blur ----
+//
+// See `Renderer::encode_multiband_stitch_pass` for the full algorithm.
+// Opt-in (`ViewportConfig::multiband_blend_enabled`), reuses the existing
+// fisheye pipeline for the per-camera and seam-mask renders (no shader
+// changes needed there - just different uniform values), and adds two new
+// shaders: `shaders/blur.wgsl` (separable Gaussian) and
+// `shaders/multiband_composite.wgsl` (final 2-band reconstruction).
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct BlurUniforms {
+    texel_size: [f32; 2],
+    direction: [f32; 2],
+    /// x: sigma in texels. y: premultiply-on-read flag (1.0/0.0). z, w: pad.
+    params: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct CompositeUniforms {
+    /// x: 1.0 if the right plane is the fading/mask plane, else 0.0.
+    /// y: narrow-band smoothstep half-width. z, w: pad.
+    params: [f32; 4],
+}
+
+/// The size-dependent half of [`MultibandResources`]: textures, views, and
+/// the bind groups that reference them. Rebuilt by
+/// [`MultibandResources::ensure_size`] whenever the render target's
+/// dimensions change (window resize) - `Renderer::output_width/height` are
+/// fixed at construction, but `render_to_view`'s target (interactive GUI
+/// preview) can be a different, live-resizable size.
+struct MultibandSized {
+    width: u32,
+    height: u32,
+    view_a: wgpu::TextureView,
+    view_b: wgpu::TextureView,
+    view_mask: wgpu::TextureView,
+    view_tmp: wgpu::TextureView,
+    view_a_blur: wgpu::TextureView,
+    view_b_blur: wgpu::TextureView,
+    view_mask_blur: wgpu::TextureView,
+    bg_read_a: wgpu::BindGroup,
+    bg_read_b: wgpu::BindGroup,
+    bg_read_mask: wgpu::BindGroup,
+    bg_read_tmp: wgpu::BindGroup,
+    bg_composite_textures: wgpu::BindGroup,
+}
+
+impl MultibandSized {
+    fn new(
+        device: &wgpu::Device,
+        sampler: &wgpu::Sampler,
+        blur_texture_layout: &wgpu::BindGroupLayout,
+        composite_texture_layout: &wgpu::BindGroupLayout,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) -> Self {
+        let make_texture = |label: &str| {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            (tex, view)
+        };
+        let read_bind_group = |view: &wgpu::TextureView, label: &str| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: blur_texture_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(sampler),
+                    },
+                ],
+            })
+        };
+
+        let (_tex_a, view_a) = make_texture("multiband_a");
+        let (_tex_b, view_b) = make_texture("multiband_b");
+        let (_tex_mask, view_mask) = make_texture("multiband_mask");
+        let (_tex_tmp, view_tmp) = make_texture("multiband_tmp");
+        let (_tex_a_blur, view_a_blur) = make_texture("multiband_a_blur");
+        let (_tex_b_blur, view_b_blur) = make_texture("multiband_b_blur");
+        let (_tex_mask_blur, view_mask_blur) = make_texture("multiband_mask_blur");
+
+        let bg_read_a = read_bind_group(&view_a, "multiband_read_a");
+        let bg_read_b = read_bind_group(&view_b, "multiband_read_b");
+        let bg_read_mask = read_bind_group(&view_mask, "multiband_read_mask");
+        let bg_read_tmp = read_bind_group(&view_tmp, "multiband_read_tmp");
+
+        let bg_composite_textures = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("multiband_composite_textures"),
+            layout: composite_texture_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view_a),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view_b),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&view_a_blur),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&view_b_blur),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&view_mask_blur),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        });
+
+        Self {
+            width,
+            height,
+            view_a,
+            view_b,
+            view_mask,
+            view_tmp,
+            view_a_blur,
+            view_b_blur,
+            view_mask_blur,
+            bg_read_a,
+            bg_read_b,
+            bg_read_mask,
+            bg_read_tmp,
+            bg_composite_textures,
+        }
+    }
+}
+
+/// Persistent GPU resources for the multi-band spatial blur, owned by
+/// [`Renderer`] and created eagerly (fixed pipeline/layout cost; the sized
+/// textures are rebuilt lazily on first use / resize via
+/// [`Self::ensure_size`], not on every frame).
+struct MultibandResources {
+    blur_texture_layout: wgpu::BindGroupLayout,
+    blur_pipeline: wgpu::RenderPipeline,
+    composite_texture_layout: wgpu::BindGroupLayout,
+    composite_pipeline: wgpu::RenderPipeline,
+    /// Single-uniform-buffer layout, reused for both blur and composite
+    /// uniform bind groups (same shape: one uniform buffer at binding 0).
+    small_uniform_layout: wgpu::BindGroupLayout,
+    /// Dedicated uniform buffer for the seam-mask pass, distinct from
+    /// `Renderer::left/right`'s own uniform buffers so writing it doesn't
+    /// clobber the value those buffers need for the `tex_a`/`tex_b` passes
+    /// in the same frame (all writes happen before one `submit()` - see
+    /// the doc comment on `encode_multiband_stitch_pass`).
+    mask_uniform_buffer: wgpu::Buffer,
+    /// Bound against `Renderer::uniform_layout` (not `small_uniform_layout`)
+    /// so it's compatible with the seam-mask pass's reuse of the main
+    /// fisheye pipeline.
+    mask_uniform_bind_group: wgpu::BindGroup,
+    format: wgpu::TextureFormat,
+    sized: RefCell<MultibandSized>,
+}
+
+impl MultibandResources {
+    fn new(
+        device: &wgpu::Device,
+        uniform_layout: &wgpu::BindGroupLayout,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) -> Self {
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("multiband_sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let single_texture_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let sampler_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        };
+
+        let blur_texture_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("multiband_blur_texture_layout"),
+                entries: &[single_texture_entry(0), sampler_entry(1)],
+            });
+        let composite_texture_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("multiband_composite_texture_layout"),
+                entries: &[
+                    single_texture_entry(0),
+                    single_texture_entry(1),
+                    single_texture_entry(2),
+                    single_texture_entry(3),
+                    single_texture_entry(4),
+                    sampler_entry(5),
+                ],
+            });
+        let small_uniform_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("multiband_small_uniform_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let full_screen_target = |blend: Option<wgpu::BlendState>| wgpu::ColorTargetState {
+            format,
+            blend,
+            write_mask: wgpu::ColorWrites::ALL,
+        };
+
+        let blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("multiband_blur"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/blur.wgsl").into()),
+        });
+        let blur_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("multiband_blur_pipeline_layout"),
+            bind_group_layouts: &[&blur_texture_layout, &small_uniform_layout],
+            immediate_size: 0,
+        });
+        let blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("multiband_blur_pipeline"),
+            layout: Some(&blur_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &blur_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &blur_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(full_screen_target(None))],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("multiband_composite"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/multiband_composite.wgsl").into(),
+            ),
+        });
+        let composite_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("multiband_composite_pipeline_layout"),
+                bind_group_layouts: &[&composite_texture_layout, &small_uniform_layout],
+                immediate_size: 0,
+            });
+        let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("multiband_composite_pipeline"),
+            layout: Some(&composite_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(full_screen_target(None))],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let mask_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("multiband_mask_uniform"),
+            size: std::mem::size_of::<GpuUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mask_uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("multiband_mask_uniform_bind_group"),
+            layout: uniform_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: mask_uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        let sized = RefCell::new(MultibandSized::new(
+            device,
+            &sampler,
+            &blur_texture_layout,
+            &composite_texture_layout,
+            width,
+            height,
+            format,
+        ));
+
+        Self {
+            blur_texture_layout,
+            blur_pipeline,
+            composite_texture_layout,
+            composite_pipeline,
+            small_uniform_layout,
+            mask_uniform_buffer,
+            mask_uniform_bind_group,
+            format,
+            sized,
+        }
+    }
+
+    /// Rebuild the size-dependent textures/bind groups if `width`/`height`
+    /// don't match what's currently allocated. The interactive GUI preview
+    /// target can be resized without recreating `Renderer` (unlike the
+    /// fixed `output_width`/`output_height` internal render target), so
+    /// this is checked on every multiband render rather than only at
+    /// construction.
+    fn ensure_size(&self, device: &wgpu::Device, sampler: &wgpu::Sampler, width: u32, height: u32) {
+        let needs_resize = {
+            let sized = self.sized.borrow();
+            sized.width != width || sized.height != height
+        };
+        if needs_resize {
+            *self.sized.borrow_mut() = MultibandSized::new(
+                device,
+                sampler,
+                &self.blur_texture_layout,
+                &self.composite_texture_layout,
+                width,
+                height,
+                self.format,
+            );
+        }
+    }
 }
 
 /// Vertex with 3D position and UV coordinates.
@@ -248,6 +652,9 @@ pub(crate) struct Renderer {
     render_target_view: wgpu::TextureView,
     output_width: u32,
     output_height: u32,
+    /// Opt-in 2-band spatial blur seam compositor. See
+    /// [`Self::encode_multiband_stitch_pass`].
+    multiband: MultibandResources,
     /// Input pixel format (YUV420P or NV12).
     input_format: InputFormat,
     /// Full-range YUV (0-255) instead of limited (16-235).
@@ -433,6 +840,14 @@ impl Renderer {
         });
         let render_target_view = render_target.create_view(&wgpu::TextureViewDescriptor::default());
 
+        let multiband = MultibandResources::new(
+            device,
+            &uniform_layout,
+            output_width,
+            output_height,
+            output_format,
+        );
+
         Self {
             pipeline,
             vertex_buffer,
@@ -442,6 +857,7 @@ impl Renderer {
             render_target_view,
             output_width,
             output_height,
+            multiband,
             input_format,
             is_full_range: false,
             texture_layout,
@@ -784,6 +1200,16 @@ impl Renderer {
         self.is_full_range = full_range;
     }
 
+    /// Current full-range YUV mode, set via [`Self::set_full_range`].
+    ///
+    /// Surfaced so [`super::color_match`]'s CPU-side band measurement can
+    /// decode raw YCbCr bytes with the same range convention the shader's
+    /// `sample_yuv` uses, keeping the measured offset in the same color
+    /// space `apply_color_transfer` applies it in.
+    pub(crate) fn is_full_range(&self) -> bool {
+        self.is_full_range
+    }
+
     /// Create fresh `TextureView`s for the left plane's Y/U/V
     /// textures. Needed by [`crate::gpu::yuv_stack_packer::YuvStackPacker`]
     /// when replay recording is enabled: the packer samples the same
@@ -841,6 +1267,7 @@ impl Renderer {
         calibration: &MatchCalibration,
         viewport: &ResolvedViewport,
         blend_width: f32,
+        color_correction: ColorCorrection,
         target_view: &wgpu::TextureView,
         aspect: f32,
         encoder_label: &str,
@@ -910,6 +1337,16 @@ impl Renderer {
         );
         right_uniforms.lens_preview[0] = correction;
 
+        // Per-camera color-transfer offset (see `ColorCorrection`'s doc).
+        // `color_offset_blend[3]` already holds `blend_width` from
+        // `build_gpu_uniforms` above - only overwrite the Y/U/V offset.
+        left_uniforms.color_offset_blend[0] = color_correction.left_offset[0];
+        left_uniforms.color_offset_blend[1] = color_correction.left_offset[1];
+        left_uniforms.color_offset_blend[2] = color_correction.left_offset[2];
+        right_uniforms.color_offset_blend[0] = color_correction.right_offset[0];
+        right_uniforms.color_offset_blend[1] = color_correction.right_offset[1];
+        right_uniforms.color_offset_blend[2] = color_correction.right_offset[2];
+
         // Seam blend direction: which plane fades in over the other at the
         // seam. `false` (default) = right fades over a fixed left, drawn
         // left-then-right so "over" compositing works (the fading plane
@@ -978,6 +1415,359 @@ impl Renderer {
         encoder
     }
 
+    /// Opt-in alternative to [`Self::encode_stitch_pass`]: a 2-band spatial
+    /// blend instead of a single alpha crossfade. Blends low frequencies
+    /// (blurred content) over a wide band and high frequencies (fine
+    /// detail) over a narrow band, then sums them - this is what lets the
+    /// visible transition be wide (hiding residual near-field misalignment)
+    /// without doubling sharp structure the way widening the single-band
+    /// crossfade does. See `reco-core/FRICTION.md`'s multi-band entry.
+    ///
+    /// Ten passes, all still cheaper than a real Laplacian pyramid: render
+    /// each camera alone (`tex_a`, `tex_b` - hard 0/1 FOV-coverage alpha,
+    /// no seam fade), render the fading plane again with a near-zero blend
+    /// width for a hard seam-position mask (`tex_mask`), separably
+    /// Gaussian-blur all three, then reconstruct in one composite pass. The
+    /// narrow-band mask is derived from the blurred wide mask via a steep
+    /// `smoothstep` around its 0.5 crossover in the composite shader,
+    /// rather than a second blur pass.
+    ///
+    /// All `gpu.queue.write_buffer` calls below happen before this
+    /// function's single implicit "submit" boundary (the caller submits
+    /// the returned encoder) - each uniform buffer here is written exactly
+    /// once and read by exactly one pass, which is required: `write_buffer`
+    /// only orders correctly relative to `queue.submit()`, not relative to
+    /// when passes are *encoded*, so a buffer written twice before one
+    /// submit would show only the last value to every pass that reads it.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_multiband_stitch_pass(
+        &self,
+        gpu: &GpuContext,
+        scene: &SceneGeometry,
+        calibration: &MatchCalibration,
+        viewport: &ResolvedViewport,
+        blend_width: f32,
+        color_correction: ColorCorrection,
+        target_view: &wgpu::TextureView,
+        target_width: u32,
+        target_height: u32,
+        aspect: f32,
+        encoder_label: &str,
+    ) -> wgpu::CommandEncoder {
+        self.multiband
+            .ensure_size(&gpu.device, &self.sampler, target_width, target_height);
+
+        let projection = opengl_to_wgpu_matrix()
+            * Perspective3::new(
+                aspect,
+                viewport.config.fov_degrees.to_radians(),
+                NEAR_PLANE,
+                FAR_PLANE,
+            )
+            .to_homogeneous();
+        let view = view_matrix(
+            &scene.camera_position,
+            viewport.position.yaw,
+            viewport.position.pitch,
+            viewport.config.rig_tilt,
+            viewport.config.rig_roll,
+        );
+
+        let left_ground_tilt = GroundTilt {
+            tilt: calibration.layout.ground_tilt_z as f32,
+            k: calibration.left.ground_tilt_k() as f32,
+        };
+        let right_ground_tilt = GroundTilt {
+            tilt: calibration.layout.ground_tilt_x as f32,
+            k: calibration.right.ground_tilt_k() as f32,
+        };
+
+        let left_mvp = projection * view * scene.model_matrix_left();
+        let correction_amount = viewport.config.lens_correction_amount;
+        let mut left_uniforms = build_gpu_uniforms(
+            &left_mvp,
+            &calibration.left,
+            false,
+            blend_width,
+            self.input_format,
+            self.flip_180[0],
+            self.is_full_range,
+            left_ground_tilt,
+        );
+        left_uniforms.lens_preview[0] = correction_amount;
+        left_uniforms.color_offset_blend[0] = color_correction.left_offset[0];
+        left_uniforms.color_offset_blend[1] = color_correction.left_offset[1];
+        left_uniforms.color_offset_blend[2] = color_correction.left_offset[2];
+        left_uniforms.ground_tilt[3] = 0.0; // tex_a: hard FOV coverage, never fades.
+
+        let right_mvp = projection * view * scene.model_matrix_right();
+        let mut right_uniforms = build_gpu_uniforms(
+            &right_mvp,
+            &calibration.right,
+            true,
+            blend_width,
+            self.input_format,
+            self.flip_180[1],
+            self.is_full_range,
+            right_ground_tilt,
+        );
+        right_uniforms.lens_preview[0] = correction_amount;
+        right_uniforms.color_offset_blend[0] = color_correction.right_offset[0];
+        right_uniforms.color_offset_blend[1] = color_correction.right_offset[1];
+        right_uniforms.color_offset_blend[2] = color_correction.right_offset[2];
+        right_uniforms.ground_tilt[3] = 0.0; // tex_b: hard FOV coverage, never fades.
+
+        // Seam mask: a copy of whichever plane fades (see
+        // `encode_stitch_pass`'s flip-convention comment), rendered with a
+        // near-zero blend width so its alpha is a hard step exactly at the
+        // true seam position instead of the visible feathered ramp. `1e-4`
+        // (not `0.0`) matters: the shader's fade branch is gated on
+        // `blend_width > 0.0`, so a literal zero would skip it entirely.
+        const MASK_HARD_BLEND_WIDTH: f32 = 1e-4;
+        let flip = viewport.config.blend_flip_direction;
+        let fading_is_right = !flip;
+        let (mut mask_uniforms, mask_plane) = if fading_is_right {
+            (right_uniforms, &self.right)
+        } else {
+            (left_uniforms, &self.left)
+        };
+        mask_uniforms.ground_tilt[3] = 1.0;
+        mask_uniforms.color_offset_blend[3] = MASK_HARD_BLEND_WIDTH;
+
+        gpu.queue.write_buffer(
+            &self.left.uniform_buffer,
+            0,
+            bytemuck::bytes_of(&left_uniforms),
+        );
+        gpu.queue.write_buffer(
+            &self.right.uniform_buffer,
+            0,
+            bytemuck::bytes_of(&right_uniforms),
+        );
+        gpu.queue.write_buffer(
+            &self.multiband.mask_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&mask_uniforms),
+        );
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some(encoder_label),
+            });
+
+        let sized = self.multiband.sized.borrow();
+
+        let single_plane_pass = |encoder: &mut wgpu::CommandEncoder,
+                                 view: &wgpu::TextureView,
+                                 texture_bg: &wgpu::BindGroup,
+                                 uniform_bg: &wgpu::BindGroup,
+                                 label: &str| {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(label),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            pass.set_bind_group(0, texture_bg, &[]);
+            pass.set_bind_group(1, uniform_bg, &[]);
+            pass.draw(0..6, 0..1);
+        };
+
+        single_plane_pass(
+            &mut encoder,
+            &sized.view_a,
+            &self.left.texture_bind_group,
+            &self.left.uniform_bind_group,
+            "multiband_render_a",
+        );
+        single_plane_pass(
+            &mut encoder,
+            &sized.view_b,
+            &self.right.texture_bind_group,
+            &self.right.uniform_bind_group,
+            "multiband_render_b",
+        );
+        single_plane_pass(
+            &mut encoder,
+            &sized.view_mask,
+            &mask_plane.texture_bind_group,
+            &self.multiband.mask_uniform_bind_group,
+            "multiband_render_mask",
+        );
+
+        // Blur radius derivation: capped well below `blend_width`'s full
+        // UV-space width so the fixed-tap shader (`blur.wgsl`'s
+        // `MAX_RADIUS`) stays well-sampled rather than approximating a
+        // wide Gaussian from too few taps. This is a deliberate ceiling,
+        // not the "true" width `blend_width` might suggest - a real
+        // N-level pyramid would scale better; see FRICTION.md.
+        let texel_size = [1.0 / target_width as f32, 1.0 / target_height as f32];
+        let sigma_px = (blend_width * target_width as f32 * 0.12).clamp(2.0, 10.0);
+
+        let make_blur_uniform_bg = |sigma: f32, direction: [f32; 2], premultiply: bool| {
+            let uniforms = BlurUniforms {
+                texel_size,
+                direction,
+                params: [sigma, if premultiply { 1.0 } else { 0.0 }, 0.0, 0.0],
+            };
+            let buffer = gpu
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("multiband_blur_uniform"),
+                    contents: bytemuck::bytes_of(&uniforms),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("multiband_blur_uniform_bg"),
+                layout: &self.multiband.small_uniform_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                }],
+            })
+        };
+
+        let blur_pass = |encoder: &mut wgpu::CommandEncoder,
+                         src_bg: &wgpu::BindGroup,
+                         dst_view: &wgpu::TextureView,
+                         uniform_bg: &wgpu::BindGroup,
+                         label: &str| {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(label),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: dst_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.multiband.blur_pipeline);
+            pass.set_bind_group(0, src_bg, &[]);
+            pass.set_bind_group(1, uniform_bg, &[]);
+            pass.draw(0..3, 0..1);
+        };
+
+        // tex_a -> tmp (horizontal) -> tex_a_blur (vertical).
+        let ubg = make_blur_uniform_bg(sigma_px, [1.0, 0.0], true);
+        blur_pass(
+            &mut encoder,
+            &sized.bg_read_a,
+            &sized.view_tmp,
+            &ubg,
+            "multiband_blur_a_h",
+        );
+        let ubg = make_blur_uniform_bg(sigma_px, [0.0, 1.0], false);
+        blur_pass(
+            &mut encoder,
+            &sized.bg_read_tmp,
+            &sized.view_a_blur,
+            &ubg,
+            "multiband_blur_a_v",
+        );
+
+        // tex_b -> tmp -> tex_b_blur.
+        let ubg = make_blur_uniform_bg(sigma_px, [1.0, 0.0], true);
+        blur_pass(
+            &mut encoder,
+            &sized.bg_read_b,
+            &sized.view_tmp,
+            &ubg,
+            "multiband_blur_b_h",
+        );
+        let ubg = make_blur_uniform_bg(sigma_px, [0.0, 1.0], false);
+        blur_pass(
+            &mut encoder,
+            &sized.bg_read_tmp,
+            &sized.view_b_blur,
+            &ubg,
+            "multiband_blur_b_v",
+        );
+
+        // tex_mask -> tmp -> tex_mask_blur (the wide seam-position ramp).
+        let ubg = make_blur_uniform_bg(sigma_px, [1.0, 0.0], true);
+        blur_pass(
+            &mut encoder,
+            &sized.bg_read_mask,
+            &sized.view_tmp,
+            &ubg,
+            "multiband_blur_mask_h",
+        );
+        let ubg = make_blur_uniform_bg(sigma_px, [0.0, 1.0], false);
+        blur_pass(
+            &mut encoder,
+            &sized.bg_read_tmp,
+            &sized.view_mask_blur,
+            &ubg,
+            "multiband_blur_mask_v",
+        );
+
+        // Composite: reconstruct low + high bands into the real target.
+        let composite_uniforms = CompositeUniforms {
+            params: [if fading_is_right { 1.0 } else { 0.0 }, 0.04, 0.0, 0.0],
+        };
+        let composite_uniform_buffer =
+            gpu.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("multiband_composite_uniform"),
+                    contents: bytemuck::bytes_of(&composite_uniforms),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+        let composite_uniform_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("multiband_composite_uniform_bg"),
+            layout: &self.multiband.small_uniform_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: composite_uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("multiband_composite"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.multiband.composite_pipeline);
+            pass.set_bind_group(0, &sized.bg_composite_textures, &[]);
+            pass.set_bind_group(1, &composite_uniform_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        drop(sized);
+        encoder
+    }
+
     /// Render a stitched frame to the internal render target, without readback.
     ///
     /// Returns the recorded `CommandBuffer` without submitting it.
@@ -995,18 +1785,37 @@ impl Renderer {
         calibration: &MatchCalibration,
         viewport: &ResolvedViewport,
         blend_width: f32,
+        color_correction: ColorCorrection,
+        multiband_enabled: bool,
     ) -> wgpu::CommandBuffer {
         let aspect = self.output_width as f32 / self.output_height as f32;
-        let encoder = self.encode_stitch_pass(
-            gpu,
-            scene,
-            calibration,
-            viewport,
-            blend_width,
-            &self.render_target_view,
-            aspect,
-            "stitch_to_target",
-        );
+        let encoder = if multiband_enabled {
+            self.encode_multiband_stitch_pass(
+                gpu,
+                scene,
+                calibration,
+                viewport,
+                blend_width,
+                color_correction,
+                &self.render_target_view,
+                self.output_width,
+                self.output_height,
+                aspect,
+                "stitch_to_target_multiband",
+            )
+        } else {
+            self.encode_stitch_pass(
+                gpu,
+                scene,
+                calibration,
+                viewport,
+                blend_width,
+                color_correction,
+                &self.render_target_view,
+                aspect,
+                "stitch_to_target",
+            )
+        };
         encoder.finish()
     }
 
@@ -1022,6 +1831,7 @@ impl Renderer {
     ///
     /// Unlike [`Self::render_to_target`], this does NOT read back the result to CPU.
     /// Used for interactive preview windows.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_to_view(
         &self,
         gpu: &GpuContext,
@@ -1029,19 +1839,38 @@ impl Renderer {
         calibration: &MatchCalibration,
         viewport: &ResolvedViewport,
         blend_width: f32,
+        color_correction: ColorCorrection,
+        multiband_enabled: bool,
         target_view: &wgpu::TextureView,
     ) {
         let aspect = viewport.config.width as f32 / viewport.config.height as f32;
-        let encoder = self.encode_stitch_pass(
-            gpu,
-            scene,
-            calibration,
-            viewport,
-            blend_width,
-            target_view,
-            aspect,
-            "preview_frame",
-        );
+        let encoder = if multiband_enabled {
+            self.encode_multiband_stitch_pass(
+                gpu,
+                scene,
+                calibration,
+                viewport,
+                blend_width,
+                color_correction,
+                target_view,
+                viewport.config.width,
+                viewport.config.height,
+                aspect,
+                "preview_frame_multiband",
+            )
+        } else {
+            self.encode_stitch_pass(
+                gpu,
+                scene,
+                calibration,
+                viewport,
+                blend_width,
+                color_correction,
+                target_view,
+                aspect,
+                "preview_frame",
+            )
+        };
         gpu.queue.submit(Some(encoder.finish()));
     }
 }

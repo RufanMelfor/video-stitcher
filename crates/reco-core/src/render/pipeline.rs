@@ -79,6 +79,9 @@ pub struct StitchPipeline {
     /// Input frame dimensions.
     input_width: u32,
     input_height: u32,
+    /// Periodic exposure/color-matching state (see [`super::color_match`]).
+    /// `&self` render methods need interior mutability here.
+    color_match: std::sync::Mutex<super::color_match::ColorMatchState>,
 }
 
 /// Pre-built bind groups for GPU-resident zero-copy sources.
@@ -152,6 +155,7 @@ impl StitchPipeline {
             renderer,
             input_width,
             input_height,
+            color_match: std::sync::Mutex::new(super::color_match::ColorMatchState::default()),
         })
     }
 
@@ -534,6 +538,81 @@ impl StitchPipeline {
         }
     }
 
+    /// Bundle the live `viewport.color_match_*` fields into the internal
+    /// params struct `ColorMatchState` expects.
+    fn color_match_params(&self) -> super::color_match::ColorMatchParams {
+        super::color_match::ColorMatchParams {
+            band_width: self.viewport.color_match_band_width,
+            grid_cols: self.viewport.color_match_grid_cols,
+            grid_rows: self.viewport.color_match_grid_rows,
+            measure_interval_frames: self.viewport.color_match_interval_frames,
+            ema_alpha: self.viewport.color_match_ema_alpha,
+            max_y_offset: self.viewport.color_match_max_y_offset,
+            max_chroma_offset: self.viewport.color_match_max_chroma_offset,
+        }
+    }
+
+    /// Force the color-match measurement to run again on the very next
+    /// frame, bypassing `viewport.color_match_interval_frames`. Call after
+    /// changing any `color_match_*` viewport field so a live-tuning slider
+    /// is reflected immediately instead of waiting up to
+    /// `color_match_interval_frames` frames.
+    pub(crate) fn force_color_match_remeasure(&self) {
+        self.color_match.lock().unwrap().force_remeasure();
+    }
+
+    /// The current smoothed color-match correction, without advancing or
+    /// re-measuring. See [`super::color_match::ColorMatchState::current`].
+    pub(crate) fn color_match_correction(&self) -> super::renderer::ColorCorrection {
+        self.color_match.lock().unwrap().current()
+    }
+
+    /// Measure (or reuse the last smoothed) per-camera color-offset
+    /// correction for a YUV420P frame pair. Identity when
+    /// `viewport.color_match_enabled` is `false`.
+    fn color_correction_yuv420p(
+        &self,
+        left: &YuvPlanes<'_>,
+        right: &YuvPlanes<'_>,
+    ) -> super::renderer::ColorCorrection {
+        if !self.viewport.color_match_enabled {
+            return super::renderer::ColorCorrection::default();
+        }
+        let params = self.color_match_params();
+        self.color_match.lock().unwrap().update_yuv420p(
+            (left.y, left.u, left.v),
+            (right.y, right.u, right.v),
+            self.input_width,
+            self.input_height,
+            &self.calibration.left,
+            &self.calibration.right,
+            self.renderer.is_full_range(),
+            &params,
+        )
+    }
+
+    /// NV12 counterpart to [`Self::color_correction_yuv420p`].
+    fn color_correction_nv12(
+        &self,
+        left: &Nv12Planes<'_>,
+        right: &Nv12Planes<'_>,
+    ) -> super::renderer::ColorCorrection {
+        if !self.viewport.color_match_enabled {
+            return super::renderer::ColorCorrection::default();
+        }
+        let params = self.color_match_params();
+        self.color_match.lock().unwrap().update_nv12(
+            (left.y, left.uv),
+            (right.y, right.uv),
+            self.input_width,
+            self.input_height,
+            &self.calibration.left,
+            &self.calibration.right,
+            self.renderer.is_full_range(),
+            &params,
+        )
+    }
+
     /// Render a frame directly to a texture view (for window display).
     ///
     /// Unlike the encode path, this does NOT read back to CPU — the result
@@ -546,6 +625,7 @@ impl StitchPipeline {
         pitch: f32,
         target_view: &wgpu::TextureView,
     ) -> Result<(), PipelineError> {
+        let color_correction = self.color_correction_yuv420p(left, right);
         self.renderer
             .upload_left_yuv(&self.gpu, left.y, left.u, left.v)?;
         self.renderer
@@ -566,6 +646,8 @@ impl StitchPipeline {
             &self.calibration,
             &viewport,
             self.viewport.blend_width,
+            color_correction,
+            self.viewport.multiband_blend_enabled,
             target_view,
         );
         Ok(())
@@ -584,6 +666,7 @@ impl StitchPipeline {
         pitch: f32,
         target_view: &wgpu::TextureView,
     ) -> Result<(), PipelineError> {
+        let color_correction = self.color_correction_nv12(left, right);
         self.renderer.upload_left_nv12(&self.gpu, left.y, left.uv)?;
         self.renderer
             .upload_right_nv12(&self.gpu, right.y, right.uv)?;
@@ -603,6 +686,8 @@ impl StitchPipeline {
             &self.calibration,
             &viewport,
             self.viewport.blend_width,
+            color_correction,
+            self.viewport.multiband_blend_enabled,
             target_view,
         );
         Ok(())
@@ -624,6 +709,7 @@ impl StitchPipeline {
         yaw: f32,
         pitch: f32,
     ) -> Result<wgpu::CommandBuffer, PipelineError> {
+        let color_correction = self.color_correction_yuv420p(left, right);
         self.renderer
             .upload_left_yuv(&self.gpu, left.y, left.u, left.v)?;
         self.renderer
@@ -644,6 +730,8 @@ impl StitchPipeline {
             &self.calibration,
             &viewport,
             self.viewport.blend_width,
+            color_correction,
+            self.viewport.multiband_blend_enabled,
         ))
     }
 
@@ -663,6 +751,7 @@ impl StitchPipeline {
         yaw: f32,
         pitch: f32,
     ) -> Result<wgpu::CommandBuffer, PipelineError> {
+        let color_correction = self.color_correction_nv12(left, right);
         self.renderer.upload_left_nv12(&self.gpu, left.y, left.uv)?;
         self.renderer
             .upload_right_nv12(&self.gpu, right.y, right.uv)?;
@@ -682,6 +771,8 @@ impl StitchPipeline {
             &self.calibration,
             &viewport,
             self.viewport.blend_width,
+            color_correction,
+            self.viewport.multiband_blend_enabled,
         ))
     }
 
@@ -691,6 +782,10 @@ impl StitchPipeline {
     /// order. Use [`BgraPlanes::from_bgra_swizzle_into`] when the source
     /// is BGRA. Requires the pipeline to be initialized with
     /// [`InputFormat::Bgra`](crate::render::renderer::InputFormat#variant.Bgra).
+    ///
+    /// No exposure/color matching (see [`super::color_match`]): its band
+    /// measurement needs raw YCbCr bytes, which packed RGBA doesn't carry.
+    /// Always renders with identity color correction.
     #[cfg_attr(
         feature = "profiling",
         tracing::instrument(skip_all, name = "render_to_target_bgra")
@@ -720,6 +815,8 @@ impl StitchPipeline {
             &self.calibration,
             &viewport,
             self.viewport.blend_width,
+            super::renderer::ColorCorrection::default(),
+            self.viewport.multiband_blend_enabled,
         ))
     }
 
@@ -767,6 +864,10 @@ impl StitchPipeline {
     /// bound. Call [`Self::render_imported_textures`] once to set up
     /// bind groups, then use this for subsequent frames with the same
     /// textures to avoid per-frame bind group allocation.
+    ///
+    /// No exposure/color matching (see [`super::color_match`]): the
+    /// zero-copy path never gives the CPU access to pixel data. Always
+    /// renders with identity color correction.
     pub fn render_to_target_gpu(&self, yaw: f32, pitch: f32) -> wgpu::CommandBuffer {
         let viewport = ResolvedViewport {
             config: self.viewport.clone(),
@@ -783,6 +884,8 @@ impl StitchPipeline {
             &self.calibration,
             &viewport,
             self.viewport.blend_width,
+            super::renderer::ColorCorrection::default(),
+            self.viewport.multiband_blend_enabled,
         )
     }
 

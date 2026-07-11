@@ -894,6 +894,18 @@ export component RecoApp inherits Window {
     in-out property <float> fov: 75.0;     // degrees
     in-out property <float> blend-width: 0.05;
     in-out property <bool> blend-flip-direction: false;
+    in-out property <bool> multiband-blend-enabled: false;
+    in-out property <bool> color-match-enabled: true;
+    in-out property <float> color-match-band-width: 0.15;
+    in-out property <float> color-match-grid-cols: 8;
+    in-out property <float> color-match-grid-rows: 16;
+    in-out property <float> color-match-interval-frames: 15;
+    in-out property <float> color-match-ema-alpha: 0.15;
+    in-out property <float> color-match-max-y-offset: 0.06;
+    in-out property <float> color-match-max-chroma-offset: 0.04;
+    // Live readout of the actual measured correction, refreshed every
+    // rendered frame - see the Color Mapping section's diagnostic Text.
+    in-out property <string> color-match-status: "";
     in-out property <float> rig-tilt: 0.0; // degrees
     in-out property <float> rig-roll: 0.0; // degrees
     in-out property <int> sync-offset: 0;  // frames
@@ -1125,6 +1137,15 @@ export component RecoApp inherits Window {
     // Settings-panel slider callbacks.
     callback changed-blend-width(float);
     callback changed-blend-flip-direction(bool);
+    callback changed-multiband-blend-enabled(bool);
+    callback changed-color-match-enabled(bool);
+    callback changed-color-match-band-width(float);
+    callback changed-color-match-grid-cols(float);
+    callback changed-color-match-grid-rows(float);
+    callback changed-color-match-interval-frames(float);
+    callback changed-color-match-ema-alpha(float);
+    callback changed-color-match-max-y-offset(float);
+    callback changed-color-match-max-chroma-offset(float);
     callback changed-rig-tilt(float);
     callback changed-rig-roll(float);
     callback changed-sync-offset(int);
@@ -1475,6 +1496,15 @@ export component RecoApp inherits Window {
                                 text: "Flip blend direction (left over right)";
                                 checked <=> root.blend-flip-direction;
                                 toggled => { root.changed-blend-flip-direction(self.checked); }
+                            }
+                        }
+
+                        if root.files-loaded: Tip {
+                            tip: "Spatial (multi-band) blend: blurs low frequencies over a wide band and keeps high frequencies over a narrow band, instead of a single crossfade. Lets the seam blend read as wider without doubling fine detail (ball, player edges, field lines) - but costs 10 render passes instead of 1. Experimental.";
+                            CheckBox {
+                                text: "Multi-band blend (experimental)";
+                                checked <=> root.multiband-blend-enabled;
+                                toggled => { root.changed-multiband-blend-enabled(self.checked); }
                             }
                         }
 
@@ -2138,6 +2168,112 @@ export component RecoApp inherits Window {
                     }
 
                     if !cal-section.expanded: Rectangle { height: 1px; background: #2a2a2a; }
+
+                    // ── Color Mapping (collapsible) ──
+                    color-match-section := SectionHeader {
+                        title: "Color Mapping";
+                        expanded: false;
+                    }
+
+                    if color-match-section.expanded: VerticalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: root.color-match-status == "" ? "Measuring…" : root.color-match-status;
+                            color: root.text-muted;
+                            font-size: 10px;
+                            wrap: word-wrap;
+                        }
+
+                        Tip {
+                            tip: "Periodically measures each camera's color in the seam-adjacent band of its raw frame and nudges both toward their shared average, so an exposure/white-balance mismatch between the two cameras doesn't show up as a color step at the seam. Independent of geometric alignment. Only affects live YUV420P/NV12 decode paths.";
+                            CheckBox {
+                                text: "Auto color match";
+                                checked <=> root.color-match-enabled;
+                                toggled => { root.changed-color-match-enabled(self.checked); }
+                            }
+                        }
+
+                        LabeledSlider {
+                            tip: "Max luma (brightness) correction either camera can receive. Updates live.";
+                            label: "Max Y offset";
+                            minimum: 0;
+                            maximum: 0.2;
+                            value <=> root.color-match-max-y-offset;
+                            decimals: 3;
+                            step: 0.005;
+                            changed(v) => { root.changed-color-match-max-y-offset(v); }
+                        }
+
+                        LabeledSlider {
+                            tip: "Max color (chroma) correction either camera can receive. Updates live.";
+                            label: "Max chroma offset";
+                            minimum: 0;
+                            maximum: 0.15;
+                            value <=> root.color-match-max-chroma-offset;
+                            decimals: 3;
+                            step: 0.005;
+                            changed(v) => { root.changed-color-match-max-chroma-offset(v); }
+                        }
+
+                        LabeledSlider {
+                            tip: "How fast the correction reacts to a new measurement (higher = faster, noisier). Updates live.";
+                            label: "Smoothing (EMA alpha)";
+                            minimum: 0.01;
+                            maximum: 1.0;
+                            value <=> root.color-match-ema-alpha;
+                            decimals: 2;
+                            step: 0.01;
+                            changed(v) => { root.changed-color-match-ema-alpha(v); }
+                        }
+
+                        LabeledSlider {
+                            tip: "Re-measure color every N rendered frames. Updates live.";
+                            label: "Measure interval";
+                            minimum: 1;
+                            maximum: 120;
+                            value <=> root.color-match-interval-frames;
+                            suffix: " frames";
+                            decimals: 0;
+                            step: 1;
+                            changed(v) => { root.changed-color-match-interval-frames(v); }
+                        }
+
+                        LabeledSlider {
+                            tip: "Width of the seam-adjacent band sampled for the measurement, independent of the seam blend width. Updates live.";
+                            label: "Measurement band";
+                            minimum: 0.02;
+                            maximum: 0.4;
+                            value <=> root.color-match-band-width;
+                            decimals: 2;
+                            step: 0.01;
+                            changed(v) => { root.changed-color-match-band-width(v); }
+                        }
+
+                        LabeledSlider {
+                            tip: "Sample grid columns per camera. More = a more stable measurement, at a small extra cost. Updates live.";
+                            label: "Grid columns";
+                            minimum: 2;
+                            maximum: 32;
+                            value <=> root.color-match-grid-cols;
+                            decimals: 0;
+                            step: 1;
+                            changed(v) => { root.changed-color-match-grid-cols(v); }
+                        }
+
+                        LabeledSlider {
+                            tip: "Sample grid rows per camera. Updates live.";
+                            label: "Grid rows";
+                            minimum: 2;
+                            maximum: 64;
+                            value <=> root.color-match-grid-rows;
+                            decimals: 0;
+                            step: 1;
+                            changed(v) => { root.changed-color-match-grid-rows(v); }
+                        }
+                    }
+
+                    if !color-match-section.expanded: Rectangle { height: 1px; background: #2a2a2a; }
 
                     // ── Auto-calibrate tuning (collapsible) ──
                     if root.has-both-videos: VerticalLayout {

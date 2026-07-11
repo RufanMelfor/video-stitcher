@@ -133,6 +133,7 @@ mod tests {
             field_roi: None,
             lens_correction_amount: 1.0,
             blend_width: 0.05,
+            blend_flip_direction: false,
         }
     }
 
