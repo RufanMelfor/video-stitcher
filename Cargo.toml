@@ -55,6 +55,14 @@ serde_json  = { path = "vendor/serde_json" }
 naga        = { path = "vendor/naga" }
 # wgpu-hal's build script also uses cfg_aliases. Same Defender-bypass patch.
 wgpu-hal    = { path = "vendor/wgpu-hal" }
+# wgpu and wgpu-core also use cfg_aliases in their build scripts (same class
+# of bug as wgpu-hal/naga above) - not caught earlier because a stale build
+# cache silently carried over a working artifact across sessions until
+# `cargo clean -p wgpu-core` forced a fresh recompile and exposed
+# "unresolved module 'std'" / "unresolved import 'portable_atomic'" in
+# wgpu/src/util/panicking.rs. Same Defender-bypass patch as wgpu-hal/naga.
+wgpu        = { path = "vendor/wgpu" }
+wgpu-core   = { path = "vendor/wgpu-core" }
 # aligned-vec (pulled in via Slint's build-time image/AVIF codec stack:
 # i-slint-compiler -> image -> ravif -> rav1e -> aligned-vec) uses the
 # `equator` crate's proc-macro for its internal assert!, which hits a
