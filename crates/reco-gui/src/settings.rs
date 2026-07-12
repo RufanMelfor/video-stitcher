@@ -87,6 +87,18 @@ pub struct GuiSettings {
     /// Dark mode preference. Default true.
     #[serde(default = "default_dark_mode")]
     pub dark_mode: bool,
+
+    /// Full segment chain for the left camera video last used (in
+    /// temporal order). Restores a multi-segment selection (e.g. DJI's
+    /// auto-split 4GB recordings) across an app restart - `recent_left`
+    /// only tracks single most-recent paths for the Recent-files
+    /// dropdown, which isn't enough on its own to reconstruct a chain.
+    /// Empty means "no chain to restore, fall back to `last_left()`".
+    #[serde(default)]
+    pub last_left_segments: Vec<PathBuf>,
+    /// Same as `last_left_segments`, for the right camera video.
+    #[serde(default)]
+    pub last_right_segments: Vec<PathBuf>,
 }
 
 fn default_dark_mode() -> bool {
@@ -125,6 +137,8 @@ impl Default for GuiSettings {
             telemetry_enabled: false,
             telemetry_client_id: None,
             dark_mode: true,
+            last_left_segments: Vec::new(),
+            last_right_segments: Vec::new(),
         }
     }
 }
@@ -195,6 +209,48 @@ impl GuiSettings {
         self.recent_calibration.push(path);
         self.save();
     }
+
+    /// Persist the full segment chain for the left video (see
+    /// `last_left_segments`).
+    pub fn set_last_left_segments(&mut self, paths: Vec<PathBuf>) {
+        self.last_left_segments = paths;
+        self.save();
+    }
+
+    /// Persist the full segment chain for the right video (see
+    /// `last_right_segments`).
+    pub fn set_last_right_segments(&mut self, paths: Vec<PathBuf>) {
+        self.last_right_segments = paths;
+        self.save();
+    }
+
+    /// Restore a previously-used (possibly multi-segment) input: prefers
+    /// the persisted segment chain when non-empty and every segment
+    /// still exists on disk, otherwise falls back to the single
+    /// most-recent path from the Recent-files MRU.
+    fn restore_input(
+        segments: &[PathBuf],
+        last_single: Option<PathBuf>,
+    ) -> Option<reco_io::stitch_job::InputPath> {
+        if !segments.is_empty() && segments.iter().all(|p| p.exists()) {
+            return Some(if segments.len() == 1 {
+                reco_io::stitch_job::InputPath::Single(segments[0].clone())
+            } else {
+                reco_io::stitch_job::InputPath::Chained(segments.to_vec())
+            });
+        }
+        last_single.map(reco_io::stitch_job::InputPath::Single)
+    }
+
+    /// Restore the left video input last used (see [`Self::restore_input`]).
+    pub fn restore_left_input(&self) -> Option<reco_io::stitch_job::InputPath> {
+        Self::restore_input(&self.last_left_segments, self.last_left())
+    }
+
+    /// Restore the right video input last used (see [`Self::restore_input`]).
+    pub fn restore_right_input(&self) -> Option<reco_io::stitch_job::InputPath> {
+        Self::restore_input(&self.last_right_segments, self.last_right())
+    }
 }
 
 #[cfg(test)]
@@ -219,5 +275,70 @@ mod tests {
         assert_eq!(s.default_codec, "hevc");
         assert_eq!(s.default_quality, "balanced");
         assert!(s.recent_left.is_empty());
+    }
+
+    /// Creates `n` empty files under a unique temp subdirectory and
+    /// returns their paths - real files on disk so `restore_input`'s
+    /// `.exists()` filtering has something genuine to check.
+    fn make_temp_files(label: &str, n: usize) -> Vec<PathBuf> {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "reco-gui-settings-test-{label}-{}-{unique}",
+            std::process::id(),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        (0..n)
+            .map(|i| {
+                let p = dir.join(format!("segment_{i}.mp4"));
+                std::fs::write(&p, b"").unwrap();
+                p
+            })
+            .collect()
+    }
+
+    #[test]
+    fn restore_input_prefers_segment_chain_over_single_mru_path() {
+        let segments = make_temp_files("chain", 3);
+        let mut s = GuiSettings::default();
+        s.recent_left.push(segments[0].clone());
+        s.last_left_segments = segments.clone();
+
+        let restored = s.restore_left_input().expect("chain should restore");
+        assert_eq!(restored.all_paths(), segments);
+    }
+
+    #[test]
+    fn restore_input_falls_back_to_single_when_no_segments_persisted() {
+        let single = make_temp_files("single", 1);
+        let mut s = GuiSettings::default();
+        s.recent_left.push(single[0].clone());
+        // last_left_segments intentionally left empty.
+
+        let restored = s.restore_left_input().expect("single path should restore");
+        assert_eq!(restored.all_paths(), single);
+    }
+
+    #[test]
+    fn restore_input_falls_back_when_a_persisted_segment_no_longer_exists() {
+        let mut segments = make_temp_files("stale", 2);
+        let single = make_temp_files("fallback", 1);
+        // Simulate one segment having been deleted/moved since last save.
+        std::fs::remove_file(&segments[1]).unwrap();
+        segments.push(PathBuf::from("does-not-exist.mp4"));
+
+        let mut s = GuiSettings::default();
+        s.recent_left.push(single[0].clone());
+        s.last_left_segments = segments;
+
+        let restored = s.restore_left_input().expect("should fall back to single path");
+        assert_eq!(restored.all_paths(), single);
+    }
+
+    #[test]
+    fn restore_input_none_when_nothing_persisted() {
+        let s = GuiSettings::default();
+        assert!(s.restore_left_input().is_none());
+        assert!(s.restore_right_input().is_none());
     }
 }

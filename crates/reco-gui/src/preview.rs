@@ -85,6 +85,7 @@ impl PreviewBridge {
             blend_width: calibration.blend_width,
             blend_flip_direction: calibration.blend_flip_direction,
             seam_offset: calibration.seam_offset,
+            multiband_blend_enabled: calibration.multiband_blend_enabled,
             rig_tilt: calibration.rig_tilt as f32,
             rig_roll: calibration.rig_roll as f32,
             ..ViewportConfig::default()

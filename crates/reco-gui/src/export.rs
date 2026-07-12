@@ -117,6 +117,9 @@ pub fn run_export(
     codec_str: String,
     quality_str: String,
     blend: f32,
+    blend_flip_direction: bool,
+    multiband_blend_enabled: bool,
+    seam_offset: f32,
     start_secs: f32,
     end_secs: f32,
     autocam: AutocamUiConfig,
@@ -196,6 +199,9 @@ pub fn run_export(
     .format(format)
     .resolution(width, height)
     .blend_width(blend)
+    .blend_flip_direction(blend_flip_direction)
+    .multiband_blend_enabled(multiband_blend_enabled)
+    .seam_offset(seam_offset)
     .on_progress(move |p: &reco_core::session::types::FrameProgress| {
         let frames = p.frames_completed;
         let elapsed = progress_start.elapsed().as_secs_f64();

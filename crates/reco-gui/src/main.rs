@@ -346,6 +346,10 @@ struct AppState {
     roi_reload_pending: Option<Arc<AtomicBool>>,
     toasts: ToastManager,
     telemetry: Option<telemetry_client::TelemetryClient>,
+    /// Floating debug-log window, created lazily on first "Debug" click
+    /// and reused (shown/hidden) after that so its position/size stick
+    /// across opens. `None` until then.
+    debug_window: Option<DebugWindow>,
 }
 
 /// Runtime AI capability summary.
@@ -577,6 +581,7 @@ impl AppState {
             roi_reload_pending: None,
             toasts: ToastManager::default(),
             telemetry: None,
+            debug_window: None,
         }
     }
 
@@ -650,6 +655,28 @@ impl AppState {
         self.clamp_targets();
     }
 
+    /// Persist the full `left_input` segment chain so a multi-segment
+    /// selection survives an app restart (see `GuiSettings::last_left_segments`
+    /// - `push_left`'s single-path MRU entry isn't enough to reconstruct one).
+    fn persist_left_segments(&mut self) {
+        let segments = self
+            .left_input
+            .as_ref()
+            .map(reco_io::stitch_job::InputPath::all_paths)
+            .unwrap_or_default();
+        self.user_settings.set_last_left_segments(segments);
+    }
+
+    /// Same as [`Self::persist_left_segments`], for `right_input`.
+    fn persist_right_segments(&mut self) {
+        let segments = self
+            .right_input
+            .as_ref()
+            .map(reco_io::stitch_job::InputPath::all_paths)
+            .unwrap_or_default();
+        self.user_settings.set_last_right_segments(segments);
+    }
+
     /// Write the current (edited) calibration back to disk.
     fn save_calibration(&self) -> Result<(), String> {
         let (Some(cal), Some(path)) = (&self.calibration, &self.calibration_path) else {
@@ -669,6 +696,7 @@ impl AppState {
             out.blend_width = pipeline.viewport().blend_width;
             out.blend_flip_direction = pipeline.viewport().blend_flip_direction;
             out.seam_offset = pipeline.viewport().seam_offset;
+            out.multiband_blend_enabled = pipeline.viewport().multiband_blend_enabled;
         }
         let json = serde_json::to_string_pretty(&out).map_err(|e| format!("serialize: {e}"))?;
         std::fs::write(path, json).map_err(|e| format!("write {}: {e}", path.display()))?;
@@ -1586,13 +1614,23 @@ fn init_tracing() {
     // Feeds the in-app Debug panel (see `debug_log_snapshot`) - attached
     // to every branch below in addition to the file/stderr writer(s),
     // since release builds have no visible console
-    // (`windows_subsystem = "windows"`).
-    let debug_panel_layer = fmt::layer()
-        .with_target(false)
-        .with_level(true)
-        .with_ansi(false)
-        .without_time()
-        .with_writer(debug_log_writer);
+    // (`windows_subsystem = "windows"`). A generic fn rather than a
+    // shared `let` binding: each `.with(debug_panel_layer())` call site
+    // below layers onto a differently-typed subscriber stack (plain
+    // fallback vs file-augmented), so a single shared value can't
+    // monomorphize for both - only visible in release builds, since
+    // debug builds compile out every branch but the fallback one.
+    fn debug_panel_layer<S>() -> impl tracing_subscriber::Layer<S>
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fmt::layer()
+            .with_target(false)
+            .with_level(true)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(debug_log_writer)
+    }
 
     // In release builds, write logs to a file so bug reports have context.
     // Debug builds just use stderr.
@@ -1634,7 +1672,7 @@ fn init_tracing() {
                             .with_ansi(false)
                             .with_writer(file),
                     )
-                    .with(debug_panel_layer)
+                    .with(debug_panel_layer())
                     .try_init();
                 eprintln!("Log file: {}", log_path.display());
                 return;
@@ -1657,7 +1695,7 @@ fn init_tracing() {
                             .with_level(true)
                             .with_writer(std::io::stderr),
                     )
-                    .with(debug_panel_layer)
+                    .with(debug_panel_layer())
                     .try_init();
                 eprintln!("Log file: {}", log_path.display());
                 return;
@@ -1668,7 +1706,7 @@ fn init_tracing() {
     let _ = tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_target(true).with_level(true))
-        .with(debug_panel_layer)
+        .with(debug_panel_layer())
         .try_init();
 }
 
@@ -1810,15 +1848,29 @@ fn main() -> anyhow::Result<()> {
     // `RenderingSetup` branch below (same as picking files manually).
     {
         let mut s = state.borrow_mut();
-        if let Some(left) = s.user_settings.last_left() {
-            app.set_left_path(display_name(&left).into());
-            s.left_input = Some(reco_io::stitch_job::InputPath::Single(left.clone()));
-            s.left_path = Some(left);
+        if let Some(input) = s.user_settings.restore_left_input() {
+            let first = input.first_path().to_path_buf();
+            let label = match &input {
+                reco_io::stitch_job::InputPath::Single(p) => display_name(p),
+                reco_io::stitch_job::InputPath::Chained(ps) => {
+                    format!("{} ({} segments)", display_name(&ps[0]), ps.len())
+                }
+            };
+            app.set_left_path(label.into());
+            s.left_input = Some(input);
+            s.left_path = Some(first);
         }
-        if let Some(right) = s.user_settings.last_right() {
-            app.set_right_path(display_name(&right).into());
-            s.right_input = Some(reco_io::stitch_job::InputPath::Single(right.clone()));
-            s.right_path = Some(right);
+        if let Some(input) = s.user_settings.restore_right_input() {
+            let first = input.first_path().to_path_buf();
+            let label = match &input {
+                reco_io::stitch_job::InputPath::Single(p) => display_name(p),
+                reco_io::stitch_job::InputPath::Chained(ps) => {
+                    format!("{} ({} segments)", display_name(&ps[0]), ps.len())
+                }
+            };
+            app.set_right_path(label.into());
+            s.right_input = Some(input);
+            s.right_path = Some(first);
         }
         if let Some(cal) = s.user_settings.last_calibration() {
             app.set_calibration_path(display_name(&cal).into());
@@ -2055,6 +2107,7 @@ fn main() -> anyhow::Result<()> {
             }
             s.left_input = Some(input);
             s.left_path = Some(first);
+            s.persist_left_segments();
             drop(s);
             try_init_and_update(&state_ref, &app_weak);
         }
@@ -2128,6 +2181,7 @@ fn main() -> anyhow::Result<()> {
             }
             s.right_input = Some(input);
             s.right_path = Some(first);
+            s.persist_right_segments();
             drop(s);
             try_init_and_update(&state_ref, &app_weak);
         }
@@ -2267,6 +2321,7 @@ fn main() -> anyhow::Result<()> {
         }
         s.left_path = None;
         s.left_input = None;
+        s.persist_left_segments();
         if let Some(app) = app_weak.upgrade() {
             app.set_left_path("".into());
             app.set_files_loaded(false);
@@ -2284,6 +2339,7 @@ fn main() -> anyhow::Result<()> {
         }
         s.right_path = None;
         s.right_input = None;
+        s.persist_right_segments();
         if let Some(app) = app_weak.upgrade() {
             app.set_right_path("".into());
             app.set_files_loaded(false);
@@ -2583,6 +2639,7 @@ fn main() -> anyhow::Result<()> {
             _ => false,
         };
         if removed {
+            s.persist_left_segments();
             if s.bridge.is_some() {
                 s.unload_pipeline();
             }
@@ -2636,6 +2693,7 @@ fn main() -> anyhow::Result<()> {
             _ => false,
         };
         if removed {
+            s.persist_right_segments();
             if s.bridge.is_some() {
                 s.unload_pipeline();
             }
@@ -2683,6 +2741,7 @@ fn main() -> anyhow::Result<()> {
         };
         log::info!("Left: reordered segment {from} -> {to}");
         s.left_path = Some(first);
+        s.persist_left_segments();
         if let Some(app) = app_weak.upgrade() {
             if let Some(reco_io::stitch_job::InputPath::Chained(ps)) = s.left_input.as_ref() {
                 app.set_left_path(
@@ -2723,6 +2782,7 @@ fn main() -> anyhow::Result<()> {
         };
         log::info!("Right: reordered segment {from} -> {to}");
         s.right_path = Some(first);
+        s.persist_right_segments();
         if let Some(app) = app_weak.upgrade() {
             if let Some(reco_io::stitch_job::InputPath::Chained(ps)) = s.right_input.as_ref() {
                 app.set_right_path(
@@ -2825,6 +2885,34 @@ fn main() -> anyhow::Result<()> {
             s.telemetry = None;
         }
         s.user_settings.save();
+    });
+
+    // Floating debug-log window: created lazily on first click, then
+    // just shown/hidden after that so its position and size persist
+    // across opens within the session. `on_close_requested` hides
+    // rather than destroys the window when the user clicks the native
+    // close button, matching that reuse.
+    let state_ref = Rc::clone(&state);
+    app.on_open_debug_window(move || {
+        let mut s = state_ref.borrow_mut();
+        if s.debug_window.is_none() {
+            match DebugWindow::new() {
+                Ok(dw) => {
+                    dw.window()
+                        .on_close_requested(|| slint::CloseRequestResponse::HideWindow);
+                    s.debug_window = Some(dw);
+                }
+                Err(e) => {
+                    log::warn!("Failed to create debug window: {e}");
+                    return;
+                }
+            }
+        }
+        let dw = s.debug_window.as_ref().unwrap();
+        dw.set_log_text(debug_log_snapshot().into());
+        if let Err(e) = dw.show() {
+            log::warn!("Failed to show debug window: {e}");
+        }
     });
 
     app.on_open_website(|| {
@@ -4077,6 +4165,9 @@ fn main() -> anyhow::Result<()> {
         let codec_str = app.get_export_codec().to_string();
         let quality_str = app.get_export_quality().to_string();
         let blend = app.get_blend_width();
+        let blend_flip_direction = app.get_blend_flip_direction();
+        let multiband_blend_enabled = app.get_multiband_blend_enabled();
+        let seam_offset = app.get_seam_offset();
         let start_secs = app.get_export_start_secs();
         let end_secs = app.get_export_end_secs();
         log::info!("Export range: start={start_secs:.1}s, end={end_secs:.1}s");
@@ -4161,6 +4252,9 @@ fn main() -> anyhow::Result<()> {
                 codec_str,
                 quality_str,
                 blend,
+                blend_flip_direction,
+                multiband_blend_enabled,
+                seam_offset,
                 start_secs,
                 end_secs,
                 autocam,
@@ -4648,19 +4742,21 @@ fn main() -> anyhow::Result<()> {
 
     // ── Debug log panel refresh timer ──
     //
-    // Only pushes a snapshot while the dialog is open - the ring buffer
-    // itself (`DEBUG_LOG_BUFFER`) keeps accumulating in the background
-    // regardless via the tracing layer installed in `init_tracing`.
+    // Only pushes a snapshot while the floating debug window is open -
+    // the ring buffer itself (`DEBUG_LOG_BUFFER`) keeps accumulating in
+    // the background regardless via the tracing layer installed in
+    // `init_tracing`.
     let debug_log_timer = slint::Timer::default();
-    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
     debug_log_timer.start(
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(500),
         move || {
-            if let Some(app) = app_weak.upgrade()
-                && app.get_debug_dialog_open()
+            let s = state_ref.borrow();
+            if let Some(dw) = s.debug_window.as_ref()
+                && dw.window().is_visible()
             {
-                app.set_debug_log_text(debug_log_snapshot().into());
+                dw.set_log_text(debug_log_snapshot().into());
             }
         },
     );
@@ -4670,6 +4766,19 @@ fn main() -> anyhow::Result<()> {
     if !app.get_files_loaded() {
         app.set_files_panel_open(true);
     }
+
+    // Closing the main window must also close the floating debug window
+    // (a separate top-level window - see `on_open_debug_window` above).
+    // Without this, the event loop's "quit once no windows remain"
+    // mechanism keeps the process alive with just the orphaned debug
+    // window left on screen after the main window closes.
+    let state_ref = Rc::clone(&state);
+    app.window().on_close_requested(move || {
+        if let Some(dw) = state_ref.borrow().debug_window.as_ref() {
+            let _ = dw.hide();
+        }
+        slint::CloseRequestResponse::HideWindow
+    });
 
     app.run()?;
     Ok(())
@@ -4940,6 +5049,14 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 .bridge
                 .as_ref()
                 .map(|b| b.renderer().pipeline().viewport().blend_flip_direction);
+            let seam_offset = s
+                .bridge
+                .as_ref()
+                .map(|b| b.renderer().pipeline().viewport().seam_offset);
+            let multiband_blend_enabled = s
+                .bridge
+                .as_ref()
+                .map(|b| b.renderer().pipeline().viewport().multiband_blend_enabled);
             // Lens-correction strength came in via the loaded calibration and
             // the renderer was seeded with it at bridge creation; mirror it
             // into AppState so a later save re-persists the right value.
@@ -5039,6 +5156,12 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 }
                 if let Some(flip) = blend_flip_direction {
                     app.set_blend_flip_direction(flip);
+                }
+                if let Some(so) = seam_offset {
+                    app.set_seam_offset(so);
+                }
+                if let Some(mb) = multiband_blend_enabled {
+                    app.set_multiband_blend_enabled(mb);
                 }
                 if let Some(lc) = lens_correction {
                     app.set_lens_correction_amount(lc);
@@ -5235,6 +5358,14 @@ fn handle_calibration_result(
                         .bridge
                         .as_ref()
                         .map(|b| b.renderer().pipeline().viewport().blend_flip_direction);
+                    let seam_offset = state
+                        .bridge
+                        .as_ref()
+                        .map(|b| b.renderer().pipeline().viewport().seam_offset);
+                    let multiband_blend_enabled = state
+                        .bridge
+                        .as_ref()
+                        .map(|b| b.renderer().pipeline().viewport().multiband_blend_enabled);
                     let lens_correction =
                         state.calibration.as_ref().map(|c| c.lens_correction_amount);
                     if let Some(lc) = lens_correction {
@@ -5316,6 +5447,12 @@ fn handle_calibration_result(
                         }
                         if let Some(flip) = blend_flip_direction {
                             app.set_blend_flip_direction(flip);
+                        }
+                        if let Some(so) = seam_offset {
+                            app.set_seam_offset(so);
+                        }
+                        if let Some(mb) = multiband_blend_enabled {
+                            app.set_multiband_blend_enabled(mb);
                         }
                         if let Some(lc) = lens_correction {
                             app.set_lens_correction_amount(lc);
