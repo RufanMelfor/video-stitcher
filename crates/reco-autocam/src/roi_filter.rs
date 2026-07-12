@@ -77,7 +77,8 @@ fn filter_by_roi(
     class_anchors: &HashMap<u16, RoiAnchor>,
     default_anchor: RoiAnchor,
 ) -> Vec<Detection> {
-    detections
+    let total = detections.len();
+    let filtered: Vec<Detection> = detections
         .into_iter()
         .filter(|d| {
             let polygon = match d.camera {
@@ -93,7 +94,12 @@ fn filter_by_roi(
                 .unwrap_or(default_anchor);
             anchor.passes(d, polygon)
         })
-        .collect()
+        .collect();
+    let dropped = total - filtered.len();
+    if dropped > 0 {
+        log::debug!("RoiFilter: dropped {dropped}/{total} detection(s) outside field ROI");
+    }
+    filtered
 }
 
 /// An [`UnifiedDetector`] decorator that filters output detections by
