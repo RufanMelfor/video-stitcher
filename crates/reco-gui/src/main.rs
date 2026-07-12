@@ -2477,7 +2477,10 @@ fn main() -> anyhow::Result<()> {
         }
         let mut s = state_ref.borrow_mut();
         let side = s.lens_preview_side.clone();
-        let norm = [(lx / cw).clamp(0.0, 1.0) as f64, (ly / ch).clamp(0.0, 1.0) as f64];
+        let norm = [
+            (lx / cw).clamp(0.0, 1.0) as f64,
+            (ly / ch).clamp(0.0, 1.0) as f64,
+        ];
         if let Some(cal) = s.calibration.as_mut() {
             let roi = cal.field_roi.get_or_insert_with(Default::default);
             let pts = if side == "right" {
@@ -2507,7 +2510,10 @@ fn main() -> anyhow::Result<()> {
         }
         let mut s = state_ref.borrow_mut();
         let side = s.lens_preview_side.clone();
-        let norm = [(lx / cw).clamp(0.0, 1.0) as f64, (ly / ch).clamp(0.0, 1.0) as f64];
+        let norm = [
+            (lx / cw).clamp(0.0, 1.0) as f64,
+            (ly / ch).clamp(0.0, 1.0) as f64,
+        ];
         if let Some(roi) = s.calibration.as_mut().and_then(|c| c.field_roi.as_mut()) {
             let pts = if side == "right" {
                 &mut roi.right
