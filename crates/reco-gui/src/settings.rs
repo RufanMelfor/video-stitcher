@@ -331,7 +331,9 @@ mod tests {
         s.recent_left.push(single[0].clone());
         s.last_left_segments = segments;
 
-        let restored = s.restore_left_input().expect("should fall back to single path");
+        let restored = s
+            .restore_left_input()
+            .expect("should fall back to single path");
         assert_eq!(restored.all_paths(), single);
     }
 

@@ -648,12 +648,12 @@ pub fn calibrate_with_reporting(
         layout: best_layout,
         rig_tilt: 0.0, // set by CalibrationPipeline after calibrate()
         rig_roll: 0.0,
-        sync_offset: 0,              // set by CalibrationPipeline after calibrate()
-        field_roi: None,             // set manually or by a future field detection pipeline
-        lens_correction_amount: 1.0, // full correction; user-tunable in the GUI
-        blend_width: 0.05,           // renderer default; user-tunable in the GUI
-        blend_flip_direction: false, // renderer default; user-tunable in the GUI
-        seam_offset: 0.0,            // renderer default; user-tunable in the GUI
+        sync_offset: 0,                 // set by CalibrationPipeline after calibrate()
+        field_roi: None,                // set manually or by a future field detection pipeline
+        lens_correction_amount: 1.0,    // full correction; user-tunable in the GUI
+        blend_width: 0.05,              // renderer default; user-tunable in the GUI
+        blend_flip_direction: false,    // renderer default; user-tunable in the GUI
+        seam_offset: 0.0,               // renderer default; user-tunable in the GUI
         multiband_blend_enabled: false, // renderer default; user-tunable in the GUI
     };
 
