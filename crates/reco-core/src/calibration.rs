@@ -375,6 +375,14 @@ pub struct MatchCalibration {
     /// `0.0` for older calibrations that predate this field.
     #[serde(default)]
     pub seam_offset: f32,
+
+    /// Use a 2-band spatial blend at the seam instead of a single alpha
+    /// crossfade. See
+    /// [`crate::render::viewport::ViewportConfig::multiband_blend_enabled`].
+    /// Persisted so the choice survives save/reload. Defaults to `false`
+    /// for older calibrations that predate this field.
+    #[serde(default)]
+    pub multiband_blend_enabled: bool,
 }
 
 /// Safe drag range for [`MatchCalibration::seam_offset`], in the same
@@ -805,6 +813,7 @@ mod tests {
             blend_width: 0.05,
             blend_flip_direction: false,
             seam_offset: 0.0,
+            multiband_blend_enabled: false,
         }
     }
 
@@ -993,6 +1002,7 @@ mod tests {
             blend_width: 0.123,
             blend_flip_direction: true,
             seam_offset: -0.077,
+            multiband_blend_enabled: true,
         };
 
         let json = serde_json::to_string(&cal).unwrap();
@@ -1009,6 +1019,7 @@ mod tests {
         assert!((parsed.layout.ground_tilt_z - cal.layout.ground_tilt_z).abs() < f64::EPSILON);
         assert_eq!(parsed.blend_flip_direction, cal.blend_flip_direction);
         assert!((parsed.seam_offset - cal.seam_offset).abs() < f32::EPSILON);
+        assert_eq!(parsed.multiband_blend_enabled, cal.multiband_blend_enabled);
     }
 
     #[test]

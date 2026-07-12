@@ -654,6 +654,7 @@ pub fn calibrate_with_reporting(
         blend_width: 0.05,           // renderer default; user-tunable in the GUI
         blend_flip_direction: false, // renderer default; user-tunable in the GUI
         seam_offset: 0.0,            // renderer default; user-tunable in the GUI
+        multiband_blend_enabled: false, // renderer default; user-tunable in the GUI
     };
 
     Ok(CalibrationResult {

@@ -331,6 +331,7 @@ component LabeledSlider inherits VerticalLayout {
 /// they are unknown the track falls back to a neutral colour.
 component VramRiskSlider inherits VerticalLayout {
     in property <string> label;
+    in property <string> tip: "";
     in property <float> minimum: 0;
     in property <float> maximum: 1;
     in-out property <float> value;
@@ -351,12 +352,15 @@ component VramRiskSlider inherits VerticalLayout {
 
     HorizontalLayout {
         spacing: 6px;
-        Text {
-            text: root.label;
-            color: #bbb;
-            font-size: 11px;
-            vertical-alignment: center;
+        Tip {
+            tip: root.tip;
             horizontal-stretch: 1;
+            Text {
+                text: root.label;
+                color: #bbb;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
         }
         Text {
             text: !root.risk-active ? ""
@@ -906,7 +910,7 @@ export component RecoApp inherits Window {
     in-out property <bool> multiband-blend-enabled: false;
     in-out property <bool> show-seam-line: false;
     in-out property <float> seam-offset: 0.0;
-    in-out property <bool> color-match-enabled: true;
+    in-out property <bool> color-match-enabled: false;
     in-out property <float> color-match-band-width: 0.15;
     in-out property <float> color-match-grid-cols: 8;
     in-out property <float> color-match-grid-rows: 16;
@@ -1050,9 +1054,10 @@ export component RecoApp inherits Window {
     // release builds have no visible console
     // (`windows_subsystem = "windows"`), so this is the only way a user
     // can see log output without digging up the log file for a bug
-    // report.
-    in-out property <bool> debug-dialog-open: false;
-    in-out property <string> debug-log-text: "";
+    // report. Shown in its own floating `DebugWindow` (see bottom of
+    // this file) rather than an in-window modal, so it can sit beside
+    // the main window instead of covering it.
+    callback open-debug-window();
 
     // Preferences dialog state.
     in-out property <bool> prefs-dialog-open: false;
@@ -1342,7 +1347,7 @@ export component RecoApp inherits Window {
 
                 Rectangle { horizontal-stretch: 1; }
 
-                FlatButton { text: "Debug"; clicked => { root.debug-dialog-open = true; } }
+                FlatButton { text: "Debug"; clicked => { root.open-debug-window(); } }
                 FlatButton { text: "?"; clicked => { root.shortcuts-dialog-open = true; } }
                 FlatButton { text: "⚙"; clicked => { root.open-prefs-dialog(); } }
 
@@ -3076,75 +3081,6 @@ export component RecoApp inherits Window {
         }
 
         // ── Keyboard shortcuts dialog (modal) ──
-        // ── Debug log dialog (modal) ──
-        //
-        // Live tail of the tracing log (see `debug_log_snapshot` in
-        // main.rs), refreshed periodically from Rust while this dialog is
-        // open. Read-only `TextInput` (not `Text`) so the log stays
-        // selectable/copyable for pasting into a bug report.
-        if root.debug-dialog-open: Rectangle {
-            background: root.bg-scrim;
-            TouchArea {
-                clicked => { root.debug-dialog-open = false; }
-            }
-
-            Rectangle {
-                width: min(parent.width - 60px, 640px);
-                height: min(parent.height - 60px, 520px);
-                background: root.bg-surface;
-                border-radius: 12px;
-                border-width: 1px;
-                border-color: root.border-mid;
-                TouchArea {}
-
-                VerticalLayout {
-                    padding: 20px;
-                    spacing: 8px;
-
-                    Text {
-                        text: "Debug log";
-                        color: root.text-heading;
-                        font-size: 16px;
-                        font-weight: 600;
-                    }
-
-                    Rectangle { height: 1px; background: root.border-subtle; }
-
-                    Rectangle {
-                        vertical-stretch: 1;
-                        background: root.bg-base;
-                        border-radius: 6px;
-                        border-width: 1px;
-                        border-color: root.border-subtle;
-                        clip: true;
-
-                        ScrollView {
-                            TextInput {
-                                x: 8px;
-                                width: parent.width - 16px;
-                                text: root.debug-log-text == "" ? "(no log output yet)" : root.debug-log-text;
-                                color: #ccc;
-                                font-size: 10px;
-                                font-family: "Consolas";
-                                read-only: true;
-                                wrap: word-wrap;
-                                single-line: false;
-                            }
-                        }
-                    }
-
-                    HorizontalLayout {
-                        spacing: 8px;
-                        Rectangle { horizontal-stretch: 1; }
-                        FlatButton {
-                            text: "Close";
-                            clicked => { root.debug-dialog-open = false; }
-                        }
-                    }
-                }
-            }
-        }
-
         if root.shortcuts-dialog-open: Rectangle {
             background: root.bg-scrim;
             TouchArea {
@@ -3255,22 +3191,31 @@ export component RecoApp inherits Window {
 
                     Rectangle { height: 1px; background: root.border-subtle; }
 
-                    Text { text: "Default codec"; color: #ccc; font-size: 12px; }
+                    Tip {
+                        tip: "Codec used to prefill the Export dialog. Can still be changed per export.";
+                        Text { text: "Default codec"; color: #ccc; font-size: 12px; }
+                    }
                     ComboBox {
                         model: root.available-codecs;
                         current-value <=> root.prefs-default-codec;
                     }
 
-                    Text { text: "Default quality"; color: #ccc; font-size: 12px; }
+                    Tip {
+                        tip: "Quality preset used to prefill the Export dialog. Can still be changed per export.";
+                        Text { text: "Default quality"; color: #ccc; font-size: 12px; }
+                    }
                     ComboBox {
                         model: ["fast", "balanced", "high"];
                         current-value <=> root.prefs-default-quality;
                     }
 
-                    Text {
-                        text: "Default seam blend (" + round(root.prefs-default-blend-width * 100) / 100 + ")";
-                        color: #ccc;
-                        font-size: 12px;
+                    Tip {
+                        tip: "Seam blend width used to prefill new calibrations - matches the Stitching panel's Seam blend slider.";
+                        Text {
+                            text: "Default seam blend (" + round(root.prefs-default-blend-width * 100) / 100 + ")";
+                            color: #ccc;
+                            font-size: 12px;
+                        }
                     }
                     Slider {
                         minimum: 0;
@@ -3278,7 +3223,10 @@ export component RecoApp inherits Window {
                         value <=> root.prefs-default-blend-width;
                     }
 
-                    Text { text: "AI model (ONNX)"; color: #ccc; font-size: 12px; }
+                    Tip {
+                        tip: "Default YOLO model path, used to prefill the Export dialog's AI Tracking section so you don't have to browse for it every time.";
+                        Text { text: "AI model (ONNX)"; color: #ccc; font-size: 12px; }
+                    }
                     HorizontalLayout {
                         spacing: 6px;
                         LineEdit {
@@ -3301,7 +3249,10 @@ export component RecoApp inherits Window {
                         VerticalLayout {
                             spacing: 4px;
                             horizontal-stretch: 1;
-                            Text { text: "Codec"; color: #ccc; font-size: 12px; }
+                            Tip {
+                                tip: "Codec for live-preview recordings (the record button in the transport bar) - separate from the Export dialog's codec.";
+                                Text { text: "Codec"; color: #ccc; font-size: 12px; }
+                            }
                             ComboBox {
                                 model: root.available-codecs;
                                 current-value <=> root.recording-codec;
@@ -3310,7 +3261,10 @@ export component RecoApp inherits Window {
                         VerticalLayout {
                             spacing: 4px;
                             horizontal-stretch: 1;
-                            Text { text: "Quality"; color: #ccc; font-size: 12px; }
+                            Tip {
+                                tip: "Quality for live-preview recordings - separate from the Export dialog's quality.";
+                                Text { text: "Quality"; color: #ccc; font-size: 12px; }
+                            }
                             ComboBox {
                                 model: ["fast", "balanced", "high"];
                                 current-value <=> root.recording-quality;
@@ -3318,7 +3272,10 @@ export component RecoApp inherits Window {
                         }
                     }
 
-                    Text { text: "Recording folder"; color: #ccc; font-size: 12px; }
+                    Tip {
+                        tip: "Where live-preview recordings are saved. Empty = same folder as the source video.";
+                        Text { text: "Recording folder"; color: #ccc; font-size: 12px; }
+                    }
                     HorizontalLayout {
                         spacing: 6px;
                         LineEdit {
@@ -3336,9 +3293,12 @@ export component RecoApp inherits Window {
 
                     Text { text: "Appearance"; color: root.text-body; font-size: 12px; font-weight: 600; }
 
-                    CheckBox {
-                        text: "Dark mode";
-                        checked <=> root.prefs-dark-mode;
+                    Tip {
+                        tip: "Switch the app between dark and light theme.";
+                        CheckBox {
+                            text: "Dark mode";
+                            checked <=> root.prefs-dark-mode;
+                        }
                     }
 
                     Rectangle { height: 1px; background: root.border-subtle; }
@@ -3495,7 +3455,10 @@ export component RecoApp inherits Window {
                     }
 
                     // Output path
-                    Text { text: "Output file"; color: #ccc; font-size: 12px; }
+                    Tip {
+                        tip: "Destination for the stitched export. Type a path directly or browse - whatever's here when you click Start Export is used verbatim.";
+                        Text { text: "Output file"; color: #ccc; font-size: 12px; }
+                    }
                     HorizontalBox {
                         spacing: 6px;
                         padding: 0;
@@ -3523,7 +3486,10 @@ export component RecoApp inherits Window {
                         VerticalLayout {
                             spacing: 4px;
                             horizontal-stretch: 1;
-                            Text { text: "Resolution"; color: #ccc; font-size: 12px; }
+                            Tip {
+                                tip: "Output resolution for the stitched video. Independent of the source cameras' resolution.";
+                                Text { text: "Resolution"; color: #ccc; font-size: 12px; }
+                            }
                             ComboBox {
                                 model: ["1080p (1920x1080)", "720p (1280x720)", "2K (2560x1440)", "4K (3840x2160)"];
                                 current-index: root.export-width == 1280 ? 1
@@ -3561,7 +3527,10 @@ export component RecoApp inherits Window {
                         VerticalLayout {
                             spacing: 4px;
                             horizontal-stretch: 1;
-                            Text { text: "Codec"; color: #ccc; font-size: 12px; }
+                            Tip {
+                                tip: "Video codec for the export. Falls back automatically (hardware -> software) if a specific encoder can't be opened on this machine - check the Debug log for which one was actually used.";
+                                Text { text: "Codec"; color: #ccc; font-size: 12px; }
+                            }
                             ComboBox {
                                 model: root.available-codecs;
                                 current-index: root.export-codec == "hevc" ? 1
@@ -3574,7 +3543,10 @@ export component RecoApp inherits Window {
                         VerticalLayout {
                             spacing: 4px;
                             horizontal-stretch: 1;
-                            Text { text: "Quality"; color: #ccc; font-size: 12px; }
+                            Tip {
+                                tip: "Encoder quality preset - trades encode speed and file size for visual quality.";
+                                Text { text: "Quality"; color: #ccc; font-size: 12px; }
+                            }
                             ComboBox {
                                 model: ["fast", "balanced", "high"];
                                 current-index: root.export-quality == "fast" ? 0
@@ -3586,7 +3558,10 @@ export component RecoApp inherits Window {
                     }
 
                     // Processing range (start/end with sliders and manual input)
-                    Text { text: "Processing range"; color: #ccc; font-size: 12px; }
+                    Tip {
+                        tip: "Trims the export to a start/end time window within the loaded clip. Defaults to the full clip.";
+                        Text { text: "Processing range"; color: #ccc; font-size: 12px; }
+                    }
 
                     HorizontalBox {
                         spacing: 8px;
@@ -3595,7 +3570,10 @@ export component RecoApp inherits Window {
                         VerticalLayout {
                             spacing: 3px;
                             horizontal-stretch: 1;
-                            Text { text: "Start (s)"; color: #888; font-size: 11px; }
+                            Tip {
+                                tip: "Export start time, in seconds from the beginning of the clip.";
+                                Text { text: "Start (s)"; color: #888; font-size: 11px; }
+                            }
                             Slider {
                                 minimum: 0;
                                 maximum: max(1, root.clip-duration-secs);
@@ -3618,7 +3596,10 @@ export component RecoApp inherits Window {
                         VerticalLayout {
                             spacing: 3px;
                             horizontal-stretch: 1;
-                            Text { text: "End (s)"; color: #888; font-size: 11px; }
+                            Tip {
+                                tip: "Export end time, in seconds from the beginning of the clip.";
+                                Text { text: "End (s)"; color: #888; font-size: 11px; }
+                            }
                             Slider {
                                 minimum: 0;
                                 maximum: max(1, root.clip-duration-secs);
@@ -3647,14 +3628,20 @@ export component RecoApp inherits Window {
                         font-size: 11px;
                     }
 
-                    CheckBox {
-                        text: "Record replay (stacked raw input for re-stitching)";
-                        checked <=> root.export-replay-enabled;
+                    Tip {
+                        tip: "Also saves the raw pre-stitch source frames (stacked side-by-side) to a separate file alongside the export, for later re-stitching without re-decoding the originals.";
+                        CheckBox {
+                            text: "Record replay (stacked raw input for re-stitching)";
+                            checked <=> root.export-replay-enabled;
+                        }
                     }
 
-                    CheckBox {
-                        text: "Save AI debug events (.jsonl for visualize_detections.py)";
-                        checked <=> root.export-events-enabled;
+                    Tip {
+                        tip: "Writes every detection, filter decision, and pan decision to a .jsonl file next to the export, for offline analysis with visualize_detections.py.";
+                        CheckBox {
+                            text: "Save AI debug events (.jsonl for visualize_detections.py)";
+                            checked <=> root.export-events-enabled;
+                        }
                     }
 
                     Rectangle { height: 1px; background: root.border-subtle; }
@@ -3671,10 +3658,13 @@ export component RecoApp inherits Window {
                             vertical-alignment: center;
                             horizontal-stretch: 1;
                         }
-                        CheckBox {
-                            text: "Enable";
-                            checked <=> root.export-autocam-enabled;
-                            enabled: root.ai-available;
+                        Tip {
+                            tip: "Turns on AI camera tracking (ball/player detection) for this export. Needs a YOLO ONNX model below.";
+                            CheckBox {
+                                text: "Enable";
+                                checked <=> root.export-autocam-enabled;
+                                enabled: root.ai-available;
+                            }
                         }
                     }
 
@@ -3720,7 +3710,10 @@ export component RecoApp inherits Window {
                             VerticalLayout {
                                 spacing: 4px;
                                 horizontal-stretch: 1;
-                                Text { text: "Tracking mode"; color: #ccc; font-size: 12px; }
+                                Tip {
+                                    tip: "Field: follows the player cluster + ball together (falls back to ball-only if the model has no player class). Ball: follows only the ball. Sweep: a fixed left-right pan with no AI at all - a baseline/debug mode.";
+                                    Text { text: "Tracking mode"; color: #ccc; font-size: 12px; }
+                                }
                                 ComboBox {
                                     model: ["field", "ball", "sweep"];
                                     current-index: root.export-tracking-mode == "ball" ? 1
@@ -3733,7 +3726,10 @@ export component RecoApp inherits Window {
                             VerticalLayout {
                                 spacing: 4px;
                                 horizontal-stretch: 1;
-                                Text { text: "Detect every N frames"; color: #ccc; font-size: 12px; }
+                                Tip {
+                                    tip: "Runs AI detection every Nth frame; frames in between reuse the last detection. Higher = cheaper but staler positions during fast action.";
+                                    Text { text: "Detect every N frames"; color: #ccc; font-size: 12px; }
+                                }
                                 ComboBox {
                                     model: ["1", "3", "5", "10", "15", "30"];
                                     current-index: root.export-detection-interval == 1 ? 0
@@ -3754,7 +3750,10 @@ export component RecoApp inherits Window {
                         // Style preset: sets the controls below; tweak after.
                         VerticalLayout {
                             spacing: 4px;
-                            Text { text: "Style preset"; color: #ccc; font-size: 12px; }
+                            Tip {
+                                tip: "One-shot preset that overwrites every slider below (framing, cluster mode, lock-pitch, bandwidth, dead-zone, ball weight, FOV) with tuned defaults for that style. You can still tweak any slider afterward.";
+                                Text { text: "Style preset"; color: #ccc; font-size: 12px; }
+                            }
                             ComboBox {
                                 model: ["broadcast", "action", "frame_all"];
                                 current-index: root.export-panner-preset == "action" ? 1
@@ -3775,7 +3774,10 @@ export component RecoApp inherits Window {
                             VerticalLayout {
                                 spacing: 4px;
                                 horizontal-stretch: 1;
-                                Text { text: "Framing"; color: #ccc; font-size: 12px; }
+                                Tip {
+                                    tip: "Action: aims at the (optionally confidence-weighted) player cluster, with ball pull and dynamic zoom. Frame all: aims at the geometric center of every player, zoomed to fit the whole team.";
+                                    Text { text: "Framing"; color: #ccc; font-size: 12px; }
+                                }
                                 ComboBox {
                                     model: ["action", "frame_all"];
                                     current-index: root.export-framing == "frame_all" ? 1 : 0;
@@ -3787,9 +3789,12 @@ export component RecoApp inherits Window {
                                 spacing: 4px;
                                 horizontal-stretch: 1;
                                 Text { text: "Pitch"; color: #ccc; font-size: 12px; }
-                                CheckBox {
-                                    text: "Lock (horizontal-only)";
-                                    checked <=> root.export-lock-pitch;
+                                Tip {
+                                    tip: "Holds the camera's tilt fixed and pans left/right only. Off by default - the camera follows the action's vertical position too.";
+                                    CheckBox {
+                                        text: "Lock (horizontal-only)";
+                                        checked <=> root.export-lock-pitch;
+                                    }
                                 }
                             }
                         }
@@ -3800,6 +3805,7 @@ export component RecoApp inherits Window {
                         // GPU memory for the loaded source resolution.
                         VramRiskSlider {
                             label: "Lookahead (smoothness)";
+                            tip: "Buffers N seconds of future frames so the panner can smooth over past+future and lead the action slightly, instead of reacting frame-by-frame. The dominant lever for smooth AI panning. 0 disables it.";
                             minimum: 0.0;
                             maximum: 2.5;
                             value <=> root.export-lookahead-secs;
@@ -3824,7 +3830,10 @@ export component RecoApp inherits Window {
                                 VerticalLayout {
                                     spacing: 4px;
                                     horizontal-stretch: 1;
-                                    Text { text: "Cluster mode"; color: #ccc; font-size: 12px; }
+                                    Tip {
+                                        tip: "Density (default): follows the tightest knot of players, ignoring stragglers. Trimmed mean: averages all players' positions, trimming outliers - a distant group can still pull the aim before trimming kicks in.";
+                                        Text { text: "Cluster mode"; color: #ccc; font-size: 12px; }
+                                    }
                                     ComboBox {
                                         model: ["density", "trimmed_mean"];
                                         current-index: root.export-cluster-mode == "trimmed_mean" ? 1 : 0;
@@ -3837,6 +3846,7 @@ export component RecoApp inherits Window {
                                     horizontal-stretch: 1;
                                     LabeledSlider {
                                         label: "Ball weight";
+                                        tip: "How strongly the ball pulls the aim away from the player cluster (Action framing only) - scaled by ball confidence and distance from the cluster. Forced to 1.0 in Ball tracking mode.";
                                         minimum: 0.0;
                                         maximum: 1.0;
                                         value <=> root.export-ball-weight;
@@ -3847,6 +3857,7 @@ export component RecoApp inherits Window {
 
                             LabeledSlider {
                                 label: "Cluster bandwidth";
+                                tip: "Radius used by Density cluster mode to group nearby players. Wider pulls a looser formation into one cluster; narrower isolates a tight core. No effect in Trimmed mean mode.";
                                 minimum: 0.1;
                                 maximum: 0.6;
                                 value <=> root.export-cluster-bandwidth;
@@ -3855,6 +3866,7 @@ export component RecoApp inherits Window {
                             }
                             LabeledSlider {
                                 label: "Dead-zone";
+                                tip: "Camera holds still while the target stays within this radius; larger errors ease in beyond it instead of snapping. Removes micro-wobble on static play - relies on Lookahead to absorb the added latency.";
                                 minimum: 0.0;
                                 maximum: 0.5;
                                 value <=> root.export-dead-zone;
@@ -3862,7 +3874,10 @@ export component RecoApp inherits Window {
                                 decimals: 2;
                             }
 
-                            Text { text: "Field of view (degrees)"; color: #ccc; font-size: 12px; }
+                            Tip {
+                                tip: "Bounds for the panner's continuously-varying zoom, recomputed every frame from cluster spread and framing. Default is just the starting FOV before any players are detected.";
+                                Text { text: "Field of view (degrees)"; color: #ccc; font-size: 12px; }
+                            }
                             HorizontalBox {
                                 spacing: 10px;
                                 padding: 0;
@@ -4043,5 +4058,58 @@ export component RecoApp inherits Window {
         toasts: root.toasts;
         right-inset: root.controls-open ? root.right-panel-width : 0px;
         dismissed(id) => { root.toast-dismissed(id); }
+    }
+}
+
+// Floating debug-log window: a separate top-level window (not a modal
+// overlay) so it can be dragged beside the main window and stays open
+// independently while the user works. Rust shows/hides it (see
+// `on_open_debug_window` in main.rs) and pushes periodic log snapshots
+// into `log-text` while it's visible. Always dark - a log viewer, not a
+// themed app surface, so it doesn't need to track the main window's
+// dark/light toggle.
+export component DebugWindow inherits Window {
+    title: "Reco - Debug Log";
+    width: 640px;
+    height: 520px;
+    background: #202327;
+
+    in-out property <string> log-text: "";
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 8px;
+
+        Text {
+            text: "Debug log";
+            color: #f0f2f4;
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        Rectangle { height: 1px; background: #2a2e33; }
+
+        Rectangle {
+            vertical-stretch: 1;
+            background: #101214;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: #2a2e33;
+            clip: true;
+
+            ScrollView {
+                TextInput {
+                    x: 8px;
+                    width: parent.width - 16px;
+                    text: root.log-text == "" ? "(no log output yet)" : root.log-text;
+                    color: #ccc;
+                    font-size: 10px;
+                    font-family: "Consolas";
+                    read-only: true;
+                    wrap: word-wrap;
+                    single-line: false;
+                }
+            }
+        }
     }
 }
