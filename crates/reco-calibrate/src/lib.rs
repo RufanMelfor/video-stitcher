@@ -655,6 +655,14 @@ pub fn calibrate_with_reporting(
         blend_flip_direction: false,    // renderer default; user-tunable in the GUI
         seam_offset: 0.0,               // renderer default; user-tunable in the GUI
         multiband_blend_enabled: false, // renderer default; user-tunable in the GUI
+        color_match_enabled: true,      // renderer default; user-tunable in the GUI
+        color_match_band_width: 0.15,   // renderer default; user-tunable in the GUI
+        color_match_grid_cols: 8,       // renderer default; user-tunable in the GUI
+        color_match_grid_rows: 16,      // renderer default; user-tunable in the GUI
+        color_match_interval_frames: 15, // renderer default; user-tunable in the GUI
+        color_match_ema_alpha: 0.15,    // renderer default; user-tunable in the GUI
+        color_match_max_y_offset: 0.06, // renderer default; user-tunable in the GUI
+        color_match_max_chroma_offset: 0.04, // renderer default; user-tunable in the GUI
     };
 
     Ok(CalibrationResult {

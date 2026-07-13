@@ -420,6 +420,31 @@ pub struct MatchCalibration {
     /// for older calibrations that predate this field.
     #[serde(default)]
     pub multiband_blend_enabled: bool,
+
+    /// Auto exposure/white-balance matching at the seam and its tuning
+    /// knobs - see [`crate::render::color_match::ColorMatchParams`] and the
+    /// matching `ViewportConfig::color_match_*` fields for what each one
+    /// does. Persisted so a rig-specific tuning (or simply having disabled
+    /// the harmful chroma component - see `FRICTION.md`) survives
+    /// save/reload instead of resetting to defaults every launch. Defaults
+    /// below match `ViewportConfig::default()`'s, for older calibrations
+    /// that predate these fields.
+    #[serde(default = "default_color_match_enabled")]
+    pub color_match_enabled: bool,
+    #[serde(default = "default_color_match_band_width")]
+    pub color_match_band_width: f32,
+    #[serde(default = "default_color_match_grid_cols")]
+    pub color_match_grid_cols: u32,
+    #[serde(default = "default_color_match_grid_rows")]
+    pub color_match_grid_rows: u32,
+    #[serde(default = "default_color_match_interval_frames")]
+    pub color_match_interval_frames: u32,
+    #[serde(default = "default_color_match_ema_alpha")]
+    pub color_match_ema_alpha: f32,
+    #[serde(default = "default_color_match_max_y_offset")]
+    pub color_match_max_y_offset: f32,
+    #[serde(default = "default_color_match_max_chroma_offset")]
+    pub color_match_max_chroma_offset: f32,
 }
 
 /// Safe drag range for [`MatchCalibration::seam_offset`], in the same
@@ -442,6 +467,34 @@ fn default_lens_correction_amount() -> f32 {
 /// loading a calibration written before the field existed.
 fn default_blend_width() -> f32 {
     0.05
+}
+
+/// Backward-compatible defaults for the `color_match_*` fields when loading
+/// a calibration written before they existed - match
+/// `ViewportConfig::default()` exactly.
+fn default_color_match_enabled() -> bool {
+    true
+}
+fn default_color_match_band_width() -> f32 {
+    0.15
+}
+fn default_color_match_grid_cols() -> u32 {
+    8
+}
+fn default_color_match_grid_rows() -> u32 {
+    16
+}
+fn default_color_match_interval_frames() -> u32 {
+    15
+}
+fn default_color_match_ema_alpha() -> f32 {
+    0.15
+}
+fn default_color_match_max_y_offset() -> f32 {
+    0.06
+}
+fn default_color_match_max_chroma_offset() -> f32 {
+    0.04
 }
 
 /// Maximum calibration file size (1 MB) to prevent loading unreasonably large files.
@@ -859,6 +912,14 @@ mod tests {
             blend_flip_direction: false,
             seam_offset: 0.0,
             multiband_blend_enabled: false,
+            color_match_enabled: true,
+            color_match_band_width: 0.15,
+            color_match_grid_cols: 8,
+            color_match_grid_rows: 16,
+            color_match_interval_frames: 15,
+            color_match_ema_alpha: 0.15,
+            color_match_max_y_offset: 0.06,
+            color_match_max_chroma_offset: 0.04,
         }
     }
 
@@ -1052,6 +1113,14 @@ mod tests {
             blend_flip_direction: true,
             seam_offset: -0.077,
             multiband_blend_enabled: true,
+            color_match_enabled: false,
+            color_match_band_width: 0.22,
+            color_match_grid_cols: 6,
+            color_match_grid_rows: 12,
+            color_match_interval_frames: 30,
+            color_match_ema_alpha: 0.3,
+            color_match_max_y_offset: 0.09,
+            color_match_max_chroma_offset: 0.0,
         };
 
         let json = serde_json::to_string(&cal).unwrap();
@@ -1079,6 +1148,22 @@ mod tests {
         assert_eq!(parsed.blend_flip_direction, cal.blend_flip_direction);
         assert!((parsed.seam_offset - cal.seam_offset).abs() < f32::EPSILON);
         assert_eq!(parsed.multiband_blend_enabled, cal.multiband_blend_enabled);
+        assert_eq!(parsed.color_match_enabled, cal.color_match_enabled);
+        assert!((parsed.color_match_band_width - cal.color_match_band_width).abs() < f32::EPSILON);
+        assert_eq!(parsed.color_match_grid_cols, cal.color_match_grid_cols);
+        assert_eq!(parsed.color_match_grid_rows, cal.color_match_grid_rows);
+        assert_eq!(
+            parsed.color_match_interval_frames,
+            cal.color_match_interval_frames
+        );
+        assert!((parsed.color_match_ema_alpha - cal.color_match_ema_alpha).abs() < f32::EPSILON);
+        assert!(
+            (parsed.color_match_max_y_offset - cal.color_match_max_y_offset).abs() < f32::EPSILON
+        );
+        assert!(
+            (parsed.color_match_max_chroma_offset - cal.color_match_max_chroma_offset).abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]
@@ -1104,6 +1189,14 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("topTiltBandWidth");
+        obj.remove("color_match_enabled");
+        obj.remove("color_match_band_width");
+        obj.remove("color_match_grid_cols");
+        obj.remove("color_match_grid_rows");
+        obj.remove("color_match_interval_frames");
+        obj.remove("color_match_ema_alpha");
+        obj.remove("color_match_max_y_offset");
+        obj.remove("color_match_max_chroma_offset");
 
         let parsed: MatchCalibration = serde_json::from_value(value).unwrap();
         assert!((parsed.lens_correction_amount - 1.0).abs() < f32::EPSILON);
@@ -1118,6 +1211,18 @@ mod tests {
         // must resolve to the real prior constant, not the type's zero value.
         assert_eq!(parsed.layout.ground_tilt_band_width, 0.16);
         assert_eq!(parsed.layout.top_tilt_band_width, 0.16);
+        // color_match_* must default to ViewportConfig::default()'s values
+        // (matching prior behavior: these knobs didn't exist in the
+        // calibration file before, so the renderer's hardcoded defaults were
+        // always what ran).
+        assert!(parsed.color_match_enabled);
+        assert!((parsed.color_match_band_width - 0.15).abs() < f32::EPSILON);
+        assert_eq!(parsed.color_match_grid_cols, 8);
+        assert_eq!(parsed.color_match_grid_rows, 16);
+        assert_eq!(parsed.color_match_interval_frames, 15);
+        assert!((parsed.color_match_ema_alpha - 0.15).abs() < f32::EPSILON);
+        assert!((parsed.color_match_max_y_offset - 0.06).abs() < f32::EPSILON);
+        assert!((parsed.color_match_max_chroma_offset - 0.04).abs() < f32::EPSILON);
     }
 
     #[test]
