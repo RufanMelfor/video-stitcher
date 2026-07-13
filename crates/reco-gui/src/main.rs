@@ -694,6 +694,14 @@ impl AppState {
             out.blend_flip_direction = pipeline.viewport().blend_flip_direction;
             out.seam_offset = pipeline.viewport().seam_offset;
             out.multiband_blend_enabled = pipeline.viewport().multiband_blend_enabled;
+            out.color_match_enabled = pipeline.viewport().color_match_enabled;
+            out.color_match_band_width = pipeline.viewport().color_match_band_width;
+            out.color_match_grid_cols = pipeline.viewport().color_match_grid_cols;
+            out.color_match_grid_rows = pipeline.viewport().color_match_grid_rows;
+            out.color_match_interval_frames = pipeline.viewport().color_match_interval_frames;
+            out.color_match_ema_alpha = pipeline.viewport().color_match_ema_alpha;
+            out.color_match_max_y_offset = pipeline.viewport().color_match_max_y_offset;
+            out.color_match_max_chroma_offset = pipeline.viewport().color_match_max_chroma_offset;
         }
         let json = serde_json::to_string_pretty(&out).map_err(|e| format!("serialize: {e}"))?;
         std::fs::write(path, json).map_err(|e| format!("write {}: {e}", path.display()))?;
@@ -3416,45 +3424,77 @@ fn main() -> anyhow::Result<()> {
     });
 
     let state_ref = Rc::clone(&state);
+    let app_weak = app.as_weak();
     app.on_changed_color_match_enabled(move |enabled| {
         state_ref.borrow_mut().set_color_match_enabled(enabled);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
     });
 
     let state_ref = Rc::clone(&state);
+    let app_weak = app.as_weak();
     app.on_changed_color_match_band_width(move |w| {
         state_ref.borrow_mut().set_color_match_band_width(w);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
     });
 
     let state_ref = Rc::clone(&state);
+    let app_weak = app.as_weak();
     app.on_changed_color_match_grid_cols(move |cols| {
         state_ref.borrow_mut().set_color_match_grid_cols(cols);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
     });
 
     let state_ref = Rc::clone(&state);
+    let app_weak = app.as_weak();
     app.on_changed_color_match_grid_rows(move |rows| {
         state_ref.borrow_mut().set_color_match_grid_rows(rows);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
     });
 
     let state_ref = Rc::clone(&state);
+    let app_weak = app.as_weak();
     app.on_changed_color_match_interval_frames(move |frames| {
         state_ref
             .borrow_mut()
             .set_color_match_interval_frames(frames);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
     });
 
     let state_ref = Rc::clone(&state);
+    let app_weak = app.as_weak();
     app.on_changed_color_match_ema_alpha(move |alpha| {
         state_ref.borrow_mut().set_color_match_ema_alpha(alpha);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
     });
 
     let state_ref = Rc::clone(&state);
+    let app_weak = app.as_weak();
     app.on_changed_color_match_max_y_offset(move |v| {
         state_ref.borrow_mut().set_color_match_max_y_offset(v);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
     });
 
     let state_ref = Rc::clone(&state);
+    let app_weak = app.as_weak();
     app.on_changed_color_match_max_chroma_offset(move |v| {
         state_ref.borrow_mut().set_color_match_max_chroma_offset(v);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
     });
 
     let state_ref = Rc::clone(&state);
@@ -4062,10 +4102,16 @@ fn main() -> anyhow::Result<()> {
         let mut s = state_ref.borrow_mut();
         s.lens_preview_active = app.get_lens_preview_active();
         s.lens_preview_side = app.get_lens_preview_side().to_string();
-        sync_roi_points(&s, &app);
+        // Must run before `sync_roi_points`, which reads
+        // `lens_frame_aspect` to scale the polygon - otherwise the very
+        // first time this fires (e.g. the first "Edit ROI" click after
+        // startup) it uses Slint's stale `1.0` default instead of the
+        // real camera aspect, drawing a warped polygon that only
+        // self-corrects after a later side-switch primes this value.
         if let Some((w, h)) = s.playback.input_dimensions() {
             app.set_lens_frame_aspect(w as f32 / h as f32);
         }
+        sync_roi_points(&s, &app);
         s.preview_dirty = true;
     });
 
@@ -5129,6 +5175,42 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 .bridge
                 .as_ref()
                 .map(|b| b.renderer().pipeline().viewport().multiband_blend_enabled);
+            let color_match_enabled = s
+                .bridge
+                .as_ref()
+                .map(|b| b.renderer().pipeline().viewport().color_match_enabled);
+            let color_match_band_width = s
+                .bridge
+                .as_ref()
+                .map(|b| b.renderer().pipeline().viewport().color_match_band_width);
+            let color_match_grid_cols = s
+                .bridge
+                .as_ref()
+                .map(|b| b.renderer().pipeline().viewport().color_match_grid_cols);
+            let color_match_grid_rows = s
+                .bridge
+                .as_ref()
+                .map(|b| b.renderer().pipeline().viewport().color_match_grid_rows);
+            let color_match_interval_frames = s.bridge.as_ref().map(|b| {
+                b.renderer()
+                    .pipeline()
+                    .viewport()
+                    .color_match_interval_frames
+            });
+            let color_match_ema_alpha = s
+                .bridge
+                .as_ref()
+                .map(|b| b.renderer().pipeline().viewport().color_match_ema_alpha);
+            let color_match_max_y_offset = s
+                .bridge
+                .as_ref()
+                .map(|b| b.renderer().pipeline().viewport().color_match_max_y_offset);
+            let color_match_max_chroma_offset = s.bridge.as_ref().map(|b| {
+                b.renderer()
+                    .pipeline()
+                    .viewport()
+                    .color_match_max_chroma_offset
+            });
             // Lens-correction strength came in via the loaded calibration and
             // the renderer was seeded with it at bridge creation; mirror it
             // into AppState so a later save re-persists the right value.
@@ -5238,6 +5320,30 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 }
                 if let Some(mb) = multiband_blend_enabled {
                     app.set_multiband_blend_enabled(mb);
+                }
+                if let Some(v) = color_match_enabled {
+                    app.set_color_match_enabled(v);
+                }
+                if let Some(v) = color_match_band_width {
+                    app.set_color_match_band_width(v);
+                }
+                if let Some(v) = color_match_grid_cols {
+                    app.set_color_match_grid_cols(v as f32);
+                }
+                if let Some(v) = color_match_grid_rows {
+                    app.set_color_match_grid_rows(v as f32);
+                }
+                if let Some(v) = color_match_interval_frames {
+                    app.set_color_match_interval_frames(v as f32);
+                }
+                if let Some(v) = color_match_ema_alpha {
+                    app.set_color_match_ema_alpha(v);
+                }
+                if let Some(v) = color_match_max_y_offset {
+                    app.set_color_match_max_y_offset(v);
+                }
+                if let Some(v) = color_match_max_chroma_offset {
+                    app.set_color_match_max_chroma_offset(v);
                 }
                 if let Some(lc) = lens_correction {
                     app.set_lens_correction_amount(lc);
@@ -5442,6 +5548,42 @@ fn handle_calibration_result(
                         .bridge
                         .as_ref()
                         .map(|b| b.renderer().pipeline().viewport().multiband_blend_enabled);
+                    let color_match_enabled = state
+                        .bridge
+                        .as_ref()
+                        .map(|b| b.renderer().pipeline().viewport().color_match_enabled);
+                    let color_match_band_width = state
+                        .bridge
+                        .as_ref()
+                        .map(|b| b.renderer().pipeline().viewport().color_match_band_width);
+                    let color_match_grid_cols = state
+                        .bridge
+                        .as_ref()
+                        .map(|b| b.renderer().pipeline().viewport().color_match_grid_cols);
+                    let color_match_grid_rows = state
+                        .bridge
+                        .as_ref()
+                        .map(|b| b.renderer().pipeline().viewport().color_match_grid_rows);
+                    let color_match_interval_frames = state.bridge.as_ref().map(|b| {
+                        b.renderer()
+                            .pipeline()
+                            .viewport()
+                            .color_match_interval_frames
+                    });
+                    let color_match_ema_alpha = state
+                        .bridge
+                        .as_ref()
+                        .map(|b| b.renderer().pipeline().viewport().color_match_ema_alpha);
+                    let color_match_max_y_offset = state
+                        .bridge
+                        .as_ref()
+                        .map(|b| b.renderer().pipeline().viewport().color_match_max_y_offset);
+                    let color_match_max_chroma_offset = state.bridge.as_ref().map(|b| {
+                        b.renderer()
+                            .pipeline()
+                            .viewport()
+                            .color_match_max_chroma_offset
+                    });
                     let lens_correction =
                         state.calibration.as_ref().map(|c| c.lens_correction_amount);
                     if let Some(lc) = lens_correction {
@@ -5535,6 +5677,30 @@ fn handle_calibration_result(
                         }
                         if let Some(mb) = multiband_blend_enabled {
                             app.set_multiband_blend_enabled(mb);
+                        }
+                        if let Some(v) = color_match_enabled {
+                            app.set_color_match_enabled(v);
+                        }
+                        if let Some(v) = color_match_band_width {
+                            app.set_color_match_band_width(v);
+                        }
+                        if let Some(v) = color_match_grid_cols {
+                            app.set_color_match_grid_cols(v as f32);
+                        }
+                        if let Some(v) = color_match_grid_rows {
+                            app.set_color_match_grid_rows(v as f32);
+                        }
+                        if let Some(v) = color_match_interval_frames {
+                            app.set_color_match_interval_frames(v as f32);
+                        }
+                        if let Some(v) = color_match_ema_alpha {
+                            app.set_color_match_ema_alpha(v);
+                        }
+                        if let Some(v) = color_match_max_y_offset {
+                            app.set_color_match_max_y_offset(v);
+                        }
+                        if let Some(v) = color_match_max_chroma_offset {
+                            app.set_color_match_max_chroma_offset(v);
                         }
                         if let Some(lc) = lens_correction {
                             app.set_lens_correction_amount(lc);

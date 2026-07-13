@@ -140,6 +140,14 @@ mod tests {
             blend_flip_direction: false,
             seam_offset: 0.0,
             multiband_blend_enabled: false,
+            color_match_enabled: true,
+            color_match_band_width: 0.15,
+            color_match_grid_cols: 8,
+            color_match_grid_rows: 16,
+            color_match_interval_frames: 15,
+            color_match_ema_alpha: 0.15,
+            color_match_max_y_offset: 0.06,
+            color_match_max_chroma_offset: 0.04,
         }
     }
 

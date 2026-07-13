@@ -88,6 +88,14 @@ impl PreviewBridge {
             multiband_blend_enabled: calibration.multiband_blend_enabled,
             rig_tilt: calibration.rig_tilt as f32,
             rig_roll: calibration.rig_roll as f32,
+            color_match_enabled: calibration.color_match_enabled,
+            color_match_band_width: calibration.color_match_band_width,
+            color_match_grid_cols: calibration.color_match_grid_cols,
+            color_match_grid_rows: calibration.color_match_grid_rows,
+            color_match_interval_frames: calibration.color_match_interval_frames,
+            color_match_ema_alpha: calibration.color_match_ema_alpha,
+            color_match_max_y_offset: calibration.color_match_max_y_offset,
+            color_match_max_chroma_offset: calibration.color_match_max_chroma_offset,
             ..ViewportConfig::default()
         };
 
