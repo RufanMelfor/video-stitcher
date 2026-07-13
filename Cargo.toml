@@ -11,13 +11,17 @@ members = [
     "crates/reco-gui",
     "crates/reco-obs",
     "crates/reco-stitch-img",
-    "crates/rig-calib",
 ]
 # The `fuzz` subcrate is intentionally out of the workspace because
 # libfuzzer-sys requires nightly-specific compiler flags that would
 # otherwise constrain the rest of the workspace. Run targets via
 # `cargo +nightly fuzz run <target>` from the fuzz/ directory.
-exclude = ["fuzz"]
+#
+# `rig-calib` is deprecated (superseded by reco-gui's in-app calibration
+# UX) and excluded from the workspace, but its source is kept on disk
+# for reference. Build/test it standalone via
+# `cargo build --manifest-path crates/rig-calib/Cargo.toml`.
+exclude = ["fuzz", "crates/rig-calib"]
 
 [workspace.package]
 edition = "2024"
