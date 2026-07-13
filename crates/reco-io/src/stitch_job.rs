@@ -58,6 +58,7 @@ pub struct StitchJob {
     multiband_blend_enabled: bool,
     show_seam_line: bool,
     seam_offset: f32,
+    color_match_enabled: bool,
 
     // Callbacks
     on_progress: Option<ProgressCallback>,
@@ -256,6 +257,7 @@ impl StitchJob {
             multiband_blend_enabled: false,
             show_seam_line: false,
             seam_offset: 0.0,
+            color_match_enabled: true,
             on_progress: None,
             on_finalizing: None,
             session_hooks: Vec::new(),
@@ -393,6 +395,15 @@ impl StitchJob {
     /// Default: false.
     pub fn multiband_blend_enabled(mut self, enabled: bool) -> Self {
         self.multiband_blend_enabled = enabled;
+        self
+    }
+
+    /// Auto-measure and correct per-camera exposure/white-balance drift at
+    /// the seam. See
+    /// `reco_core::render::viewport::ViewportConfig::color_match_enabled`.
+    /// Default: true.
+    pub fn color_match_enabled(mut self, enabled: bool) -> Self {
+        self.color_match_enabled = enabled;
         self
     }
 
@@ -632,6 +643,7 @@ impl StitchJob {
             multiband_blend_enabled: self.multiband_blend_enabled,
             show_seam_line: self.show_seam_line,
             seam_offset: self.seam_offset,
+            color_match_enabled: self.color_match_enabled,
             rig_tilt: cal.rig_tilt as f32,
             rig_roll: cal.rig_roll as f32,
             ..Default::default()

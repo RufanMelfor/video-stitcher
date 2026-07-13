@@ -59,7 +59,21 @@ pub(crate) struct ColorMatchParams {
     /// seam (e.g. crowd/sky on one side, pitch on the other) and derives a
     /// correction that has nothing to do with the two cameras' actual
     /// exposure difference - see `measure_band_mean`.
+    ///
+    /// Only shifts the band for whichever plane is *currently fading* -
+    /// `seam_offset` only ever moves the fading plane's alpha threshold
+    /// (`fisheye.wgsl`'s `if u.ground_tilt.w > 0.5` gate); the other,
+    /// fixed/opaque plane renders at alpha=1.0 unconditionally, so its
+    /// on-screen boundary never moves with `seam_offset` at all. Which
+    /// plane is fading depends on `blend_flip_direction`, hence that field
+    /// below - see `seam_band_bounds`.
     pub(crate) seam_offset: f32,
+    /// `ViewportConfig::blend_flip_direction` - SYNC_WITH
+    /// `renderer.rs`'s `left_uniforms.ground_tilt[3] = if flip {1.0} else
+    /// {0.0}` (and the mirrored assignment for right). Needed to know
+    /// which plane `seam_offset` actually applies to - see this struct's
+    /// `seam_offset` doc.
+    pub(crate) blend_flip_direction: bool,
 }
 
 impl Default for ColorMatchParams {
@@ -73,6 +87,7 @@ impl Default for ColorMatchParams {
             max_y_offset: 0.06,
             max_chroma_offset: 0.04,
             seam_offset: 0.0,
+            blend_flip_direction: false,
         }
     }
 }
@@ -241,11 +256,23 @@ impl ColorMatchState {
     }
 }
 
+/// Whether `is_right`'s plane is the one `renderer.rs` currently designates
+/// as fading (`ground_tilt[3] = 1.0`) rather than fixed/opaque
+/// (`ground_tilt[3] = 0.0`) - SYNC_WITH `left_uniforms.ground_tilt[3] = if
+/// flip {1.0} else {0.0}` (and the mirrored right assignment). Default
+/// (`blend_flip_direction = false`): right fades, left is fixed.
+fn is_fading_plane(is_right: bool, blend_flip_direction: bool) -> bool {
+    is_right != blend_flip_direction
+}
+
 /// Where, in plane UV space, the seam-adjacent measurement band sits for one
 /// camera - the same edge and `seam_offset` shift `fisheye.wgsl`'s `fs_main`
 /// uses for its alpha threshold (`u.flags.x == 1u` branch for `is_right`).
-/// Kept separate from `measure_band_mean` so the bounds math is unit-testable
-/// without needing synthetic distorted frames.
+/// `seam_offset` must already be zeroed by the caller when this plane isn't
+/// the fading one (see `is_fading_plane`) - the fixed/opaque plane's alpha
+/// is hardcoded to 1.0 regardless of `seam_offset`, so its band must stay at
+/// the unshifted edge. Kept separate from `measure_band_mean` so the bounds
+/// math is unit-testable without needing synthetic distorted frames.
 fn seam_band_bounds(is_right: bool, seam_offset: f64, band_width: f64) -> (f64, f64) {
     let (u0, u1) = if is_right {
         (seam_offset, seam_offset + band_width)
@@ -308,11 +335,14 @@ fn nv12_sampler<'a>(
 /// `is_right` selects which edge of plane UV space the band sits against -
 /// mirrors the alpha-blend convention documented on `fisheye.wgsl`'s
 /// `fs_main` (right plane's seam-adjacent edge is at UV x=0, left plane's is
-/// at UV x=1), shifted by `match_params.seam_offset` exactly like the
-/// shader's alpha threshold - otherwise a manual seam drag decouples this
-/// band from the seam it's meant to measure. Returns `None` if every sample
-/// point mapped outside the raw frame (band too close to the edge of the
-/// lens' FOV, or `seam_offset` pushed it out of `[0, 1]` entirely).
+/// at UV x=1). Only shifted by `match_params.seam_offset` when this plane is
+/// the one currently designated as fading (see `seam_band_bounds`) -
+/// otherwise a manual seam drag decouples this band from the seam it's
+/// meant to measure, or (for the fixed/opaque plane) shifts it away from
+/// its actual, seam-offset-independent on-screen boundary. Returns `None`
+/// if every sample point mapped outside the raw frame (band too close to
+/// the edge of the lens' FOV, or the shift pushed it out of `[0, 1]`
+/// entirely).
 fn measure_band_mean(
     width: u32,
     height: u32,
@@ -322,11 +352,13 @@ fn measure_band_mean(
     match_params: &ColorMatchParams,
     sample: impl Fn(u32, u32) -> Option<(u8, u8, u8)>,
 ) -> Option<[f32; 3]> {
-    let (u0, u1) = seam_band_bounds(
-        is_right,
-        match_params.seam_offset as f64,
-        match_params.band_width as f64,
-    );
+    let is_fading = is_fading_plane(is_right, match_params.blend_flip_direction);
+    let seam_offset = if is_fading {
+        match_params.seam_offset as f64
+    } else {
+        0.0
+    };
+    let (u0, u1) = seam_band_bounds(is_right, seam_offset, match_params.band_width as f64);
     let grid_cols = match_params.grid_cols.max(1);
     let grid_rows = match_params.grid_rows.max(1);
 
@@ -520,6 +552,21 @@ mod tests {
         // Safety clamp must hold even after many iterations.
         assert!(correction.left_offset[0] <= match_params.max_y_offset + 1e-6);
         assert!(correction.right_offset[0] >= -match_params.max_y_offset - 1e-6);
+    }
+
+    #[test]
+    fn is_fading_plane_matches_renderer_convention() {
+        // Default (blend_flip_direction = false): right fades, left is
+        // fixed - matches `left_uniforms.ground_tilt[3] = if flip {1.0}
+        // else {0.0}` in renderer.rs.
+        assert!(is_fading_plane(true, false));
+        assert!(!is_fading_plane(false, false));
+        // Flipped: left fades, right is fixed - the reported bug's exact
+        // scenario (`blend_flip_direction: true` in the user's
+        // calibration), where the *right* plane's band must NOT shift by
+        // seam_offset since right's alpha is hardcoded to 1.0 here.
+        assert!(is_fading_plane(false, true));
+        assert!(!is_fading_plane(true, true));
     }
 
     #[test]

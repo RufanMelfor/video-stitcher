@@ -36,6 +36,9 @@ pub struct StitchArgs<'a> {
     /// Manual seam nudge. See
     /// `reco_core::render::viewport::ViewportConfig::seam_offset`.
     pub seam_offset: f32,
+    /// Disable auto exposure/color matching at the seam. See
+    /// `reco_core::render::viewport::ViewportConfig::color_match_enabled`.
+    pub no_color_match: bool,
     pub start_time: Option<f64>,
     pub end_time: Option<f64>,
     pub max_frames: Option<u64>,
@@ -133,6 +136,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
     .multiband_blend_enabled(args.multiband)
     .show_seam_line(args.show_seam_line)
     .seam_offset(args.seam_offset)
+    .color_match_enabled(!args.no_color_match)
     .on_progress(move |p: &reco_core::session::types::FrameProgress| {
         // Use the session's own elapsed clock so the reported
         // rate excludes one-time GPU / encoder / ORT init and
