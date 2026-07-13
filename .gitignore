@@ -2,9 +2,6 @@
 target/
 sticher/
 
-# Local session notes
-SESSION_HANDOFF.md
-
 # Video artifacts
 *.mp4
 reco-trace.json
