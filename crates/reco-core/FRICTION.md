@@ -113,6 +113,41 @@ frame instead of waiting up to `color_match_interval_frames` frames - see
 `ColorMatchState::force_remeasure`. reco-gui exposes all of these as
 sliders under the right-panel "Color Mapping" section.
 
+## Color-match measurement band didn't track `seam_offset` - could make the seam worse than disabled
+
+**Symptom (reported 2026-07-13 on real match footage):** with Auto Color
+Match on, the left/right brightness step at the seam was visibly *worse*
+than with it off - a hard, unnatural vertical discontinuity, confirmed via
+screenshot and reproduced on the user's actual calibration
+(`resources/test-data/match_clicks.json`, `seam_offset: 0.157`) and source
+footage.
+
+**Root cause:** `measure_band_mean` picked its sampling band from the
+plane's *fixed* UV edge (`is_right` → `[0, band_width]`, else →
+`[1-band_width, 1]`) and never accounted for `seam_offset`, even though
+`fisheye.wgsl`'s `fs_main` shifts its alpha threshold by exactly that amount
+(`smoothstep(seam_offset, seam_offset + blend_width, uv.x)` and the mirror
+for the other edge). Once a calibration has a non-trivial `seam_offset` -
+this one's `0.157` exceeded the default `band_width` of `0.15` outright -
+the measurement band sits entirely past where the seam actually renders.
+The correction then reflects whatever's in that unrelated strip (crowd,
+signage, a sunlit vs. shaded patch of pitch) rather than the two cameras'
+real difference at the visible seam, and - being a uniform per-frame offset
+via `apply_color_transfer` - gets applied everywhere, which can easily make
+the true seam *more* mismatched than doing nothing. Verified on real
+footage: rendering the same clip/calibration before and after the fix
+showed materially different measured means (band moved as intended) and
+the pre-fix render reproduced the reported hard vertical seam split;
+post-fix it did not.
+
+**Fix:** `ColorMatchParams` carries `seam_offset` (from
+`ViewportConfig::seam_offset`, wired in
+`StitchPipeline::color_match_params`); `measure_band_mean`'s band bounds are
+now computed by `seam_band_bounds`, which shifts the same way the shader
+does (`seam_band_bounds_tracks_seam_offset` test) and clamps to `[0, 1]`
+instead of reading past the frame when `seam_offset` pushes the band out of
+range (`seam_band_bounds_clamps_to_valid_uv_range`).
+
 ## `PlaneLayout::intersect` is not a safe "move the seam" control
 
 **Symptom (confirmed 2026-07-11 on real DJI Osmo Action 4 footage):**
