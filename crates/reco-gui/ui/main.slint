@@ -932,6 +932,10 @@ export component RecoApp inherits Window {
     in-out property <float> cal-x-ty: 0.0;
     in-out property <float> cal-ground-tilt-x: 0.0;
     in-out property <float> cal-ground-tilt-z: 0.0;
+    in-out property <float> cal-top-tilt-x: 0.0;
+    in-out property <float> cal-top-tilt-z: 0.0;
+    in-out property <float> cal-ground-tilt-band-width: 0.16;
+    in-out property <float> cal-top-tilt-band-width: 0.16;
     in-out property <bool> cal-dirty: false;  // true when user has edited
 
     // Side panel visibility (unified Controls + Stats).
@@ -1179,6 +1183,10 @@ export component RecoApp inherits Window {
     callback changed-cal-x-ty(float);
     callback changed-cal-ground-tilt-x(float);
     callback changed-cal-ground-tilt-z(float);
+    callback changed-cal-top-tilt-x(float);
+    callback changed-cal-top-tilt-z(float);
+    callback changed-cal-ground-tilt-band-width(float);
+    callback changed-cal-top-tilt-band-width(float);
     callback save-calibration();
     callback reset-calibration();
     // Live lens parameter editing. Fires on any of the 8 sliders per
@@ -2471,6 +2479,50 @@ export component RecoApp inherits Window {
                             decimals: 3;
                             step: 0.001;
                             changed(v) => { root.changed-cal-ground-tilt-z(v); }
+                        }
+
+                        LabeledSlider {
+                            tip: "Top-of-frame tilt correction for the right camera's content (x-plane). Mirror of ground_tilt_x, for far background content (distant structures, goal frames, skyline) instead of the near field - only affects the top of frame; leaves the ground band untouched. Manual only - no auto-fit yet.";
+                            label: "top_tilt_x";
+                            minimum: -0.3;
+                            maximum: 0.3;
+                            value <=> root.cal-top-tilt-x;
+                            decimals: 3;
+                            step: 0.001;
+                            changed(v) => { root.changed-cal-top-tilt-x(v); }
+                        }
+
+                        LabeledSlider {
+                            tip: "Same as top_tilt_x, for the left camera's content (z-plane).";
+                            label: "top_tilt_z";
+                            minimum: -0.3;
+                            maximum: 0.3;
+                            value <=> root.cal-top-tilt-z;
+                            decimals: 3;
+                            step: 0.001;
+                            changed(v) => { root.changed-cal-top-tilt-z(v); }
+                        }
+
+                        LabeledSlider {
+                            tip: "How far into the frame ground_tilt_x/z's correction extends before reaching full strength (the ramp always starts at the same fixed point close to the seam). Wider spreads the correction more gradually; narrower concentrates it closer to the very bottom edge. Shared by both ground_tilt_x and ground_tilt_z.";
+                            label: "ground_tilt_band_width";
+                            minimum: 0.09;
+                            maximum: 0.4;
+                            value <=> root.cal-ground-tilt-band-width;
+                            decimals: 2;
+                            step: 0.01;
+                            changed(v) => { root.changed-cal-ground-tilt-band-width(v); }
+                        }
+
+                        LabeledSlider {
+                            tip: "Same as ground_tilt_band_width, for top_tilt_x/z's band (top of frame instead of the bottom).";
+                            label: "top_tilt_band_width";
+                            minimum: 0.09;
+                            maximum: 0.4;
+                            value <=> root.cal-top-tilt-band-width;
+                            decimals: 2;
+                            step: 0.01;
+                            changed(v) => { root.changed-cal-top-tilt-band-width(v); }
                         }
 
                         // Saving lives in one place: the "Save Calibration"

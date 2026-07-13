@@ -429,6 +429,15 @@ impl Optimizer for NelderMeadOptimizer {
             // workflow that fits these.
             ground_tilt_x: 0.0,
             ground_tilt_z: 0.0,
+            // top_tilt_x/z has no fitting path at all yet (manual-only,
+            // set via the calibration UI/match.json) - same "not fitted
+            // here" reasoning as ground_tilt_x/z above.
+            top_tilt_x: 0.0,
+            top_tilt_z: 0.0,
+            // Not fitted either - same reasoning, defaults to the constant
+            // this band was fixed at before it became adjustable.
+            ground_tilt_band_width: 0.16,
+            top_tilt_band_width: 0.16,
         };
 
         Ok((layout, best_cost))

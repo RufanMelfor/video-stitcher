@@ -155,6 +155,10 @@ mod tests {
             z_rz: 0.0,
             ground_tilt_x: 0.0,
             ground_tilt_z: 0.0,
+            top_tilt_x: 0.0,
+            top_tilt_z: 0.0,
+            ground_tilt_band_width: 0.16,
+            top_tilt_band_width: 0.16,
         };
 
         let geom = SceneGeometry::from_layout_with_aspect(&layout, 16.0 / 9.0);
@@ -179,6 +183,10 @@ mod tests {
             z_rz: 0.0,
             ground_tilt_x: 0.0,
             ground_tilt_z: 0.0,
+            top_tilt_x: 0.0,
+            top_tilt_z: 0.0,
+            ground_tilt_band_width: 0.16,
+            top_tilt_band_width: 0.16,
         };
 
         let geom = SceneGeometry::from_layout_with_aspect(&layout, 16.0 / 9.0);
@@ -202,6 +210,10 @@ mod tests {
             z_rz: 0.0,
             ground_tilt_x: 0.0,
             ground_tilt_z: 0.0,
+            top_tilt_x: 0.0,
+            top_tilt_z: 0.0,
+            ground_tilt_band_width: 0.16,
+            top_tilt_band_width: 0.16,
         };
 
         let aspect_4_3 = 4.0 / 3.0;

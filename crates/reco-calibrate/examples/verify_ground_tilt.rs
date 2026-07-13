@@ -28,7 +28,7 @@
 
 use reco_core::calibration::MatchCalibration;
 use reco_core::gpu::GpuContext;
-use reco_core::render::renderer::GroundTilt;
+use reco_core::render::renderer::{GroundTilt, TopTilt};
 use reco_core::render::scene::SceneGeometry;
 use reco_core::render::single_camera::SingleCameraRenderer;
 use reco_core::source::YuvFrame;
@@ -101,10 +101,12 @@ fn main() {
     let left_ground_tilt = GroundTilt {
         tilt: cal.layout.ground_tilt_z as f32,
         k: cal.left.ground_tilt_k() as f32,
+        band_full: cal.layout.ground_tilt_band_width as f32,
     };
     let right_ground_tilt = GroundTilt {
         tilt: cal.layout.ground_tilt_x as f32,
         k: cal.right.ground_tilt_k() as f32,
+        band_full: cal.layout.ground_tilt_band_width as f32,
     };
 
     let render_pair = |gt_left: GroundTilt, gt_right: GroundTilt| -> Vec<u8> {
@@ -118,6 +120,7 @@ fn main() {
             &left_yuv.u,
             &left_yuv.v,
             gt_left,
+            TopTilt::default(),
         );
         let right_rgba = right_renderer.render_and_readback(
             &gpu,
@@ -129,6 +132,7 @@ fn main() {
             &right_yuv.u,
             &right_yuv.v,
             gt_right,
+            TopTilt::default(),
         );
         composite_hard_seam(&left_rgba, &right_rgba)
     };
