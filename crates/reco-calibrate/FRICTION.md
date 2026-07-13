@@ -1307,6 +1307,45 @@ it's not sufficient, (2) is the real feature to plan and build next.
     build as optional/opt-in) is still not started - this wiring makes the
     *existing* band-limited correction real, it isn't that feature.
 
+22. **`top_tilt_x`/`top_tilt_z` (2026-07-13) - mirror correction for the top
+    of frame, plus adjustable band width for both corrections. Resolves the
+    "no GUI field" gap noted above, for reco-gui rather than rig-calib
+    (deprecated by then).** User reported a visible seam step at the *top*
+    of frame (goal structure/background buildings, not the near-field
+    ground) - root cause was that `band_limited_ground_warp` is
+    deliberately one-sided (`t <= 0`, horizon and up, is always identity -
+    see point 21's own fix), so that region had zero correction available,
+    not a bug. Added `top_tilt_x`/`top_tilt_z` as an exact mirror
+    (one-sided the other way), fully independent of `ground_tilt_x/z`.
+    **Manual-only by explicit user request** - unlike `ground_tilt_x/z`,
+    no fitting harness exists or is planned; set via a new reco-gui slider
+    or hand-edited `match.json` (`topTiltX`/`topTiltZ`).
+
+    Also made the band's full-strength threshold adjustable
+    (`groundTiltBandWidth`/`topTiltBandWidth`, new reco-gui sliders) - the
+    ramp's *start* stays fixed at `0.08` (unchanged, still the value
+    manual-line-click fitting assumes), only where it reaches full
+    strength was previously hardcoded at `0.16`. Defaults to `0.16` so
+    every existing calibration renders unchanged. Deliberately does NOT
+    touch this file's own Rust-side fitting math (`geometry.rs`'s
+    `band_limited_ground_warp`, still fixed 0.08/0.16) - this is a pure
+    render-time knob, independent of how a tilt value was obtained
+    (fitted or hand-set).
+
+    Threaded through `PlaneLayout` -> `GroundTilt`/`TopTilt` render structs
+    (`reco-core/src/render/renderer.rs`) -> GPU uniforms -> `fisheye.wgsl`,
+    touching every `ground_tilt` call site (production/multiband stitch,
+    lens preview, undistort, single-camera renderer, all of this crate's
+    validation examples) - same shape as point 21's own wiring. The two
+    new band-width scalars were packed into `top_tilt`'s previously-unused
+    `.z`/`.w` uniform slots (no new GPU uniform slot needed), same pattern
+    already used by `lens_preview.z`/`.w`.
+
+    Verified: full workspace build/test/clippy(`-D warnings`)/fmt clean
+    (only the pre-existing unrelated CUDA/matroska test failures noted
+    elsewhere), plus a live `reco-gui.exe` launch with a real calibration
+    loaded through the new uniform layout. Committed `3d4f3222`/`b67c38da`.
+
 ## Calibration "confidence" metric measures match count, not fit quality
 
 **Symptom, documented since 2026-07-03:** `CalibrationResult::confidence`
