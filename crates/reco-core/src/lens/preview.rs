@@ -13,7 +13,9 @@
 use crate::calibration::CameraParams;
 use crate::gpu::GpuContext;
 use crate::render::pipeline::YuvPlanes;
-use crate::render::renderer::{GroundTilt, InputFormat, build_gpu_uniforms, opengl_to_wgpu_matrix};
+use crate::render::renderer::{
+    GroundTilt, InputFormat, TopTilt, build_gpu_uniforms, opengl_to_wgpu_matrix,
+};
 
 use bytemuck::Pod;
 use nalgebra::Orthographic3;
@@ -312,6 +314,7 @@ impl LensPreviewRenderer {
             false,
             false,
             GroundTilt::default(),
+            TopTilt::default(),
         );
         uniforms.lens_preview[0] = correction_amount.clamp(-1.0, 1.0);
 

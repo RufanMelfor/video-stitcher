@@ -47,6 +47,18 @@ struct Uniforms {
     //   its seam-adjacent edge this frame; see the seam-blending comment
     //   in fs_main and ViewportConfig::blend_flip_direction)
     ground_tilt: vec4<f32>,
+    // top_tilt.x: tilt parameter c for the top-of-frame correction
+    //   (PlaneLayout::top_tilt_x/z); 0.0 = no-op. Mirror image of
+    //   ground_tilt.x - see band_limited_top_warp.
+    // top_tilt.y: focal-scale constant k (same as ground_tilt.y) - only
+    //   meaningful when .x != 0.0
+    // top_tilt.z: PlaneLayout::ground_tilt_band_width - |t| at which
+    //   ground_tilt's correction reaches full strength (repurposed padding:
+    //   this plane's aspect ratio already lives in ground_tilt.z, so this
+    //   slot would otherwise be unused)
+    // top_tilt.w: PlaneLayout::top_tilt_band_width - same, for top_tilt's
+    //   own band
+    top_tilt: vec4<f32>,
 };
 
 // YUV420P plane textures (Y = full res R8Unorm, U/V = half res R8Unorm)
@@ -181,14 +193,20 @@ fn sample_yuv(uv: vec2<f32>) -> vec4<f32> {
 // ---- Ground-plane tilt correction ----
 //
 // Direct port of reco_calibrate::geometry's warp_ground_y /
-// band_limited_ground_warp / smoothstep (crates/reco-calibrate/src/geometry.rs)
-// - must stay bit-for-bit equivalent in shape, since the parameter fitted
-// there (FRICTION.md points 8-11, 18-20) is only meaningful if the render
-// applies the exact same warp. See PlaneLayout::ground_tilt_x/z's doc
-// comment for the full picture.
+// band_limited_ground_warp / smoothstep (crates/reco-calibrate/src/geometry.rs).
+// The ramp *shape* and its start (GROUND_TILT_BAND_START) must stay
+// bit-for-bit equivalent to that Rust copy, since the manual-line-click
+// fitting harnesses (FRICTION.md points 8-11, 18-20) use the Rust version's
+// fixed 0.08/0.16 band to derive ground_tilt_x/z. Where the ramp reaches
+// full strength is, unlike that fixed fitting-time band, a live render-time
+// override (PlaneLayout::ground_tilt_band_width/top_tilt_band_width) - so a
+// fitted tilt value stays meaningful (the ramp still starts at the same
+// 0.08), but its default (0.16) is what's actually bit-for-bit equivalent
+// to the Rust fitting harness; a custom width is an intentional departure
+// from that, same as manually nudging a fitted tilt value would be.
+// See PlaneLayout::ground_tilt_x/z's doc comment for the full picture.
 
 const GROUND_TILT_BAND_START: f32 = 0.08;
-const GROUND_TILT_BAND_FULL: f32 = 0.16;
 
 fn smoothstep_band(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
@@ -210,14 +228,39 @@ fn warp_ground_y(t: f32, c: f32, k: f32) -> f32 {
 // bottom of frame); t <= 0 is horizon and sky, always identity regardless
 // of magnitude. SYNC_WITH geometry::band_limited_ground_warp's doc
 // comment for why this has to be one-sided - a symmetric-in-abs(t)
-// version visibly warps the skyline once |t| >= GROUND_TILT_BAND_FULL in
-// the negative direction, since every pixel (not just near-field matched
-// points) goes through this function at render time.
-fn band_limited_ground_warp(t: f32, c: f32, k: f32) -> f32 {
+// version visibly warps the skyline once |t| >= band_full in the negative
+// direction, since every pixel (not just near-field matched points) goes
+// through this function at render time.
+//
+// `band_full` (PlaneLayout::ground_tilt_band_width) is clamped to stay
+// strictly greater than GROUND_TILT_BAND_START - at or below it, the
+// smoothstep's edge0/edge1 would collapse or invert, which is meaningless
+// (not just "a wider/narrower band"). The UI only exposes safe values, but
+// the shader defends independently regardless of caller.
+fn band_limited_ground_warp(t: f32, c: f32, k: f32, band_full: f32) -> f32 {
     if t <= 0.0 {
         return t;
     }
-    let weight = smoothstep_band(GROUND_TILT_BAND_START, GROUND_TILT_BAND_FULL, t);
+    let full = max(band_full, GROUND_TILT_BAND_START + 0.01);
+    let weight = smoothstep_band(GROUND_TILT_BAND_START, full, t);
+    if weight == 0.0 {
+        return t;
+    }
+    return t + weight * (warp_ground_y(t, c, k) - t);
+}
+
+// Mirror image of band_limited_ground_warp: one-sided the other way.
+// t >= 0.0 (horizon and the ground band below it) is always identity,
+// regardless of magnitude - only t < 0.0 (top of frame: sky, distant
+// background structures) ramps in, by the same smoothstep shape applied
+// to |t|. Manual-only parameter (PlaneLayout::top_tilt_x/z) - no
+// automatic fitting path exists yet, unlike ground_tilt.
+fn band_limited_top_warp(t: f32, c: f32, k: f32, band_full: f32) -> f32 {
+    if t >= 0.0 {
+        return t;
+    }
+    let full = max(band_full, GROUND_TILT_BAND_START + 0.01);
+    let weight = smoothstep_band(GROUND_TILT_BAND_START, full, -t);
     if weight == 0.0 {
         return t;
     }
@@ -260,10 +303,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // `uv.y` above - `ground_tilt.z` (plane aspect) converts it into the
     // same width-normalized unit `normalize_to_plane` uses.
     var uv_y = uv.y;
-    if u.ground_tilt.x != 0.0 {
-        let plane_y = (in.uv.y - 0.5) / u.ground_tilt.z;
-        let warped_plane_y = band_limited_ground_warp(plane_y, u.ground_tilt.x, u.ground_tilt.y);
-        uv_y = (warped_plane_y * u.ground_tilt.z + 0.5) * 2.0 - 0.5;
+    if u.ground_tilt.x != 0.0 || u.top_tilt.x != 0.0 {
+        var plane_y = (in.uv.y - 0.5) / u.ground_tilt.z;
+        if u.ground_tilt.x != 0.0 {
+            plane_y = band_limited_ground_warp(plane_y, u.ground_tilt.x, u.ground_tilt.y, u.top_tilt.z);
+        }
+        if u.top_tilt.x != 0.0 {
+            plane_y = band_limited_top_warp(plane_y, u.top_tilt.x, u.top_tilt.y, u.top_tilt.w);
+        }
+        uv_y = (plane_y * u.ground_tilt.z + 0.5) * 2.0 - 0.5;
     }
 
     // KB4 fisheye undistortion: map from plane UV to video texture coordinate

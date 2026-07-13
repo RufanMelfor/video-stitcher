@@ -73,21 +73,44 @@ pub(crate) struct GpuUniforms {
     flags: [u32; 4],
     pub(crate) lens_preview: [f32; 4],
     ground_tilt: [f32; 4],
+    top_tilt: [f32; 4],
 }
 
 /// Per-plane ground-plane tilt correction for [`build_gpu_uniforms`] and
 /// [`super::single_camera::SingleCameraRenderer::render_and_readback`] - see
 /// `PlaneLayout::ground_tilt_x`/`ground_tilt_z`'s doc comment
 /// (`crates/reco-core/src/calibration.rs`) and `fisheye.wgsl`'s
-/// `band_limited_ground_warp` for the full picture. `k` only matters when
-/// `tilt != 0.0`; `Default` (both zero) is the "no correction" no-op. `pub`
-/// (not `pub(crate)`): `render_and_readback` is called from other crates
-/// (`reco-calibrate`'s validation examples), so this type has to be at
-/// least as visible as that function.
+/// `band_limited_ground_warp` for the full picture. `k` and `band_full`
+/// only matter when `tilt != 0.0`; `Default` (all zero) is the "no
+/// correction" no-op - `band_full` defaulting to `0.0` instead of the real
+/// `PlaneLayout::ground_tilt_band_width` default (`0.16`) is harmless here
+/// since it's never read while `tilt == 0.0`. `pub` (not `pub(crate)`):
+/// `render_and_readback` is called from other crates (`reco-calibrate`'s
+/// validation examples), so this type has to be at least as visible as
+/// that function.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct GroundTilt {
     pub tilt: f32,
     pub k: f32,
+    /// `PlaneLayout::ground_tilt_band_width` - `|t|` at which the
+    /// correction reaches full strength (the ramp always starts at the
+    /// fixed `0.08`).
+    pub band_full: f32,
+}
+
+/// Per-plane top-of-frame tilt correction, mirroring [`GroundTilt`] - see
+/// `PlaneLayout::top_tilt_x`/`top_tilt_z`'s doc comment
+/// (`crates/reco-core/src/calibration.rs`) and `fisheye.wgsl`'s
+/// `band_limited_top_warp`. Unlike `GroundTilt`, this plane aspect ratio
+/// doesn't need its own copy in the packed uniform - the shader reuses
+/// `ground_tilt.z` for both bands, since it's the same plane's own aspect
+/// ratio either way. `Default` (all zero) is the "no correction" no-op.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TopTilt {
+    pub tilt: f32,
+    pub k: f32,
+    /// `PlaneLayout::top_tilt_band_width` - see [`GroundTilt::band_full`].
+    pub band_full: f32,
 }
 
 /// Per-plane YUV offset applied by `apply_color_transfer` in `fisheye.wgsl`,
@@ -1303,13 +1326,28 @@ impl Renderer {
         // left/right naming already matches the physical cameras directly,
         // and it's only the optimizer's internal x-plane/z-plane bookkeeping
         // that's swapped.
+        // band_full is a whole-calibration setting (not per-plane), so both
+        // left/right share the same value here.
         let left_ground_tilt = GroundTilt {
             tilt: calibration.layout.ground_tilt_z as f32,
             k: calibration.left.ground_tilt_k() as f32,
+            band_full: calibration.layout.ground_tilt_band_width as f32,
         };
         let right_ground_tilt = GroundTilt {
             tilt: calibration.layout.ground_tilt_x as f32,
             k: calibration.right.ground_tilt_k() as f32,
+            band_full: calibration.layout.ground_tilt_band_width as f32,
+        };
+        // Same left/right-vs-x/z-plane swap as ground_tilt above.
+        let left_top_tilt = TopTilt {
+            tilt: calibration.layout.top_tilt_z as f32,
+            k: calibration.left.ground_tilt_k() as f32,
+            band_full: calibration.layout.top_tilt_band_width as f32,
+        };
+        let right_top_tilt = TopTilt {
+            tilt: calibration.layout.top_tilt_x as f32,
+            k: calibration.right.ground_tilt_k() as f32,
+            band_full: calibration.layout.top_tilt_band_width as f32,
         };
 
         let left_mvp = projection * view * scene.model_matrix_left();
@@ -1323,6 +1361,7 @@ impl Renderer {
             self.flip_180[0],
             self.is_full_range,
             left_ground_tilt,
+            left_top_tilt,
         );
         left_uniforms.lens_preview[0] = correction;
 
@@ -1336,6 +1375,7 @@ impl Renderer {
             self.flip_180[1],
             self.is_full_range,
             right_ground_tilt,
+            right_top_tilt,
         );
         right_uniforms.lens_preview[0] = correction;
 
@@ -1496,10 +1536,22 @@ impl Renderer {
         let left_ground_tilt = GroundTilt {
             tilt: calibration.layout.ground_tilt_z as f32,
             k: calibration.left.ground_tilt_k() as f32,
+            band_full: calibration.layout.ground_tilt_band_width as f32,
         };
         let right_ground_tilt = GroundTilt {
             tilt: calibration.layout.ground_tilt_x as f32,
             k: calibration.right.ground_tilt_k() as f32,
+            band_full: calibration.layout.ground_tilt_band_width as f32,
+        };
+        let left_top_tilt = TopTilt {
+            tilt: calibration.layout.top_tilt_z as f32,
+            k: calibration.left.ground_tilt_k() as f32,
+            band_full: calibration.layout.top_tilt_band_width as f32,
+        };
+        let right_top_tilt = TopTilt {
+            tilt: calibration.layout.top_tilt_x as f32,
+            k: calibration.right.ground_tilt_k() as f32,
+            band_full: calibration.layout.top_tilt_band_width as f32,
         };
 
         let left_mvp = projection * view * scene.model_matrix_left();
@@ -1513,6 +1565,7 @@ impl Renderer {
             self.flip_180[0],
             self.is_full_range,
             left_ground_tilt,
+            left_top_tilt,
         );
         left_uniforms.lens_preview[0] = correction_amount;
         left_uniforms.color_offset_blend[0] = color_correction.left_offset[0];
@@ -1530,6 +1583,7 @@ impl Renderer {
             self.flip_180[1],
             self.is_full_range,
             right_ground_tilt,
+            right_top_tilt,
         );
         right_uniforms.lens_preview[0] = correction_amount;
         right_uniforms.color_offset_blend[0] = color_correction.right_offset[0];
@@ -2172,6 +2226,9 @@ fn view_matrix(
 /// for any caller not rendering a calibrated stitch pair - single-camera
 /// preview and lens-correction-tuning paths have no plane-pair placement
 /// context for it to apply to).
+///
+/// `top_tilt`: this plane's top-of-frame correction, same caveat as
+/// `ground_tilt` above.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_gpu_uniforms(
     mvp: &Matrix4<f32>,
@@ -2182,6 +2239,7 @@ pub(crate) fn build_gpu_uniforms(
     flip_180: bool,
     is_full_range: bool,
     ground_tilt: GroundTilt,
+    top_tilt: TopTilt,
 ) -> GpuUniforms {
     let w = camera.width as f32;
     let h = camera.height as f32;
@@ -2215,6 +2273,17 @@ pub(crate) fn build_gpu_uniforms(
         // overrides this field for the single-camera preview mode.
         lens_preview: [1.0, 0.0, 0.0, 0.0],
         ground_tilt: [ground_tilt.tilt, ground_tilt.k, w / h, 0.0],
+        // .z/.w were otherwise-unused padding (this plane's aspect ratio
+        // already lives in ground_tilt.z) - reused to carry both bands'
+        // adjustable full-strength thresholds instead of adding a whole
+        // new uniform slot for two scalars, same "repurpose spare padding"
+        // pattern as lens_preview.z/.w above.
+        top_tilt: [
+            top_tilt.tilt,
+            top_tilt.k,
+            ground_tilt.band_full,
+            top_tilt.band_full,
+        ],
     }
 }
 
@@ -2268,6 +2337,7 @@ mod tests {
             false,
             false,
             GroundTilt::default(),
+            TopTilt::default(),
         );
 
         // fx/width ≈ 0.4678
@@ -2281,6 +2351,8 @@ mod tests {
         // aspect-ratio slot here, see ground_tilt_uniform_packs_plane_aspect
         assert_eq!(u.ground_tilt[0], 0.0);
         assert_eq!(u.ground_tilt[1], 0.0);
+        assert_eq!(u.top_tilt[0], 0.0);
+        assert_eq!(u.top_tilt[1], 0.0);
     }
 
     #[test]
@@ -2306,12 +2378,50 @@ mod tests {
             GroundTilt {
                 tilt: -0.09,
                 k: 0.1897,
+                band_full: 0.2,
             },
+            TopTilt::default(),
         );
         assert_eq!(u.ground_tilt[0], -0.09);
         assert!((u.ground_tilt[1] - 0.1897).abs() < 1e-6);
         // plane_aspect = width / height = 3840 / 2880
         assert!((u.ground_tilt[2] - (3840.0 / 2880.0)).abs() < 1e-6);
+        // ground_tilt's band_full is packed into top_tilt.z, not ground_tilt itself.
+        assert_eq!(u.top_tilt[2], 0.2);
+    }
+
+    #[test]
+    fn top_tilt_uniform_packs_correctly() {
+        let camera = CameraParams {
+            width: 3840,
+            height: 2880,
+            fx: 1457.07,
+            fy: 1457.07,
+            cx: 1920.0,
+            cy: 1440.0,
+            d: [0.0; 4],
+        };
+        let mvp = Matrix4::identity();
+        let u = build_gpu_uniforms(
+            &mvp,
+            &camera,
+            true,
+            0.0,
+            InputFormat::Yuv420p,
+            false,
+            false,
+            GroundTilt::default(),
+            TopTilt {
+                tilt: 0.05,
+                k: 0.1897,
+                band_full: 0.18,
+            },
+        );
+        assert_eq!(u.top_tilt[0], 0.05);
+        assert!((u.top_tilt[1] - 0.1897).abs() < 1e-6);
+        // ground_tilt untouched by a top_tilt-only call.
+        assert_eq!(u.ground_tilt[0], 0.0);
+        assert_eq!(u.top_tilt[3], 0.18);
     }
 
     #[test]

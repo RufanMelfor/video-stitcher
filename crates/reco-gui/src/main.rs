@@ -3609,6 +3609,62 @@ fn main() -> anyhow::Result<()> {
 
     let app_weak = app.as_weak();
     let state_ref = Rc::clone(&state);
+    app.on_changed_cal_top_tilt_x(move |v| {
+        let mut s = state_ref.borrow_mut();
+        let Some(mut layout) = s.calibration.as_ref().map(|c| c.layout.clone()) else {
+            return;
+        };
+        layout.top_tilt_x = v as f64;
+        s.apply_layout(layout);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_cal_top_tilt_z(move |v| {
+        let mut s = state_ref.borrow_mut();
+        let Some(mut layout) = s.calibration.as_ref().map(|c| c.layout.clone()) else {
+            return;
+        };
+        layout.top_tilt_z = v as f64;
+        s.apply_layout(layout);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_cal_ground_tilt_band_width(move |v| {
+        let mut s = state_ref.borrow_mut();
+        let Some(mut layout) = s.calibration.as_ref().map(|c| c.layout.clone()) else {
+            return;
+        };
+        layout.ground_tilt_band_width = v as f64;
+        s.apply_layout(layout);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_cal_top_tilt_band_width(move |v| {
+        let mut s = state_ref.borrow_mut();
+        let Some(mut layout) = s.calibration.as_ref().map(|c| c.layout.clone()) else {
+            return;
+        };
+        layout.top_tilt_band_width = v as f64;
+        s.apply_layout(layout);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
     app.on_save_calibration(move || {
         let save_result = state_ref.borrow().save_calibration();
         match save_result {
@@ -3648,6 +3704,10 @@ fn main() -> anyhow::Result<()> {
             app.set_cal_x_ty(layout.x_ty as f32);
             app.set_cal_ground_tilt_x(layout.ground_tilt_x as f32);
             app.set_cal_ground_tilt_z(layout.ground_tilt_z as f32);
+            app.set_cal_top_tilt_x(layout.top_tilt_x as f32);
+            app.set_cal_top_tilt_z(layout.top_tilt_z as f32);
+            app.set_cal_ground_tilt_band_width(layout.ground_tilt_band_width as f32);
+            app.set_cal_top_tilt_band_width(layout.top_tilt_band_width as f32);
             app.set_cal_dirty(false);
         }
     });
@@ -5155,6 +5215,10 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                     app.set_cal_x_ty(layout.x_ty as f32);
                     app.set_cal_ground_tilt_x(layout.ground_tilt_x as f32);
                     app.set_cal_ground_tilt_z(layout.ground_tilt_z as f32);
+                    app.set_cal_top_tilt_x(layout.top_tilt_x as f32);
+                    app.set_cal_top_tilt_z(layout.top_tilt_z as f32);
+                    app.set_cal_ground_tilt_band_width(layout.ground_tilt_band_width as f32);
+                    app.set_cal_top_tilt_band_width(layout.top_tilt_band_width as f32);
                     app.set_cal_dirty(false);
                 }
                 if let Some(rt) = rig_tilt_rad {
@@ -5446,6 +5510,12 @@ fn handle_calibration_result(
                             app.set_cal_x_ty(layout.x_ty as f32);
                             app.set_cal_ground_tilt_x(layout.ground_tilt_x as f32);
                             app.set_cal_ground_tilt_z(layout.ground_tilt_z as f32);
+                            app.set_cal_top_tilt_x(layout.top_tilt_x as f32);
+                            app.set_cal_top_tilt_z(layout.top_tilt_z as f32);
+                            app.set_cal_ground_tilt_band_width(
+                                layout.ground_tilt_band_width as f32,
+                            );
+                            app.set_cal_top_tilt_band_width(layout.top_tilt_band_width as f32);
                             app.set_cal_dirty(false);
                         }
                         if let Some(rt) = rig_tilt_rad {

@@ -24,7 +24,9 @@
 //! near-field seam residual, and this renderer exists to test whether a
 //! direct pixel-comparison (ZNCC) objective can refine it further.
 
-use super::renderer::{GroundTilt, InputFormat, build_gpu_uniforms, opengl_to_wgpu_matrix};
+use super::renderer::{
+    GroundTilt, InputFormat, TopTilt, build_gpu_uniforms, opengl_to_wgpu_matrix,
+};
 use super::scene::SceneGeometry;
 use crate::calibration::CameraParams;
 use crate::gpu::GpuContext;
@@ -370,6 +372,10 @@ impl SingleCameraRenderer {
     /// see `PlaneLayout::ground_tilt_x`/`ground_tilt_z`. Pass
     /// [`GroundTilt::default()`] for the pre-existing behavior (no
     /// correction).
+    ///
+    /// `top_tilt`: this plane's top-of-frame correction, if any - see
+    /// `PlaneLayout::top_tilt_x`/`top_tilt_z`. Pass [`TopTilt::default()`]
+    /// for no correction.
     #[allow(clippy::too_many_arguments)]
     pub fn render_and_readback(
         &self,
@@ -382,6 +388,7 @@ impl SingleCameraRenderer {
         u: &[u8],
         v: &[u8],
         ground_tilt: GroundTilt,
+        top_tilt: TopTilt,
     ) -> Vec<u8> {
         upload_plane(
             &gpu.queue,
@@ -440,6 +447,7 @@ impl SingleCameraRenderer {
             false,
             false,
             ground_tilt,
+            top_tilt,
         );
         gpu.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));

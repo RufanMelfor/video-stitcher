@@ -7,7 +7,9 @@
 
 use crate::calibration::CameraParams;
 use crate::gpu::GpuContext;
-use crate::render::renderer::{GroundTilt, InputFormat, build_gpu_uniforms, opengl_to_wgpu_matrix};
+use crate::render::renderer::{
+    GroundTilt, InputFormat, TopTilt, build_gpu_uniforms, opengl_to_wgpu_matrix,
+};
 
 use bytemuck::Pod;
 use nalgebra::Orthographic3;
@@ -340,6 +342,7 @@ impl GpuUndistort {
             false,
             false,
             GroundTilt::default(),
+            TopTilt::default(),
         );
         gpu.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));

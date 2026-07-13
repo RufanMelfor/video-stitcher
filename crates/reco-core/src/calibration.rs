@@ -245,6 +245,43 @@ pub struct PlaneLayout {
     /// See [`Self::ground_tilt_x`] - same math, applied to the other plane.
     #[serde(rename = "groundTiltZ", default)]
     pub ground_tilt_z: f64,
+
+    /// Top-of-frame tilt correction for the x-plane (right camera's content).
+    /// Mirror image of [`Self::ground_tilt_x`]: same band-limited tangent
+    /// warp, but one-sided the other way - identity at and below the
+    /// horizon, ramped in only near the top of frame (far background
+    /// content: distant structures, goal frames, skyline). Manual-only for
+    /// now - unlike `ground_tilt_x/z`, there is no automatic fitting path
+    /// (`reco_calibrate`'s optimizer/manual-line-click tooling doesn't fit
+    /// this yet); set by hand via the calibration UI or `match.json`.
+    /// `0.0` (the default) is a no-op.
+    #[serde(rename = "topTiltX", default)]
+    pub top_tilt_x: f64,
+
+    /// Top-of-frame tilt correction for the z-plane (left camera's content).
+    /// See [`Self::top_tilt_x`] - same math, applied to the other plane.
+    #[serde(rename = "topTiltZ", default)]
+    pub top_tilt_z: f64,
+
+    /// `|t|` at and beyond which [`Self::ground_tilt_x`]/`ground_tilt_z`'s
+    /// correction reaches full strength (the ramp always *starts* at the
+    /// fixed `0.08` threshold - only where it finishes is adjustable).
+    /// Default `0.16` matches the value this band was fixed at before this
+    /// field existed, so existing calibrations render unchanged. Must stay
+    /// greater than `0.08` - the renderer defensively clamps it if not, but
+    /// values at or below that collapse the ramp to nothing meaningful.
+    #[serde(rename = "groundTiltBandWidth", default = "default_tilt_band_width")]
+    pub ground_tilt_band_width: f64,
+
+    /// Same as [`Self::ground_tilt_band_width`], for
+    /// [`Self::top_tilt_x`]/`top_tilt_z`'s band (ramping toward the top of
+    /// frame instead of the bottom).
+    #[serde(rename = "topTiltBandWidth", default = "default_tilt_band_width")]
+    pub top_tilt_band_width: f64,
+}
+
+fn default_tilt_band_width() -> f64 {
+    0.16
 }
 
 /// Playing field region of interest for per-camera detection filtering.
@@ -686,6 +723,10 @@ fn validate_layout(l: &PlaneLayout) -> Result<(), CalibrationError> {
         ("params.zRz", l.z_rz),
         ("params.groundTiltX", l.ground_tilt_x),
         ("params.groundTiltZ", l.ground_tilt_z),
+        ("params.topTiltX", l.top_tilt_x),
+        ("params.topTiltZ", l.top_tilt_z),
+        ("params.groundTiltBandWidth", l.ground_tilt_band_width),
+        ("params.topTiltBandWidth", l.top_tilt_band_width),
     ] {
         if !val.is_finite() {
             return Err(CalibrationError::NonFiniteFloat {
@@ -804,6 +845,10 @@ mod tests {
                 z_rz: 0.0,
                 ground_tilt_x: 0.0,
                 ground_tilt_z: 0.0,
+                top_tilt_x: 0.0,
+                top_tilt_z: 0.0,
+                ground_tilt_band_width: 0.16,
+                top_tilt_band_width: 0.16,
             },
             rig_tilt: 0.0,
             rig_roll: 0.0,
@@ -991,6 +1036,10 @@ mod tests {
                 // lens_correction_amount/blend_width below.
                 ground_tilt_x: -0.09,
                 ground_tilt_z: -0.085,
+                top_tilt_x: 0.05,
+                top_tilt_z: -0.04,
+                ground_tilt_band_width: 0.2,
+                top_tilt_band_width: 0.18,
             },
             rig_tilt: 0.3,
             rig_roll: -0.12,
@@ -1017,6 +1066,16 @@ mod tests {
         assert!((parsed.blend_width - cal.blend_width).abs() < f32::EPSILON);
         assert!((parsed.layout.ground_tilt_x - cal.layout.ground_tilt_x).abs() < f64::EPSILON);
         assert!((parsed.layout.ground_tilt_z - cal.layout.ground_tilt_z).abs() < f64::EPSILON);
+        assert!((parsed.layout.top_tilt_x - cal.layout.top_tilt_x).abs() < f64::EPSILON);
+        assert!((parsed.layout.top_tilt_z - cal.layout.top_tilt_z).abs() < f64::EPSILON);
+        assert!(
+            (parsed.layout.ground_tilt_band_width - cal.layout.ground_tilt_band_width).abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (parsed.layout.top_tilt_band_width - cal.layout.top_tilt_band_width).abs()
+                < f64::EPSILON
+        );
         assert_eq!(parsed.blend_flip_direction, cal.blend_flip_direction);
         assert!((parsed.seam_offset - cal.seam_offset).abs() < f32::EPSILON);
         assert_eq!(parsed.multiband_blend_enabled, cal.multiband_blend_enabled);
@@ -1035,12 +1094,30 @@ mod tests {
         obj.remove("blend_width");
         obj["params"].as_object_mut().unwrap().remove("groundTiltX");
         obj["params"].as_object_mut().unwrap().remove("groundTiltZ");
+        obj["params"].as_object_mut().unwrap().remove("topTiltX");
+        obj["params"].as_object_mut().unwrap().remove("topTiltZ");
+        obj["params"]
+            .as_object_mut()
+            .unwrap()
+            .remove("groundTiltBandWidth");
+        obj["params"]
+            .as_object_mut()
+            .unwrap()
+            .remove("topTiltBandWidth");
 
         let parsed: MatchCalibration = serde_json::from_value(value).unwrap();
         assert!((parsed.lens_correction_amount - 1.0).abs() < f32::EPSILON);
         assert!((parsed.blend_width - 0.05).abs() < f32::EPSILON);
         assert_eq!(parsed.layout.ground_tilt_x, 0.0);
         assert_eq!(parsed.layout.ground_tilt_z, 0.0);
+        assert_eq!(parsed.layout.top_tilt_x, 0.0);
+        assert_eq!(parsed.layout.top_tilt_z, 0.0);
+        // Defaults to the value this band was fixed at before the field
+        // existed (0.16), not 0.0 - unlike the tilt values, 0.0 here would
+        // NOT be a no-op (it would collapse the ramp), so old calibrations
+        // must resolve to the real prior constant, not the type's zero value.
+        assert_eq!(parsed.layout.ground_tilt_band_width, 0.16);
+        assert_eq!(parsed.layout.top_tilt_band_width, 0.16);
     }
 
     #[test]

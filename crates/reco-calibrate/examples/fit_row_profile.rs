@@ -173,6 +173,7 @@ fn main() {
             &left_yuv.u,
             &left_yuv.v,
             reco_core::render::renderer::GroundTilt::default(),
+            reco_core::render::renderer::TopTilt::default(),
         );
         let right_rgba = right_renderer.render_and_readback(
             &gpu,
@@ -184,6 +185,7 @@ fn main() {
             &right_yuv.u,
             &right_yuv.v,
             reco_core::render::renderer::GroundTilt::default(),
+            reco_core::render::renderer::TopTilt::default(),
         );
         let mask = photometric::overlap_mask_from_alpha(
             &left_rgba,
