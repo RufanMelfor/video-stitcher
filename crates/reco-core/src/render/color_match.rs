@@ -52,6 +52,14 @@ pub(crate) struct ColorMatchParams {
     /// visually worse than doing nothing.
     pub(crate) max_y_offset: f32,
     pub(crate) max_chroma_offset: f32,
+    /// `ViewportConfig::seam_offset` - SYNC_WITH `shaders/fisheye.wgsl`'s
+    /// `fs_main` alpha-blend threshold. The sampling band must track the
+    /// same seam-adjacent edge the shader actually feathers, or a manual
+    /// seam drag leaves this measuring scene content nowhere near the real
+    /// seam (e.g. crowd/sky on one side, pitch on the other) and derives a
+    /// correction that has nothing to do with the two cameras' actual
+    /// exposure difference - see `measure_band_mean`.
+    pub(crate) seam_offset: f32,
 }
 
 impl Default for ColorMatchParams {
@@ -64,6 +72,7 @@ impl Default for ColorMatchParams {
             ema_alpha: 0.15,
             max_y_offset: 0.06,
             max_chroma_offset: 0.04,
+            seam_offset: 0.0,
         }
     }
 }
@@ -213,6 +222,13 @@ impl ColorMatchState {
                 let new_right = clamp_offset(sub3(target, right_mean), params);
                 ema_toward(&mut self.left_offset, new_left, params.ema_alpha);
                 ema_toward(&mut self.right_offset, new_right, params.ema_alpha);
+                log::debug!(
+                    "color_match measured: left_mean={left_mean:?} right_mean={right_mean:?} \
+                     target={target:?} new_left={new_left:?} new_right={new_right:?} \
+                     smoothed_left={:?} smoothed_right={:?}",
+                    self.left_offset,
+                    self.right_offset,
+                );
             }
             // If measurement fails (band entirely out of FOV), keep
             // serving the last smoothed correction rather than snapping to
@@ -223,6 +239,20 @@ impl ColorMatchState {
             right_offset: self.right_offset,
         }
     }
+}
+
+/// Where, in plane UV space, the seam-adjacent measurement band sits for one
+/// camera - the same edge and `seam_offset` shift `fisheye.wgsl`'s `fs_main`
+/// uses for its alpha threshold (`u.flags.x == 1u` branch for `is_right`).
+/// Kept separate from `measure_band_mean` so the bounds math is unit-testable
+/// without needing synthetic distorted frames.
+fn seam_band_bounds(is_right: bool, seam_offset: f64, band_width: f64) -> (f64, f64) {
+    let (u0, u1) = if is_right {
+        (seam_offset, seam_offset + band_width)
+    } else {
+        (1.0 - seam_offset - band_width, 1.0 - seam_offset)
+    };
+    (u0.clamp(0.0, 1.0), u1.clamp(0.0, 1.0))
 }
 
 fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -278,8 +308,11 @@ fn nv12_sampler<'a>(
 /// `is_right` selects which edge of plane UV space the band sits against -
 /// mirrors the alpha-blend convention documented on `fisheye.wgsl`'s
 /// `fs_main` (right plane's seam-adjacent edge is at UV x=0, left plane's is
-/// at UV x=1). Returns `None` if every sample point mapped outside the raw
-/// frame (band too close to the edge of the lens' FOV).
+/// at UV x=1), shifted by `match_params.seam_offset` exactly like the
+/// shader's alpha threshold - otherwise a manual seam drag decouples this
+/// band from the seam it's meant to measure. Returns `None` if every sample
+/// point mapped outside the raw frame (band too close to the edge of the
+/// lens' FOV, or `seam_offset` pushed it out of `[0, 1]` entirely).
 fn measure_band_mean(
     width: u32,
     height: u32,
@@ -289,12 +322,11 @@ fn measure_band_mean(
     match_params: &ColorMatchParams,
     sample: impl Fn(u32, u32) -> Option<(u8, u8, u8)>,
 ) -> Option<[f32; 3]> {
-    let band_width = match_params.band_width as f64;
-    let (u0, u1) = if is_right {
-        (0.0, band_width)
-    } else {
-        (1.0 - band_width, 1.0)
-    };
+    let (u0, u1) = seam_band_bounds(
+        is_right,
+        match_params.seam_offset as f64,
+        match_params.band_width as f64,
+    );
     let grid_cols = match_params.grid_cols.max(1);
     let grid_rows = match_params.grid_rows.max(1);
 
@@ -488,6 +520,35 @@ mod tests {
         // Safety clamp must hold even after many iterations.
         assert!(correction.left_offset[0] <= match_params.max_y_offset + 1e-6);
         assert!(correction.right_offset[0] >= -match_params.max_y_offset - 1e-6);
+    }
+
+    #[test]
+    fn seam_band_bounds_tracks_seam_offset() {
+        // No offset: matches the pre-`seam_offset` fixed-edge behavior.
+        assert_eq!(seam_band_bounds(true, 0.0, 0.15), (0.0, 0.15));
+        assert_eq!(seam_band_bounds(false, 0.0, 0.15), (0.85, 1.0));
+
+        // A positive seam_offset must shift the band by exactly that much,
+        // same as the shader's alpha threshold - this is the bug: before
+        // this fix, the band never moved and could end up sampling content
+        // nowhere near the actual (manually repositioned) seam.
+        assert_eq!(seam_band_bounds(true, 0.1, 0.15), (0.1, 0.25));
+        assert_eq!(seam_band_bounds(false, 0.1, 0.15), (0.75, 0.9));
+
+        // seam_offset larger than band_width (the user's reported scenario)
+        // must still land the band adjacent to the real seam, not clipped
+        // back to the stale unshifted location.
+        assert_eq!(seam_band_bounds(true, 0.2, 0.15), (0.2, 0.35));
+    }
+
+    #[test]
+    fn seam_band_bounds_clamps_to_valid_uv_range() {
+        // Large negative offset pushes the band fully out of [0, 1] - both
+        // bounds clamp to 0.0 rather than going negative into undefined
+        // distortion-mapping territory.
+        assert_eq!(seam_band_bounds(true, -0.3, 0.15), (0.0, 0.0));
+        // Large positive offset on the left edge clamps the top to 1.0.
+        assert_eq!(seam_band_bounds(false, -0.3, 0.15), (1.0, 1.0));
     }
 
     #[test]
