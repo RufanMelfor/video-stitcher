@@ -2,10 +2,10 @@
 publish = false
 name = "rig-calib"
 version = "0.1.0"
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
+edition = "2024"
+rust-version = "1.92"
+license = "AGPL-3.0-only"
+repository = "https://github.com/reco-project/video-stitcher"
 description = "Standalone lens + rig stitch calibration tool with live GPU preview"
 
 [[bin]]
@@ -28,9 +28,9 @@ anyhow = "1"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-tracing-log = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "tracing-log"] }
+tracing-log = "0.2"
 tracing-appender = "0.2"
 
 [build-dependencies]
