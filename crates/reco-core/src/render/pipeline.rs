@@ -550,6 +550,7 @@ impl StitchPipeline {
             max_y_offset: self.viewport.color_match_max_y_offset,
             max_chroma_offset: self.viewport.color_match_max_chroma_offset,
             seam_offset: self.viewport.seam_offset,
+            blend_flip_direction: self.viewport.blend_flip_direction,
         }
     }
 

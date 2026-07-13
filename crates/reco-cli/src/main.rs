@@ -208,6 +208,12 @@ enum Commands {
         #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
         seam_offset: f32,
 
+        /// Disable automatic per-camera exposure/color matching at the
+        /// seam. On by default - see
+        /// `reco_core::render::viewport::ViewportConfig::color_match_enabled`.
+        #[arg(long, default_value_t = false)]
+        no_color_match: bool,
+
         /// Frame offset for temporal sync between cameras.
         /// Positive: skip N right frames (right started first).
         /// Negative: skip N left frames (left started first).
@@ -853,6 +859,7 @@ fn main() -> anyhow::Result<()> {
             multiband,
             show_seam_line,
             seam_offset,
+            no_color_match,
             sync_offset,
             model,
             detection_interval,
@@ -882,6 +889,7 @@ fn main() -> anyhow::Result<()> {
                 multiband,
                 show_seam_line,
                 seam_offset,
+                no_color_match,
                 start_time,
                 end_time,
                 max_frames,

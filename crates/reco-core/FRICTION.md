@@ -148,6 +148,76 @@ does (`seam_band_bounds_tracks_seam_offset` test) and clamps to `[0, 1]`
 instead of reading past the frame when `seam_offset` pushes the band out of
 range (`seam_band_bounds_clamps_to_valid_uv_range`).
 
+**Follow-up (same day): the above fix was still incomplete with
+`blend_flip_direction: true`.** Re-tested on the user's exact calibration
+(which has `blend_flip_direction: true`) with a controlled before/after
+render (same source frames, `--no-color-match` added to `reco stitch` for
+a clean A/B) - the seam step *still* grew over time as the correction
+converged (13 -> 28 gray levels across a 20s clip), while the
+correction-off baseline stayed flat around 10-12.
+
+**Root cause:** `seam_offset` only ever moves the alpha threshold of
+whichever plane `renderer.rs` currently designates as *fading*
+(`left_uniforms.ground_tilt[3] = if flip {1.0} else {0.0}`, mirrored for
+right) - the other, fixed/opaque plane renders at `alpha = 1.0`
+unconditionally (the `if u.ground_tilt.w > 0.5` gate in `fisheye.wgsl`
+never runs for it), so its on-screen boundary never moves with
+`seam_offset` at all. The first fix shifted *both* planes' measurement
+bands by `seam_offset` unconditionally. With the default
+`blend_flip_direction: false` that's harmless by coincidence (right is
+always the fading plane there), but with `blend_flip_direction: true` -
+this calibration - right is the *fixed* plane, so shifting its band moved
+it away from its actual (unshifted) on-screen boundary, feeding the
+correction a `right_mean` that didn't represent what's really adjacent to
+the seam.
+
+**Fix:** `measure_band_mean` now resolves `is_fading_plane(is_right,
+blend_flip_direction)` and zeroes the shift for whichever plane isn't
+fading before calling `seam_band_bounds`, matching `renderer.rs`'s
+`ground_tilt[3]` assignment exactly (`is_fading_plane_matches_renderer_convention`
+test). `ColorMatchParams` gained `blend_flip_direction`, wired from
+`ViewportConfig::blend_flip_direction` in `color_match_params`. Verified
+on the user's real footage/calibration: the seam step with correction on
+now tracks the correction-off baseline (~11-13 vs ~10-12) instead of
+growing unbounded. A smaller, stable brightness/tint difference remains
+even with color-match off - likely each lens' own vignetting/metering, not
+something a single per-frame additive offset can fully erase - but the
+specific regression (*on* being worse than *off*) is gone.
+
+**Second follow-up: that grayscale-only measurement undersold a real
+remaining problem - the chroma correction specifically is still net-harmful
+on this footage.** The luma-only check above used single-channel grayscale,
+which hid a per-channel effect. Re-measured in full RGB on the same
+calibration/footage (mean absolute R+G+B difference across the seam,
+20s-converged):
+
+| Config | Total \|ΔRGB\| |
+|---|---|
+| Color match off | 35.4 |
+| Y-only (chroma clamp forced to 0) | **24.5 - genuinely better** |
+| Y+chroma, default `band_width` 0.15 | 42.1 - worse than off |
+| Y+chroma, narrower `band_width` 0.03 | 57.3 - worse still |
+
+Luma correction is now correctly targeted (see above) and measurably helps.
+Chroma correction reflects a real, consistently-measured Cb difference
+between the cameras' seam-adjacent content (not noise - stable across
+measurements), but converting that mean-band Cb/Cr difference back to RGB
+via the standard BT.709 matrix (`apply_color_transfer`) has an outsized
+effect on blue specifically (`ΔB ≈ 1.8556 × ΔCb`), and applying it
+uniformly overshoots rather than fixing the true near-seam mismatch -
+narrowing the band makes this worse, not better, meaning it isn't simply
+"the band samples the wrong pixels" the way the luma bug was. Likely the
+measured band still isn't scene-content-independent enough for chroma (a
+green pitch's Cb/Cr sensitivity to metering/white-balance differs from a
+grey card), needing a smarter approach than a plain mean - not yet solved.
+
+**Practical workaround, verified:** set "Max chroma offset" to `0` in
+reco-gui's Color Mapping section (`color_match_max_chroma_offset`) - keeps
+the (now correctly beneficial) luma correction while dropping the harmful
+chroma correction. Left as a live user-adjustable slider rather than
+changed as the shipped default, since this is one rig's real-world
+measurement, not proof the chroma correction is harmful in general.
+
 ## `PlaneLayout::intersect` is not a safe "move the seam" control
 
 **Symptom (confirmed 2026-07-11 on real DJI Osmo Action 4 footage):**
