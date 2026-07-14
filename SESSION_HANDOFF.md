@@ -1,41 +1,75 @@
-# Session handoff — 2026-07-13
+# Session handoff — 2026-07-14
 
-Continuation note for resuming work on a different machine/session (now
+Continuation note for resuming work on a different machine/session -
 git-tracked so it travels with `git pull`/`push` between the user's two
-PCs — was gitignored/local-only before this date, which meant it never
-actually reached a second machine). Kept short and current; overwrite
-wholesale at the end of a session rather than appending history — git
-history is the append-only log, this file is just "where things stand
-right now."
+PCs. Overwrite wholesale at the end of a session rather than appending
+history - git history is the append-only log, this file is just "where
+things stand right now."
 
 ## Current state
 
-Working tree clean, `main` up to date with `github/main`
-(`ee785d3c`). Nothing uncommitted.
+Working tree clean, `main` up to date with `github/main` (`b19054b4`).
+Nothing uncommitted. Untracked `seam_debug.txt`/`seam_debug2.txt` in the
+repo root are leftover local debug-log dumps from this session's
+diagnosis work - harmless, safe to delete, not gitignored on purpose
+(no need to bother).
 
-## What shipped this session (2026-07-13)
+## What shipped this session (2026-07-14)
 
-1. **`rig-calib` excluded from the workspace** (`3d4f3222`) — deprecated
-   (superseded by reco-gui), no longer built/tested/linted by
-   `--workspace` commands, but source kept on disk and still buildable
-   standalone via `cargo build --manifest-path crates/rig-calib/Cargo.toml`.
-2. **`top_tilt_x`/`top_tilt_z`** (`b67c38da`) — manual-only mirror of
-   `ground_tilt_x/z` for the *top* of frame (distant structures/goal
-   frames/skyline), since the existing correction is deliberately
-   one-sided and never touched that region. New reco-gui sliders,
-   `match.json` fields `topTiltX`/`topTiltZ`. No auto-fit path, by
-   explicit user request.
-3. **Adjustable band width** (same commit) — `groundTiltBandWidth`/
-   `topTiltBandWidth`, new reco-gui sliders, control where each band's
-   correction reaches full strength (ramp always starts at the fixed
-   `0.08`). Defaults to `0.16` (the old hardcoded value), so existing
-   calibrations render unchanged.
-4. **`crates/reco-calibrate/FRICTION.md` point 22** (`ee785d3c`) — logs
-   items 2-3 in that file's own long-running ground_tilt history.
+**`b19054b4`** - three independent reco-gui changes bundled in one commit:
 
-Full technical detail for 2-3: `crates/reco-calibrate/FRICTION.md` point
-22. For the much longer ground_tilt/seam-alignment saga that precedes all
-of this (resolved 2026-07-07): FRICTION.md points 1-21.
+1. **Seam debug line (Show seam line) is now grabbable properly.**
+   Before: any drag anywhere in the preview while "Show seam line" was on
+   hijacked pan/tilt entirely, and there was no visual affordance. Now:
+   hovering the actual line shows a grab cursor, and only a press-and-
+   drag that *starts* on the line moves it - everywhere else still pans/
+   tilts normally.
+   - New `reco_core::render::renderer::seam_line_screen_points()`
+     projects the line's true on-screen position using the *live* camera
+     yaw/pitch (queries `PoseControl::current_pose()` - not an
+     approximation, the app already tracks this).
+   - **Real bug found and fixed during verification** (worth remembering
+     for any future screen-space math in this shader): the fragment
+     shader remaps `uv` before testing it against `seam_offset` -
+     `let uv = in.uv * 2.0 - vec2<f32>(0.5);` (extends [0,1] to
+     [-0.5,1.5] so undistortion can sample beyond the plane's own edges).
+     Missing that factor of 2 put the computed hit-test column ~140px off
+     from the real line. Found by taking a real screenshot, measuring the
+     line's pixel column programmatically (not eyeballing), and comparing
+     against the computed value - confirmed via a permanent regression
+     test (`seam_line_screen_points_matches_real_screenshot_measurement`)
+     pinned to that real measurement.
+   - Synthetic mouse automation (`SetCursorPos`/`mouse_event` via
+     PowerShell) was tried to speed up verification and turned out
+     unreliable *again* - it reported a stuck mouse position regardless of
+     actual click target (see `feedback_synthetic_gui_automation_risk`
+     memory, now with a third incident). Real user clicks + programmatic
+     screenshot pixel-measurement was what actually got this fixed -
+     don't trust synthetic click coordinates from this app again, but
+     screenshot *analysis* (reading pixels back, not driving input) is
+     fine and was reliable.
+2. **"Reset" button for Auto Color Match tuning** - resets to
+   `ViewportConfig::default()`, not whatever the loaded calibration has.
+3. **"Reset AKAZE" button** in Auto-Calibrate's Advanced section - resets
+   threshold/detect-y-min/detect-y-max/full-res-features to
+   `AkazeConfig::default()`. Pure Slint (no Rust round-trip needed) since
+   these were never persisted in `match.json` to begin with.
+4. **Calibration section sliders now show 5 decimal places** (was 2-3):
+   Intersect, Camera axis offset, x_ty, ground_tilt_x/z, top_tilt_x/z,
+   ground_tilt_band_width, top_tilt_band_width.
+
+Also this session (before the above): pulled 3 commits
+(`f89036c0`..`71ad53a7`) authored from the user's *other* PC - Auto Color
+Match tuning persistence + a ROI polygon bug fix - proof the git-based
+cross-machine handoff (see below) works end to end.
+
+## Cross-machine workflow (established 2026-07-13)
+
+This file is the primary continuity mechanism between the user's two
+PCs (different absolute repo paths, so this assistant's own per-machine
+memory can't bridge them). Keep it updated each session; rely on it
+(not assistant memory) for anything code/project-state related that the
+*other* machine needs to know.
 
 ## Environment (must re-set every new shell/session on any machine)
 
