@@ -8,11 +8,104 @@ things stand right now."
 
 ## Current state
 
-Working tree clean, `main` up to date with `github/main` (`b19054b4`).
-Nothing uncommitted. Untracked `seam_debug.txt`/`seam_debug2.txt` in the
-repo root are leftover local debug-log dumps from this session's
-diagnosis work - harmless, safe to delete, not gitignored on purpose
-(no need to bother).
+`main` at `c209b822` (lookahead VRAM fix, see its own section below -
+committed and pushed to `github`). Working tree otherwise clean.
+Untracked `seam_debug.txt`/`seam_debug2.txt` in the repo root are
+leftover local debug-log dumps from a previous session's diagnosis
+work - harmless, safe to delete, not gitignored on purpose (no need to
+bother).
+
+**reco-gui.exe rebuilt and smoke-tested tonight** (release build,
+launched, confirmed it reaches a healthy steady state - GPU init,
+zero-copy preview pipeline, calibration/lens-database load, all clean
+in the log with no errors) ahead of the user physically testing it
+tomorrow. Full verification on `main`: `cargo fmt --check` clean,
+`cargo clippy --workspace --all-targets --exclude reco-obs -D warnings`
+clean, `cargo test --workspace --exclude reco-obs` all green except
+two known pre-existing gaps (see "Known pre-existing issues" below,
+both reconfirmed unrelated to tonight's changes - the CUDA ones are a
+hardware/driver gap, and `matroska_reader_sees_partial_writes` fails
+identically with or without tonight's commit, confirmed by testing
+both states directly).
+
+## Upstream contribution branches (prepared 2026-07-14/15, not yet pushed or PR'd)
+
+The `reco-project/video-stitcher` owner asked (via a message relayed
+through this session) for fork-only features back as **separate PRs,
+one per feature**, built fresh off upstream's current `main`. The user
+said to prepare *all* branches locally before any pushing/PR-opening;
+that prep is now done for six independent branches, each verified with
+its own `cargo fmt --check` / `cargo clippy -D warnings` / `cargo test`
+pass **against upstream `origin/main`**, not this fork's `main`:
+
+- `feat/windows-portability-fixes` (`879e379f`) - DirectML EP wiring,
+  Slint/wgpu backend selection, reco-obs build.rs portability fixes.
+  Clean cherry-picks from fork history.
+- `fix/d3d11-stage-frame-unsafe` (`75e724c8`) - a **pre-existing**
+  upstream clippy `-D warnings` failure on Windows (found while
+  testing the branch above, not caused by it) - `D3d11StagingPool::
+  stage_frame` needed `unsafe fn` + a `# Safety` doc comment, plus a
+  few dead-code/cfg-scoping cleanups clippy flagged alongside it.
+- `fix/concat-multisegment-seek` (`23170223`) - the concat-demuxer
+  seek bug fix only; deliberately excludes the original commit's
+  bundled multi-segment-persistence changes, which depend on a
+  "reopen last files on startup" feature that doesn't exist on
+  upstream `main` at all (itself a different, unpicked fork commit).
+- `feat/inapp-roi-editor` (`00e4dfd7`) - cherry-pick + a real conflict-
+  resolution pass against upstream's ROI-editor-adjacent changes
+  (dead debug-log-window code and an unavailable `FlatButton`
+  component both had to be dropped/adapted).
+- `feat/seam-positioning` (`a0126951`) - **full reimplementation**, not
+  a cherry-pick. Upstream's two intervening refactors (`#395` stitch
+  unification, `#403` executor-spine/wgpu-free-engine) deleted
+  `stitch_renderer.rs` and moved render-affecting rig state onto
+  `Calibration.topology` instead of `ViewportConfig`. Rebuilt
+  `seam_offset` + the debug line against the new `StitchCore` /
+  `Executor` / `stitch::geometry::PlaneMap` architecture, with a CPU-
+  side `BlendRule::Smoothstep` mirror and a new GPU-vs-CPU agreement
+  test (`cpu_and_gpu_backends_agree_with_seam_offset`) that actually
+  ran on real GPU hardware this session.
+- `feat/color-matching-multiband` (`c433ded5`) - also a full
+  reimplementation, built on the same seam-positioning-era
+  architecture research. Per-camera exposure/white-balance matching at
+  the seam band, sampling via a freshly-written `plane_uv_to_source_uv`
+  (deliberately *not* reusing `lens::undistorted_to_distorted`, which
+  uses a different/mismatched intrinsics convention - a bug class the
+  original feature hit twice historically). **Caught a real regression
+  via the existing agreement-oracle tests**: defaulting
+  `color_match_enabled` to `true` (matching the original fork design)
+  broke 7 CPU/GPU agreement tests because color matching has no CPU-
+  side mirror; fixed by defaulting to `false` (opt-in), called out
+  explicitly in the commit message as a deliberate departure from the
+  original design. Multi-band spatial blend itself (blur/composite
+  shaders) was **not** included - deferred as its own follow-up, not
+  started.
+  - **Note for next session**: this branch was briefly, accidentally
+    committed on top of `feat/seam-positioning` (a bash pipe swallowed
+    a `git checkout` failure's exit code, so a `||` fallback branch-
+    creation never fired). Caught via `git branch --show-current`
+    before anything was pushed; fixed by re-cherry-picking the color-
+    matching commit onto a fresh branch off `origin/main` and manually
+    resolving the resulting conflicts (each one was "does this
+    reference `seam_offset`/`show_seam_line` from the sibling branch -
+    drop it if so, since this branch must not depend on seam-
+    positioning"). Both branches independently verified afterward
+    (1 commit ahead of `origin/main` each, clean build/test/clippy).
+    Mentioning this only so a future session doesn't need to
+    re-derive it if something looks off - both branches are correct
+    as of `c433ded5`/`a0126951`.
+
+**Not yet done**: `feat/ground-top-tilt` (confirmed to not exist
+upstream at all - the largest remaining feature), audio-sync/playback
+UX, and live AKAZE detection preview were not started this session.
+None of these six branches have been pushed anywhere yet, and no PRs
+have been opened - the user's instruction was prep-only until further
+notice. Actually pushing/opening PRs additionally needs the real,
+GitHub-recognized fork `RufanMelfor/video-stitcher` added as a local
+remote (the day-to-day `github` remote, `RufanMelfor/reco-video-
+stitcher-rig`, is **not** fork-linked to `reco-project/video-stitcher`
+- confirmed via `gh repo view --json isFork,parent` - so GitHub will
+refuse a PR from it directly).
 
 ## What shipped this session (2026-07-14)
 
@@ -116,62 +209,121 @@ machine) - adjust for wherever this is being resumed.
 - Stale open PR #10 on the private fork ("Manual feature matching
   files") - superseded by work already on `main`; probably just needs
   closing.
-- **Export VRAM/lookahead limit - user wants to pick this up next**
-  (2026-07-14, upgraded from "someday" to "next"). Export can fail with
-  "not enough VRAM for a 1.5s lookahead" on lower-VRAM cards with large
-  source footage (e.g. 3840x2880 10-bit: ~66MB/stereo-frame, 71 slots
-  for 1.5s = ~4.7GB, vs. ~3.2GB usable on a 7.6GB card). Not a bug -
-  `reco-core/src/session/vram_pool.rs`'s budget system is deliberately
-  conservative and fails safely with a clear message (see closed
-  upstream #360, already fixed here: preview VRAM no longer
-  double-counted during export). Checked upstream issues - no exact
-  match (#373 is preview-memory-during-playback, different; #379 is a
-  different chained-export bug); no GitHub issue filed yet, user said
-  "not yet" when asked.
 
-  **Root cause, precisely**: the lookahead pool
-  (`reco-core/src/session/vram_pool.rs::VramPool`) holds *raw decoded*
-  stereo frames pre-stitch, preserving the source's native bit depth via
-  `GpuPixelFormat` (`P010`/10-bit for this user's DJI Osmo Action 4 HEVC
-  footage, vs `Nv12`/8-bit for 8-bit sources - see
-  `reco_io::adapters::pixel_format()`). This is a *different* buffer
-  from the final stitched render target, which is already 8-bit
-  (`Rgba8Unorm`) - no contradiction, just two stages of the pipeline.
+## Export VRAM/lookahead limit - implemented, verified, and committed (2026-07-14/15)
 
-  **Competitive research done**: user has "Once Autocam" (a competing
-  product) installed locally
-  (`C:\Users\Rufan\AppData\Local\Programs\Autocam\`). Its own runtime
-  logs (`%LOCALAPPDATA%\Once\Autocam\logs\*.jsonl` - read directly, not
-  reverse-engineered/decompiled) captured a real run against this same
-  user's footage with full config args logged. Key findings:
-  - `decodeProduceAheadWindow=4`, `frameBufferWorkAheadCapacity=8` - a
-    tiny lookahead window (4-8 frames) vs reco's 71-frame/1.5s pool.
-  - `internalPixelFormat=yuv420p` - forces 8-bit internally even though
-    their encoder supports 10-bit (`p010le` is in their own supported-
-    formats log line) - i.e. they deliberately give up bit depth for
-    memory, exactly the lever reco doesn't currently pull.
-  - `ballDetectorResizeWidth=1024` - AI ball detection runs on frames
-    downscaled to 1024px wide, not source resolution.
-  - `outputWidth=2560,outputHeight=1440` - even final output is capped
-    below source resolution.
-  - Architecturally Once's "core" is a PyInstaller-frozen Python process
-    (opencv/cv2, numpy, onnxruntime+DirectML) - not a GPU-VRAM-resident
-    texture pool like reco-core's `wgpu`-based `VramPool`. Their buffer
-    almost certainly lives in system RAM, with the GPU invoked per-frame
-    for AI inference only. **User's own assessment, worth remembering**:
-    Once is noticeably slow because of this CPU/RAM-driven design (the
-    GPU<->CPU round-trips cost real throughput) - so "just copy Once's
-    approach wholesale" is not the goal.
+Full write-up (root cause, competitive research against "Once Autocam",
+full design reasoning including the Windows CUDA-import investigation
+and the R16Unorm render-attachment discovery): `crates/reco-core/
+FRICTION.md` "Lookahead pool VRAM cost scales with source bit depth" -
+kept current, check there first for anything code-level. This section is
+just the session-handoff summary.
 
-  **Proposed direction (agreed with user, not yet started)**: keep
-  reco's speed advantage (everything GPU-resident, no CPU round-trip)
-  but convert *only the lookahead pool* to 8-bit (`Nv12`) instead of
-  preserving source bit depth (`P010`) - that pool only needs to support
-  coarse AI-trajectory prediction, not the final pixel-perfect stitch,
-  so full 10-bit precision there is probably wasted. Roughly halves the
-  pool's VRAM footprint without adding Once's CPU-round-trip slowness.
-  Not yet scoped in detail (e.g. where exactly the P010->NV12 downconvert
-  would happen, whether a downscale should be added too mirroring
-  Once's `ballDetectorResizeWidth`, whether this needs to be opt-in/
-  configurable). This is the next thing to actually implement, per the
-  user - start here next session unless redirected.
+**Shipped this session, committed as `c209b822`:**
+- `session::vram_pool::LookaheadBitDepth` (`Native`/`Reduced8Bit`, opt-in,
+  default `Native` = zero behavior change unless explicitly set via
+  `StitchSession::set_lookahead_bit_depth`).
+- `render::lookahead_downconvert::LookaheadDownconverter` +
+  `shaders/lookahead_downconvert.wgsl` - a small GPU render pass that
+  downconverts a P010/NV12 plane to 8-bit NV12, relying on wgpu's
+  existing Unorm normalization (no manual bit math).
+- `VramPool::copy_from_textures` (Linux/macOS) and the new
+  `VramPool::copy_from_d3d11` (Windows) both branch the same way: same
+  format in/out uses a bit-exact raw copy (`copy_texture_to_texture`,
+  plane-aspect-selected on Windows via the new
+  `D3d11StagingPool::plane_source`); `Reduced8Bit` runs the downconvert
+  pass instead.
+- **Windows (`interop::d3d11::D3d11StagingPool`) is now also
+  implemented**, not deferred: the D3D11-imported pool shrank to a small
+  fixed 4-slot bridge (was scaling with the full lookahead depth); the
+  actual long-lived buffer is now `VramPool`, same as Linux/macOS, fed by
+  `copy_from_d3d11` right after each frame is staged. Rendering
+  (`frame_processing.rs`'s D3D11 buffered-path branch) now reads from
+  `VramPool` bind groups, mirroring Linux's `render_gpu_resident` exactly.
+  A real cross-API sync gap (wgpu DX12 read vs. the next D3D11
+  `CopySubresourceRegion` write to the same shared-handle slot) was found
+  and fixed with an explicit `device.poll(wait_indefinitely())`, matching
+  the same pattern Linux/macOS already used for the identical hazard - see
+  FRICTION.md for the full reasoning.
+- **Verified end-to-end with a real export**, not just unit tests:
+  `reco-cli stitch` against real 3840x2880 10-bit HEVC DJI footage with
+  `--lookahead 1.5 --model <yolo onnx>` (real AI tracking) on this
+  machine's NVIDIA RTX 3060 Ti. At `Native`, reproduced the user's
+  original bug exactly. With `Reduced8Bit` enabled, the VRAM budget line
+  dropped from "needs 4.71 GB" to "needs 2.36 GB" (exactly half, as
+  designed) and the export completed cleanly: 150/150 frames encoded, no
+  hangs, no driver faults, ball tracker acquired a real target, output
+  file valid (correct dimensions/duration/codec) and a decoded frame was
+  visually inspected - normal colors, no banding, no plane-swap
+  corruption.
+- Full verification: `cargo fmt --check`, `cargo clippy --all-targets
+  -- -D warnings`, `cargo test --lib` (164 passed for `reco-core`, only
+  the 2 pre-existing unrelated CUDA hardware-gap failures listed above;
+  17 passed for `reco-io`) all green; `cargo check --workspace --lib
+  --bins --exclude reco-obs` (reco-obs excluded for its own pre-existing
+  OBS-SDK build gap) also green.
+
+**Now user-facing, not just a code-level fix:**
+- `StitchJob::lookahead_reduced_bit_depth(bool)` builder (`reco-io/src/
+  stitch_job.rs`, mirrors the existing `.lookahead()` builder).
+- `reco-cli stitch --lookahead-reduced-bit-depth` (`reco-cli/src/
+  stitch.rs` + `main.rs`).
+- `reco-gui` export panel: "Reduce lookahead memory (8-bit)" checkbox
+  right under the Lookahead slider (`AutocamUiConfig::
+  lookahead_reduced_bit_depth` in `export.rs`, Slint property
+  `export-lookahead-reduced-bit-depth` in `ui/main.slint`).
+- Re-verified with the real flag (not the earlier throwaway env var,
+  which has been removed) on the same real footage - identical result to
+  the original verification run: budget "needs 2.36 GB" instead of
+  "4.71 GB", clean encode, no regressions.
+- **If you tried this in the GUI before and got the old error message:
+  that was a stale, pre-fix `reco-gui.exe` build** (binaries don't hot-
+  reload) - rebuild with `cargo build -p reco-gui --release` and relaunch.
+
+**Not yet done - the remaining gap before this is a fully shipped
+feature, not a correctness concern:**
+- Only tested on this session's Windows/NVIDIA machine. The Linux/macOS
+  side of `VramPool` (which already existed structurally, just gained the
+  `Reduced8Bit` branch) has not been live-tested this session - no
+  Linux/macOS hardware available here. Code-reviewed and passes the full
+  `cargo test`/`clippy` suite, but worth a real run on the other PC (or
+  Linux/macOS CI) before fully trusting it.
+- The VRAM risk slider in reco-gui's export panel (`lookahead-green-max`/
+  `lookahead-red-min`, computed once when footage loads) does not yet
+  recompute when the new checkbox is toggled - so the slider's red/green
+  zone still reflects `Native` sizing even after checking the box. Not
+  wrong (the actual export uses the checkbox correctly, verified above),
+  just a stale visual hint - the fit-recompute block in `main.rs` (~line
+  5337-5372) would need to also re-run on checkbox toggle, not only on
+  file load.
+- No GitHub issue filed upstream yet (user said "not yet" when first
+  asked; now there's a concrete, verified fix to reference if that
+  changes).
+
+**Grayscale-for-AI-only (user asked, answered in-session, not
+implemented)**: doesn't reduce the pool's memory by itself under the
+current architecture, because the pool's *size* is driven by how long
+the final render needs frames held (it re-renders the buffered frames,
+it doesn't just peek at them for AI), not by what AI needs. Grayscale
+would need the same kind of decoupling work as a downscale-for-AI
+optimization (a separate, smaller AI-only buffer, decoupled from the
+render-feeding one) to actually save memory - a plausible *complementary*
+future optimization, not a substitute for this session's fix, and not
+started.
+
+**Next step whenever this is picked up again**: (1) optionally make the
+VRAM risk slider re-fit live on checkbox toggle (polish, not
+correctness), (2) if possible, a quick real-footage run on the other
+(Linux/macOS, if applicable) machine to close the one platform this
+session couldn't verify live, (3) decide whether to open the upstream
+GitHub issue now that there's a working, user-facing fix to point to.
+
+## Autonomous work note (2026-07-14 night → 2026-07-15)
+
+The user went to sleep mid-session with instructions to keep working
+and maximize progress toward a physically-testable GUI by morning, and
+to put the machine to sleep when done or blocked. Everything from the
+"Upstream contribution branches" section above through this point was
+done under that instruction, without further check-ins. `reco-gui.exe`
+was rebuilt and smoke-tested as the final step specifically because
+that was the stated goal for tomorrow.
