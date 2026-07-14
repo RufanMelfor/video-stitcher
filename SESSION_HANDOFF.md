@@ -116,3 +116,18 @@ machine) - adjust for wherever this is being resumed.
 - Stale open PR #10 on the private fork ("Manual feature matching
   files") - superseded by work already on `main`; probably just needs
   closing.
+- Export can fail with "not enough VRAM for a 1.5s lookahead" on
+  lower-VRAM cards with large source footage (e.g. 3840x2880 10-bit:
+  ~66MB/stereo-frame, 71 slots for 1.5s = ~4.7GB, vs. ~3.2GB usable on a
+  7.6GB card). Not a bug - `reco-core/src/session/vram_pool.rs`'s
+  budget system is deliberately conservative and fails safely with a
+  clear message (see closed upstream #360, already fixed here: preview
+  VRAM no longer double-counted during export). User confirmed
+  (2026-07-14) this is a real, known pain point they want fixed
+  eventually, checked upstream issues - no exact match yet (#373 is
+  preview-memory-during-playback, different; #379 is a different
+  chained-export bug). No GitHub issue filed yet - user said "not yet"
+  when asked. The real fix would be a lower-resolution *proxy* buffer
+  for the lookahead pool (it only needs to support AI-trajectory
+  prediction, not the final render, so full source resolution isn't
+  actually required there) - an architecture change, not a quick fix.
