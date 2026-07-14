@@ -116,18 +116,62 @@ machine) - adjust for wherever this is being resumed.
 - Stale open PR #10 on the private fork ("Manual feature matching
   files") - superseded by work already on `main`; probably just needs
   closing.
-- Export can fail with "not enough VRAM for a 1.5s lookahead" on
-  lower-VRAM cards with large source footage (e.g. 3840x2880 10-bit:
-  ~66MB/stereo-frame, 71 slots for 1.5s = ~4.7GB, vs. ~3.2GB usable on a
-  7.6GB card). Not a bug - `reco-core/src/session/vram_pool.rs`'s
-  budget system is deliberately conservative and fails safely with a
-  clear message (see closed upstream #360, already fixed here: preview
-  VRAM no longer double-counted during export). User confirmed
-  (2026-07-14) this is a real, known pain point they want fixed
-  eventually, checked upstream issues - no exact match yet (#373 is
-  preview-memory-during-playback, different; #379 is a different
-  chained-export bug). No GitHub issue filed yet - user said "not yet"
-  when asked. The real fix would be a lower-resolution *proxy* buffer
-  for the lookahead pool (it only needs to support AI-trajectory
-  prediction, not the final render, so full source resolution isn't
-  actually required there) - an architecture change, not a quick fix.
+- **Export VRAM/lookahead limit - user wants to pick this up next**
+  (2026-07-14, upgraded from "someday" to "next"). Export can fail with
+  "not enough VRAM for a 1.5s lookahead" on lower-VRAM cards with large
+  source footage (e.g. 3840x2880 10-bit: ~66MB/stereo-frame, 71 slots
+  for 1.5s = ~4.7GB, vs. ~3.2GB usable on a 7.6GB card). Not a bug -
+  `reco-core/src/session/vram_pool.rs`'s budget system is deliberately
+  conservative and fails safely with a clear message (see closed
+  upstream #360, already fixed here: preview VRAM no longer
+  double-counted during export). Checked upstream issues - no exact
+  match (#373 is preview-memory-during-playback, different; #379 is a
+  different chained-export bug); no GitHub issue filed yet, user said
+  "not yet" when asked.
+
+  **Root cause, precisely**: the lookahead pool
+  (`reco-core/src/session/vram_pool.rs::VramPool`) holds *raw decoded*
+  stereo frames pre-stitch, preserving the source's native bit depth via
+  `GpuPixelFormat` (`P010`/10-bit for this user's DJI Osmo Action 4 HEVC
+  footage, vs `Nv12`/8-bit for 8-bit sources - see
+  `reco_io::adapters::pixel_format()`). This is a *different* buffer
+  from the final stitched render target, which is already 8-bit
+  (`Rgba8Unorm`) - no contradiction, just two stages of the pipeline.
+
+  **Competitive research done**: user has "Once Autocam" (a competing
+  product) installed locally
+  (`C:\Users\Rufan\AppData\Local\Programs\Autocam\`). Its own runtime
+  logs (`%LOCALAPPDATA%\Once\Autocam\logs\*.jsonl` - read directly, not
+  reverse-engineered/decompiled) captured a real run against this same
+  user's footage with full config args logged. Key findings:
+  - `decodeProduceAheadWindow=4`, `frameBufferWorkAheadCapacity=8` - a
+    tiny lookahead window (4-8 frames) vs reco's 71-frame/1.5s pool.
+  - `internalPixelFormat=yuv420p` - forces 8-bit internally even though
+    their encoder supports 10-bit (`p010le` is in their own supported-
+    formats log line) - i.e. they deliberately give up bit depth for
+    memory, exactly the lever reco doesn't currently pull.
+  - `ballDetectorResizeWidth=1024` - AI ball detection runs on frames
+    downscaled to 1024px wide, not source resolution.
+  - `outputWidth=2560,outputHeight=1440` - even final output is capped
+    below source resolution.
+  - Architecturally Once's "core" is a PyInstaller-frozen Python process
+    (opencv/cv2, numpy, onnxruntime+DirectML) - not a GPU-VRAM-resident
+    texture pool like reco-core's `wgpu`-based `VramPool`. Their buffer
+    almost certainly lives in system RAM, with the GPU invoked per-frame
+    for AI inference only. **User's own assessment, worth remembering**:
+    Once is noticeably slow because of this CPU/RAM-driven design (the
+    GPU<->CPU round-trips cost real throughput) - so "just copy Once's
+    approach wholesale" is not the goal.
+
+  **Proposed direction (agreed with user, not yet started)**: keep
+  reco's speed advantage (everything GPU-resident, no CPU round-trip)
+  but convert *only the lookahead pool* to 8-bit (`Nv12`) instead of
+  preserving source bit depth (`P010`) - that pool only needs to support
+  coarse AI-trajectory prediction, not the final pixel-perfect stitch,
+  so full 10-bit precision there is probably wasted. Roughly halves the
+  pool's VRAM footprint without adding Once's CPU-round-trip slowness.
+  Not yet scoped in detail (e.g. where exactly the P010->NV12 downconvert
+  would happen, whether a downscale should be added too mirroring
+  Once's `ballDetectorResizeWidth`, whether this needs to be opt-in/
+  configurable). This is the next thing to actually implement, per the
+  user - start here next session unless redirected.
