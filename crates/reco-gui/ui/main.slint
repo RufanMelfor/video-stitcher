@@ -1163,6 +1163,16 @@ export component RecoApp inherits Window {
     // the horizontal drag delta normalized by preview width (dimensionless
     // - not pixels), so sensitivity doesn't change with window/panel size.
     callback seam-drag(float);
+    // Hit-test against the seam debug line's actual on-screen projection
+    // (uses the live camera yaw/pitch, so it tracks correctly under
+    // pan/tilt, not just when centered). Args: (mouse-x, mouse-y,
+    // preview-box.width, preview-box.height), all in raw box-relative
+    // pixels - NOT the `local-x`/`local-y`/`content-w`/`content-h`
+    // convention `roi-pointer-hit-test` uses, which is specific to
+    // lens-preview mode's own letterbox math (unused/meaningless outside
+    // it). Rust reconstructs the real (non-lens) letterbox itself from the
+    // output aspect ratio.
+    callback seam-hit-test(float, float, float, float) -> bool;
     callback changed-color-match-enabled(bool);
     callback changed-color-match-band-width(float);
     callback changed-color-match-grid-cols(float);
@@ -1171,6 +1181,7 @@ export component RecoApp inherits Window {
     callback changed-color-match-ema-alpha(float);
     callback changed-color-match-max-y-offset(float);
     callback changed-color-match-max-chroma-offset(float);
+    callback reset-color-match();
     callback changed-rig-tilt(float);
     callback changed-rig-roll(float);
     callback changed-sync-offset(int);
@@ -1921,6 +1932,17 @@ export component RecoApp inherits Window {
                         property <bool> local-in-bounds:
                             self.local-x >= 0px && self.local-x <= preview-box.content-w
                             && self.local-y >= 0px && self.local-y <= preview-box.content-h;
+                        // Whether the mouse is currently near the seam debug
+                        // line (hover feedback / drag gating - see
+                        // `seam-hit-test`'s own doc). Only meaningful outside
+                        // lens-preview mode, same scoping the pan/seam-drag
+                        // logic below already uses.
+                        property <bool> hovering-seam-line: false;
+                        // Set on press only when the press itself started on
+                        // the line - a drag started elsewhere stays a normal
+                        // pan/tilt even while Show seam line is on.
+                        property <bool> seam-dragging: false;
+                        mouse-cursor: self.seam-dragging ? grabbing : (self.hovering-seam-line ? grab : default);
 
                         pointer-event(e) => {
                             if (e.kind == PointerEventKind.down) {
@@ -1929,6 +1951,13 @@ export component RecoApp inherits Window {
                                 self.press-x = self.mouse-x;
                                 self.press-y = self.mouse-y;
                                 self.roi-click-pending = false;
+                                self.seam-dragging = !root.lens-preview-active && root.show-seam-line
+                                    && root.seam-hit-test(
+                                        self.mouse-x / 1px,
+                                        self.mouse-y / 1px,
+                                        preview-box.width / 1px,
+                                        preview-box.height / 1px,
+                                    );
 
                                 if (root.lens-preview-active && root.roi-edit-mode && self.local-in-bounds) {
                                     if (e.button == PointerEventButton.right) {
@@ -1965,10 +1994,22 @@ export component RecoApp inherits Window {
                                     );
                                     self.roi-click-pending = false;
                                 }
+                                self.seam-dragging = false;
                             }
                         }
 
                         moved => {
+                            // Hover feedback, independent of press state, so
+                            // the cursor already shows a hand before the user
+                            // clicks.
+                            self.hovering-seam-line = !root.lens-preview-active && root.show-seam-line
+                                && root.seam-hit-test(
+                                    self.mouse-x / 1px,
+                                    self.mouse-y / 1px,
+                                    preview-box.width / 1px,
+                                    preview-box.height / 1px,
+                                );
+
                             if (self.pressed) {
                                 if (root.lens-preview-active && root.roi-edit-mode && self.roi-dragging-index >= 0) {
                                     root.roi-pointer-drag(
@@ -1995,11 +2036,15 @@ export component RecoApp inherits Window {
                                 } else if (root.lens-preview-active) {
                                     root.lens-pan-x += self.mouse-x - self.last-x;
                                     root.lens-pan-y += self.mouse-y - self.last-y;
-                                } else if (root.show-seam-line) {
+                                } else if (root.show-seam-line && self.seam-dragging) {
                                     // Seam-edit mode: horizontal drag nudges the
                                     // seam instead of panning, normalized by
                                     // width so sensitivity is independent of
-                                    // window/panel size.
+                                    // window/panel size. Only reached when the
+                                    // press itself started on the line (see
+                                    // `seam-dragging`) - otherwise this falls
+                                    // through to a normal pan/tilt below, even
+                                    // while Show seam line is on.
                                     root.seam-drag((self.mouse-x - self.last-x) / self.width);
                                 } else {
                                     root.pan(
@@ -2432,7 +2477,7 @@ export component RecoApp inherits Window {
                             minimum: -1.0;
                             maximum: 1.0;
                             value <=> root.cal-intersect;
-                            decimals: 3;
+                            decimals: 5;
                             step: 0.001;
                             changed(v) => { root.changed-cal-intersect(v); }
                         }
@@ -2443,7 +2488,7 @@ export component RecoApp inherits Window {
                             minimum: -0.6;
                             maximum: 0.6;
                             value <=> root.cal-camera-axis-offset;
-                            decimals: 3;
+                            decimals: 5;
                             step: 0.001;
                             changed(v) => { root.changed-cal-camera-axis-offset(v); }
                         }
@@ -2454,7 +2499,7 @@ export component RecoApp inherits Window {
                             minimum: -0.1;
                             maximum: 0.1;
                             value <=> root.cal-x-ty;
-                            decimals: 3;
+                            decimals: 5;
                             step: 0.001;
                             changed(v) => { root.changed-cal-x-ty(v); }
                         }
@@ -2465,7 +2510,7 @@ export component RecoApp inherits Window {
                             minimum: -0.3;
                             maximum: 0.3;
                             value <=> root.cal-ground-tilt-x;
-                            decimals: 3;
+                            decimals: 5;
                             step: 0.001;
                             changed(v) => { root.changed-cal-ground-tilt-x(v); }
                         }
@@ -2476,7 +2521,7 @@ export component RecoApp inherits Window {
                             minimum: -0.3;
                             maximum: 0.3;
                             value <=> root.cal-ground-tilt-z;
-                            decimals: 3;
+                            decimals: 5;
                             step: 0.001;
                             changed(v) => { root.changed-cal-ground-tilt-z(v); }
                         }
@@ -2487,7 +2532,7 @@ export component RecoApp inherits Window {
                             minimum: -0.3;
                             maximum: 0.3;
                             value <=> root.cal-top-tilt-x;
-                            decimals: 3;
+                            decimals: 5;
                             step: 0.001;
                             changed(v) => { root.changed-cal-top-tilt-x(v); }
                         }
@@ -2498,7 +2543,7 @@ export component RecoApp inherits Window {
                             minimum: -0.3;
                             maximum: 0.3;
                             value <=> root.cal-top-tilt-z;
-                            decimals: 3;
+                            decimals: 5;
                             step: 0.001;
                             changed(v) => { root.changed-cal-top-tilt-z(v); }
                         }
@@ -2509,7 +2554,7 @@ export component RecoApp inherits Window {
                             minimum: 0.09;
                             maximum: 0.4;
                             value <=> root.cal-ground-tilt-band-width;
-                            decimals: 2;
+                            decimals: 5;
                             step: 0.01;
                             changed(v) => { root.changed-cal-ground-tilt-band-width(v); }
                         }
@@ -2520,7 +2565,7 @@ export component RecoApp inherits Window {
                             minimum: 0.09;
                             maximum: 0.4;
                             value <=> root.cal-top-tilt-band-width;
-                            decimals: 2;
+                            decimals: 5;
                             step: 0.01;
                             changed(v) => { root.changed-cal-top-tilt-band-width(v); }
                         }
@@ -2641,6 +2686,11 @@ export component RecoApp inherits Window {
                             step: 1;
                             changed(v) => { root.changed-color-match-grid-rows(v); }
                         }
+
+                        FlatButton {
+                            text: "Reset";
+                            clicked => { root.reset-color-match(); }
+                        }
                     }
 
                     if !color-match-section.expanded: Rectangle { height: 1px; background: #2a2a2a; }
@@ -2742,6 +2792,18 @@ export component RecoApp inherits Window {
                                     text: "Full-resolution features (slower)";
                                     checked <=> root.cal-full-res-features;
                                     enabled: !root.calibrating;
+                                }
+                            }
+
+                            FlatButton {
+                                text: "Reset AKAZE";
+                                enabled: !root.calibrating;
+                                clicked => {
+                                    root.cal-akaze-threshold = 0.0001;
+                                    root.cal-detect-y-min = 0.05;
+                                    root.cal-detect-y-max = 0.95;
+                                    root.cal-full-res-features = false;
+                                    root.detect-preview-tick();
                                 }
                             }
                         }
