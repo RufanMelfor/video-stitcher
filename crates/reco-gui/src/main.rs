@@ -39,6 +39,7 @@ use reco_control::pose_control::{PoseControl, PoseControlConfig};
 use reco_control::{ControlIntent, IntentTranslator, PoseIntent};
 use reco_core::calibration::MatchCalibration;
 use reco_core::detect::director::ViewportPosition;
+use reco_core::render::viewport::ViewportConfig;
 use reco_core::wgpu;
 
 use crate::playback::{PlayState, Playback};
@@ -1131,6 +1132,26 @@ impl AppState {
         }
     }
 
+    /// Restore all Auto Color Match tuning knobs to their engineering
+    /// defaults (`ViewportConfig::default()`) - not the values loaded from
+    /// the current calibration file, which is what `reset_calibration`
+    /// does for the layout sliders.
+    fn reset_color_match(&mut self) {
+        let defaults = ViewportConfig::default();
+        if let Some(bridge) = self.bridge.as_mut() {
+            let renderer = bridge.renderer_mut();
+            renderer.set_color_match_enabled(defaults.color_match_enabled);
+            renderer.set_color_match_band_width(defaults.color_match_band_width);
+            renderer.set_color_match_grid_cols(defaults.color_match_grid_cols);
+            renderer.set_color_match_grid_rows(defaults.color_match_grid_rows);
+            renderer.set_color_match_interval_frames(defaults.color_match_interval_frames);
+            renderer.set_color_match_ema_alpha(defaults.color_match_ema_alpha);
+            renderer.set_color_match_max_y_offset(defaults.color_match_max_y_offset);
+            renderer.set_color_match_max_chroma_offset(defaults.color_match_max_chroma_offset);
+            self.preview_dirty = true;
+        }
+    }
+
     fn set_rig_tilt(&mut self, deg: f32) {
         if let Some(cal) = self.calibration.as_mut() {
             cal.rig_tilt = (deg as f64).to_radians();
@@ -1604,6 +1625,25 @@ fn roi_hit_test(pts: &[[f64; 2]], lx: f32, ly: f32, cw: f32, ch: f32) -> Option<
         .filter(|(_, d)| *d <= ROI_HIT_RADIUS_PX)
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(i, _)| i)
+}
+
+/// Hit-test radius (pixels) for grabbing the seam debug line - see
+/// `reco_core::render::renderer::seam_line_screen_points` for how its
+/// on-screen position is computed.
+const SEAM_LINE_HIT_RADIUS_PX: f32 = 8.0;
+
+/// Shortest distance from `(px, py)` to the line segment `(ax,ay)-(bx,by)`,
+/// clamped to the segment itself (not the infinite line through it).
+fn point_to_segment_distance(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    let (dx, dy) = (bx - ax, by - ay);
+    let len_sq = dx * dx + dy * dy;
+    let t = if len_sq > 1e-6 {
+        (((px - ax) * dx + (py - ay) * dy) / len_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (cx, cy) = (ax + t * dx, ay + t * dy);
+    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
 }
 
 /// Index at which to insert a newly-clicked point into an existing ROI
@@ -3424,6 +3464,55 @@ fn main() -> anyhow::Result<()> {
     });
 
     let state_ref = Rc::clone(&state);
+    app.on_seam_hit_test(move |mouse_x, mouse_y, box_w, box_h| {
+        if box_w <= 0.0 || box_h <= 0.0 {
+            return false;
+        }
+        let s = state_ref.borrow();
+        let Some(bridge) = s.bridge.as_ref() else {
+            return false;
+        };
+        let pipeline = bridge.renderer().pipeline();
+        let output_aspect = pipeline.viewport().aspect_ratio();
+        let pose = s.pose.current_pose();
+
+        // Reconstruct Slint's `image-fit: contain` letterbox rect within the
+        // preview box - outside lens-preview mode the displayed Image is
+        // sized to the box directly (no `content-w`/`content-h` properties
+        // exist for this case, unlike lens-preview - those are letter-
+        // boxed against `lens-frame-aspect`, a different, unrelated ratio),
+        // so it's the *box*, not any pre-existing property, that actually
+        // letterboxes to the real output aspect ratio.
+        let box_aspect = box_w / box_h;
+        let (content_w, content_h) = if box_aspect > output_aspect {
+            (box_h * output_aspect, box_h)
+        } else {
+            (box_w, box_w / output_aspect)
+        };
+        let content_x = (box_w - content_w) / 2.0;
+        let content_y = (box_h - content_h) / 2.0;
+        let lx = mouse_x - content_x;
+        let ly = mouse_y - content_y;
+        if lx < 0.0 || lx > content_w || ly < 0.0 || ly > content_h {
+            return false;
+        }
+
+        let Some((top, bottom)) = reco_core::render::renderer::seam_line_screen_points(
+            pipeline.calibration(),
+            pipeline.viewport(),
+            pose.yaw,
+            pose.pitch,
+            output_aspect,
+        ) else {
+            return false;
+        };
+        let top_px = (top.0 * content_w, top.1 * content_h);
+        let bottom_px = (bottom.0 * content_w, bottom.1 * content_h);
+        let dist = point_to_segment_distance(lx, ly, top_px.0, top_px.1, bottom_px.0, bottom_px.1);
+        dist <= SEAM_LINE_HIT_RADIUS_PX
+    });
+
+    let state_ref = Rc::clone(&state);
     let app_weak = app.as_weak();
     app.on_changed_color_match_enabled(move |enabled| {
         state_ref.borrow_mut().set_color_match_enabled(enabled);
@@ -3493,6 +3582,24 @@ fn main() -> anyhow::Result<()> {
     app.on_changed_color_match_max_chroma_offset(move |v| {
         state_ref.borrow_mut().set_color_match_max_chroma_offset(v);
         if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let state_ref = Rc::clone(&state);
+    let app_weak = app.as_weak();
+    app.on_reset_color_match(move || {
+        state_ref.borrow_mut().reset_color_match();
+        if let Some(app) = app_weak.upgrade() {
+            let defaults = ViewportConfig::default();
+            app.set_color_match_enabled(defaults.color_match_enabled);
+            app.set_color_match_band_width(defaults.color_match_band_width);
+            app.set_color_match_grid_cols(defaults.color_match_grid_cols as f32);
+            app.set_color_match_grid_rows(defaults.color_match_grid_rows as f32);
+            app.set_color_match_interval_frames(defaults.color_match_interval_frames as f32);
+            app.set_color_match_ema_alpha(defaults.color_match_ema_alpha);
+            app.set_color_match_max_y_offset(defaults.color_match_max_y_offset);
+            app.set_color_match_max_chroma_offset(defaults.color_match_max_chroma_offset);
             app.set_cal_dirty(true);
         }
     });

@@ -24,12 +24,12 @@
 //! bandwidth) and eliminates CPU-side swscale color conversion entirely.
 
 use super::scene::SceneGeometry;
-use super::viewport::ResolvedViewport;
+use super::viewport::{ResolvedViewport, ViewportConfig};
 use crate::calibration::{CameraParams, MatchCalibration};
 use crate::gpu::GpuContext;
 
 use bytemuck::{Pod, Zeroable};
-use nalgebra::{Matrix4, Perspective3, Point3, UnitQuaternion};
+use nalgebra::{Matrix4, Perspective3, Point3, UnitQuaternion, Vector4};
 use std::cell::RefCell;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
@@ -660,6 +660,110 @@ impl GpuPixelFormat {
             Self::P010 => wgpu::TextureFormat::P010,
         }
     }
+}
+
+// ---- Seam-line screen-space projection (for UI hit-testing) ----
+
+/// Project the seam debug line (see `fisheye.wgsl`'s `show_seam_line`
+/// comment) to normalized screen-space endpoints `(x, y)` in `0.0..=1.0`,
+/// `(0,0)` = top-left, for hit-testing a mouse cursor against it in a GUI.
+///
+/// `yaw`/`pitch` should be the *live* current viewport position (e.g.
+/// `PoseControl::current_pose()`), not assumed to be centered - callers
+/// have this on hand already (it's what the real render uses), so there's
+/// no need to approximate. `rig_tilt`/`rig_roll` come from `viewport`
+/// itself, same as the real render.
+///
+/// `output_aspect` should match the actual displayed preview's aspect
+/// ratio (width / height), not necessarily `viewport.width/height` - the
+/// displayed box may be letterboxed to a different ratio.
+///
+/// Returns `None` when there's nothing meaningful to point at (`blend_width
+/// <= 0.0`, a hard cut with no feathered seam to visualize) or when either
+/// endpoint projects behind the camera.
+pub fn seam_line_screen_points(
+    calibration: &MatchCalibration,
+    viewport: &ViewportConfig,
+    yaw: f32,
+    pitch: f32,
+    output_aspect: f32,
+) -> Option<((f32, f32), (f32, f32))> {
+    if viewport.blend_width <= 0.0 {
+        return None;
+    }
+
+    let plane_aspect = calibration.left.width as f32 / calibration.left.height as f32;
+    let scene = SceneGeometry::from_layout_with_aspect(&calibration.layout, plane_aspect);
+
+    // Same left/right fading convention as `encode_stitch_pass`: `false`
+    // (default) = right fades over a fixed left.
+    let is_right_fading = !viewport.blend_flip_direction;
+    let model = if is_right_fading {
+        scene.model_matrix_right()
+    } else {
+        scene.model_matrix_left()
+    };
+
+    // fisheye.wgsl's seam_dist test doesn't run on the raw vertex uv - the
+    // fragment shader remaps it first: `uv = in.uv * 2.0 - 0.5` (extends
+    // [0,1] to [-0.5,1.5] for undistortion sampling beyond the plane's own
+    // edges), and it's *that* extended `uv.x` the seam_dist formula
+    // compares against `seam_offset`. Solving `in.uv.x * 2 - 0.5 ==
+    // seam_offset` for `in.uv.x`, then converting to local-x via
+    // `quad_vertices`' mapping (`local_x = in.uv.x - 0.5`), collapses to
+    // `(seam_offset - 0.5) / 2` - missing this factor of 2 was a real bug
+    // (confirmed against a real calibration: computed column landed at the
+    // wrong screen fraction by a wide, non-approximation-sized margin).
+    // The fading plane's seam-adjacent edge sits at (extended) uv.x=0 if
+    // it's the right plane, uv.x=1 if it's the left plane (see the
+    // shader's own comment for the geometric reason), with `seam_offset`
+    // shifting it the same way in both cases.
+    let seam_offset = viewport.seam_offset;
+    let local_x = if is_right_fading {
+        (seam_offset - 0.5) / 2.0
+    } else {
+        (0.5 - seam_offset) / 2.0
+    };
+    let half_height = 0.5 / plane_aspect;
+
+    let projection = opengl_to_wgpu_matrix()
+        * Perspective3::new(
+            output_aspect,
+            viewport.fov_degrees.to_radians(),
+            NEAR_PLANE,
+            FAR_PLANE,
+        )
+        .to_homogeneous();
+    let view = view_matrix(
+        &scene.camera_position,
+        yaw,
+        pitch,
+        viewport.rig_tilt,
+        viewport.rig_roll,
+    );
+    let mvp = projection * view * model;
+
+    let top = project_to_screen_fraction(&mvp, local_x, half_height)?;
+    let bottom = project_to_screen_fraction(&mvp, local_x, -half_height)?;
+    Some((top, bottom))
+}
+
+/// Project one local-space point on a plane (z=0) through an MVP matrix to
+/// a normalized `0.0..=1.0` screen fraction, `(0,0)` = top-left. `None` if
+/// the point is behind the camera (`w <= 0`), where the perspective divide
+/// is meaningless.
+fn project_to_screen_fraction(
+    mvp: &Matrix4<f32>,
+    local_x: f32,
+    local_y: f32,
+) -> Option<(f32, f32)> {
+    let clip = mvp * Vector4::new(local_x, local_y, 0.0, 1.0);
+    if clip.w <= 1e-4 {
+        return None;
+    }
+    let ndc_x = clip.x / clip.w;
+    let ndc_y = clip.y / clip.w;
+    Some(((ndc_x + 1.0) * 0.5, (1.0 - ndc_y) * 0.5))
 }
 
 /// The GPU renderer for panoramic stitching.
@@ -2487,5 +2591,223 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn seam_test_calibration() -> MatchCalibration {
+        let camera = CameraParams {
+            width: 1920,
+            height: 1080,
+            fx: 900.0,
+            fy: 900.0,
+            cx: 960.0,
+            cy: 540.0,
+            d: [0.0; 4],
+        };
+        MatchCalibration {
+            left: camera.clone(),
+            right: camera,
+            layout: crate::calibration::PlaneLayout {
+                camera_axis_offset: 0.24,
+                intersect: 0.54,
+                x_ty: 0.0,
+                x_rz: 0.0,
+                z_rx: 0.0,
+                x_rx: 0.0,
+                z_rz: 0.0,
+                ground_tilt_x: 0.0,
+                ground_tilt_z: 0.0,
+                top_tilt_x: 0.0,
+                top_tilt_z: 0.0,
+                ground_tilt_band_width: 0.16,
+                top_tilt_band_width: 0.16,
+            },
+            rig_tilt: 0.0,
+            rig_roll: 0.0,
+            sync_offset: 0,
+            field_roi: None,
+            lens_correction_amount: 1.0,
+            blend_width: 0.05,
+            blend_flip_direction: false,
+            seam_offset: 0.0,
+            multiband_blend_enabled: false,
+            color_match_enabled: true,
+            color_match_band_width: 0.15,
+            color_match_grid_cols: 8,
+            color_match_grid_rows: 16,
+            color_match_interval_frames: 15,
+            color_match_ema_alpha: 0.15,
+            color_match_max_y_offset: 0.06,
+            color_match_max_chroma_offset: 0.04,
+        }
+    }
+
+    #[test]
+    fn seam_line_screen_points_none_when_blend_width_zero() {
+        let cal = seam_test_calibration();
+        let mut viewport = ViewportConfig {
+            seam_offset: cal.seam_offset,
+            blend_flip_direction: cal.blend_flip_direction,
+            blend_width: cal.blend_width,
+            ..ViewportConfig::default()
+        };
+        viewport.blend_width = 0.0;
+        assert!(seam_line_screen_points(&cal, &viewport, 0.0, 0.0, 16.0 / 9.0).is_none());
+    }
+
+    #[test]
+    fn seam_line_screen_points_returns_finite_points_near_center() {
+        let cal = seam_test_calibration();
+        let viewport = ViewportConfig {
+            seam_offset: cal.seam_offset,
+            blend_flip_direction: cal.blend_flip_direction,
+            blend_width: cal.blend_width,
+            ..ViewportConfig::default()
+        };
+        let (top, bottom) = seam_line_screen_points(&cal, &viewport, 0.0, 0.0, 16.0 / 9.0)
+            .expect("seam offset 0 straight ahead should project on-screen");
+        for (x, y) in [top, bottom] {
+            assert!(x.is_finite() && y.is_finite());
+            // Loosely bounded - a straight-ahead seam at the default rig
+            // geometry should land roughly within the visible frame, not
+            // off in the extreme numeric distance.
+            assert!((-1.0..=2.0).contains(&x), "x={x} out of expected range");
+            assert!((-1.0..=2.0).contains(&y), "y={y} out of expected range");
+        }
+    }
+
+    #[test]
+    fn seam_line_screen_points_shifts_monotonically_with_seam_offset() {
+        let cal = seam_test_calibration();
+        let base_viewport = ViewportConfig {
+            blend_flip_direction: cal.blend_flip_direction,
+            blend_width: cal.blend_width,
+            ..ViewportConfig::default()
+        };
+
+        let at = |offset: f32| {
+            let viewport = ViewportConfig {
+                seam_offset: offset,
+                ..base_viewport.clone()
+            };
+            seam_line_screen_points(&cal, &viewport, 0.0, 0.0, 16.0 / 9.0)
+                .expect("should project")
+                .0
+                .0
+        };
+
+        let x_neg = at(-0.1);
+        let x_zero = at(0.0);
+        let x_pos = at(0.1);
+        assert!(
+            x_neg < x_zero && x_zero < x_pos,
+            "seam_offset should shift the projected x monotonically: {x_neg} < {x_zero} < {x_pos}"
+        );
+    }
+
+    #[test]
+    fn seam_line_screen_points_tracks_yaw_not_just_straight_ahead() {
+        let cal = seam_test_calibration();
+        let viewport = ViewportConfig {
+            seam_offset: cal.seam_offset,
+            blend_flip_direction: cal.blend_flip_direction,
+            blend_width: cal.blend_width,
+            ..ViewportConfig::default()
+        };
+        let x_at = |yaw: f32| {
+            seam_line_screen_points(&cal, &viewport, yaw, 0.0, 16.0 / 9.0)
+                .expect("should project")
+                .0
+                .0
+        };
+        let straight = x_at(0.0);
+        let panned = x_at(0.3);
+        assert!(
+            (straight - panned).abs() > 0.05,
+            "panning yaw should measurably move the projected seam column: \
+             straight={straight} panned={panned}"
+        );
+    }
+
+    #[test]
+    fn seam_line_screen_points_matches_real_screenshot_measurement() {
+        let camera = CameraParams {
+            width: 3840,
+            height: 2880,
+            fx: 1457.07373046875,
+            fy: 1457.07373046875,
+            cx: 1920.0,
+            cy: 1440.0,
+            d: [
+                0.15513110160827637,
+                0.1371408998966217,
+                -0.0938614010810852,
+                0.0041704000905156136,
+            ],
+        };
+        let cal = MatchCalibration {
+            left: camera.clone(),
+            right: camera,
+            layout: crate::calibration::PlaneLayout {
+                camera_axis_offset: 0.18876110017299652,
+                intersect: 0.656978189945221,
+                x_ty: -0.00602530796897377,
+                x_rz: 0.004217210506111289,
+                z_rx: -0.02375206433034046,
+                x_rx: 0.0,
+                z_rz: 0.0,
+                ground_tilt_x: -0.007000000681728125,
+                ground_tilt_z: 0.0010000000474974513,
+                top_tilt_x: 0.0,
+                top_tilt_z: 0.0,
+                ground_tilt_band_width: 0.16,
+                top_tilt_band_width: 0.16,
+            },
+            rig_tilt: 0.0,
+            rig_roll: 0.0,
+            sync_offset: 3,
+            field_roi: None,
+            lens_correction_amount: 1.0,
+            blend_width: 0.19363637,
+            blend_flip_direction: false,
+            seam_offset: 0.15829112,
+            multiband_blend_enabled: true,
+            color_match_enabled: true,
+            color_match_band_width: 0.4,
+            color_match_grid_cols: 8,
+            color_match_grid_rows: 16,
+            color_match_interval_frames: 15,
+            color_match_ema_alpha: 0.15,
+            color_match_max_y_offset: 0.06,
+            color_match_max_chroma_offset: 0.0,
+        };
+        let viewport = ViewportConfig {
+            seam_offset: cal.seam_offset,
+            blend_flip_direction: cal.blend_flip_direction,
+            blend_width: cal.blend_width,
+            fov_degrees: 75.0,
+            ..ViewportConfig::default()
+        };
+
+        // Real-world ground truth: a screenshot of this exact calibration
+        // with "Show seam line" on had the red line's reddest pixel at
+        // x=779-780 out of a 1020px-wide, 0-offset content box (measured
+        // programmatically, not eyeballed) - i.e. a screen fraction of
+        // ~0.499-0.501. This test exists to catch a regression back to the
+        // bug this was fixed against (missing the fragment shader's `uv =
+        // in.uv * 2.0 - 0.5` remap, which put the computed column at 0.36
+        // instead of ~0.50 - a 140px error, not a rounding difference).
+        let (top, bottom) = seam_line_screen_points(&cal, &viewport, 0.0, 0.0, 1020.0 / 688.0)
+            .expect("should project");
+        eprintln!("top_frac={top:?} bottom_frac={bottom:?}");
+        assert!(
+            (top.0 - 0.5).abs() < 0.02,
+            "expected top.x near 0.5 (measured ~0.499-0.501 from a real screenshot), got {}",
+            top.0
+        );
+        assert!(
+            (bottom.0 - 0.5).abs() < 0.02,
+            "expected bottom.x near 0.5, got {}",
+            bottom.0
+        );
     }
 }
