@@ -8,12 +8,12 @@ things stand right now."
 
 ## Current state
 
-`main` at `c209b822` (lookahead VRAM fix, see its own section below -
-committed and pushed to `github`). Working tree otherwise clean.
-Untracked `seam_debug.txt`/`seam_debug2.txt` in the repo root are
-leftover local debug-log dumps from a previous session's diagnosis
-work - harmless, safe to delete, not gitignored on purpose (no need to
-bother).
+`main` at `63d733e5` (no-ROI export confirmation, see the 9th upstream
+branch entry below - committed, not yet pushed to `github`). Working
+tree otherwise clean. Untracked `seam_debug.txt`/`seam_debug2.txt` in
+the repo root are leftover local debug-log dumps from a previous
+session's diagnosis work - harmless, safe to delete, not gitignored on
+purpose (no need to bother).
 
 **reco-gui.exe rebuilt and smoke-tested tonight** (release build,
 launched, confirmed it reaches a healthy steady state - GPU init,
@@ -115,6 +115,24 @@ the public render API - only live setters were needed (mirrors
 creation scare as before (huge vendored tree, harmless, see
 [[feedback_git_object_corruption]]-adjacent pattern) - recovered via a
 user-confirmed `git reset --hard HEAD`, no data lost.
+
+**9th branch added 2026-07-15**: `feat/export-roi-confirm` (`272f8db9`)
+- Start Export now checks the pre-existing `has-roi` flag and, if no
+field ROI is set, shows a confirm/cancel modal ("Export Anyway" /
+"Cancel") instead of silently starting. User-requested: "voor dat er
+een export plaats vindt controleer eerst of er een ROI aanwezig is. Zo
+niet geef een popup melding of je wel/niet door wilt gaan." Smallest
+port of the batch - pure Slint UI, no Rust logic changed (`has-roi` and
+its sync sites already existed upstream), so no CPU/GPU agreement
+concerns. Mirrors the existing `bug-dialog-open` modal pattern, using
+plain `Button` (upstream doesn't have the fork's `FlatButton` restyle).
+Verified against `origin/main`: build clean, `cargo test -p reco-gui`
+6/6 passed; clippy showed only the same pre-existing `reco-core`
+dead-code/unsafe-ptr failures already tracked on
+`fix/d3d11-stage-frame-unsafe` (confirmed via `git diff origin/main
+--stat` showing this branch touches only `main.slint`). Also applied to
+this fork's own `main` first (`63d733e5`), same as the export-metadata
+feature's workflow.
 
 **Not yet done**: audio-sync/playback UX and live AKAZE detection
 preview were not started this session. None of these branches have been
