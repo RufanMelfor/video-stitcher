@@ -24,13 +24,11 @@
 //! near-field seam residual, and this renderer exists to test whether a
 //! direct pixel-comparison (ZNCC) objective can refine it further.
 
-use super::renderer::{
-    GroundTilt, InputFormat, TopTilt, build_gpu_uniforms, opengl_to_wgpu_matrix,
-};
+use super::renderer::{GroundTilt, InputFormat, TopTilt, build_gpu_uniforms};
 use super::scene::SceneGeometry;
-use crate::calibration::CameraParams;
+use crate::calibration::Lens;
+use crate::geometry::{VirtualCamera, opengl_to_wgpu_matrix};
 use crate::gpu::GpuContext;
-use crate::projection::VirtualCamera;
 
 use bytemuck::{Pod, Zeroable};
 use nalgebra::{Isometry3, Perspective3, Point3};
@@ -369,19 +367,19 @@ impl SingleCameraRenderer {
     /// coverage mask described in the module doc.
     ///
     /// `ground_tilt`: this plane's near-field ground correction, if any -
-    /// see `PlaneLayout::ground_tilt_x`/`ground_tilt_z`. Pass
+    /// see `Topology::ground_tilt_x`/`ground_tilt_z`. Pass
     /// [`GroundTilt::default()`] for the pre-existing behavior (no
     /// correction).
     ///
     /// `top_tilt`: this plane's top-of-frame correction, if any - see
-    /// `PlaneLayout::top_tilt_x`/`top_tilt_z`. Pass [`TopTilt::default()`]
+    /// `Topology::top_tilt_x`/`top_tilt_z`. Pass [`TopTilt::default()`]
     /// for no correction.
     #[allow(clippy::too_many_arguments)]
     pub fn render_and_readback(
         &self,
         gpu: &GpuContext,
         scene: &SceneGeometry,
-        camera_params: &CameraParams,
+        camera_params: &Lens,
         is_right: bool,
         fov_degrees: f32,
         y: &[u8],

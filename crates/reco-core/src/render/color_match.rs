@@ -18,7 +18,7 @@
 //! bug.
 
 use super::renderer::ColorCorrection;
-use crate::calibration::CameraParams;
+use crate::calibration::Lens;
 use crate::lens::undistorted_to_distorted;
 
 /// Tunable knobs for [`ColorMatchState`]. Flat fields on
@@ -145,8 +145,8 @@ impl ColorMatchState {
         right: (&[u8], &[u8], &[u8]),
         width: u32,
         height: u32,
-        left_params: &CameraParams,
-        right_params: &CameraParams,
+        left_params: &Lens,
+        right_params: &Lens,
         is_full_range: bool,
         params: &ColorMatchParams,
     ) -> ColorCorrection {
@@ -186,8 +186,8 @@ impl ColorMatchState {
         right: (&[u8], &[u8]),
         width: u32,
         height: u32,
-        left_params: &CameraParams,
-        right_params: &CameraParams,
+        left_params: &Lens,
+        right_params: &Lens,
         is_full_range: bool,
         params: &ColorMatchParams,
     ) -> ColorCorrection {
@@ -346,7 +346,7 @@ fn nv12_sampler<'a>(
 fn measure_band_mean(
     width: u32,
     height: u32,
-    params: &CameraParams,
+    params: &Lens,
     is_right: bool,
     is_full_range: bool,
     match_params: &ColorMatchParams,
@@ -442,16 +442,17 @@ fn decode_transfer_yuv(y_raw: u8, u_raw: u8, v_raw: u8, is_full_range: bool) -> 
 mod tests {
     use super::*;
 
-    fn test_params() -> CameraParams {
+    fn test_params() -> Lens {
         // GoPro HERO10-ish 4K KB4 coefficients, same as other reco-core tests.
-        CameraParams {
+        Lens {
             width: 640,
             height: 480,
             fx: 320.0,
             fy: 320.0,
             cx: 320.0,
             cy: 240.0,
-            d: [0.0342, 0.0677, -0.0741, 0.0299],
+            distortion: [0.0342, 0.0677, -0.0741, 0.0299],
+            correction: 1.0,
         }
     }
 
@@ -604,14 +605,15 @@ mod tests {
         // undefined point: use a params set whose band maps entirely off
         // the (tiny) frame instead - a 2x2 frame with normal intrinsics has
         // almost all its KB4-mapped band fall outside bounds.
-        let params = CameraParams {
+        let params = Lens {
             width: 2,
             height: 2,
             fx: 320.0,
             fy: 320.0,
             cx: 320.0,
             cy: 240.0,
-            d: [0.0342, 0.0677, -0.0741, 0.0299],
+            distortion: [0.0342, 0.0677, -0.0741, 0.0299],
+            correction: 1.0,
         };
         let y = vec![0u8; 4];
         let u = vec![0u8; 1];

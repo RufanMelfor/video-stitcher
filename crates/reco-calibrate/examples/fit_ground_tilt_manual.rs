@@ -54,7 +54,7 @@
 use reco_calibrate::geometry::{self, OptParams};
 use reco_calibrate::line_seam::ManualLinesFile;
 use reco_calibrate::types::{FrameMatches, MatchedPoint};
-use reco_core::calibration::MatchCalibration;
+use reco_core::calibration::{Calibration, Framing, Topology};
 
 /// Plane-y magnitude above which a point counts as "near-field" - matches
 /// `fit_ground_tilt.rs` and this project's `sigma_y` scale convention.
@@ -77,14 +77,14 @@ fn main() {
     let manual_lines_path = &args[2];
     let akaze_points_path = flag_value(&args[3..], "--matched-points");
 
-    let cal: MatchCalibration = {
+    let cal: Calibration = {
         let s = std::fs::read_to_string(match_json_path)
             .unwrap_or_else(|e| panic!("failed to read {match_json_path}: {e}"));
-        serde_json::from_str(&s).unwrap_or_else(|e| {
-            panic!("failed to parse {match_json_path} as MatchCalibration: {e}")
-        })
+        serde_json::from_str(&s)
+            .unwrap_or_else(|e| panic!("failed to parse {match_json_path} as Calibration: {e}"))
     };
-    let base = cal.layout.clone();
+    let base_topology = cal.topology.clone();
+    let base_framing = cal.framing.clone();
 
     let manual: ManualLinesFile = {
         let s = std::fs::read_to_string(manual_lines_path)
@@ -94,16 +94,16 @@ fn main() {
         })
     };
 
-    let k_x = cal.right.ground_tilt_k(); // x-plane = right camera
-    let k_z = cal.left.ground_tilt_k(); // z-plane = left camera
+    let k_x = cal.lenses[1].ground_tilt_k(); // x-plane = right camera
+    let k_z = cal.lenses[0].ground_tilt_k(); // z-plane = left camera
     eprintln!("Focal-scale constants from match.json: k_x={k_x:.4} k_z={k_z:.4}");
 
     let manual_points = manual.to_matched_points(
-        cal.left.width,
-        cal.left.height,
-        cal.right.width,
-        cal.right.height,
-        base.intersect,
+        cal.lenses[0].width,
+        cal.lenses[0].height,
+        cal.lenses[1].width,
+        cal.lenses[1].height,
+        base_topology.intersect,
     );
     eprintln!(
         "Loaded {} manually-clicked line(s) -> {} seam-continuity point(s)",
@@ -115,7 +115,8 @@ fn main() {
         std::process::exit(1);
     }
 
-    let base_err = summed_reprojection_error(&manual_points, &base, 0.0, 0.0, k_x, k_z);
+    let base_err =
+        summed_reprojection_error(&manual_points, &base_topology, &base_framing, 0.0, 0.0, k_x, k_z);
     eprintln!(
         "\nBaseline (ground_tilt_x=ground_tilt_z=0.0): manual continuity error = {base_err:.8}"
     );
@@ -128,10 +129,10 @@ fn main() {
              split it into two.",
             manual_points.len()
         );
-        let (c, err) = grid_search_1d(&manual_points, &base, k_x, k_z);
+        let (c, err) = grid_search_1d(&manual_points, &base_topology, &base_framing, k_x, k_z);
         (c, c, err)
     } else {
-        grid_search_2d(&manual_points, &base, k_x, k_z)
+        grid_search_2d(&manual_points, &base_topology, &base_framing, k_x, k_z)
     };
 
     // A fit landing exactly on the grid edge isn't a converged answer - it
@@ -181,8 +182,17 @@ fn main() {
             .copied()
             .filter(|p| !is_near(p))
             .collect();
-        let far_before = summed_reprojection_error(&far, &base, 0.0, 0.0, k_x, k_z);
-        let far_after = summed_reprojection_error(&far, &base, best_cx, best_cz, k_x, k_z);
+        let far_before =
+            summed_reprojection_error(&far, &base_topology, &base_framing, 0.0, 0.0, k_x, k_z);
+        let far_after = summed_reprojection_error(
+            &far,
+            &base_topology,
+            &base_framing,
+            best_cx,
+            best_cz,
+            k_x,
+            k_z,
+        );
         eprintln!(
             "\nFar-field cross-check ({} AKAZE far-field points from {path}):",
             far.len()
@@ -202,9 +212,11 @@ fn main() {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn summed_reprojection_error(
     points: &[MatchedPoint],
-    base: &reco_core::calibration::PlaneLayout,
+    base_topology: &Topology,
+    base_framing: &Framing,
     cx: f64,
     cz: f64,
     k_x: f64,
@@ -214,13 +226,13 @@ fn summed_reprojection_error(
         return 0.0;
     }
     let params = OptParams {
-        x_ty: base.x_ty,
-        intersect: base.intersect,
-        cam_d: base.camera_axis_offset,
-        x_rz: base.x_rz,
-        z_rx: base.z_rx,
-        z_rz: Some(base.z_rz),
-        x_rx: Some(base.x_rx),
+        x_ty: base_topology.x_ty,
+        intersect: base_topology.intersect,
+        cam_d: base_framing.axis_offset,
+        x_rz: base_topology.x_rz,
+        z_rx: base_topology.z_rx,
+        z_rz: Some(base_topology.z_rz),
+        x_rx: Some(base_topology.x_rx),
         ground_tilt_x: if cx == 0.0 { None } else { Some(cx) },
         ground_tilt_z: if cz == 0.0 { None } else { Some(cz) },
         k_x,
@@ -233,7 +245,8 @@ fn summed_reprojection_error(
 
 fn grid_search_2d(
     points: &[MatchedPoint],
-    base: &reco_core::calibration::PlaneLayout,
+    base_topology: &Topology,
+    base_framing: &Framing,
     k_x: f64,
     k_z: f64,
 ) -> (f64, f64, f64) {
@@ -243,7 +256,8 @@ fn grid_search_2d(
         let cx = -GRID_RANGE + i as f64 * GRID_STEP;
         for j in 0..steps {
             let cz = -GRID_RANGE + j as f64 * GRID_STEP;
-            let err = summed_reprojection_error(points, base, cx, cz, k_x, k_z);
+            let err =
+                summed_reprojection_error(points, base_topology, base_framing, cx, cz, k_x, k_z);
             if err < best.2 {
                 best = (cx, cz, err);
             }
@@ -254,7 +268,8 @@ fn grid_search_2d(
 
 fn grid_search_1d(
     points: &[MatchedPoint],
-    base: &reco_core::calibration::PlaneLayout,
+    base_topology: &Topology,
+    base_framing: &Framing,
     k_x: f64,
     k_z: f64,
 ) -> (f64, f64) {
@@ -262,7 +277,7 @@ fn grid_search_1d(
     let mut best = (0.0, f64::INFINITY);
     for i in 0..steps {
         let c = -GRID_RANGE + i as f64 * GRID_STEP;
-        let err = summed_reprojection_error(points, base, c, c, k_x, k_z);
+        let err = summed_reprojection_error(points, base_topology, base_framing, c, c, k_x, k_z);
         if err < best.1 {
             best = (c, err);
         }

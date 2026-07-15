@@ -40,7 +40,7 @@
 use reco_calibrate::geometry::{self, OptParams};
 use reco_calibrate::optimizer;
 use reco_calibrate::types::{CalibrationConfig, FrameMatches, MatchedPoint};
-use reco_core::calibration::PlaneLayout;
+use reco_core::calibration::{Framing, Topology};
 
 /// Plane-y magnitude above which a point counts as "near-field" - matches
 /// the `sigma_y` scale used throughout this project's seam weighting.
@@ -54,7 +54,8 @@ struct Candidate {
     cz: f64,
     near_err: f64,
     far_err: f64,
-    layout: PlaneLayout,
+    topology: Topology,
+    framing: Framing,
 }
 
 fn main() {
@@ -101,12 +102,13 @@ fn main() {
     let config = CalibrationConfig::default();
 
     eprintln!("\n=== Baseline (today's flat-plane model, cx=cz=0.0) ===");
-    let (baseline_layout, baseline_residual) =
+    let (baseline_topology, baseline_framing, baseline_residual) =
         optimizer::optimize(&points, &config).expect("baseline optimizer should converge");
-    let (base_near, base_far) = split_residual(&baseline_layout, &near, &far, 0.0, 0.0);
+    let (base_near, base_far) = split_residual(&baseline_topology, &baseline_framing, &near, &far, 0.0, 0.0);
     print_result(
         "cx=+0.00 cz=+0.00 (baseline)",
-        &baseline_layout,
+        &baseline_topology,
+        &baseline_framing,
         base_near,
         base_far,
     );
@@ -139,18 +141,19 @@ fn main() {
                 })
                 .collect();
 
-            let Ok((layout, _residual)) = optimizer::optimize(&warped, &config) else {
+            let Ok((topology, framing, _residual)) = optimizer::optimize(&warped, &config) else {
                 failed += 1;
                 continue;
             };
 
-            let (near_err, far_err) = split_residual(&layout, &near, &far, cx, cz);
+            let (near_err, far_err) = split_residual(&topology, &framing, &near, &far, cx, cz);
             results.push(Candidate {
                 cx,
                 cz,
                 near_err,
                 far_err,
-                layout,
+                topology,
+                framing,
             });
         }
     }
@@ -167,7 +170,8 @@ fn main() {
     for cand in results.iter().take(10) {
         print_result(
             &format!("cx={:+.2} cz={:+.2}", cand.cx, cand.cz),
-            &cand.layout,
+            &cand.topology,
+            &cand.framing,
             cand.near_err,
             cand.far_err,
         );
@@ -178,24 +182,24 @@ fn main() {
             "\n=== Best candidate: cx={:+.3} cz={:+.3} ===",
             best.cx, best.cz
         );
-        print_result("best", &best.layout, best.near_err, best.far_err);
+        print_result("best", &best.topology, &best.framing, best.near_err, best.far_err);
 
         eprintln!("\nCompare against baseline core parameters:");
         eprintln!(
             "  baseline: cam_d={:.4} intersect={:.4} x_ty={:.5} x_rz={:.4} z_rx={:.4}",
-            baseline_layout.camera_axis_offset,
-            baseline_layout.intersect,
-            baseline_layout.x_ty,
-            baseline_layout.x_rz,
-            baseline_layout.z_rx,
+            baseline_framing.axis_offset,
+            baseline_topology.intersect,
+            baseline_topology.x_ty,
+            baseline_topology.x_rz,
+            baseline_topology.z_rx,
         );
         eprintln!(
             "  best:     cam_d={:.4} intersect={:.4} x_ty={:.5} x_rz={:.4} z_rx={:.4}",
-            best.layout.camera_axis_offset,
-            best.layout.intersect,
-            best.layout.x_ty,
-            best.layout.x_rz,
-            best.layout.z_rx,
+            best.framing.axis_offset,
+            best.topology.intersect,
+            best.topology.x_ty,
+            best.topology.x_rz,
+            best.topology.z_rx,
         );
 
         eprintln!("\nFar-field residual range across all candidates:");
@@ -211,11 +215,11 @@ fn main() {
 
         let cam_d_min = results
             .iter()
-            .map(|c| c.layout.camera_axis_offset)
+            .map(|c| c.framing.axis_offset)
             .fold(f64::INFINITY, f64::min);
         let cam_d_max = results
             .iter()
-            .map(|c| c.layout.camera_axis_offset)
+            .map(|c| c.framing.axis_offset)
             .fold(f64::NEG_INFINITY, f64::max);
         eprintln!("cam_d range across all candidates: min={cam_d_min:.4} max={cam_d_max:.4}");
 
@@ -232,33 +236,34 @@ fn main() {
     }
 }
 
-fn print_result(label: &str, layout: &PlaneLayout, near_err: f64, far_err: f64) {
+fn print_result(label: &str, topology: &Topology, framing: &Framing, near_err: f64, far_err: f64) {
     eprintln!(
         "  {label}: near={near_err:.6} far={far_err:.6}  \
          cam_d={:.4} intersect={:.4} x_ty={:.5} x_rz={:.4} z_rx={:.4}",
-        layout.camera_axis_offset, layout.intersect, layout.x_ty, layout.x_rz, layout.z_rx,
+        framing.axis_offset, topology.intersect, topology.x_ty, topology.x_rz, topology.z_rx,
     );
 }
 
-/// Evaluate the fitted layout's (unweighted) reprojection error separately
-/// on the near-field and far-field point buckets, using `ground_tilt_x =
-/// Some(cx)` / `ground_tilt_z = Some(cz)` so the evaluation matches exactly
-/// what the optimizer minimized against the pre-warped points (warping the
-/// input once, up front, is mathematically identical to
-/// `apply_transformations` warping internally).
+/// Evaluate the fitted topology/framing's (unweighted) reprojection error
+/// separately on the near-field and far-field point buckets, using
+/// `ground_tilt_x = Some(cx)` / `ground_tilt_z = Some(cz)` so the
+/// evaluation matches exactly what the optimizer minimized against the
+/// pre-warped points (warping the input once, up front, is mathematically
+/// identical to `apply_transformations` warping internally).
 fn split_residual(
-    layout: &PlaneLayout,
+    topology: &Topology,
+    framing: &Framing,
     near: &[MatchedPoint],
     far: &[MatchedPoint],
     cx: f64,
     cz: f64,
 ) -> (f64, f64) {
     let params = OptParams {
-        x_ty: layout.x_ty,
-        intersect: layout.intersect,
-        cam_d: layout.camera_axis_offset,
-        x_rz: layout.x_rz,
-        z_rx: layout.z_rx,
+        x_ty: topology.x_ty,
+        intersect: topology.intersect,
+        cam_d: framing.axis_offset,
+        x_rz: topology.x_rz,
+        z_rx: topology.z_rx,
         z_rz: None,
         x_rx: None,
         ground_tilt_x: if cx == 0.0 { None } else { Some(cx) },

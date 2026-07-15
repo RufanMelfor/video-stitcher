@@ -50,7 +50,7 @@
 use argmin::core::{CostFunction, Error as ArgminError, Executor, State};
 use argmin::solver::neldermead::NelderMead;
 use reco_calibrate::photometric::{self, OverlapMask, ZnccReport};
-use reco_core::calibration::{CameraParams, MatchCalibration};
+use reco_core::calibration::{Calibration, Lens};
 use reco_core::gpu::GpuContext;
 use reco_core::render::scene::SceneGeometry;
 use reco_core::render::single_camera::SingleCameraRenderer;
@@ -133,9 +133,9 @@ fn main() {
     std::fs::create_dir_all(output_dir).expect("failed to create output_dir");
 
     let json_str = std::fs::read_to_string(match_json_path).expect("failed to read match.json");
-    let cal: MatchCalibration = serde_json::from_str(&json_str).expect("invalid match.json");
-    let baseline_left = cal.left.clone();
-    let baseline_right = cal.right.clone();
+    let cal: Calibration = serde_json::from_str(&json_str).expect("invalid match.json");
+    let baseline_left = cal.lenses[0].clone();
+    let baseline_right = cal.lenses[1].clone();
 
     println!("Baseline intrinsics (from embedded lens metadata / match.json):");
     print_camera_params("left", &baseline_left);
@@ -189,7 +189,7 @@ fn main() {
 
     // Placement is held FIXED at the AKAZE-fitted seed for this whole
     // experiment - only intrinsics vary. Built once since it never changes.
-    let scene = SceneGeometry::from_layout_with_aspect(&cal.layout, aspect);
+    let scene = SceneGeometry::new(&cal.topology, &cal.framing, aspect);
 
     let ctx = RenderCtx {
         gpu: &gpu,
@@ -297,10 +297,10 @@ fn main() {
                 "fy" => base.fy,
                 "cx" => base.cx,
                 "cy" => base.cy,
-                "d0" => base.d[0],
-                "d1" => base.d[1],
-                "d2" => base.d[2],
-                _ => base.d[3],
+                "d0" => base.distortion[0],
+                "d1" => base.distortion[1],
+                "d2" => base.distortion[2],
+                _ => base.distortion[3],
             };
             check_delta(
                 &format!("{side}.{name}"),
@@ -400,10 +400,10 @@ fn perturb(v: &[f64], idx: usize, delta: f64) -> Vec<f64> {
     out
 }
 
-fn print_camera_params(label: &str, cam: &CameraParams) {
+fn print_camera_params(label: &str, cam: &Lens) {
     println!(
         "  {label}: fx={:.3} fy={:.3} cx={:.3} cy={:.3} d={:?}",
-        cam.fx, cam.fy, cam.cx, cam.cy, cam.d
+        cam.fx, cam.fy, cam.cx, cam.cy, cam.distortion
     );
 }
 
@@ -513,8 +513,8 @@ fn param_names(fit_distortion: bool) -> Vec<String> {
 /// Bounds in the same per-camera-block order as `param_names`/
 /// `deltas_to_cameras`.
 fn build_bounds(
-    baseline_left: &CameraParams,
-    baseline_right: &CameraParams,
+    baseline_left: &Lens,
+    baseline_right: &Lens,
     fit_distortion: bool,
 ) -> Vec<(f64, f64)> {
     let mut bounds = Vec::new();
@@ -534,10 +534,10 @@ fn build_bounds(
 
 fn deltas_to_cameras(
     p: &[f64],
-    base_left: &CameraParams,
-    base_right: &CameraParams,
+    base_left: &Lens,
+    base_right: &Lens,
     fit_distortion: bool,
-) -> (CameraParams, CameraParams) {
+) -> (Lens, Lens) {
     let per_camera = if fit_distortion { 8 } else { 4 };
 
     let mut left = base_left.clone();
@@ -547,7 +547,7 @@ fn deltas_to_cameras(
     left.cy += p[3];
     if fit_distortion {
         for i in 0..4 {
-            left.d[i] += p[4 + i];
+            left.distortion[i] += p[4 + i];
         }
     }
 
@@ -558,7 +558,7 @@ fn deltas_to_cameras(
     right.cy += p[per_camera + 3];
     if fit_distortion {
         for i in 0..4 {
-            right.d[i] += p[per_camera + 4 + i];
+            right.distortion[i] += p[per_camera + 4 + i];
         }
     }
 
@@ -590,11 +590,7 @@ type RenderScoreResult = (
     Vec<f32>,
 );
 
-fn render_and_score(
-    ctx: &RenderCtx<'_>,
-    left_cam: &CameraParams,
-    right_cam: &CameraParams,
-) -> RenderScoreResult {
+fn render_and_score(ctx: &RenderCtx<'_>, left_cam: &Lens, right_cam: &Lens) -> RenderScoreResult {
     let left_rgba = ctx.left_renderer.render_and_readback(
         ctx.gpu,
         ctx.scene,
@@ -647,8 +643,8 @@ fn render_and_score(
 #[derive(Clone)]
 struct IntrinsicsCost<'a> {
     ctx: RenderCtx<'a>,
-    baseline_left: CameraParams,
-    baseline_right: CameraParams,
+    baseline_left: Lens,
+    baseline_right: Lens,
     bounds: Vec<(f64, f64)>,
     fit_distortion: bool,
 }

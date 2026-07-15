@@ -1,4 +1,4 @@
-//! Zero-copy GPU preview bridge: reco-core StitchRenderer -> Slint Image.
+//! Zero-copy GPU preview bridge: reco-core StitchCore -> Slint Image.
 //!
 //! Shares the wgpu device and queue with Slint via its `unstable-wgpu-28`
 //! feature. Renders directly into a `wgpu::Texture` allocated on Slint's
@@ -12,7 +12,7 @@
 //! 2. A `set_rendering_notifier` callback fires with
 //!    `GraphicsAPI::WGPU28 { device, queue, .. }` on `RenderingSetup`.
 //! 3. Those handles are passed to `PreviewBridge::new`, which builds a
-//!    `GpuContext::from_device_queue` and a `StitchRenderer`.
+//!    `GpuContext::from_device_queue` and a `StitchCore`.
 //! 4. Each frame allocates a fresh `wgpu::Texture` on the shared device
 //!    with `RENDER_ATTACHMENT | TEXTURE_BINDING`, renders into it, and
 //!    moves it into `slint::Image::try_from`.
@@ -26,12 +26,14 @@
 //! alias the same storage. Slint's texture pool / compositor makes
 //! per-frame allocation inexpensive; the driver reuses VRAM slabs.
 
-use reco_core::calibration::{CameraParams, MatchCalibration};
+use reco_core::calibration::{Calibration, Lens};
+use reco_core::core::StitchCore;
+use reco_core::core::types::StitchCoreError;
 use reco_core::gpu::GpuContext;
 use reco_core::lens::preview::LensPreviewRenderer;
 use reco_core::render::pipeline::{PipelineError, YuvPlanes};
-use reco_core::render::stitch_renderer::StitchRenderer;
 use reco_core::render::viewport::ViewportConfig;
+use reco_core::stitch::{Executor, GpuExecutor, GpuExecutorConfig};
 use reco_core::wgpu;
 
 /// Bridges reco-core GPU rendering to Slint via a shared wgpu device.
@@ -40,7 +42,7 @@ use reco_core::wgpu;
 /// GPU texture on Slint's own device - the UI displays it with zero
 /// copies.
 pub struct PreviewBridge {
-    renderer: StitchRenderer,
+    engine: StitchCore,
     viewport_width: u32,
     viewport_height: u32,
     texture_format: wgpu::TextureFormat,
@@ -59,12 +61,12 @@ impl PreviewBridge {
         device: wgpu::Device,
         queue: wgpu::Queue,
         adapter_info: wgpu::AdapterInfo,
-        calibration: MatchCalibration,
+        calibration: Calibration,
         input_width: u32,
         input_height: u32,
         viewport_width: u32,
         viewport_height: u32,
-    ) -> Result<Self, PipelineError> {
+    ) -> Result<Self, StitchCoreError> {
         let gpu = GpuContext::from_device_queue(device, queue, adapter_info);
 
         log::info!(
@@ -73,53 +75,41 @@ impl PreviewBridge {
             gpu.backend_name(),
         );
 
-        // Lens-correction strength is consumed by the pipeline, not the
-        // viewport; capture it before `calibration` is moved into the
-        // renderer below.
-        let lens_correction_amount = calibration.lens_correction_amount;
+        // Lens-correction strength is consumed per frame, not at
+        // construction; capture it before `calibration` moves into the
+        // engine below.
+        let lens_correction_amount = calibration.lenses[0].correction;
 
         let viewport = ViewportConfig {
             width: viewport_width,
             height: viewport_height,
             fov_degrees: 75.0,
-            blend_width: calibration.blend_width,
-            blend_flip_direction: calibration.blend_flip_direction,
-            seam_offset: calibration.seam_offset,
-            multiband_blend_enabled: calibration.multiband_blend_enabled,
-            rig_tilt: calibration.rig_tilt as f32,
-            rig_roll: calibration.rig_roll as f32,
-            color_match_enabled: calibration.color_match_enabled,
-            color_match_band_width: calibration.color_match_band_width,
-            color_match_grid_cols: calibration.color_match_grid_cols,
-            color_match_grid_rows: calibration.color_match_grid_rows,
-            color_match_interval_frames: calibration.color_match_interval_frames,
-            color_match_ema_alpha: calibration.color_match_ema_alpha,
-            color_match_max_y_offset: calibration.color_match_max_y_offset,
-            color_match_max_chroma_offset: calibration.color_match_max_chroma_offset,
-            ..ViewportConfig::default()
         };
 
         // Slint expects textures in a format it can sample. Rgba8Unorm is
         // the safe common denominator across backends (Vulkan/Metal/DX12).
         let texture_format = wgpu::TextureFormat::Rgba8Unorm;
 
-        let mut renderer = StitchRenderer::new(
-            calibration,
+        let executor = GpuExecutor::new(
             gpu,
-            viewport,
-            input_width,
-            input_height,
-            texture_format,
-            reco_core::render::renderer::InputFormat::Yuv420p,
+            GpuExecutorConfig {
+                calibration,
+                viewport,
+                input_width,
+                input_height,
+                input_format: reco_core::render::renderer::InputFormat::Yuv420p,
+                output_format: texture_format,
+                projection: None,
+                full_range: false,
+            },
         )?;
+        let mut engine = StitchCore::new(Executor::Gpu(Box::new(executor)))?;
         // Honour a persisted lens-correction strength (e.g. correction
-        // saved off) instead of the pipeline's full-correction default.
-        renderer
-            .pipeline_mut()
-            .set_lens_correction_amount(lens_correction_amount);
+        // saved off) instead of the full-correction default.
+        engine.set_lens_correction_amount(lens_correction_amount);
 
         Ok(Self {
-            renderer,
+            engine,
             viewport_width,
             viewport_height,
             texture_format,
@@ -132,13 +122,12 @@ impl PreviewBridge {
     /// Render a YUV420P stereo pair, return a Slint image backed by a
     /// GPU texture on the shared device.
     pub fn render_frame(
-        &self,
+        &mut self,
         left: &YuvPlanes<'_>,
         right: &YuvPlanes<'_>,
-        yaw: f32,
-        pitch: f32,
-    ) -> Result<slint::Image, PipelineError> {
-        let device = self.renderer.gpu().device();
+        pose: reco_core::geometry::ViewportPosition,
+    ) -> Result<slint::Image, StitchCoreError> {
+        let device = self.engine.gpu().device();
 
         // Allocate a fresh texture on the shared device. RENDER_ATTACHMENT
         // lets reco-core write into it; TEXTURE_BINDING lets Slint sample
@@ -162,23 +151,23 @@ impl PreviewBridge {
 
         // Render into Slint's own device — commands submit on the shared
         // queue, no copies, no synchronization round-trip.
-        self.renderer.render_yuv(left, right, yaw, pitch, &view)?;
+        self.engine.render_to_view(left, right, pose, &view)?;
 
         // Hand the texture to Slint. ownership transfers; Slint releases
         // it when the Image is no longer referenced by any UI property.
-        slint::Image::try_from(texture).map_err(|_| PipelineError::InvalidConfig {
-            reason: "slint::Image::try_from(wgpu::Texture) failed".into(),
+        slint::Image::try_from(texture).map_err(|_| {
+            StitchCoreError::Config("slint::Image::try_from(wgpu::Texture) failed".into())
         })
     }
 
-    /// Access the underlying renderer for viewport adjustments.
-    pub fn renderer(&self) -> &StitchRenderer {
-        &self.renderer
+    /// Access the underlying engine for viewport adjustments.
+    pub fn engine(&self) -> &StitchCore {
+        &self.engine
     }
 
     /// Mutable access for resize, FOV, calibration updates.
-    pub fn renderer_mut(&mut self) -> &mut StitchRenderer {
-        &mut self.renderer
+    pub fn engine_mut(&mut self) -> &mut StitchCore {
+        &mut self.engine
     }
 
     /// Current viewport dimensions.
@@ -194,7 +183,7 @@ impl PreviewBridge {
         }
         self.viewport_width = width;
         self.viewport_height = height;
-        self.renderer.pipeline_mut().resize(width, height);
+        self.engine.resize(width, height);
     }
 
     /// Render a single camera through orthographic projection with
@@ -204,13 +193,13 @@ impl PreviewBridge {
     pub fn render_lens_preview(
         &mut self,
         planes: &YuvPlanes<'_>,
-        params: &CameraParams,
+        params: &Lens,
         correction_amount: f32,
     ) -> Result<slint::Image, PipelineError> {
         let lp = self.lens_preview.get_or_insert_with(|| {
             let aspect = self.input_width as f32 / self.input_height as f32;
             LensPreviewRenderer::new(
-                self.renderer.gpu(),
+                self.engine.gpu(),
                 self.input_width,
                 self.input_height,
                 aspect,
@@ -218,7 +207,7 @@ impl PreviewBridge {
             )
         });
 
-        let texture = lp.render_yuv(self.renderer.gpu(), planes, params, correction_amount);
+        let texture = lp.render_yuv(self.engine.gpu(), planes, params, correction_amount);
 
         slint::Image::try_from(texture).map_err(|_| PipelineError::InvalidConfig {
             reason: "slint::Image::try_from(wgpu::Texture) failed".into(),

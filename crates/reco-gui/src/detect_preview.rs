@@ -20,7 +20,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use reco_calibrate::CalibrationConfig;
 use reco_calibrate::preview::DetectionPreview;
-use reco_core::calibration::CameraParams;
+use reco_core::calibration::Lens;
 use reco_core::gpu::GpuContext;
 use reco_core::lens::undistort::GpuUndistort;
 
@@ -35,8 +35,8 @@ pub struct PreviewRequest {
     pub right_v: Vec<u8>,
     pub width: u32,
     pub height: u32,
-    pub left_params: CameraParams,
-    pub right_params: CameraParams,
+    pub left_params: Lens,
+    pub right_params: Lens,
     pub config: CalibrationConfig,
 }
 

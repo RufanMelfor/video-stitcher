@@ -34,7 +34,7 @@
 
 use reco_calibrate::photometric;
 use reco_calibrate::row_profile::{self, RowProfile};
-use reco_core::calibration::MatchCalibration;
+use reco_core::calibration::Calibration;
 use reco_core::gpu::GpuContext;
 use reco_core::render::scene::SceneGeometry;
 use reco_core::render::single_camera::SingleCameraRenderer;
@@ -110,7 +110,7 @@ fn main() {
     std::fs::create_dir_all(output_dir).expect("failed to create output_dir");
 
     let json_str = std::fs::read_to_string(match_json_path).expect("failed to read match.json");
-    let cal: MatchCalibration = serde_json::from_str(&json_str).expect("invalid match.json");
+    let cal: Calibration = serde_json::from_str(&json_str).expect("invalid match.json");
 
     println!(
         "Loading {} frame pairs (last one held out for generalization check): left={:?} right={:?}",
@@ -151,7 +151,7 @@ fn main() {
         eval_height,
         aspect,
     );
-    let scene = SceneGeometry::from_layout_with_aspect(&cal.layout, aspect);
+    let scene = SceneGeometry::new(&cal.topology, &cal.framing, aspect);
 
     // --- Render every frame's left/right/mask/luma once, up front ---
     struct FrameRender {
@@ -166,7 +166,7 @@ fn main() {
         let left_rgba = left_renderer.render_and_readback(
             &gpu,
             &scene,
-            &cal.left,
+            &cal.lenses[0],
             false,
             fov_degrees,
             &left_yuv.y,
@@ -178,7 +178,7 @@ fn main() {
         let right_rgba = right_renderer.render_and_readback(
             &gpu,
             &scene,
-            &cal.right,
+            &cal.lenses[1],
             true,
             fov_degrees,
             &right_yuv.y,

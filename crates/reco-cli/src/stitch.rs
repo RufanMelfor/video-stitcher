@@ -23,21 +23,20 @@ pub struct StitchArgs<'a> {
     pub output: &'a str,
     pub width: u32,
     pub height: u32,
-    pub blend: f32,
+    pub blend: Option<f32>,
     /// Flip which camera fades in over the other at the blend seam. See
-    /// `reco_core::render::viewport::ViewportConfig::blend_flip_direction`.
+    /// `reco_core::calibration::Topology::blend_flip_direction`.
     pub blend_flip_direction: bool,
     /// Use a 2-band spatial blend at the seam. See
-    /// `reco_core::render::viewport::ViewportConfig::multiband_blend_enabled`.
+    /// `reco_core::calibration::Topology::multiband_blend_enabled`.
     pub multiband: bool,
     /// Draw a debug line at the exact geometric seam position. See
-    /// `reco_core::render::viewport::ViewportConfig::show_seam_line`.
+    /// `reco_core::render::pipeline::StitchPipeline::set_show_seam_line`.
     pub show_seam_line: bool,
-    /// Manual seam nudge. See
-    /// `reco_core::render::viewport::ViewportConfig::seam_offset`.
+    /// Manual seam nudge. See `reco_core::calibration::Topology::seam_offset`.
     pub seam_offset: f32,
     /// Disable auto exposure/color matching at the seam. See
-    /// `reco_core::render::viewport::ViewportConfig::color_match_enabled`.
+    /// `reco_core::calibration::Topology::color_match_enabled`.
     pub no_color_match: bool,
     pub start_time: Option<f64>,
     pub end_time: Option<f64>,
@@ -101,7 +100,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
     // and pass the pre-loaded calibration to StitchJob. `field_roi` is
     // only consumed under the autocam feature; a leading underscore
     // silences the unused-var lint on `--no-default-features` builds.
-    let cal = reco_core::calibration::MatchCalibration::from_file(Path::new(args.calibration))?;
+    let cal = reco_core::calibration::Calibration::from_file(Path::new(args.calibration))?;
     #[cfg_attr(not(feature = "autocam"), allow(unused_variables))]
     let field_roi = cal.field_roi.clone();
 
@@ -161,7 +160,6 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
     .codec(parse_codec(args.codec))
     .quality(parse_quality(args.quality))
     .resolution(args.width, args.height)
-    .blend_width(args.blend)
     .blend_flip_direction(args.blend_flip_direction)
     .multiband_blend_enabled(args.multiband)
     .show_seam_line(args.show_seam_line)
@@ -175,6 +173,9 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         progress.report_with_elapsed(p.frames_completed, p.elapsed);
     });
 
+    if let Some(b) = args.blend {
+        job = job.blend_width(b);
+    }
     if let Some(t) = args.start_time {
         job = job.start_time(t);
     }

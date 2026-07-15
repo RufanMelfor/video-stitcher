@@ -30,7 +30,7 @@
 use std::path::{Path, PathBuf};
 
 use reco_calibrate::types::{CalibrationConfig, YuvFrame};
-use reco_core::calibration::MatchCalibration;
+use reco_core::calibration::Calibration;
 use reco_core::gpu::GpuContext;
 
 fn main() {
@@ -44,11 +44,11 @@ fn main() {
     }
     let (match_path, frames_dir, out_path) = (&args[1], &args[2], &args[3]);
 
-    let cal: MatchCalibration = {
+    let cal: Calibration = {
         let s = std::fs::read_to_string(match_path)
             .unwrap_or_else(|e| panic!("failed to read {match_path}: {e}"));
         serde_json::from_str(&s)
-            .unwrap_or_else(|e| panic!("failed to parse {match_path} as MatchCalibration: {e}"))
+            .unwrap_or_else(|e| panic!("failed to parse {match_path} as Calibration: {e}"))
     };
 
     let (left_paths, right_paths) = discover_pairs(Path::new(frames_dir));
@@ -72,8 +72,9 @@ fn main() {
     eprintln!("GPU: {}", gpu.gpu_name());
 
     let config = CalibrationConfig::default();
-    let result = reco_calibrate::calibrate(&gpu, &frames, &cal.left, &cal.right, &config)
-        .unwrap_or_else(|e| panic!("calibration pipeline failed: {e}"));
+    let result =
+        reco_calibrate::calibrate(&gpu, &frames, &cal.lenses[0], &cal.lenses[1], &config)
+            .unwrap_or_else(|e| panic!("calibration pipeline failed: {e}"));
 
     eprintln!(
         "\n{} total matches across {} frame pair(s), confidence {:.0}%",
@@ -87,20 +88,21 @@ fn main() {
             q.mean_reprojection_error, q.trimmed_reprojection_error, q.angular_error
         );
     }
-    let (fresh, loaded) = (&result.calibration.layout, &cal.layout);
+    let (fresh_topology, loaded_topology) = (&result.calibration.topology, &cal.topology);
+    let (fresh_framing, loaded_framing) = (&result.calibration.framing, &cal.framing);
     eprintln!("\nFresh fit vs loaded {match_path} (sanity comparison, not written anywhere):");
     eprintln!(
         "  cam_d     {:+.4} vs {:+.4}\n  intersect {:+.4} vs {:+.4}\n  x_ty      {:+.4} vs {:+.4}\n  x_rz      {:+.4} vs {:+.4}\n  z_rx      {:+.4} vs {:+.4}",
-        fresh.camera_axis_offset,
-        loaded.camera_axis_offset,
-        fresh.intersect,
-        loaded.intersect,
-        fresh.x_ty,
-        loaded.x_ty,
-        fresh.x_rz,
-        loaded.x_rz,
-        fresh.z_rx,
-        loaded.z_rx,
+        fresh_framing.axis_offset,
+        loaded_framing.axis_offset,
+        fresh_topology.intersect,
+        loaded_topology.intersect,
+        fresh_topology.x_ty,
+        loaded_topology.x_ty,
+        fresh_topology.x_rz,
+        loaded_topology.x_rz,
+        fresh_topology.z_rx,
+        loaded_topology.z_rx,
     );
 
     let json = serde_json::to_string_pretty(&result.per_frame).unwrap();

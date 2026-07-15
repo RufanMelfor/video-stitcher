@@ -25,31 +25,19 @@
 
 use super::scene::SceneGeometry;
 use super::viewport::{ResolvedViewport, ViewportConfig};
-use crate::calibration::{CameraParams, MatchCalibration};
+use crate::calibration::{Calibration, Lens};
+use crate::geometry::{
+    FAR_PLANE, NEAR_PLANE, matrix4_to_columns, opengl_to_wgpu_matrix, view_matrix,
+};
 use crate::gpu::GpuContext;
 
 use bytemuck::{Pod, Zeroable};
-use nalgebra::{Matrix4, Perspective3, Point3, UnitQuaternion, Vector4};
+use nalgebra::{Matrix4, Perspective3, Vector4};
 use std::cell::RefCell;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
 // ---- Constants ----
-
-/// Near clipping plane for the perspective projection.
-const NEAR_PLANE: f32 = 0.01;
-/// Far clipping plane for the perspective projection.
-const FAR_PLANE: f32 = 5.0;
-/// Aspect ratio of scene planes (matches GoPro 16:9 capture).
-///
-/// Deprecated: derive the aspect ratio from camera parameters instead.
-/// Use [`SceneGeometry::from_layout_with_aspect`](crate::render::scene::SceneGeometry::from_layout_with_aspect)
-/// with `camera.width as f32 / camera.height as f32`.
-#[deprecated(
-    since = "0.1.0",
-    note = "derive aspect ratio from camera parameters (width/height) instead"
-)]
-pub const PLANE_ASPECT: f32 = 16.0 / 9.0;
 
 /// Errors from the renderer.
 #[derive(Debug, Clone, Error)]
@@ -78,12 +66,12 @@ pub(crate) struct GpuUniforms {
 
 /// Per-plane ground-plane tilt correction for [`build_gpu_uniforms`] and
 /// [`super::single_camera::SingleCameraRenderer::render_and_readback`] - see
-/// `PlaneLayout::ground_tilt_x`/`ground_tilt_z`'s doc comment
+/// `Topology::ground_tilt_x`/`ground_tilt_z`'s doc comment
 /// (`crates/reco-core/src/calibration.rs`) and `fisheye.wgsl`'s
 /// `band_limited_ground_warp` for the full picture. `k` and `band_full`
 /// only matter when `tilt != 0.0`; `Default` (all zero) is the "no
 /// correction" no-op - `band_full` defaulting to `0.0` instead of the real
-/// `PlaneLayout::ground_tilt_band_width` default (`0.16`) is harmless here
+/// `Topology::ground_tilt_band_width` default (`0.16`) is harmless here
 /// since it's never read while `tilt == 0.0`. `pub` (not `pub(crate)`):
 /// `render_and_readback` is called from other crates (`reco-calibrate`'s
 /// validation examples), so this type has to be at least as visible as
@@ -92,14 +80,14 @@ pub(crate) struct GpuUniforms {
 pub struct GroundTilt {
     pub tilt: f32,
     pub k: f32,
-    /// `PlaneLayout::ground_tilt_band_width` - `|t|` at which the
+    /// `Topology::ground_tilt_band_width` - `|t|` at which the
     /// correction reaches full strength (the ramp always starts at the
     /// fixed `0.08`).
     pub band_full: f32,
 }
 
 /// Per-plane top-of-frame tilt correction, mirroring [`GroundTilt`] - see
-/// `PlaneLayout::top_tilt_x`/`top_tilt_z`'s doc comment
+/// `Topology::top_tilt_x`/`top_tilt_z`'s doc comment
 /// (`crates/reco-core/src/calibration.rs`) and `fisheye.wgsl`'s
 /// `band_limited_top_warp`. Unlike `GroundTilt`, this plane aspect ratio
 /// doesn't need its own copy in the packed uniform - the shader reuses
@@ -109,7 +97,7 @@ pub struct GroundTilt {
 pub struct TopTilt {
     pub tilt: f32,
     pub k: f32,
-    /// `PlaneLayout::top_tilt_band_width` - see [`GroundTilt::band_full`].
+    /// `Topology::top_tilt_band_width` - see [`GroundTilt::band_full`].
     pub band_full: f32,
 }
 
@@ -519,13 +507,13 @@ impl MultibandResources {
 /// Vertex with 3D position and UV coordinates.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
-struct Vertex {
+pub(crate) struct Vertex {
     position: [f32; 3],
     uv: [f32; 2],
 }
 
 impl Vertex {
-    const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    pub(crate) const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<Vertex>() as u64,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &[
@@ -671,7 +659,7 @@ impl GpuPixelFormat {
 /// `yaw`/`pitch` should be the *live* current viewport position (e.g.
 /// `PoseControl::current_pose()`), not assumed to be centered - callers
 /// have this on hand already (it's what the real render uses), so there's
-/// no need to approximate. `rig_tilt`/`rig_roll` come from `viewport`
+/// no need to approximate. `tilt`/`roll` come from `calibration.framing`
 /// itself, same as the real render.
 ///
 /// `output_aspect` should match the actual displayed preview's aspect
@@ -682,22 +670,23 @@ impl GpuPixelFormat {
 /// <= 0.0`, a hard cut with no feathered seam to visualize) or when either
 /// endpoint projects behind the camera.
 pub fn seam_line_screen_points(
-    calibration: &MatchCalibration,
+    calibration: &Calibration,
     viewport: &ViewportConfig,
     yaw: f32,
     pitch: f32,
     output_aspect: f32,
 ) -> Option<((f32, f32), (f32, f32))> {
-    if viewport.blend_width <= 0.0 {
+    let blend_width = calibration.topology.blend_width;
+    if blend_width <= 0.0 {
         return None;
     }
 
-    let plane_aspect = calibration.left.width as f32 / calibration.left.height as f32;
-    let scene = SceneGeometry::from_layout_with_aspect(&calibration.layout, plane_aspect);
+    let plane_aspect = calibration.lenses[0].width as f32 / calibration.lenses[0].height as f32;
+    let scene = SceneGeometry::new(&calibration.topology, &calibration.framing, plane_aspect);
 
     // Same left/right fading convention as `encode_stitch_pass`: `false`
     // (default) = right fades over a fixed left.
-    let is_right_fading = !viewport.blend_flip_direction;
+    let is_right_fading = !calibration.topology.blend_flip_direction;
     let model = if is_right_fading {
         scene.model_matrix_right()
     } else {
@@ -718,7 +707,7 @@ pub fn seam_line_screen_points(
     // it's the right plane, uv.x=1 if it's the left plane (see the
     // shader's own comment for the geometric reason), with `seam_offset`
     // shifting it the same way in both cases.
-    let seam_offset = viewport.seam_offset;
+    let seam_offset = calibration.topology.seam_offset;
     let local_x = if is_right_fading {
         (seam_offset - 0.5) / 2.0
     } else {
@@ -738,8 +727,8 @@ pub fn seam_line_screen_points(
         &scene.camera_position,
         yaw,
         pitch,
-        viewport.rig_tilt,
-        viewport.rig_roll,
+        calibration.framing.tilt as f32,
+        calibration.framing.roll as f32,
     );
     let mvp = projection * view * model;
 
@@ -806,8 +795,10 @@ impl Renderer {
     ///
     /// `input_format` selects between YUV420P (3 separate planes) and
     /// NV12 (Y + interleaved UV). NV12 is the native NVDEC output format.
+    #[allow(clippy::too_many_arguments)] // construction-only plumbing
     pub fn new(
         gpu: &GpuContext,
+        program: &crate::render::GpuProgram,
         output_width: u32,
         output_height: u32,
         input_width: u32,
@@ -818,10 +809,11 @@ impl Renderer {
     ) -> Self {
         let device = &gpu.device;
 
-        // Shader
+        // Shader: compiled from the projection's GPU program descriptor -
+        // the render pipeline builds exactly what the projection declares.
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("fisheye"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/fisheye.wgsl").into()),
+            label: Some("projection_composite"),
+            source: wgpu::ShaderSource::Wgsl(program.wgsl.into()),
         });
 
         // Vertex buffer (quad for both planes — same shape, different model matrices)
@@ -885,24 +877,17 @@ impl Renderer {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: Some("vs_main"),
+                entry_point: Some(program.vs_entry),
                 compilation_options: Default::default(),
-                buffers: &[Vertex::LAYOUT],
+                buffers: std::slice::from_ref(&program.vertex_layout),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some(program.fs_entry),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: output_format,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::SrcAlpha,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent::OVER,
-                    }),
+                    blend: Some(program.blend),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -1392,7 +1377,7 @@ impl Renderer {
         &self,
         gpu: &GpuContext,
         scene: &SceneGeometry,
-        calibration: &MatchCalibration,
+        calibration: &Calibration,
         viewport: &ResolvedViewport,
         blend_width: f32,
         color_correction: ColorCorrection,
@@ -1413,17 +1398,17 @@ impl Renderer {
             &scene.camera_position,
             viewport.position.yaw,
             viewport.position.pitch,
-            viewport.config.rig_tilt,
-            viewport.config.rig_roll,
+            calibration.framing.tilt as f32,
+            calibration.framing.roll as f32,
         );
 
         // Ground-tilt mapping is not the naive left<->left, right<->right
-        // pairing it looks like: `PlaneLayout::ground_tilt_x` corrects the
+        // pairing it looks like: `Topology::ground_tilt_x` corrects the
         // x-plane, which - per reco_calibrate::geometry's module doc (the
         // v1-derived left/right swap) - holds the *right* camera's content
         // and is positioned at this renderer's "right" plane; ground_tilt_z
         // corrects the z-plane (*left* camera, this renderer's "left"
-        // plane). Verified against `SceneGeometry::from_layout_with_aspect`:
+        // plane). Verified against `SceneGeometry::new`:
         // its "left plane" sits at `[0,0,half_offset]` (geometry.rs's
         // z-plane translation) and "right plane" at `[half_offset,...]`
         // (geometry.rs's x-plane translation) - so this renderer's own
@@ -1433,32 +1418,31 @@ impl Renderer {
         // band_full is a whole-calibration setting (not per-plane), so both
         // left/right share the same value here.
         let left_ground_tilt = GroundTilt {
-            tilt: calibration.layout.ground_tilt_z as f32,
-            k: calibration.left.ground_tilt_k() as f32,
-            band_full: calibration.layout.ground_tilt_band_width as f32,
+            tilt: calibration.topology.ground_tilt_z as f32,
+            k: calibration.lenses[0].ground_tilt_k() as f32,
+            band_full: calibration.topology.ground_tilt_band_width as f32,
         };
         let right_ground_tilt = GroundTilt {
-            tilt: calibration.layout.ground_tilt_x as f32,
-            k: calibration.right.ground_tilt_k() as f32,
-            band_full: calibration.layout.ground_tilt_band_width as f32,
+            tilt: calibration.topology.ground_tilt_x as f32,
+            k: calibration.lenses[1].ground_tilt_k() as f32,
+            band_full: calibration.topology.ground_tilt_band_width as f32,
         };
         // Same left/right-vs-x/z-plane swap as ground_tilt above.
         let left_top_tilt = TopTilt {
-            tilt: calibration.layout.top_tilt_z as f32,
-            k: calibration.left.ground_tilt_k() as f32,
-            band_full: calibration.layout.top_tilt_band_width as f32,
+            tilt: calibration.topology.top_tilt_z as f32,
+            k: calibration.lenses[0].ground_tilt_k() as f32,
+            band_full: calibration.topology.top_tilt_band_width as f32,
         };
         let right_top_tilt = TopTilt {
-            tilt: calibration.layout.top_tilt_x as f32,
-            k: calibration.right.ground_tilt_k() as f32,
-            band_full: calibration.layout.top_tilt_band_width as f32,
+            tilt: calibration.topology.top_tilt_x as f32,
+            k: calibration.lenses[1].ground_tilt_k() as f32,
+            band_full: calibration.topology.top_tilt_band_width as f32,
         };
 
         let left_mvp = projection * view * scene.model_matrix_left();
-        let correction = viewport.config.lens_correction_amount;
         let mut left_uniforms = build_gpu_uniforms(
             &left_mvp,
-            &calibration.left,
+            &calibration.lenses[0],
             false,
             blend_width,
             self.input_format,
@@ -1467,12 +1451,12 @@ impl Renderer {
             left_ground_tilt,
             left_top_tilt,
         );
-        left_uniforms.lens_preview[0] = correction;
+        left_uniforms.lens_preview[0] = calibration.lenses[0].correction;
 
         let right_mvp = projection * view * scene.model_matrix_right();
         let mut right_uniforms = build_gpu_uniforms(
             &right_mvp,
-            &calibration.right,
+            &calibration.lenses[1],
             true,
             blend_width,
             self.input_format,
@@ -1481,7 +1465,7 @@ impl Renderer {
             right_ground_tilt,
             right_top_tilt,
         );
-        right_uniforms.lens_preview[0] = correction;
+        right_uniforms.lens_preview[0] = calibration.lenses[1].correction;
 
         // Per-camera color-transfer offset (see `ColorCorrection`'s doc).
         // `color_offset_blend[3]` already holds `blend_width` from
@@ -1502,14 +1486,14 @@ impl Renderer {
         // draw order, so left fades over a fixed right instead. Purely a
         // rendering choice: doesn't move the seam or touch calibration
         // geometry.
-        let flip = viewport.config.blend_flip_direction;
+        let flip = calibration.topology.blend_flip_direction;
         left_uniforms.ground_tilt[3] = if flip { 1.0 } else { 0.0 };
         right_uniforms.ground_tilt[3] = if flip { 0.0 } else { 1.0 };
 
         // Seam-line debug overlay and the manual seam_offset nudge both
         // only apply to the fading-designated plane, same convention as
         // the fade flag above - see the shader's seam-line comment and
-        // `MatchCalibration::seam_offset`'s doc.
+        // `Topology::seam_offset`'s doc.
         if show_seam_line {
             if flip {
                 left_uniforms.lens_preview[2] = 1.0;
@@ -1518,9 +1502,9 @@ impl Renderer {
             }
         }
         if flip {
-            left_uniforms.lens_preview[3] = viewport.config.seam_offset;
+            left_uniforms.lens_preview[3] = calibration.topology.seam_offset;
         } else {
-            right_uniforms.lens_preview[3] = viewport.config.seam_offset;
+            right_uniforms.lens_preview[3] = calibration.topology.seam_offset;
         }
 
         gpu.queue.write_buffer(
@@ -1607,7 +1591,7 @@ impl Renderer {
         &self,
         gpu: &GpuContext,
         scene: &SceneGeometry,
-        calibration: &MatchCalibration,
+        calibration: &Calibration,
         viewport: &ResolvedViewport,
         blend_width: f32,
         color_correction: ColorCorrection,
@@ -1633,36 +1617,35 @@ impl Renderer {
             &scene.camera_position,
             viewport.position.yaw,
             viewport.position.pitch,
-            viewport.config.rig_tilt,
-            viewport.config.rig_roll,
+            calibration.framing.tilt as f32,
+            calibration.framing.roll as f32,
         );
 
         let left_ground_tilt = GroundTilt {
-            tilt: calibration.layout.ground_tilt_z as f32,
-            k: calibration.left.ground_tilt_k() as f32,
-            band_full: calibration.layout.ground_tilt_band_width as f32,
+            tilt: calibration.topology.ground_tilt_z as f32,
+            k: calibration.lenses[0].ground_tilt_k() as f32,
+            band_full: calibration.topology.ground_tilt_band_width as f32,
         };
         let right_ground_tilt = GroundTilt {
-            tilt: calibration.layout.ground_tilt_x as f32,
-            k: calibration.right.ground_tilt_k() as f32,
-            band_full: calibration.layout.ground_tilt_band_width as f32,
+            tilt: calibration.topology.ground_tilt_x as f32,
+            k: calibration.lenses[1].ground_tilt_k() as f32,
+            band_full: calibration.topology.ground_tilt_band_width as f32,
         };
         let left_top_tilt = TopTilt {
-            tilt: calibration.layout.top_tilt_z as f32,
-            k: calibration.left.ground_tilt_k() as f32,
-            band_full: calibration.layout.top_tilt_band_width as f32,
+            tilt: calibration.topology.top_tilt_z as f32,
+            k: calibration.lenses[0].ground_tilt_k() as f32,
+            band_full: calibration.topology.top_tilt_band_width as f32,
         };
         let right_top_tilt = TopTilt {
-            tilt: calibration.layout.top_tilt_x as f32,
-            k: calibration.right.ground_tilt_k() as f32,
-            band_full: calibration.layout.top_tilt_band_width as f32,
+            tilt: calibration.topology.top_tilt_x as f32,
+            k: calibration.lenses[1].ground_tilt_k() as f32,
+            band_full: calibration.topology.top_tilt_band_width as f32,
         };
 
         let left_mvp = projection * view * scene.model_matrix_left();
-        let correction_amount = viewport.config.lens_correction_amount;
         let mut left_uniforms = build_gpu_uniforms(
             &left_mvp,
-            &calibration.left,
+            &calibration.lenses[0],
             false,
             blend_width,
             self.input_format,
@@ -1671,7 +1654,7 @@ impl Renderer {
             left_ground_tilt,
             left_top_tilt,
         );
-        left_uniforms.lens_preview[0] = correction_amount;
+        left_uniforms.lens_preview[0] = calibration.lenses[0].correction;
         left_uniforms.color_offset_blend[0] = color_correction.left_offset[0];
         left_uniforms.color_offset_blend[1] = color_correction.left_offset[1];
         left_uniforms.color_offset_blend[2] = color_correction.left_offset[2];
@@ -1680,7 +1663,7 @@ impl Renderer {
         let right_mvp = projection * view * scene.model_matrix_right();
         let mut right_uniforms = build_gpu_uniforms(
             &right_mvp,
-            &calibration.right,
+            &calibration.lenses[1],
             true,
             blend_width,
             self.input_format,
@@ -1689,7 +1672,7 @@ impl Renderer {
             right_ground_tilt,
             right_top_tilt,
         );
-        right_uniforms.lens_preview[0] = correction_amount;
+        right_uniforms.lens_preview[0] = calibration.lenses[1].correction;
         right_uniforms.color_offset_blend[0] = color_correction.right_offset[0];
         right_uniforms.color_offset_blend[1] = color_correction.right_offset[1];
         right_uniforms.color_offset_blend[2] = color_correction.right_offset[2];
@@ -1702,7 +1685,7 @@ impl Renderer {
         // (not `0.0`) matters: the shader's fade branch is gated on
         // `blend_width > 0.0`, so a literal zero would skip it entirely.
         const MASK_HARD_BLEND_WIDTH: f32 = 1e-4;
-        let flip = viewport.config.blend_flip_direction;
+        let flip = calibration.topology.blend_flip_direction;
         let fading_is_right = !flip;
         let (mut mask_uniforms, mask_plane) = if fading_is_right {
             (right_uniforms, &self.right)
@@ -1715,7 +1698,7 @@ impl Renderer {
         // must carry the manual offset - without this, seam_offset would
         // have no effect at all in multiband mode (tex_a/tex_b never fade,
         // so their own lens_preview.w is only used by the debug line).
-        mask_uniforms.lens_preview[3] = viewport.config.seam_offset;
+        mask_uniforms.lens_preview[3] = calibration.topology.seam_offset;
 
         // Seam-line debug overlay: set on tex_a/tex_b (whichever is the
         // fading-designated side) *after* mask_uniforms was copied above,
@@ -1724,10 +1707,10 @@ impl Renderer {
         if show_seam_line {
             if fading_is_right {
                 right_uniforms.lens_preview[2] = 1.0;
-                right_uniforms.lens_preview[3] = viewport.config.seam_offset;
+                right_uniforms.lens_preview[3] = calibration.topology.seam_offset;
             } else {
                 left_uniforms.lens_preview[2] = 1.0;
-                left_uniforms.lens_preview[3] = viewport.config.seam_offset;
+                left_uniforms.lens_preview[3] = calibration.topology.seam_offset;
             }
         }
 
@@ -1980,7 +1963,7 @@ impl Renderer {
         &self,
         gpu: &GpuContext,
         scene: &SceneGeometry,
-        calibration: &MatchCalibration,
+        calibration: &Calibration,
         viewport: &ResolvedViewport,
         blend_width: f32,
         color_correction: ColorCorrection,
@@ -2037,7 +2020,7 @@ impl Renderer {
         &self,
         gpu: &GpuContext,
         scene: &SceneGeometry,
-        calibration: &MatchCalibration,
+        calibration: &Calibration,
         viewport: &ResolvedViewport,
         blend_width: f32,
         color_correction: ColorCorrection,
@@ -2259,67 +2242,6 @@ fn upload_nv12(
     Ok(())
 }
 
-/// Build the view matrix for the virtual camera.
-///
-/// Camera sits at `position` and looks at the origin (corner where the two
-/// planes meet) by default. This matches v1 Three.js where the OrbitControls
-/// target is `[0, 0, 0]`. `yaw` rotates around Y (left/right from center),
-/// `pitch` rotates around X (up/down).
-fn view_matrix(
-    position: &[f32; 3],
-    yaw: f32,
-    pitch: f32,
-    rig_tilt: f32,
-    rig_roll: f32,
-) -> Matrix4<f32> {
-    // Basis is owned by VirtualCamera so view_matrix and the yaw/pitch
-    // decomposition in projection.rs share a single source of truth.
-    // The right-handed `(base_forward, base_right, world_up)` triple
-    // makes view_matrix's yaw sign agree with
-    // `direction_to_yaw_pitch` without any downstream sign reconciliation.
-    let cam = crate::projection::VirtualCamera::new(position);
-    let eye = Point3::from(cam.eye);
-    let mut base_forward = cam.base_forward;
-    let base_right = cam.base_right;
-    let mut world_up = crate::projection::VirtualCamera::world_up();
-
-    // Rig tilt: rotate the entire reference frame around the base right axis.
-    // This tilts "up" and "forward" so that yaw/pitch operate in the tilted
-    // coordinate system. Panning in this tilted frame naturally introduces
-    // roll that compensates for edge distortion from a tilted camera rig.
-    if rig_tilt.abs() > 1e-6 {
-        let tilt_q =
-            UnitQuaternion::from_axis_angle(&nalgebra::Unit::new_normalize(base_right), rig_tilt);
-        base_forward = tilt_q * base_forward;
-        world_up = tilt_q * world_up;
-    }
-
-    // Rig roll: rotate around the forward axis to correct lateral lean.
-    // Negated because roll describes the camera's lean direction, and we
-    // need to rotate the opposite way to straighten the horizon.
-    // (Tilt is not negated because it shifts the view center to match
-    // where the camera points, which is the same direction.)
-    if rig_roll.abs() > 1e-6 {
-        let roll_q = UnitQuaternion::from_axis_angle(
-            &nalgebra::Unit::new_normalize(base_forward),
-            -rig_roll,
-        );
-        world_up = roll_q * world_up;
-    }
-
-    // Yaw: rotate around the (possibly tilted) up axis
-    let up_axis = nalgebra::Unit::new_normalize(world_up);
-    let yaw_q = UnitQuaternion::from_axis_angle(&up_axis, yaw);
-    // Pitch: rotate around the yaw-rotated right axis
-    let right = yaw_q * base_right;
-    let pitch_q = UnitQuaternion::from_axis_angle(&nalgebra::Unit::new_normalize(right), pitch);
-    let rotation = pitch_q * yaw_q;
-    let forward = rotation * base_forward;
-    let up = rotation * world_up;
-    let target = Point3::from(eye.coords + forward);
-    nalgebra::Isometry3::look_at_rh(&eye, &target, &up).to_homogeneous()
-}
-
 /// Build the GPU uniform struct for one plane.
 ///
 /// `flip_180`: when true, the shader flips UV coordinates to apply
@@ -2336,7 +2258,7 @@ fn view_matrix(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_gpu_uniforms(
     mvp: &Matrix4<f32>,
-    camera: &CameraParams,
+    camera: &Lens,
     is_right: bool,
     blend_width: f32,
     input_format: InputFormat,
@@ -2356,10 +2278,10 @@ pub(crate) fn build_gpu_uniforms(
             camera.cy as f32 / h,
         ],
         dist: [
-            camera.d[0] as f32,
-            camera.d[1] as f32,
-            camera.d[2] as f32,
-            camera.d[3] as f32,
+            camera.distortion[0] as f32,
+            camera.distortion[1] as f32,
+            camera.distortion[2] as f32,
+            camera.distortion[3] as f32,
         ],
         color_scale: [1.0, 1.0, 1.0, 0.0],
         color_offset_blend: [0.0, 0.0, 0.0, blend_width],
@@ -2391,46 +2313,21 @@ pub(crate) fn build_gpu_uniforms(
     }
 }
 
-/// Convert a nalgebra `Matrix4` to column-major `[[f32; 4]; 4]` for wgpu.
-pub(crate) fn matrix4_to_columns(m: &Matrix4<f32>) -> [[f32; 4]; 4] {
-    let s = m.as_slice();
-    [
-        [s[0], s[1], s[2], s[3]],
-        [s[4], s[5], s[6], s[7]],
-        [s[8], s[9], s[10], s[11]],
-        [s[12], s[13], s[14], s[15]],
-    ]
-}
-
-/// OpenGL to wgpu clip space correction: Z from \[-1,1\] to \[0,1\].
-///
-/// nalgebra's `Perspective3` uses OpenGL conventions. wgpu expects
-/// clip space Z in [0, 1], so we apply this correction.
-#[rustfmt::skip]
-pub(crate) fn opengl_to_wgpu_matrix() -> Matrix4<f32> {
-    Matrix4::new(
-        1.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 0.5, 0.5,
-        0.0, 0.0, 0.0, 1.0,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn uniforms_are_normalized() {
-        let camera = CameraParams {
-            width: 3840,
-            height: 2160,
-            fx: 1796.32,
-            fy: 1797.22,
-            cx: 1919.37,
-            cy: 1063.17,
-            d: [0.0342, 0.0677, -0.0741, 0.0299],
-        };
+        let camera = Lens::fisheye(
+            3840,
+            2160,
+            1796.32,
+            1797.22,
+            1919.37,
+            1063.17,
+            [0.0342, 0.0677, -0.0741, 0.0299],
+        );
         let mvp = Matrix4::identity();
         let u = build_gpu_uniforms(
             &mvp,
@@ -2461,14 +2358,15 @@ mod tests {
 
     #[test]
     fn ground_tilt_uniform_packs_plane_aspect() {
-        let camera = CameraParams {
+        let camera = Lens {
             width: 3840,
             height: 2880,
             fx: 1457.07,
             fy: 1457.07,
             cx: 1920.0,
             cy: 1440.0,
-            d: [0.0; 4],
+            distortion: [0.0; 4],
+            correction: 1.0,
         };
         let mvp = Matrix4::identity();
         let u = build_gpu_uniforms(
@@ -2496,14 +2394,15 @@ mod tests {
 
     #[test]
     fn top_tilt_uniform_packs_correctly() {
-        let camera = CameraParams {
+        let camera = Lens {
             width: 3840,
             height: 2880,
             fx: 1457.07,
             fy: 1457.07,
             cx: 1920.0,
             cy: 1440.0,
-            d: [0.0; 4],
+            distortion: [0.0; 4],
+            correction: 1.0,
         };
         let mvp = Matrix4::identity();
         let u = build_gpu_uniforms(
@@ -2593,27 +2492,39 @@ mod tests {
         }
     }
 
-    fn seam_test_calibration() -> MatchCalibration {
-        let camera = CameraParams {
+    fn seam_test_calibration() -> Calibration {
+        let lens = Lens {
             width: 1920,
             height: 1080,
             fx: 900.0,
             fy: 900.0,
             cx: 960.0,
             cy: 540.0,
-            d: [0.0; 4],
+            distortion: [0.0; 4],
+            correction: 1.0,
         };
-        MatchCalibration {
-            left: camera.clone(),
-            right: camera,
-            layout: crate::calibration::PlaneLayout {
-                camera_axis_offset: 0.24,
+        Calibration {
+            schema_version: 1,
+            lenses: vec![lens.clone(), lens],
+            topology: crate::calibration::Topology {
                 intersect: 0.54,
                 x_ty: 0.0,
                 x_rz: 0.0,
                 z_rx: 0.0,
                 x_rx: 0.0,
                 z_rz: 0.0,
+                blend_width: 0.05,
+                blend_flip_direction: false,
+                seam_offset: 0.0,
+                multiband_blend_enabled: false,
+                color_match_enabled: true,
+                color_match_band_width: 0.15,
+                color_match_grid_cols: 8,
+                color_match_grid_rows: 16,
+                color_match_interval_frames: 15,
+                color_match_ema_alpha: 0.15,
+                color_match_max_y_offset: 0.06,
+                color_match_max_chroma_offset: 0.04,
                 ground_tilt_x: 0.0,
                 ground_tilt_z: 0.0,
                 top_tilt_x: 0.0,
@@ -2621,48 +2532,28 @@ mod tests {
                 ground_tilt_band_width: 0.16,
                 top_tilt_band_width: 0.16,
             },
-            rig_tilt: 0.0,
-            rig_roll: 0.0,
+            framing: crate::calibration::Framing {
+                axis_offset: 0.24,
+                tilt: 0.0,
+                roll: 0.0,
+            },
             sync_offset: 0,
             field_roi: None,
-            lens_correction_amount: 1.0,
-            blend_width: 0.05,
-            blend_flip_direction: false,
-            seam_offset: 0.0,
-            multiband_blend_enabled: false,
-            color_match_enabled: true,
-            color_match_band_width: 0.15,
-            color_match_grid_cols: 8,
-            color_match_grid_rows: 16,
-            color_match_interval_frames: 15,
-            color_match_ema_alpha: 0.15,
-            color_match_max_y_offset: 0.06,
-            color_match_max_chroma_offset: 0.04,
         }
     }
 
     #[test]
     fn seam_line_screen_points_none_when_blend_width_zero() {
-        let cal = seam_test_calibration();
-        let mut viewport = ViewportConfig {
-            seam_offset: cal.seam_offset,
-            blend_flip_direction: cal.blend_flip_direction,
-            blend_width: cal.blend_width,
-            ..ViewportConfig::default()
-        };
-        viewport.blend_width = 0.0;
+        let mut cal = seam_test_calibration();
+        cal.topology.blend_width = 0.0;
+        let viewport = ViewportConfig::default();
         assert!(seam_line_screen_points(&cal, &viewport, 0.0, 0.0, 16.0 / 9.0).is_none());
     }
 
     #[test]
     fn seam_line_screen_points_returns_finite_points_near_center() {
         let cal = seam_test_calibration();
-        let viewport = ViewportConfig {
-            seam_offset: cal.seam_offset,
-            blend_flip_direction: cal.blend_flip_direction,
-            blend_width: cal.blend_width,
-            ..ViewportConfig::default()
-        };
+        let viewport = ViewportConfig::default();
         let (top, bottom) = seam_line_screen_points(&cal, &viewport, 0.0, 0.0, 16.0 / 9.0)
             .expect("seam offset 0 straight ahead should project on-screen");
         for (x, y) in [top, bottom] {
@@ -2677,18 +2568,12 @@ mod tests {
 
     #[test]
     fn seam_line_screen_points_shifts_monotonically_with_seam_offset() {
-        let cal = seam_test_calibration();
-        let base_viewport = ViewportConfig {
-            blend_flip_direction: cal.blend_flip_direction,
-            blend_width: cal.blend_width,
-            ..ViewportConfig::default()
-        };
+        let base_cal = seam_test_calibration();
+        let viewport = ViewportConfig::default();
 
         let at = |offset: f32| {
-            let viewport = ViewportConfig {
-                seam_offset: offset,
-                ..base_viewport.clone()
-            };
+            let mut cal = base_cal.clone();
+            cal.topology.seam_offset = offset;
             seam_line_screen_points(&cal, &viewport, 0.0, 0.0, 16.0 / 9.0)
                 .expect("should project")
                 .0
@@ -2707,12 +2592,7 @@ mod tests {
     #[test]
     fn seam_line_screen_points_tracks_yaw_not_just_straight_ahead() {
         let cal = seam_test_calibration();
-        let viewport = ViewportConfig {
-            seam_offset: cal.seam_offset,
-            blend_flip_direction: cal.blend_flip_direction,
-            blend_width: cal.blend_width,
-            ..ViewportConfig::default()
-        };
+        let viewport = ViewportConfig::default();
         let x_at = |yaw: f32| {
             seam_line_screen_points(&cal, &viewport, yaw, 0.0, 16.0 / 9.0)
                 .expect("should project")
@@ -2730,31 +2610,43 @@ mod tests {
 
     #[test]
     fn seam_line_screen_points_matches_real_screenshot_measurement() {
-        let camera = CameraParams {
+        let lens = Lens {
             width: 3840,
             height: 2880,
             fx: 1457.07373046875,
             fy: 1457.07373046875,
             cx: 1920.0,
             cy: 1440.0,
-            d: [
+            distortion: [
                 0.15513110160827637,
                 0.1371408998966217,
                 -0.0938614010810852,
                 0.0041704000905156136,
             ],
+            correction: 1.0,
         };
-        let cal = MatchCalibration {
-            left: camera.clone(),
-            right: camera,
-            layout: crate::calibration::PlaneLayout {
-                camera_axis_offset: 0.18876110017299652,
+        let cal = Calibration {
+            schema_version: 1,
+            lenses: vec![lens.clone(), lens],
+            topology: crate::calibration::Topology {
                 intersect: 0.656978189945221,
                 x_ty: -0.00602530796897377,
                 x_rz: 0.004217210506111289,
                 z_rx: -0.02375206433034046,
                 x_rx: 0.0,
                 z_rz: 0.0,
+                blend_width: 0.19363637,
+                blend_flip_direction: false,
+                seam_offset: 0.15829112,
+                multiband_blend_enabled: true,
+                color_match_enabled: true,
+                color_match_band_width: 0.4,
+                color_match_grid_cols: 8,
+                color_match_grid_rows: 16,
+                color_match_interval_frames: 15,
+                color_match_ema_alpha: 0.15,
+                color_match_max_y_offset: 0.06,
+                color_match_max_chroma_offset: 0.0,
                 ground_tilt_x: -0.007000000681728125,
                 ground_tilt_z: 0.0010000000474974513,
                 top_tilt_x: 0.0,
@@ -2762,28 +2654,15 @@ mod tests {
                 ground_tilt_band_width: 0.16,
                 top_tilt_band_width: 0.16,
             },
-            rig_tilt: 0.0,
-            rig_roll: 0.0,
+            framing: crate::calibration::Framing {
+                axis_offset: 0.18876110017299652,
+                tilt: 0.0,
+                roll: 0.0,
+            },
             sync_offset: 3,
             field_roi: None,
-            lens_correction_amount: 1.0,
-            blend_width: 0.19363637,
-            blend_flip_direction: false,
-            seam_offset: 0.15829112,
-            multiband_blend_enabled: true,
-            color_match_enabled: true,
-            color_match_band_width: 0.4,
-            color_match_grid_cols: 8,
-            color_match_grid_rows: 16,
-            color_match_interval_frames: 15,
-            color_match_ema_alpha: 0.15,
-            color_match_max_y_offset: 0.06,
-            color_match_max_chroma_offset: 0.0,
         };
         let viewport = ViewportConfig {
-            seam_offset: cal.seam_offset,
-            blend_flip_direction: cal.blend_flip_direction,
-            blend_width: cal.blend_width,
             fov_degrees: 75.0,
             ..ViewportConfig::default()
         };

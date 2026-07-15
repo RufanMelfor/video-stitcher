@@ -49,7 +49,13 @@ use argmin::solver::neldermead::NelderMead;
 use reco_calibrate::geometry::{self, OptParams};
 use reco_calibrate::photometric::{self, OverlapMask, ZnccReport};
 use reco_calibrate::types::{FrameMatches, MatchedPoint};
-use reco_core::calibration::{CameraParams, MatchCalibration, PlaneLayout};
+use reco_core::calibration::{
+    Calibration, Framing, Lens, Topology, DEFAULT_BLEND_WIDTH, DEFAULT_COLOR_MATCH_BAND_WIDTH,
+    DEFAULT_COLOR_MATCH_EMA_ALPHA, DEFAULT_COLOR_MATCH_ENABLED, DEFAULT_COLOR_MATCH_GRID_COLS,
+    DEFAULT_COLOR_MATCH_GRID_ROWS, DEFAULT_COLOR_MATCH_INTERVAL_FRAMES,
+    DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET, DEFAULT_COLOR_MATCH_MAX_Y_OFFSET,
+    DEFAULT_TILT_BAND_WIDTH,
+};
 use reco_core::gpu::GpuContext;
 use reco_core::render::scene::SceneGeometry;
 use reco_core::render::single_camera::SingleCameraRenderer;
@@ -159,8 +165,9 @@ fn main() {
     std::fs::create_dir_all(output_dir).expect("failed to create output_dir");
 
     let json_str = std::fs::read_to_string(match_json_path).expect("failed to read match.json");
-    let cal: MatchCalibration = serde_json::from_str(&json_str).expect("invalid match.json");
-    let seed_layout = cal.layout.clone();
+    let cal: Calibration = serde_json::from_str(&json_str).expect("invalid match.json");
+    let seed_topology = cal.topology.clone();
+    let seed_framing = cal.framing.clone();
 
     // --- Load real frame pairs (one per --frames entry) ---
     println!(
@@ -221,8 +228,8 @@ fn main() {
             gpu: &gpu,
             left_renderer: &left_renderer,
             right_renderer: &right_renderer,
-            left_cam: &cal.left,
-            right_cam: &cal.right,
+            left_cam: &cal.lenses[0],
+            right_cam: &cal.lenses[1],
             left_yuv,
             right_yuv,
             aspect,
@@ -234,10 +241,10 @@ fn main() {
 
     // --- Baseline (AKAZE-fitted seed) ---
     println!("\n=== Baseline (AKAZE-fitted seed layout) ===");
-    print_layout("seed", &seed_layout);
+    print_layout("seed", &seed_topology, &seed_framing);
     let seed_results: Vec<RenderScoreResult> = ctxs
         .iter()
-        .map(|ctx| render_and_score(ctx, &seed_layout))
+        .map(|ctx| render_and_score(ctx, &seed_topology, &seed_framing))
         .collect();
     for (i, r) in seed_results.iter().enumerate() {
         print_report(&format!("seed[frame {}]", left_frame_indices[i]), r);
@@ -250,16 +257,16 @@ fn main() {
     let cost = PhotometricCost {
         ctxs: ctxs.clone(),
         bounds: BOUNDS_5.to_vec(),
-        fixed_x_rx: seed_layout.x_rx,
-        fixed_z_rz: seed_layout.z_rz,
+        fixed_x_rx: seed_topology.x_rx,
+        fixed_z_rz: seed_topology.z_rz,
     };
 
     let seed_vec = vec![
-        seed_layout.camera_axis_offset,
-        seed_layout.intersect,
-        seed_layout.x_ty,
-        seed_layout.x_rz,
-        seed_layout.z_rx,
+        seed_framing.axis_offset,
+        seed_topology.intersect,
+        seed_topology.x_ty,
+        seed_topology.x_rz,
+        seed_topology.z_rx,
     ];
     // Small perturbations around the seed - this harness refines an
     // already-good AKAZE fit, unlike optimizer.rs's wide cold-start grid.
@@ -291,11 +298,12 @@ fn main() {
         starts.len()
     );
 
-    let refined_layout = vec5_to_layout(&best_vec, seed_layout.x_rx, seed_layout.z_rz);
-    print_layout("refined", &refined_layout);
+    let (refined_topology, refined_framing) =
+        vec5_to_layout(&best_vec, seed_topology.x_rx, seed_topology.z_rz);
+    print_layout("refined", &refined_topology, &refined_framing);
     let refined_results: Vec<RenderScoreResult> = ctxs
         .iter()
-        .map(|ctx| render_and_score(ctx, &refined_layout))
+        .map(|ctx| render_and_score(ctx, &refined_topology, &refined_framing))
         .collect();
     for (i, r) in refined_results.iter().enumerate() {
         print_report(&format!("refined[frame {}]", left_frame_indices[i]), r);
@@ -328,13 +336,13 @@ fn main() {
     println!("2. Core parameter deltas (seed -> refined):");
     check_delta(
         "cam_d",
-        seed_layout.camera_axis_offset,
-        refined_layout.camera_axis_offset,
+        seed_framing.axis_offset,
+        refined_framing.axis_offset,
     );
-    check_delta("intersect", seed_layout.intersect, refined_layout.intersect);
-    check_delta("x_ty", seed_layout.x_ty, refined_layout.x_ty);
-    check_delta("x_rz", seed_layout.x_rz, refined_layout.x_rz);
-    check_delta("z_rx", seed_layout.z_rx, refined_layout.z_rx);
+    check_delta("intersect", seed_topology.intersect, refined_topology.intersect);
+    check_delta("x_ty", seed_topology.x_ty, refined_topology.x_ty);
+    check_delta("x_rz", seed_topology.x_rz, refined_topology.x_rz);
+    check_delta("z_rx", seed_topology.z_rx, refined_topology.z_rx);
 
     println!("3. Spread across {} converged starts:", converged.len());
     for (i, name) in ["cam_d", "intersect", "x_ty", "x_rz", "z_rx"]
@@ -351,12 +359,18 @@ fn main() {
     }
 
     println!("4. Bound-pegging check (cam_d, intersect):");
-    check_bound_pegging("cam_d", refined_layout.camera_axis_offset, BOUNDS_5[0]);
-    check_bound_pegging("intersect", refined_layout.intersect, BOUNDS_5[1]);
+    check_bound_pegging("cam_d", refined_framing.axis_offset, BOUNDS_5[0]);
+    check_bound_pegging("intersect", refined_topology.intersect, BOUNDS_5[1]);
 
     if let Some(mp_path) = matched_points_path {
         println!("5. Independent AKAZE-metric cross-check ({mp_path}):");
-        cross_check_akaze_residual(mp_path, &seed_layout, &refined_layout);
+        cross_check_akaze_residual(
+            mp_path,
+            &seed_topology,
+            &seed_framing,
+            &refined_topology,
+            &refined_framing,
+        );
     } else {
         println!("5. (skipped - pass --matched-points to cross-check against the AKAZE residual)");
     }
@@ -446,16 +460,16 @@ fn perturb(v: &[f64], idx: usize, delta: f64) -> Vec<f64> {
     out
 }
 
-fn print_layout(label: &str, layout: &PlaneLayout) {
+fn print_layout(label: &str, topology: &Topology, framing: &Framing) {
     println!(
         "  {label}: cam_d={:.4} intersect={:.4} x_ty={:.5} x_rz={:.4} z_rx={:.4} x_rx={:.4} z_rz={:.4}",
-        layout.camera_axis_offset,
-        layout.intersect,
-        layout.x_ty,
-        layout.x_rz,
-        layout.z_rx,
-        layout.x_rx,
-        layout.z_rz,
+        framing.axis_offset,
+        topology.intersect,
+        topology.x_ty,
+        topology.x_rz,
+        topology.z_rx,
+        topology.x_rx,
+        topology.z_rz,
     );
 }
 
@@ -510,7 +524,13 @@ fn check_bound_pegging(name: &str, value: f64, bound: (f64, f64)) {
     }
 }
 
-fn cross_check_akaze_residual(path: &str, seed: &PlaneLayout, refined: &PlaneLayout) {
+fn cross_check_akaze_residual(
+    path: &str,
+    seed_topology: &Topology,
+    seed_framing: &Framing,
+    refined_topology: &Topology,
+    refined_framing: &Framing,
+) {
     let json = match std::fs::read_to_string(path) {
         Ok(j) => j,
         Err(e) => {
@@ -532,8 +552,8 @@ fn cross_check_akaze_residual(path: &str, seed: &PlaneLayout, refined: &PlaneLay
     let near: Vec<MatchedPoint> = points.iter().copied().filter(is_near).collect();
     let far: Vec<MatchedPoint> = points.iter().copied().filter(|p| !is_near(p)).collect();
 
-    let seed_params = layout_to_opt_params(seed);
-    let refined_params = layout_to_opt_params(refined);
+    let seed_params = layout_to_opt_params(seed_topology, seed_framing);
+    let refined_params = layout_to_opt_params(refined_topology, refined_framing);
 
     let near_seed: f64 = geometry::per_point_reprojection_error(&near, &seed_params)
         .iter()
@@ -566,15 +586,15 @@ fn cross_check_akaze_residual(path: &str, seed: &PlaneLayout, refined: &PlaneLay
     }
 }
 
-fn layout_to_opt_params(layout: &PlaneLayout) -> OptParams {
+fn layout_to_opt_params(topology: &Topology, framing: &Framing) -> OptParams {
     OptParams {
-        x_ty: layout.x_ty,
-        intersect: layout.intersect,
-        cam_d: layout.camera_axis_offset,
-        x_rz: layout.x_rz,
-        z_rx: layout.z_rx,
-        z_rz: Some(layout.z_rz),
-        x_rx: Some(layout.x_rx),
+        x_ty: topology.x_ty,
+        intersect: topology.intersect,
+        cam_d: framing.axis_offset,
+        x_rz: topology.x_rz,
+        z_rx: topology.z_rx,
+        z_rz: Some(topology.z_rz),
+        x_rx: Some(topology.x_rx),
         ground_tilt_x: None,
         ground_tilt_z: None,
         k_x: 1.0,
@@ -624,22 +644,39 @@ fn render_heatmap(left_luma: &[f32], right_luma: &[f32], mask: &OverlapMask) -> 
     img
 }
 
-fn vec5_to_layout(p: &[f64], x_rx: f64, z_rz: f64) -> PlaneLayout {
-    PlaneLayout {
-        camera_axis_offset: p[0],
+fn vec5_to_layout(p: &[f64], x_rx: f64, z_rz: f64) -> (Topology, Framing) {
+    let topology = Topology {
         intersect: p[1],
         x_ty: p[2],
         x_rz: p[3],
         z_rx: p[4],
         x_rx,
         z_rz,
+        blend_width: DEFAULT_BLEND_WIDTH,
+        blend_flip_direction: false,
+        seam_offset: 0.0,
+        multiband_blend_enabled: false,
+        color_match_enabled: DEFAULT_COLOR_MATCH_ENABLED,
+        color_match_band_width: DEFAULT_COLOR_MATCH_BAND_WIDTH,
+        color_match_grid_cols: DEFAULT_COLOR_MATCH_GRID_COLS,
+        color_match_grid_rows: DEFAULT_COLOR_MATCH_GRID_ROWS,
+        color_match_interval_frames: DEFAULT_COLOR_MATCH_INTERVAL_FRAMES,
+        color_match_ema_alpha: DEFAULT_COLOR_MATCH_EMA_ALPHA,
+        color_match_max_y_offset: DEFAULT_COLOR_MATCH_MAX_Y_OFFSET,
+        color_match_max_chroma_offset: DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET,
         ground_tilt_x: 0.0,
         ground_tilt_z: 0.0,
         top_tilt_x: 0.0,
         top_tilt_z: 0.0,
-        ground_tilt_band_width: 0.16,
-        top_tilt_band_width: 0.16,
-    }
+        ground_tilt_band_width: DEFAULT_TILT_BAND_WIDTH,
+        top_tilt_band_width: DEFAULT_TILT_BAND_WIDTH,
+    };
+    let framing = Framing {
+        axis_offset: p[0],
+        tilt: 0.0,
+        roll: 0.0,
+    };
+    (topology, framing)
 }
 
 /// Shared render inputs, cheap to clone (all shared references + Copy
@@ -650,8 +687,8 @@ struct RenderCtx<'a> {
     gpu: &'a GpuContext,
     left_renderer: &'a SingleCameraRenderer,
     right_renderer: &'a SingleCameraRenderer,
-    left_cam: &'a CameraParams,
-    right_cam: &'a CameraParams,
+    left_cam: &'a Lens,
+    right_cam: &'a Lens,
     left_yuv: &'a reco_core::source::YuvFrame,
     right_yuv: &'a reco_core::source::YuvFrame,
     aspect: f32,
@@ -675,8 +712,12 @@ struct RenderScoreResult {
     right_luma: Vec<f32>,
 }
 
-fn render_and_score(ctx: &RenderCtx<'_>, layout: &PlaneLayout) -> RenderScoreResult {
-    let scene = SceneGeometry::from_layout_with_aspect(layout, ctx.aspect);
+fn render_and_score(
+    ctx: &RenderCtx<'_>,
+    topology: &Topology,
+    framing: &Framing,
+) -> RenderScoreResult {
+    let scene = SceneGeometry::new(topology, framing, ctx.aspect);
     let left_rgba = ctx.left_renderer.render_and_readback(
         ctx.gpu,
         &scene,
@@ -756,7 +797,7 @@ impl CostFunction for PhotometricCost<'_> {
     type Output = f64;
 
     fn cost(&self, p: &Self::Param) -> Result<Self::Output, ArgminError> {
-        let layout = vec5_to_layout(p, self.fixed_x_rx, self.fixed_z_rz);
+        let (topology, framing) = vec5_to_layout(p, self.fixed_x_rx, self.fixed_z_rz);
         let penalty = bounds_penalty(p, &self.bounds);
 
         // Every loaded frame must pass the degeneracy checks on the
@@ -765,7 +806,7 @@ impl CostFunction for PhotometricCost<'_> {
         // whole candidate rather than averaging around the failure.
         let mut banded_sum = 0.0f64;
         for ctx in &self.ctxs {
-            let r = render_and_score(ctx, &layout);
+            let r = render_and_score(ctx, &topology, &framing);
             if r.mask.coverage_fraction() < MIN_OVERLAP_FRACTION
                 || r.banded_report.valid_patches < MIN_VALID_PATCHES
             {

@@ -53,7 +53,9 @@ pub struct StitchJob {
     end_time: Option<f64>,
     max_frames: Option<u64>,
     sync_offset: Option<i64>,
-    blend_width: f32,
+    /// Seam blend override. `None` (default) respects the calibration
+    /// document's saved value - the single home for render params.
+    blend_width: Option<f32>,
     blend_flip_direction: bool,
     multiband_blend_enabled: bool,
     show_seam_line: bool,
@@ -125,7 +127,7 @@ enum CalibrationSource {
     /// Load from a JSON file path.
     File(PathBuf),
     /// Use an in-memory calibration (no file I/O).
-    Memory(Box<reco_core::calibration::MatchCalibration>),
+    Memory(Box<reco_core::calibration::Calibration>),
 }
 
 /// Input video file path(s), supporting chained/segmented recordings.
@@ -260,7 +262,7 @@ impl StitchJob {
             end_time: None,
             max_frames: None,
             sync_offset: None,
-            blend_width: 0.15,
+            blend_width: None,
             blend_flip_direction: false,
             multiband_blend_enabled: false,
             show_seam_line: false,
@@ -283,7 +285,7 @@ impl StitchJob {
     pub fn with_calibration(
         left: impl Into<InputPath>,
         right: impl Into<InputPath>,
-        calibration: reco_core::calibration::MatchCalibration,
+        calibration: reco_core::calibration::Calibration,
         output: impl AsRef<Path>,
     ) -> Self {
         let mut job = Self::new(left, right, Path::new(""), output);
@@ -395,9 +397,10 @@ impl StitchJob {
         self
     }
 
-    /// Set the blend width for seam blending (0.0 - 1.0). Default: 0.15.
+    /// Override the calibration's saved seam blend width (0.0 - 1.0).
+    /// When not called, the calibration document's value is used.
     pub fn blend_width(mut self, blend: f32) -> Self {
-        self.blend_width = blend;
+        self.blend_width = Some(blend);
         self
     }
 
@@ -627,9 +630,9 @@ impl StitchJob {
         let start = std::time::Instant::now();
 
         // Load calibration
-        let cal = match self.calibration {
+        let mut cal = match self.calibration {
             CalibrationSource::File(ref path) => {
-                reco_core::calibration::MatchCalibration::from_file(path)
+                reco_core::calibration::Calibration::from_file(path)
                     .map_err(|e| StitchError::Calibration(format!("{e}")))?
             }
             CalibrationSource::Memory(cal) => *cal,
@@ -664,18 +667,35 @@ impl StitchJob {
             reco_core::render::renderer::InputFormat::Yuv420p
         };
 
-        // Build session
+        // Build session. Render params live on the calibration; an explicit
+        // job override replaces the saved value, otherwise it renders as-is.
+        if let Some(blend) = self.blend_width {
+            log::info!(
+                "seam blend: overriding calibration value {} with {blend}",
+                cal.topology.blend_width
+            );
+            cal.topology.blend_width = blend;
+        } else {
+            log::info!(
+                "seam blend: using calibration value {}",
+                cal.topology.blend_width
+            );
+        }
+        cal.topology.blend_flip_direction = self.blend_flip_direction;
+        cal.topology.multiband_blend_enabled = self.multiband_blend_enabled;
+        cal.topology.seam_offset = self.seam_offset;
+        cal.topology.color_match_enabled = self.color_match_enabled;
+        if self.show_seam_line {
+            log::warn!(
+                "show_seam_line requested but not wired through StitchSession/SessionConfig \
+                 since the upstream merge - the debug seam line will not be drawn in this \
+                 export. StitchPipeline::set_show_seam_line exists but nothing threads a \
+                 StitchJob-level request to it yet."
+            );
+        }
         let viewport = reco_core::render::viewport::ViewportConfig {
             width: out_w,
             height: out_h,
-            blend_width: self.blend_width,
-            blend_flip_direction: self.blend_flip_direction,
-            multiband_blend_enabled: self.multiband_blend_enabled,
-            show_seam_line: self.show_seam_line,
-            seam_offset: self.seam_offset,
-            color_match_enabled: self.color_match_enabled,
-            rig_tilt: cal.rig_tilt as f32,
-            rig_roll: cal.rig_roll as f32,
             ..Default::default()
         };
         let session_config = reco_core::session::types::SessionConfig {
