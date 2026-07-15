@@ -105,7 +105,35 @@ GitHub-recognized fork `RufanMelfor/video-stitcher` added as a local
 remote (the day-to-day `github` remote, `RufanMelfor/reco-video-
 stitcher-rig`, is **not** fork-linked to `reco-project/video-stitcher`
 - confirmed via `gh repo view --json isFork,parent` - so GitHub will
-refuse a PR from it directly).
+refuse a PR from it directly). **Update 2026-07-15**: the user
+confirmed `RufanMelfor/video-stitcher`'s `main` is now synced to
+upstream's current tip (`ab553d35`, matching `origin/main` exactly),
+so that remote is ready whenever the user says go for pushing/PRs.
+
+**Appearance/restyle - not prepared as a branch, asked about
+2026-07-15, deliberately left bundled for now**: the user asked whether
+a PR exists for "how the program looks, all the new buttons etc." It
+doesn't - the visual work lives in two fork-history commits, both
+heavily bundled with unrelated functional features:
+- `ba37aee5` "port rig-calib calibration UX + full transport/panel
+  restyle" - new `FlatButton` component, transport-bar redesign,
+  flat control language, FOV pill - bundled together with 8 unrelated
+  functional ports (ground_tilt sliders, blend_flip_direction,
+  variable playback speed, auto-calibrate tuning, sync-offset
+  auto-detection + audio waveform panel, reopen-last-files-on-startup,
+  playhead-jump fix).
+- `d9d63850` "numeric-field polish, toolbar debug panel, transport
+  layout tweaks" - NumEdit fields, "Expert Mode" button rename, panel
+  reordering, transport layout - bundled with the Debug toolbar/log
+  dialog (pure functionality, not appearance).
+User's instruction: leave this un-split for now (don't prepare a 7th
+branch), **but make sure it gets mentioned in the text whenever the
+relevant PR(s) are written** - i.e. don't let the owner's PR review
+silently miss that a restyle exists in fork history; it needs a
+call-out (in whichever PR description ends up being the natural place,
+or as its own note to the owner) that this feature exists but needs
+untangling from unrelated functional commits before it can be its own
+clean PR, same category of work as the concat-seek/persistence split.
 
 ## What shipped this session (2026-07-14)
 
