@@ -16,8 +16,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use reco_core::{
-    calibration::MatchCalibration,
+    calibration::Calibration,
     gpu::{GpuContext, OutputFormat, rgba_readback::RgbaReadback},
+    projection::{LShapeProjection, Projection},
     render::{
         pipeline::{BgraPlanes, StitchPipeline},
         renderer::InputFormat,
@@ -80,11 +81,11 @@ fn main() -> Result<()> {
     // --- Calibration ---
     let cal_json = std::fs::read_to_string(&args.calibration)
         .with_context(|| format!("reading calibration: {}", args.calibration.display()))?;
-    let calibration: MatchCalibration =
+    let calibration: Calibration =
         serde_json::from_str(&cal_json).context("parsing calibration JSON")?;
 
-    let in_w = calibration.left.width;
-    let in_h = calibration.left.height;
+    let in_w = calibration.lenses[0].width;
+    let in_h = calibration.lenses[0].height;
     eprintln!("Calibration input dimensions: {in_w}x{in_h}");
 
     // --- Input images ---
@@ -101,21 +102,20 @@ fn main() -> Result<()> {
     eprintln!("GPU: {} ({})", gpu.gpu_name(), gpu.backend_name());
 
     // --- Pipeline ---
+    let mut calibration = calibration;
+    calibration.topology.blend_width = args.blend;
     let viewport = ViewportConfig {
         width: args.width,
         height: args.height,
         fov_degrees: args.fov,
-        blend_width: args.blend,
-        rig_tilt: calibration.rig_tilt as f32,
-        rig_roll: calibration.rig_roll as f32,
-        lens_correction_amount: calibration.lens_correction_amount,
-        ..ViewportConfig::default()
     };
 
     // InputFormat::Bgra: skips YUV→RGB conversion, samples RGBA directly.
     // Correct for pre-decoded PNG/JPEG inputs that are already in RGB space.
+    let projection = LShapeProjection;
     let pipeline = StitchPipeline::with_gpu(
         gpu.clone(),
+        &projection.gpu_program(),
         calibration,
         viewport,
         in_w,

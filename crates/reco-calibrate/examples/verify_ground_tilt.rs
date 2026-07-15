@@ -26,7 +26,7 @@
 //! -0.090/-0.085) - this harness renders that same layout with and
 //! without the correction, it doesn't fit anything itself.
 
-use reco_core::calibration::MatchCalibration;
+use reco_core::calibration::Calibration;
 use reco_core::gpu::GpuContext;
 use reco_core::render::renderer::{GroundTilt, TopTilt};
 use reco_core::render::scene::SceneGeometry;
@@ -49,17 +49,17 @@ fn main() {
     let (match_path, left_path, right_path, out_dir) = (&args[1], &args[2], &args[3], &args[4]);
     std::fs::create_dir_all(out_dir).expect("failed to create output_dir");
 
-    let cal: MatchCalibration = {
+    let cal: Calibration = {
         let s = std::fs::read_to_string(match_path)
             .unwrap_or_else(|e| panic!("failed to read {match_path}: {e}"));
         serde_json::from_str(&s)
-            .unwrap_or_else(|e| panic!("failed to parse {match_path} as MatchCalibration: {e}"))
+            .unwrap_or_else(|e| panic!("failed to parse {match_path} as Calibration: {e}"))
     };
     eprintln!(
         "Loaded ground_tilt_x={:+.4} ground_tilt_z={:+.4} from {match_path}",
-        cal.layout.ground_tilt_x, cal.layout.ground_tilt_z
+        cal.topology.ground_tilt_x, cal.topology.ground_tilt_z
     );
-    if cal.layout.ground_tilt_x == 0.0 && cal.layout.ground_tilt_z == 0.0 {
+    if cal.topology.ground_tilt_x == 0.0 && cal.topology.ground_tilt_z == 0.0 {
         eprintln!(
             "WARNING: both are 0.0 - baseline and corrected renders will be identical. \
              Pass a match.json with groundTiltX/groundTiltZ already set (see FRICTION.md point 20)."
@@ -76,7 +76,7 @@ fn main() {
 
     let gpu = GpuContext::new_blocking().expect("no GPU");
     let aspect = left_yuv.width as f32 / left_yuv.height as f32;
-    let scene = SceneGeometry::from_layout_with_aspect(&cal.layout, aspect);
+    let scene = SceneGeometry::new(&cal.topology, &cal.framing, aspect);
 
     let left_renderer = SingleCameraRenderer::new(
         &gpu,
@@ -99,21 +99,21 @@ fn main() {
     // Renderer::encode_stitch_pass (crates/reco-core/src/render/renderer.rs)
     // - see that function's comment for why it's not the naive pairing.
     let left_ground_tilt = GroundTilt {
-        tilt: cal.layout.ground_tilt_z as f32,
-        k: cal.left.ground_tilt_k() as f32,
-        band_full: cal.layout.ground_tilt_band_width as f32,
+        tilt: cal.topology.ground_tilt_z as f32,
+        k: cal.lenses[0].ground_tilt_k() as f32,
+        band_full: cal.topology.ground_tilt_band_width as f32,
     };
     let right_ground_tilt = GroundTilt {
-        tilt: cal.layout.ground_tilt_x as f32,
-        k: cal.right.ground_tilt_k() as f32,
-        band_full: cal.layout.ground_tilt_band_width as f32,
+        tilt: cal.topology.ground_tilt_x as f32,
+        k: cal.lenses[1].ground_tilt_k() as f32,
+        band_full: cal.topology.ground_tilt_band_width as f32,
     };
 
     let render_pair = |gt_left: GroundTilt, gt_right: GroundTilt| -> Vec<u8> {
         let left_rgba = left_renderer.render_and_readback(
             &gpu,
             &scene,
-            &cal.left,
+            &cal.lenses[0],
             false,
             FOV_DEGREES,
             &left_yuv.y,
@@ -125,7 +125,7 @@ fn main() {
         let right_rgba = right_renderer.render_and_readback(
             &gpu,
             &scene,
-            &cal.right,
+            &cal.lenses[1],
             true,
             FOV_DEGREES,
             &right_yuv.y,

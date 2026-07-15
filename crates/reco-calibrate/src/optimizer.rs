@@ -19,7 +19,7 @@
 
 use argmin::core::{CostFunction, Error, Executor, State};
 use argmin::solver::neldermead::NelderMead;
-use reco_core::calibration::PlaneLayout;
+use reco_core::calibration::{Framing, Topology};
 
 use crate::error::CalibrateError;
 use crate::geometry::{self, OptParams};
@@ -32,7 +32,7 @@ use crate::types::{CalibrationConfig, MatchedPoint};
 /// Trait for calibration parameter optimizers.
 ///
 /// Implementations take a set of matched points and configuration, and
-/// return the optimal [`PlaneLayout`] with its residual error. This
+/// return the optimal [`Topology`] with its residual error. This
 /// abstraction allows swapping optimization backends without changing
 /// the calibration pipeline.
 pub trait Optimizer {
@@ -41,7 +41,7 @@ pub trait Optimizer {
         &self,
         points: &[MatchedPoint],
         config: &CalibrationConfig,
-    ) -> Result<(PlaneLayout, f64), CalibrateError>;
+    ) -> Result<(Topology, Framing, f64), CalibrateError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -314,7 +314,7 @@ impl Optimizer for NelderMeadOptimizer {
         &self,
         points: &[MatchedPoint],
         config: &CalibrationConfig,
-    ) -> Result<(PlaneLayout, f64), CalibrateError> {
+    ) -> Result<(Topology, Framing, f64), CalibrateError> {
         let lock = config.optimizer.lock_cam_d;
         let lock_zrx = config.optimizer.lock_z_rx;
         let enable_xrx = config.optimizer.enable_x_rx;
@@ -416,14 +416,33 @@ impl Optimizer for NelderMeadOptimizer {
         })?;
 
         let params = unpack_params(&best_p, lock, lock_zrx, enable_xrx, enable_zrz);
-        let layout = PlaneLayout {
-            camera_axis_offset: params.cam_d,
+        let topology = Topology {
             intersect: params.intersect,
             x_ty: params.x_ty,
             x_rz: params.x_rz,
             z_rx: params.z_rx,
-            x_rx: params.x_rx.unwrap_or(0.0),
-            z_rz: params.z_rz.unwrap_or(0.0),
+            x_rx: if enable_xrx {
+                params.x_rx.unwrap_or(0.0)
+            } else {
+                0.0
+            },
+            z_rz: if enable_zrz {
+                params.z_rz.unwrap_or(0.0)
+            } else {
+                0.0
+            },
+            blend_width: reco_core::calibration::DEFAULT_BLEND_WIDTH,
+            blend_flip_direction: false,
+            seam_offset: 0.0,
+            multiband_blend_enabled: false,
+            color_match_enabled: reco_core::calibration::DEFAULT_COLOR_MATCH_ENABLED,
+            color_match_band_width: reco_core::calibration::DEFAULT_COLOR_MATCH_BAND_WIDTH,
+            color_match_grid_cols: reco_core::calibration::DEFAULT_COLOR_MATCH_GRID_COLS,
+            color_match_grid_rows: reco_core::calibration::DEFAULT_COLOR_MATCH_GRID_ROWS,
+            color_match_interval_frames: reco_core::calibration::DEFAULT_COLOR_MATCH_INTERVAL_FRAMES,
+            color_match_ema_alpha: reco_core::calibration::DEFAULT_COLOR_MATCH_EMA_ALPHA,
+            color_match_max_y_offset: reco_core::calibration::DEFAULT_COLOR_MATCH_MAX_Y_OFFSET,
+            color_match_max_chroma_offset: reco_core::calibration::DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET,
             // Not fitted by this optimizer - see fit_ground_tilt_manual.rs
             // and FRICTION.md points 18-20 for the separate manual-line
             // workflow that fits these.
@@ -436,11 +455,16 @@ impl Optimizer for NelderMeadOptimizer {
             top_tilt_z: 0.0,
             // Not fitted either - same reasoning, defaults to the constant
             // this band was fixed at before it became adjustable.
-            ground_tilt_band_width: 0.16,
-            top_tilt_band_width: 0.16,
+            ground_tilt_band_width: reco_core::calibration::DEFAULT_TILT_BAND_WIDTH,
+            top_tilt_band_width: reco_core::calibration::DEFAULT_TILT_BAND_WIDTH,
+        };
+        let framing = Framing {
+            axis_offset: params.cam_d,
+            tilt: 0.0,
+            roll: 0.0,
         };
 
-        Ok((layout, best_cost))
+        Ok((topology, framing, best_cost))
     }
 }
 
@@ -468,7 +492,7 @@ impl Clone for CalibrationCost<'_> {
 pub fn optimize(
     points: &[MatchedPoint],
     config: &CalibrationConfig,
-) -> Result<(PlaneLayout, f64), CalibrateError> {
+) -> Result<(Topology, Framing, f64), CalibrateError> {
     NelderMeadOptimizer.optimize(points, config)
 }
 
@@ -559,11 +583,12 @@ mod tests {
         );
 
         let config = CalibrationConfig::default();
-        let (layout, _) = optimize(&points, &config).expect("optimization should succeed");
+        let (topology, framing, _) =
+            optimize(&points, &config).expect("optimization should succeed");
 
-        assert_abs_diff_eq!(layout.camera_axis_offset, 0.225, epsilon = 0.05);
-        assert_abs_diff_eq!(layout.intersect, 0.5, epsilon = 0.1);
-        assert_abs_diff_eq!(layout.x_ty, 0.01, epsilon = 0.02);
+        assert_abs_diff_eq!(framing.axis_offset, 0.225, epsilon = 0.05);
+        assert_abs_diff_eq!(topology.intersect, 0.5, epsilon = 0.1);
+        assert_abs_diff_eq!(topology.x_ty, 0.01, epsilon = 0.02);
     }
 
     #[test]
@@ -584,9 +609,10 @@ mod tests {
         let points = synthetic_points(&true_params, 50);
 
         let config = CalibrationConfig::default();
-        let (layout, _) = optimize(&points, &config).expect("optimization should succeed");
-        assert_abs_diff_eq!(layout.camera_axis_offset, 0.24, epsilon = 0.05);
-        assert_abs_diff_eq!(layout.intersect, 0.55, epsilon = 0.1);
+        let (topology, framing, _) =
+            optimize(&points, &config).expect("optimization should succeed");
+        assert_abs_diff_eq!(framing.axis_offset, 0.24, epsilon = 0.05);
+        assert_abs_diff_eq!(topology.intersect, 0.55, epsilon = 0.1);
     }
 
     #[test]

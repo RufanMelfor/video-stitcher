@@ -20,7 +20,7 @@
 //!
 //! ```text
 //! Frame pairs -> GPU Undistort -> AKAZE Detect -> Descriptor Match
-//!   -> Spatial + RANSAC Filter -> Nelder-Mead Optimizer -> PlaneLayout
+//!   -> Spatial + RANSAC Filter -> Nelder-Mead Optimizer -> Topology
 //! ```
 //!
 //! Each stage also has a trait interface ([`traits`]) with default
@@ -30,7 +30,7 @@
 //!
 //! ```ignore
 //! use reco_calibrate::{calibrate, CalibrationConfig};
-//! use reco_core::calibration::CameraParams;
+//! use reco_core::calibration::Lens;
 //!
 //! let result = calibrate(&gpu, &frames, &left_params, &right_params, &CalibrationConfig::default())?;
 //! println!("Confidence: {:.1}%", result.confidence * 100.0);
@@ -98,7 +98,7 @@ pub use types::{
     ProfileSource, YuvFrame,
 };
 
-use reco_core::calibration::{CameraParams, MatchCalibration};
+use reco_core::calibration::{Calibration, Lens};
 use reco_core::gpu::GpuContext;
 use reco_core::lens::undistort::GpuUndistort;
 
@@ -388,8 +388,8 @@ pub fn preview_akaze_detection(
 pub fn calibrate(
     gpu: &GpuContext,
     frames: &[(YuvFrame, YuvFrame)],
-    left_params: &CameraParams,
-    right_params: &CameraParams,
+    left_params: &Lens,
+    right_params: &Lens,
     config: &CalibrationConfig,
 ) -> Result<CalibrationResult, CalibrateError> {
     calibrate_reporting(gpu, frames, left_params, right_params, config, None)
@@ -404,8 +404,8 @@ pub fn calibrate(
 pub fn calibrate_reporting(
     gpu: &GpuContext,
     frames: &[(YuvFrame, YuvFrame)],
-    left_params: &CameraParams,
-    right_params: &CameraParams,
+    left_params: &Lens,
+    right_params: &Lens,
     config: &CalibrationConfig,
     on_frame_progress: Option<&mut dyn FnMut(usize, usize, preview::DetectionPreview)>,
 ) -> Result<CalibrationResult, CalibrateError> {
@@ -452,8 +452,8 @@ pub fn calibrate_reporting(
 pub fn calibrate_with(
     gpu: &GpuContext,
     frames: &[(YuvFrame, YuvFrame)],
-    left_params: &CameraParams,
-    right_params: &CameraParams,
+    left_params: &Lens,
+    right_params: &Lens,
     config: &CalibrationConfig,
     detector: &dyn traits::FeatureDetector,
     matcher: &dyn traits::FeatureMatcher,
@@ -478,8 +478,8 @@ pub fn calibrate_with(
 pub fn calibrate_with_reporting(
     gpu: &GpuContext,
     frames: &[(YuvFrame, YuvFrame)],
-    left_params: &CameraParams,
-    right_params: &CameraParams,
+    left_params: &Lens,
+    right_params: &Lens,
     config: &CalibrationConfig,
     detector: &dyn traits::FeatureDetector,
     matcher: &dyn traits::FeatureMatcher,
@@ -602,7 +602,7 @@ pub fn calibrate_with_reporting(
     }
 
     // Single-pass optimization on all points with trimmed cost.
-    let (best_layout, best_residual) = {
+    let (best_topology, best_framing, best_residual) = {
         profile_scope!("optimizer");
         optimizer::optimize(&all_points, config)
     }
@@ -613,11 +613,11 @@ pub fn calibrate_with_reporting(
 
     // Log both metrics for diagnostic comparison
     let best_params = geometry::OptParams {
-        x_ty: best_layout.x_ty,
-        intersect: best_layout.intersect,
-        cam_d: best_layout.camera_axis_offset,
-        x_rz: best_layout.x_rz,
-        z_rx: best_layout.z_rx,
+        x_ty: best_topology.x_ty,
+        intersect: best_topology.intersect,
+        cam_d: best_framing.axis_offset,
+        x_rz: best_topology.x_rz,
+        z_rx: best_topology.z_rx,
         z_rz: None,
         x_rx: None,
         ground_tilt_x: None,
@@ -639,31 +639,17 @@ pub fn calibrate_with_reporting(
          total_reproj={total_reproj:.6}, mean_reproj={mean_reproj:.6}, \
          angular_error={angular_err:.6}, match_confidence={match_confidence:.2}, \
          fit_confidence={fit_confidence:.2}, confidence={confidence:.2}, z_rz={:.4}",
-        best_layout.z_rz
+        best_topology.z_rz
     );
 
-    let calibration = MatchCalibration {
-        left: left_params.clone(),
-        right: right_params.clone(),
-        layout: best_layout,
-        rig_tilt: 0.0, // set by CalibrationPipeline after calibrate()
-        rig_roll: 0.0,
-        sync_offset: 0,                 // set by CalibrationPipeline after calibrate()
-        field_roi: None,                // set manually or by a future field detection pipeline
-        lens_correction_amount: 1.0,    // full correction; user-tunable in the GUI
-        blend_width: 0.05,              // renderer default; user-tunable in the GUI
-        blend_flip_direction: false,    // renderer default; user-tunable in the GUI
-        seam_offset: 0.0,               // renderer default; user-tunable in the GUI
-        multiband_blend_enabled: false, // renderer default; user-tunable in the GUI
-        color_match_enabled: true,      // renderer default; user-tunable in the GUI
-        color_match_band_width: 0.15,   // renderer default; user-tunable in the GUI
-        color_match_grid_cols: 8,       // renderer default; user-tunable in the GUI
-        color_match_grid_rows: 16,      // renderer default; user-tunable in the GUI
-        color_match_interval_frames: 15, // renderer default; user-tunable in the GUI
-        color_match_ema_alpha: 0.15,    // renderer default; user-tunable in the GUI
-        color_match_max_y_offset: 0.06, // renderer default; user-tunable in the GUI
-        color_match_max_chroma_offset: 0.04, // renderer default; user-tunable in the GUI
-    };
+    // Framing tilt/roll and sync_offset are set by CalibrationPipeline after
+    // calibrate(); lens correction defaults to full per lens; blend and
+    // ground/top tilt default on the topology.
+    let calibration = Calibration::new(
+        vec![left_params.clone(), right_params.clone()],
+        best_topology,
+        best_framing,
+    );
 
     Ok(CalibrationResult {
         calibration,

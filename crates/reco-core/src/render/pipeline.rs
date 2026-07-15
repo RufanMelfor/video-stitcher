@@ -25,8 +25,8 @@
 use super::renderer::{InputFormat, RenderError, Renderer};
 use super::scene::SceneGeometry;
 use super::viewport::{ResolvedViewport, ViewportConfig};
-use crate::calibration::MatchCalibration;
-use crate::detect::director::ViewportPosition;
+use crate::calibration::Calibration;
+use crate::geometry::ViewportPosition;
 use crate::gpu::{GpuContext, GpuError};
 
 use thiserror::Error;
@@ -40,6 +40,10 @@ pub enum PipelineError {
     /// GPU initialization failed.
     #[error("GPU error: {0}")]
     Gpu(#[from] GpuError),
+
+    /// The calibration document is invalid.
+    #[error("invalid calibration: {0}")]
+    Calibration(#[from] crate::calibration::CalibrationError),
 
     /// Render error.
     #[error("render error: {0}")]
@@ -71,9 +75,13 @@ pub struct StitchPipeline {
     /// 3D scene layout computed from calibration.
     pub(crate) scene: SceneGeometry,
     /// Calibration data (camera intrinsics + layout).
-    pub(crate) calibration: MatchCalibration,
+    pub(crate) calibration: Calibration,
     /// Output viewport configuration.
     pub(crate) viewport: ViewportConfig,
+    /// Draw a debug line at the exact seam position. Pure visualization
+    /// (calibration-tuning aid), not calibration state - deliberately not
+    /// part of `Calibration` so toggling it never touches the saved file.
+    pub(crate) show_seam_line: bool,
     /// GPU renderer (textures, pipelines, bind groups).
     renderer: Renderer,
     /// Input frame dimensions.
@@ -101,14 +109,21 @@ impl StitchPipeline {
     /// and provides its own GPU context (selected with surface compatibility).
     pub fn with_gpu(
         gpu: GpuContext,
-        calibration: MatchCalibration,
+        program: &crate::render::GpuProgram,
+        calibration: Calibration,
         viewport: ViewportConfig,
         input_width: u32,
         input_height: u32,
         output_format: impl Into<wgpu::TextureFormat>,
         input_format: InputFormat,
     ) -> Result<Self, PipelineError> {
-        // Validate inputs before GPU resource creation.
+        // Validate inputs before GPU resource creation. This is THE
+        // enforcement boundary for in-memory calibrations: every
+        // constructor (StitchCore, StitchSession, the preview bridge,
+        // StitchJob) funnels through here, so a wrong lens count or a
+        // NaN surfaces as a typed error instead of an index panic or a
+        // GPU hang further down.
+        calibration.validate()?;
         if let Err(e) = viewport.validate() {
             return Err(PipelineError::InvalidConfig { reason: e });
         }
@@ -127,10 +142,11 @@ impl StitchPipeline {
         }
 
         let output_format = output_format.into();
-        let aspect = calibration.left.width as f32 / calibration.left.height as f32;
-        let scene = SceneGeometry::from_layout_with_aspect(&calibration.layout, aspect);
+        let aspect = calibration.lenses[0].width as f32 / calibration.lenses[0].height as f32;
+        let scene = SceneGeometry::new(&calibration.topology, &calibration.framing, aspect);
         let renderer = Renderer::new(
             &gpu,
+            program,
             viewport.width,
             viewport.height,
             input_width,
@@ -152,6 +168,7 @@ impl StitchPipeline {
             scene,
             calibration,
             viewport,
+            show_seam_line: false,
             renderer,
             input_width,
             input_height,
@@ -173,7 +190,7 @@ impl StitchPipeline {
     }
 
     /// The calibration data this pipeline was created with.
-    pub fn calibration(&self) -> &MatchCalibration {
+    pub fn calibration(&self) -> &Calibration {
         &self.calibration
     }
 
@@ -249,9 +266,145 @@ impl StitchPipeline {
         self.viewport.fov_degrees
     }
 
-    /// Set the lens distortion correction amount for the stitch view.
+    /// Set the lens distortion correction amount for every lens (per-frame
+    /// uniform; no scene rebuild).
     pub fn set_lens_correction_amount(&mut self, amount: f32) {
-        self.viewport.lens_correction_amount = amount.clamp(0.0, 1.0);
+        let c = amount.clamp(0.0, 1.0);
+        for lens in &mut self.calibration.lenses {
+            lens.correction = c;
+        }
+    }
+
+    /// Set the seam blend width (per-frame uniform; no scene rebuild).
+    pub fn set_blend_width(&mut self, width: f32) {
+        self.calibration.topology.blend_width = width;
+    }
+
+    /// Flip which camera's content fades over the other at the blend seam.
+    /// See [`crate::calibration::Topology::blend_flip_direction`].
+    pub fn set_blend_flip_direction(&mut self, flip: bool) {
+        self.calibration.topology.blend_flip_direction = flip;
+    }
+
+    /// Set the manual seam-position nudge (per-frame uniform; no scene
+    /// rebuild). See [`crate::calibration::Topology::seam_offset`].
+    pub fn set_seam_offset(&mut self, offset: f32) {
+        self.calibration.topology.seam_offset = offset;
+    }
+
+    /// Current manual seam-position nudge. See
+    /// [`crate::calibration::Topology::seam_offset`].
+    pub fn seam_offset(&self) -> f32 {
+        self.calibration.topology.seam_offset
+    }
+
+    /// Enable/disable the 2-band spatial seam blend. See
+    /// [`crate::calibration::Topology::multiband_blend_enabled`].
+    pub fn set_multiband_blend_enabled(&mut self, enabled: bool) {
+        self.calibration.topology.multiband_blend_enabled = enabled;
+    }
+
+    /// Toggle the seam debug line (per-frame uniform; no scene rebuild).
+    /// Draws a thin highlight at the exact rendered seam position by
+    /// reusing the same alpha-threshold math the blend itself uses, so
+    /// it can never disagree with where the blend actually sits. Purely a
+    /// visualization aid - deliberately not part of `Calibration` so
+    /// toggling it never touches the saved file.
+    pub fn set_show_seam_line(&mut self, show: bool) {
+        self.show_seam_line = show;
+    }
+
+    /// Set the ground-plane tilt correction for the x-plane (per-frame
+    /// uniform; no scene rebuild). See
+    /// [`crate::calibration::Topology::ground_tilt_x`].
+    pub fn set_ground_tilt_x(&mut self, tilt: f32) {
+        self.calibration.topology.ground_tilt_x = tilt as f64;
+    }
+
+    /// Set the ground-plane tilt correction for the z-plane. See
+    /// [`crate::calibration::Topology::ground_tilt_z`].
+    pub fn set_ground_tilt_z(&mut self, tilt: f32) {
+        self.calibration.topology.ground_tilt_z = tilt as f64;
+    }
+
+    /// Set the top-of-frame tilt correction for the x-plane. See
+    /// [`crate::calibration::Topology::top_tilt_x`].
+    pub fn set_top_tilt_x(&mut self, tilt: f32) {
+        self.calibration.topology.top_tilt_x = tilt as f64;
+    }
+
+    /// Set the top-of-frame tilt correction for the z-plane. See
+    /// [`crate::calibration::Topology::top_tilt_z`].
+    pub fn set_top_tilt_z(&mut self, tilt: f32) {
+        self.calibration.topology.top_tilt_z = tilt as f64;
+    }
+
+    /// Set the ground-tilt band's full-strength threshold. See
+    /// [`crate::calibration::Topology::ground_tilt_band_width`].
+    pub fn set_ground_tilt_band_width(&mut self, width: f32) {
+        self.calibration.topology.ground_tilt_band_width = width as f64;
+    }
+
+    /// Set the top-tilt band's full-strength threshold. See
+    /// [`crate::calibration::Topology::top_tilt_band_width`].
+    pub fn set_top_tilt_band_width(&mut self, width: f32) {
+        self.calibration.topology.top_tilt_band_width = width as f64;
+    }
+
+    /// Enable/disable automatic per-camera seam-band exposure/color
+    /// matching. See [`crate::calibration::Topology::color_match_enabled`].
+    pub fn set_color_match_enabled(&mut self, enabled: bool) {
+        self.calibration.topology.color_match_enabled = enabled;
+        self.force_color_match_remeasure();
+    }
+
+    /// Width of the color-match measurement/blend band. See
+    /// [`crate::calibration::Topology::color_match_band_width`].
+    pub fn set_color_match_band_width(&mut self, width: f32) {
+        self.calibration.topology.color_match_band_width = width;
+        self.force_color_match_remeasure();
+    }
+
+    /// Columns in the color-match sampling grid. See
+    /// [`crate::calibration::Topology::color_match_grid_cols`].
+    pub fn set_color_match_grid_cols(&mut self, cols: u32) {
+        self.calibration.topology.color_match_grid_cols = cols;
+        self.force_color_match_remeasure();
+    }
+
+    /// Rows in the color-match sampling grid. See
+    /// [`crate::calibration::Topology::color_match_grid_rows`].
+    pub fn set_color_match_grid_rows(&mut self, rows: u32) {
+        self.calibration.topology.color_match_grid_rows = rows;
+        self.force_color_match_remeasure();
+    }
+
+    /// Frame interval between color-match re-measurements. See
+    /// [`crate::calibration::Topology::color_match_interval_frames`].
+    pub fn set_color_match_interval_frames(&mut self, frames: u32) {
+        self.calibration.topology.color_match_interval_frames = frames;
+        self.force_color_match_remeasure();
+    }
+
+    /// EMA smoothing factor for color-match updates. See
+    /// [`crate::calibration::Topology::color_match_ema_alpha`].
+    pub fn set_color_match_ema_alpha(&mut self, alpha: f32) {
+        self.calibration.topology.color_match_ema_alpha = alpha;
+        self.force_color_match_remeasure();
+    }
+
+    /// Maximum luma offset the color match may apply. See
+    /// [`crate::calibration::Topology::color_match_max_y_offset`].
+    pub fn set_color_match_max_y_offset(&mut self, offset: f32) {
+        self.calibration.topology.color_match_max_y_offset = offset;
+        self.force_color_match_remeasure();
+    }
+
+    /// Maximum chroma offset the color match may apply. See
+    /// [`crate::calibration::Topology::color_match_max_chroma_offset`].
+    pub fn set_color_match_max_chroma_offset(&mut self, offset: f32) {
+        self.calibration.topology.color_match_max_chroma_offset = offset;
+        self.force_color_match_remeasure();
     }
 
     /// Current virtual camera position `[x, y, z]` in scene space.
@@ -280,7 +433,7 @@ impl StitchPipeline {
     /// is a debug/preview navigation aid, not a render path). Vertical
     /// (`up`) uses world up so it stays level regardless of pitch.
     pub fn fly_camera(&mut self, local: [f32; 3], yaw: f32, pitch: f32) {
-        use crate::projection::VirtualCamera;
+        use crate::geometry::VirtualCamera;
         use nalgebra::{Unit, UnitQuaternion};
 
         let cam = VirtualCamera::new(&self.scene.camera_position);
@@ -304,20 +457,24 @@ impl StitchPipeline {
     /// each frame from the stored calibration and scene).
     ///
     /// No GPU pipeline recreation needed - only the uniform data changes.
-    pub fn update_calibration(&mut self, calibration: MatchCalibration) {
-        let aspect = calibration.left.width as f32 / calibration.left.height as f32;
-        self.scene = SceneGeometry::from_layout_with_aspect(&calibration.layout, aspect);
+    pub fn update_calibration(&mut self, calibration: Calibration) {
+        let aspect = calibration.lenses[0].width as f32 / calibration.lenses[0].height as f32;
+        self.scene = SceneGeometry::new(&calibration.topology, &calibration.framing, aspect);
         self.calibration = calibration;
         log::debug!("Pipeline calibration updated");
     }
 
-    /// Update only the plane layout (convenience for slider adjustments).
-    ///
-    /// Equivalent to cloning the current calibration, replacing its layout,
-    /// and calling [`update_calibration`](Self::update_calibration).
-    pub fn update_layout(&mut self, layout: crate::calibration::PlaneLayout) {
+    /// Replace the topology (plane placement + seam), rebuilding the scene.
+    pub fn update_topology(&mut self, topology: crate::calibration::Topology) {
         let mut cal = self.calibration.clone();
-        cal.layout = layout;
+        cal.topology = topology;
+        self.update_calibration(cal);
+    }
+
+    /// Replace the framing (axis offset, tilt, roll), rebuilding the scene.
+    pub fn update_framing(&mut self, framing: crate::calibration::Framing) {
+        let mut cal = self.calibration.clone();
+        cal.framing = framing;
         self.update_calibration(cal);
     }
 
@@ -325,7 +482,7 @@ impl StitchPipeline {
     /// for one or both cameras without touching the plane layout or rig
     /// orientation.
     ///
-    /// Intended for interactive lens tweaking in a GUI: each `CameraParams`
+    /// Intended for interactive lens tweaking in a GUI: each `Lens`
     /// change is written into the shader's per-frame uniform buffer, so the
     /// next render call reflects the new values. No GPU pipeline or scene
     /// recreation is needed - cheap enough (~microseconds) to call on
@@ -333,7 +490,7 @@ impl StitchPipeline {
     ///
     /// `left`/`right` are `None` to leave that side untouched. If both are
     /// `None` this is a no-op. Passing `Some` for a side replaces that
-    /// side's `CameraParams` on the stored calibration; the next render
+    /// side's `Lens` on the stored calibration; the next render
     /// picks it up automatically.
     ///
     /// Does not recompute `SceneGeometry` because the plane layout is
@@ -341,17 +498,17 @@ impl StitchPipeline {
     /// calibration and are re-read each frame) need updating.
     pub fn update_camera_params(
         &mut self,
-        left: Option<crate::calibration::CameraParams>,
-        right: Option<crate::calibration::CameraParams>,
+        left: Option<crate::calibration::Lens>,
+        right: Option<crate::calibration::Lens>,
     ) {
         if left.is_none() && right.is_none() {
             return;
         }
         if let Some(l) = left {
-            self.calibration.left = l;
+            self.calibration.lenses[0] = l;
         }
         if let Some(r) = right {
-            self.calibration.right = r;
+            self.calibration.lenses[1] = r;
         }
         log::debug!("Pipeline camera params updated");
     }
@@ -538,25 +695,26 @@ impl StitchPipeline {
         }
     }
 
-    /// Bundle the live `viewport.color_match_*` fields into the internal
+    /// Bundle the live `topology.color_match_*` fields into the internal
     /// params struct `ColorMatchState` expects.
     fn color_match_params(&self) -> super::color_match::ColorMatchParams {
+        let t = &self.calibration.topology;
         super::color_match::ColorMatchParams {
-            band_width: self.viewport.color_match_band_width,
-            grid_cols: self.viewport.color_match_grid_cols,
-            grid_rows: self.viewport.color_match_grid_rows,
-            measure_interval_frames: self.viewport.color_match_interval_frames,
-            ema_alpha: self.viewport.color_match_ema_alpha,
-            max_y_offset: self.viewport.color_match_max_y_offset,
-            max_chroma_offset: self.viewport.color_match_max_chroma_offset,
-            seam_offset: self.viewport.seam_offset,
-            blend_flip_direction: self.viewport.blend_flip_direction,
+            band_width: t.color_match_band_width,
+            grid_cols: t.color_match_grid_cols,
+            grid_rows: t.color_match_grid_rows,
+            measure_interval_frames: t.color_match_interval_frames,
+            ema_alpha: t.color_match_ema_alpha,
+            max_y_offset: t.color_match_max_y_offset,
+            max_chroma_offset: t.color_match_max_chroma_offset,
+            seam_offset: t.seam_offset,
+            blend_flip_direction: t.blend_flip_direction,
         }
     }
 
     /// Force the color-match measurement to run again on the very next
-    /// frame, bypassing `viewport.color_match_interval_frames`. Call after
-    /// changing any `color_match_*` viewport field so a live-tuning slider
+    /// frame, bypassing `topology.color_match_interval_frames`. Call after
+    /// changing any `color_match_*` topology field so a live-tuning slider
     /// is reflected immediately instead of waiting up to
     /// `color_match_interval_frames` frames.
     pub(crate) fn force_color_match_remeasure(&self) {
@@ -565,19 +723,19 @@ impl StitchPipeline {
 
     /// The current smoothed color-match correction, without advancing or
     /// re-measuring. See [`super::color_match::ColorMatchState::current`].
-    pub(crate) fn color_match_correction(&self) -> super::renderer::ColorCorrection {
+    pub fn color_match_correction(&self) -> super::renderer::ColorCorrection {
         self.color_match.lock().unwrap().current()
     }
 
     /// Measure (or reuse the last smoothed) per-camera color-offset
     /// correction for a YUV420P frame pair. Identity when
-    /// `viewport.color_match_enabled` is `false`.
+    /// `topology.color_match_enabled` is `false`.
     fn color_correction_yuv420p(
         &self,
         left: &YuvPlanes<'_>,
         right: &YuvPlanes<'_>,
     ) -> super::renderer::ColorCorrection {
-        if !self.viewport.color_match_enabled {
+        if !self.calibration.topology.color_match_enabled {
             return super::renderer::ColorCorrection::default();
         }
         let params = self.color_match_params();
@@ -586,8 +744,8 @@ impl StitchPipeline {
             (right.y, right.u, right.v),
             self.input_width,
             self.input_height,
-            &self.calibration.left,
-            &self.calibration.right,
+            &self.calibration.lenses[0],
+            &self.calibration.lenses[1],
             self.renderer.is_full_range(),
             &params,
         )
@@ -599,7 +757,7 @@ impl StitchPipeline {
         left: &Nv12Planes<'_>,
         right: &Nv12Planes<'_>,
     ) -> super::renderer::ColorCorrection {
-        if !self.viewport.color_match_enabled {
+        if !self.calibration.topology.color_match_enabled {
             return super::renderer::ColorCorrection::default();
         }
         let params = self.color_match_params();
@@ -608,8 +766,8 @@ impl StitchPipeline {
             (right.y, right.uv),
             self.input_width,
             self.input_height,
-            &self.calibration.left,
-            &self.calibration.right,
+            &self.calibration.lenses[0],
+            &self.calibration.lenses[1],
             self.renderer.is_full_range(),
             &params,
         )
@@ -647,10 +805,10 @@ impl StitchPipeline {
             &self.scene,
             &self.calibration,
             &viewport,
-            self.viewport.blend_width,
+            self.calibration.topology.blend_width,
             color_correction,
-            self.viewport.multiband_blend_enabled,
-            self.viewport.show_seam_line,
+            self.calibration.topology.multiband_blend_enabled,
+            self.show_seam_line,
             target_view,
         );
         Ok(())
@@ -688,10 +846,10 @@ impl StitchPipeline {
             &self.scene,
             &self.calibration,
             &viewport,
-            self.viewport.blend_width,
+            self.calibration.topology.blend_width,
             color_correction,
-            self.viewport.multiband_blend_enabled,
-            self.viewport.show_seam_line,
+            self.calibration.topology.multiband_blend_enabled,
+            self.show_seam_line,
             target_view,
         );
         Ok(())
@@ -733,10 +891,10 @@ impl StitchPipeline {
             &self.scene,
             &self.calibration,
             &viewport,
-            self.viewport.blend_width,
+            self.calibration.topology.blend_width,
             color_correction,
-            self.viewport.multiband_blend_enabled,
-            self.viewport.show_seam_line,
+            self.calibration.topology.multiband_blend_enabled,
+            self.show_seam_line,
         ))
     }
 
@@ -775,10 +933,10 @@ impl StitchPipeline {
             &self.scene,
             &self.calibration,
             &viewport,
-            self.viewport.blend_width,
+            self.calibration.topology.blend_width,
             color_correction,
-            self.viewport.multiband_blend_enabled,
-            self.viewport.show_seam_line,
+            self.calibration.topology.multiband_blend_enabled,
+            self.show_seam_line,
         ))
     }
 
@@ -820,10 +978,10 @@ impl StitchPipeline {
             &self.scene,
             &self.calibration,
             &viewport,
-            self.viewport.blend_width,
+            self.calibration.topology.blend_width,
             super::renderer::ColorCorrection::default(),
-            self.viewport.multiband_blend_enabled,
-            self.viewport.show_seam_line,
+            self.calibration.topology.multiband_blend_enabled,
+            self.show_seam_line,
         ))
     }
 
@@ -890,10 +1048,10 @@ impl StitchPipeline {
             &self.scene,
             &self.calibration,
             &viewport,
-            self.viewport.blend_width,
+            self.calibration.topology.blend_width,
             super::renderer::ColorCorrection::default(),
-            self.viewport.multiband_blend_enabled,
-            self.viewport.show_seam_line,
+            self.calibration.topology.multiband_blend_enabled,
+            self.show_seam_line,
         )
     }
 

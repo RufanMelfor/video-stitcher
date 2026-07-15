@@ -5,11 +5,10 @@
 //! the viewport. The result is a rectilinear (undistorted) RGBA image
 //! mapping 1:1 to the plane UV space.
 
-use crate::calibration::CameraParams;
+use crate::calibration::Lens;
+use crate::geometry::opengl_to_wgpu_matrix;
 use crate::gpu::GpuContext;
-use crate::render::renderer::{
-    GroundTilt, InputFormat, TopTilt, build_gpu_uniforms, opengl_to_wgpu_matrix,
-};
+use crate::render::renderer::{GroundTilt, InputFormat, TopTilt, build_gpu_uniforms};
 
 use bytemuck::Pod;
 use nalgebra::Orthographic3;
@@ -317,7 +316,7 @@ impl GpuUndistort {
         y: &[u8],
         u: &[u8],
         v: &[u8],
-        params: &CameraParams,
+        params: &Lens,
     ) -> Vec<u8> {
         let w = self.width;
         let h = self.height;

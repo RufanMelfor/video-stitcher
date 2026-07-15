@@ -25,14 +25,15 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use reco_control::pose_control::{PoseControl, PoseControlConfig};
-use reco_core::calibration::MatchCalibration;
+use reco_core::calibration::Calibration;
 use reco_core::core::StitchCore;
-use reco_core::core::types::{RenderOutcome, StitchCoreConfig};
-use reco_core::detect::director::ViewportPosition;
+use reco_core::core::types::RenderOutcome;
+use reco_core::geometry::ViewportPosition;
 use reco_core::gpu::GpuContext;
 use reco_core::render::pipeline::{BgraPlanes, FramePlaneView, StridedYuvPlanes};
 use reco_core::render::renderer::InputFormat;
 use reco_core::render::viewport::ViewportConfig;
+use reco_core::stitch::{Executor, GpuExecutor, GpuExecutorConfig};
 
 use crate::ffi;
 
@@ -145,7 +146,7 @@ struct RecoSource {
     diag_uploads: u64,
 
     /// Current calibration loaded from the config file.
-    calibration: Option<MatchCalibration>,
+    calibration: Option<Calibration>,
 
     /// Path to the calibration JSON file.
     config_path: String,
@@ -369,25 +370,35 @@ impl RecoSource {
         let viewport = ViewportConfig {
             width: self.output_width,
             height: self.output_height,
-            rig_tilt: calibration.rig_tilt as f32,
-            rig_roll: calibration.rig_roll as f32,
             ..ViewportConfig::default()
         };
 
-        match StitchCore::new(
+        let executor = GpuExecutor::new(
             gpu,
-            StitchCoreConfig {
+            GpuExecutorConfig {
                 calibration,
                 viewport,
                 input_width: self.input_width,
                 input_height: self.input_height,
-                output_format: reco_core::wgpu::TextureFormat::Rgba8Unorm,
                 input_format: self.input_format,
+                output_format: reco_core::wgpu::TextureFormat::Rgba8Unorm,
                 projection: None,
-                camera_input: None,
-                replay_buffer_duration: None,
+                full_range: false,
             },
-        ) {
+        );
+        let executor = match executor {
+            Ok(executor) => executor,
+            Err(e) => {
+                log::error!("reco-obs: failed to create executor: {e}");
+                self.core = None;
+                #[cfg(feature = "replay")]
+                {
+                    self.replay_recorder_attached = false;
+                }
+                return;
+            }
+        };
+        match StitchCore::new(Executor::Gpu(Box::new(executor))) {
             Ok(session) => {
                 log::info!(
                     "reco-obs: session initialized ({}x{} output, {}x{} input, format={:?})",
@@ -521,7 +532,7 @@ impl RecoSource {
         }
 
         let path = Path::new(&self.config_path);
-        match MatchCalibration::from_file(path) {
+        match Calibration::from_file(path) {
             Ok(cal) => {
                 log::info!("reco-obs: loaded calibration from {}", self.config_path);
                 self.calibration = Some(cal);
@@ -723,7 +734,7 @@ impl RecoSource {
                 let pitch = self.pose.current_pitch_rad();
                 let fov = self.pose.current_fov_deg();
                 if let Some(core) = self.core.as_mut() {
-                    core.pipeline_mut().set_fov(fov);
+                    core.set_fov(fov);
                 }
                 let result = match self.input_format {
                     InputFormat::Yuv420p => {
