@@ -1,4 +1,4 @@
-# Session handoff — 2026-07-14
+# Session handoff — 2026-07-15
 
 Continuation note for resuming work on a different machine/session -
 git-tracked so it travels with `git pull`/`push` between the user's two
@@ -8,25 +8,122 @@ things stand right now."
 
 ## Current state
 
-`main` at `63d733e5` (no-ROI export confirmation, see the 9th upstream
-branch entry below - committed, not yet pushed to `github`). Working
-tree otherwise clean. Untracked `seam_debug.txt`/`seam_debug2.txt` in
-the repo root are leftover local debug-log dumps from a previous
-session's diagnosis work - harmless, safe to delete, not gitignored on
-purpose (no need to bother).
+`main` at `6ff32c37` - committed AND pushed to `github` (in sync, `git
+log github/main..main` empty). Working tree clean except untracked
+`seam_debug.txt`/`seam_debug2.txt` in the repo root (leftover local
+debug-log dumps from an earlier session's diagnosis work - harmless,
+safe to delete, not gitignored on purpose, no need to bother).
 
-**reco-gui.exe rebuilt and smoke-tested tonight** (release build,
-launched, confirmed it reaches a healthy steady state - GPU init,
-zero-copy preview pipeline, calibration/lens-database load, all clean
-in the log with no errors) ahead of the user physically testing it
-tomorrow. Full verification on `main`: `cargo fmt --check` clean,
-`cargo clippy --workspace --all-targets --exclude reco-obs -D warnings`
-clean, `cargo test --workspace --exclude reco-obs` all green except
-two known pre-existing gaps (see "Known pre-existing issues" below,
-both reconfirmed unrelated to tonight's changes - the CUDA ones are a
-hardware/driver gap, and `matroska_reader_sees_partial_writes` fails
-identically with or without tonight's commit, confirmed by testing
-both states directly).
+**Major event this session: merged `origin/main` into this fork's
+`main`** (see its own section below for full detail) - this fork's 67
+commits of features are now rebuilt on top of upstream's two big
+architecture refactors (`#395` stitch unification, `#403` executor
+spine). `reco-gui.exe` (debug build) rebuilt from the merged `main` and
+**smoke-tested by the user with a real export** (real DJI footage,
+AI ball-tracking active, 90s clip) - completed cleanly, no errors,
+1.45x realtime encode, preview rebuilt correctly afterward. Full
+workspace (`cargo build --workspace --all-targets --exclude reco-obs
+--exclude rig-calib`) verified clean before and after the user's test.
+
+## Merged origin/main into this fork's main (2026-07-15)
+
+User explicitly requested this: worried about drift between the fork
+and the 9 prepared upstream PR branches (all built fresh off
+`origin/main`), asked to bring the fork's own `main` up to date too.
+Chose `git merge` over `git rebase` (user's call, via AskUserQuestion) -
+safer given the scope (104 files touched by upstream's two refactors,
+67 fork commits to reconcile against them); one conflict-resolution
+pass at the merge commit instead of per-commit conflicts across a
+rewritten history.
+
+**Safety**: tagged `backup/main-before-upstream-rebase-2026-07-15` on
+`main` before starting, pushed to `github` - a permanent escape hatch
+(`git reset --hard` to it) independent of anything that happens on
+`main` afterward.
+
+**Scope**: 24 files had real merge conflicts (`calibration.rs` - the
+core data-model rename `MatchCalibration/CameraParams/PlaneLayout` →
+`Calibration/Lens/Topology/Framing` - plus the render layer, reco-gui,
+reco-cli, reco-calibrate, reco-io). Resolved via a mix of direct edits
+and parallel background subagents (each given the already-resolved
+`calibration.rs` as ground truth, plus already-validated sibling PR
+branches - `feat/ground-top-tilt`, `feat/seam-positioning`,
+`feat/color-matching-multiband` - as reference for how each fork
+feature ports onto upstream's new shape). A further ~10 files had
+*no* conflict markers but referenced retired types - git silently
+carried them forward unchanged, so `cargo build --all-targets` (not
+just the default target) was needed to surface them one crate at a
+time: `render/single_camera.rs` and `render/color_match.rs` (new
+fork-only files upstream never touched, so no marker), `reco-calibrate`
+examples (7 standalone dev-tool binaries, delegated to a subagent),
+`reco-stitch-img` (a whole crate with no conflicts, stale
+`MatchCalibration`/`ViewportConfig` usage), `reco-gui/detect_preview.rs`,
+and a few leftover `cal.left`/`cal.layout`/`bridge.renderer()` call
+sites inside `reco-gui/main.rs` that sat outside its 8 marked conflict
+blocks.
+
+**Preserved every fork feature**, re-wired onto the new architecture:
+ground/top tilt, seam positioning, color matching, blend flip/
+multiband, the no-ROI export confirmation. `ViewportConfig` lost almost
+all its fields upstream (down to `width`/`height`/`fov_degrees` -
+render-affecting state now lives on `Calibration.topology`/`.framing`
+instead) - every consumer that built the old wider `ViewportConfig`
+literal needed rewiring, not just a rename.
+
+**One real capability gap identified, not silently dropped**:
+`show_seam_line` (the debug seam-position line) has no path from
+`StitchJob`/CLI through to `StitchSession`/`SessionConfig` on the new
+architecture - it's `StitchPipeline`-only runtime state now, with
+nothing threading a request to it from a headless export. `StitchJob`
+now logs a `WARN` instead of silently no-op'ing when
+`--show-seam-line` is requested. The GUI's own live preview still shows
+the line fine (different code path) - only CLI/headless export is
+affected. Not fixed this session; flagged as a real follow-up.
+
+**Verification**: full workspace (`cargo build --workspace
+--all-targets --exclude reco-obs --exclude rig-calib`) clean, zero
+errors, before committing. User then ran a real export through the
+rebuilt `reco-gui.exe` (DJI 3840x2880 10-bit footage, AI ball tracking,
+seam blend override, 90s clip) - completed with no errors, 1.45x
+realtime. Merge commit `6ff32c37`, pushed to `github`.
+
+**`reco-obs` still doesn't build** - but this is NOT a merge
+regression: it's a pre-existing local linker gap (`LNK1181: cannot open
+input file 'obs-frontend-api.lib'`), missing on this machine before the
+merge too (only `OBS_INCLUDE_DIR` for the *header* dependency was ever
+set up, never the `.lib` for linking - see
+[[project_reco_obs_wgpu_feature_bug]] in memory for the header-side
+history). Not investigated further since reco-obs isn't in active use
+this session.
+
+**Confirmed the 9 PR branches are still valid**: `origin/main` hasn't
+moved since they were built (`ab553d35` both times), and none of the 3
+upstream commits just merged implement any of the 9 fork features
+(checked directly - `ground_tilt_x`, `seam_offset`, `color_match`,
+`multiband`, `blend_flip_direction`, `directml`, `metadata_comment` all
+absent from `origin/main`; the D3D11 `stage_frame` bug and the old
+browser-based ROI editor are both still present upstream unfixed) - so
+none of the 9 are redundant.
+
+**Follow-up, not started**: updated `DJI Action4 Final_1.json` (a
+user calibration file) from the retired flat "match" format to the new
+`Calibration`/`Topology`/`Framing` JSON shape by hand (field-by-field
+mapping, verified via a temporary `#[test]` that loaded + validated it,
+then removed the test) - this only fixed the one file the user hit;
+other old-format calibration files the user has elsewhere are not
+auto-migrated. If more surface with the same "legacy match format...
+no longer supported" error, same manual JSON conversion applies (see
+git history around this note for the field-mapping reference, or ask
+this session to redo it - the mapping is mechanical).
+
+**PR description artifact updated**: added the 9th PR
+(`feat/export-roi-confirm`) which was missing from the original 8-PR
+draft, plus `![...](PLACEHOLDER)` markdown-image slots on the PRs
+where a screenshot/GIF would help a reviewer (in-app ROI editor, seam
+debug line, color-match before/after, ground/top-tilt sliders + a
+before/after, no-ROI confirmation dialog) - republished to the same
+artifact URL, ask the user for the link if resuming and it's not in
+recent conversation context.
 
 ## Upstream contribution branches (prepared 2026-07-14/15, not yet pushed or PR'd)
 
