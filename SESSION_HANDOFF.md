@@ -98,7 +98,7 @@ pass **against upstream `origin/main`**, not this fork's `main`:
 **Not yet done**: `feat/ground-top-tilt` (confirmed to not exist
 upstream at all - the largest remaining feature), audio-sync/playback
 UX, and live AKAZE detection preview were not started this session.
-None of these six branches have been pushed anywhere yet, and no PRs
+None of these branches have been pushed anywhere yet, and no PRs
 have been opened - the user's instruction was prep-only until further
 notice. Actually pushing/opening PRs additionally needs the real,
 GitHub-recognized fork `RufanMelfor/video-stitcher` added as a local
@@ -109,6 +109,22 @@ refuse a PR from it directly). **Update 2026-07-15**: the user
 confirmed `RufanMelfor/video-stitcher`'s `main` is now synced to
 upstream's current tip (`ab553d35`, matching `origin/main` exactly),
 so that remote is ready whenever the user says go for pushing/PRs.
+
+**7th branch added 2026-07-15**: `feat/export-metadata-comment`
+(`5ffb0a83`) - embeds a JSON snapshot of the settings actually used
+(codec, quality, resolution, blend width, AI/autocam parameters) into
+every export's container "comment" tag (`ffprobe -show_entries
+format_tags`), so a batch of test exports with varying settings stays
+self-describing without a sidecar file. New on `main` too (committed
+`df7c3ee8` there first, since the user is actively using it for
+testing), then ported to a fresh branch off `origin/main` - required
+adapting the JSON builder since upstream's simpler `StitchArgs`/
+`AutocamUiConfig` lack several fork-only fields (`blend_flip_direction`,
+`multiband`, `seam_offset`, `lookahead_reduced_bit_depth`); the core
+`EncoderConfig::metadata_comment`/`StitchJob::metadata_comment` builder
+mechanism ported over unchanged since it doesn't depend on any of those.
+Fully verified independently (fmt/clippy/test clean) same as the other
+six.
 
 **Appearance/restyle - not prepared as a branch, asked about
 2026-07-15, deliberately left bundled for now**: the user asked whether
