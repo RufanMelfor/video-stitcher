@@ -195,6 +195,41 @@ pub fn run_export(
         log::info!("Streaming to {}", effective_output.display());
     }
 
+    // Snapshot the settings actually used for this export into the
+    // output container's "comment" tag, so a batch of test exports
+    // with varying AI/blend settings stays self-describing without a
+    // separate sidecar file (`ffprobe -show_entries format_tags`).
+    let metadata_comment = serde_json::json!({
+        "reco_export": {
+            "codec": codec_str,
+            "quality": quality_str,
+            "resolution": format!("{width}x{height}"),
+            "blend_width": blend,
+            "blend_flip_direction": blend_flip_direction,
+            "multiband_blend": multiband_blend_enabled,
+            "seam_offset": seam_offset,
+            "autocam": {
+                "enabled": autocam.enabled,
+                "model_path": &autocam.model_path,
+                "tracking_mode": &autocam.tracking_mode,
+                "detection_interval": autocam.detection_interval,
+                "lookahead_secs": autocam.lookahead_secs,
+                "lookahead_reduced_bit_depth": autocam.lookahead_reduced_bit_depth,
+                "preset": &autocam.preset,
+                "framing": &autocam.framing,
+                "lock_pitch": autocam.lock_pitch,
+                "cluster_mode": &autocam.cluster_mode,
+                "cluster_bandwidth_rad": autocam.cluster_bandwidth_rad,
+                "dead_zone_rad": autocam.dead_zone_rad,
+                "ball_weight": autocam.ball_weight,
+                "fov_tight": autocam.fov_tight,
+                "fov_wide": autocam.fov_wide,
+                "fov_default": autocam.fov_default,
+            }
+        }
+    })
+    .to_string();
+
     let mut job = reco_io::StitchJob::with_calibration(
         left.clone(),
         right.clone(),
@@ -209,6 +244,7 @@ pub fn run_export(
     .blend_flip_direction(blend_flip_direction)
     .multiband_blend_enabled(multiband_blend_enabled)
     .seam_offset(seam_offset)
+    .metadata_comment(metadata_comment)
     .on_progress(move |p: &reco_core::session::types::FrameProgress| {
         let frames = p.frames_completed;
         let elapsed = progress_start.elapsed().as_secs_f64();
