@@ -95,10 +95,30 @@ pass **against upstream `origin/main`**, not this fork's `main`:
     re-derive it if something looks off - both branches are correct
     as of `c433ded5`/`a0126951`.
 
-**Not yet done**: `feat/ground-top-tilt` (confirmed to not exist
-upstream at all - the largest remaining feature), audio-sync/playback
-UX, and live AKAZE detection preview were not started this session.
-None of these branches have been pushed anywhere yet, and no PRs
+**8th branch added 2026-07-15**: `feat/ground-top-tilt` (`7d920dd0`) -
+manual ground/top-plane tilt correction, the largest port so far (17
+files: `Calibration`/`Topology`, GPU shader, CPU-mirror geometry,
+`StitchPipeline`/`Executor`/`StitchCore` setter chain, 6 new reco-gui
+sliders + 3 calibration-sync sites, plus `reco-calibrate`/`reco-autocam`
+test-fixture updates for the new required `Topology` fields). Unlike
+color-matching, this one got a **full CPU mirror** (not GPU-only/opt-in)
+since the warp is pure closed-form arithmetic with no state - added to
+`stitch::geometry::PlaneMap::sample_uv`, verified with a real end-to-end
+GPU agreement test (`cpu_and_gpu_backends_agree_with_ground_top_tilt`,
+ran successfully on this machine's RTX 3060 Ti) plus 4 focused unit
+tests on the warp math itself. GPU-side wiring turned out simpler than
+seam-positioning/color-matching needed: `encode_stitch_pass` already
+receives the full `Calibration`, so the two new uniform fields populate
+directly from `calibration.topology` with no new params threaded through
+the public render API - only live setters were needed (mirrors
+`set_blend_width` exactly). Hit the same interrupted-checkout-on-branch-
+creation scare as before (huge vendored tree, harmless, see
+[[feedback_git_object_corruption]]-adjacent pattern) - recovered via a
+user-confirmed `git reset --hard HEAD`, no data lost.
+
+**Not yet done**: audio-sync/playback UX and live AKAZE detection
+preview were not started this session. None of these branches have been
+pushed anywhere yet, and no PRs
 have been opened - the user's instruction was prep-only until further
 notice. Actually pushing/opening PRs additionally needs the real,
 GitHub-recognized fork `RufanMelfor/video-stitcher` added as a local
