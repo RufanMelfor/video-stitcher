@@ -685,14 +685,6 @@ impl StitchJob {
         cal.topology.multiband_blend_enabled = self.multiband_blend_enabled;
         cal.topology.seam_offset = self.seam_offset;
         cal.topology.color_match_enabled = self.color_match_enabled;
-        if self.show_seam_line {
-            log::warn!(
-                "show_seam_line requested but not wired through StitchSession/SessionConfig \
-                 since the upstream merge - the debug seam line will not be drawn in this \
-                 export. StitchPipeline::set_show_seam_line exists but nothing threads a \
-                 StitchJob-level request to it yet."
-            );
-        }
         let viewport = reco_core::render::viewport::ViewportConfig {
             width: out_w,
             height: out_h,
@@ -709,6 +701,16 @@ impl StitchJob {
             right_rotation: source.right_rotation(),
         };
         let mut session = reco_core::session::StitchSession::with_gpu(gpu, session_config)?;
+
+        // show_seam_line is StitchPipeline-only runtime state (not part
+        // of SessionConfig - see Topology's doc comment on why
+        // render-affecting rig state lives on the calibration but this
+        // debug overlay deliberately doesn't), so it's set directly on
+        // the session's pipeline once constructed, same as the GUI's
+        // live preview does via `PreviewBridge::pipeline_mut()`.
+        if self.show_seam_line {
+            session.pipeline_mut().set_show_seam_line(true);
+        }
 
         session.telemetry_mut().set_gpu_name(gpu_name.clone());
         session.telemetry_mut().set_decode_mode(decode_mode.clone());
