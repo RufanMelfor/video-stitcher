@@ -531,6 +531,17 @@ impl Executor {
         }
     }
 
+    /// Show/hide the seam-position debug line. A no-op on the CPU
+    /// executor - it's a headless correctness oracle with no interactive
+    /// preview to draw a debug overlay onto.
+    pub fn set_show_seam_line(&mut self, show: bool) {
+        match self {
+            Executor::Cpu(_) => {}
+            #[cfg(feature = "gpu")]
+            Executor::Gpu(g) => g.pipeline.set_show_seam_line(show),
+        }
+    }
+
     /// Set the lens-correction strength on every lens, clamped to `[0, 1]`.
     pub fn set_lens_correction_amount(&mut self, amount: f32) {
         match self {
