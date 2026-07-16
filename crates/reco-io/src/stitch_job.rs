@@ -706,10 +706,14 @@ impl StitchJob {
         // of SessionConfig - see Topology's doc comment on why
         // render-affecting rig state lives on the calibration but this
         // debug overlay deliberately doesn't), so it's set directly on
-        // the session's pipeline once constructed, same as the GUI's
-        // live preview does via `PreviewBridge::pipeline_mut()`.
+        // the session's core once constructed, same as the GUI's live
+        // preview does via `PreviewBridge::pipeline_mut()`. Goes through
+        // `core_mut()` rather than `pipeline_mut()` - the latter panics
+        // outright if the session ever runs on the CPU executor, which
+        // would turn a purely cosmetic debug flag into a hard export
+        // failure; `StitchCore::set_show_seam_line` no-ops on CPU instead.
         if self.show_seam_line {
-            session.pipeline_mut().set_show_seam_line(true);
+            session.core_mut().set_show_seam_line(true);
         }
 
         session.telemetry_mut().set_gpu_name(gpu_name.clone());

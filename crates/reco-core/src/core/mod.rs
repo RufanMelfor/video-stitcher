@@ -487,6 +487,11 @@ impl StitchCore {
         self.executor.set_blend_width(width);
     }
 
+    /// Show/hide the seam-position debug line.
+    pub fn set_show_seam_line(&mut self, show: bool) {
+        self.executor.set_show_seam_line(show);
+    }
+
     /// Set the lens-correction strength on every lens (`0` = pinhole,
     /// `1` = full KB4).
     pub fn set_lens_correction_amount(&mut self, amount: f32) {
