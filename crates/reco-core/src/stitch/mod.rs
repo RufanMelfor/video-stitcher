@@ -132,7 +132,15 @@ pub(crate) mod test_support {
                 blend_flip_direction: false,
                 seam_offset: 0.0,
                 multiband_blend_enabled: false,
-                color_match_enabled: true,
+                // Color matching is GPU-only (no CPU-side implementation),
+                // so this shared fixture - used by every CPU/GPU agreement
+                // test in this module - must keep it off. Enabling it here
+                // (even though `Topology`'s own serde default is `true`)
+                // would make the GPU backend apply a correction the CPU
+                // backend never does, guaranteeing every agreement test
+                // using this fixture fails on a spurious color mismatch
+                // rather than a real geometry/sampler bug.
+                color_match_enabled: false,
                 color_match_band_width: 0.15,
                 color_match_grid_cols: 8,
                 color_match_grid_rows: 16,
