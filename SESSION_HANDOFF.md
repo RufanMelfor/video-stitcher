@@ -8,15 +8,62 @@ things stand right now."
 
 ## Current state
 
-`main` at `eaa34c5e` - committed AND pushed to `github` (in sync).
-Working tree has untracked leftovers not gitignored on purpose:
-`seam_debug.txt`/`seam_debug2.txt` (harmless debug dumps), plus
-`sticher/` and `vendor/` build/vendor trees that appeared this session -
-worth a look next session, not yet investigated.
+`main` at `0d661b87`. Working tree clean - `seam_debug.txt`/
+`seam_debug2.txt`/`seam_debug.log` (harmless debug dumps) and `sticher/`
+(349MB, gitignored duplicate of `target/`, no Cargo references) were all
+deleted 2026-07-16/17 at the user's request ("verwijder alle bestanden
+die niet meer gebruikt worden"). `vendor/` was investigated and kept -
+it's actively patched in via the root `Cargo.toml`'s `[patch]` section
+(wgpu/wgpu-core/naga/serde/etc., see [[project_reco_obs_wgpu_feature_bug]]),
+not unused.
 
-## Upstream PRs: all 11 opened
+## Two research-only findings, noted as possible future tasks (not started)
 
-All eleven prepared feature branches were verified (fmt/build/test
+**1. Direct YouTube upload after export.** User asked to investigate
+only, nothing built. Findings: existing RTMP output (`reco-io/src/
+output.rs`) is live-streaming-only, not applicable. A real "upload the
+finished file" feature needs the YouTube Data API v3 (`videos.insert`),
+which requires OAuth 2.0 user consent (a loopback HTTP server to catch
+the redirect + secure refresh-token storage - current `reco-gui`
+settings are plain JSON, not great for a secret) and a resumable
+chunked-upload protocol (files are multi-GB). Real blocker: YouTube's
+default API quota is 10,000 units/day and `videos.insert` costs 1600
+units/call - **~6 uploads/day, shared across every user of the
+distributed app** unless each user registers their own Google Cloud
+project, or the project goes through Google's app-verification review
+for a quota increase. No official Google Rust SDK; `google-youtube3`
+(community, `google-apis-rs`) exists but feels heavy/inconsistently
+maintained - hand-rolling with `reqwest`+`oauth2` would fit the
+project's existing lightweight-dependency style better (precedent:
+`reco-control`'s optional `gopro` feature already uses `reqwest`).
+Quota is the real showstopper for open-source-scale rollout, not the
+Rust implementation.
+
+**2. Cut pieces out of a source video before stitching** (e.g. remove a
+mid-match pause), not just the existing single start/end trim window.
+Findings: the good news is the encoder already uses its own
+continuously-incrementing output PTS counter (`reco-io/src/ffmpeg/
+encoder.rs`'s `next_pts`), not input timestamps passed through - so
+output-stream continuity across a skipped gap is already solved for
+free. What's missing: (a) `FrameSource::skip_frames()` is a brute-force
+decode-and-discard loop with no real seek in the streaming decode path
+used during export (a faster `seek_to_secs` exists only in the separate
+calibration-only decoder) - fine for skipping the very start, wasteful
+for a multi-minute mid-video gap; (b) autocam's trajectory smoothing has
+no reset hook for a sudden timeline jump - would need one at every cut
+point to avoid a camera "snap"; (c) the lookahead VRAM buffer would need
+an explicit flush at each cut so pre-cut frames don't leak into the
+post-cut lookahead window; (d) audio must skip the same ranges to stay
+in sync; (e) the existing `SegmentList`/`InputPath::Chained` mechanism
+only chains whole separate files (e.g. DJI 4GB splits) - a new
+"multiple time-ranges within one file" data structure + UI would be
+needed, `SegmentList`'s reorder-list UI is a plausible starting point to
+adapt. Feasible, comparable effort to the seam-positioning port, no
+fundamental blocker.
+
+## Upstream PRs: all 12 opened
+
+All twelve prepared feature branches were verified (fmt/build/test
 against `origin/main`) and opened as separate PRs against
 `reco-project/video-stitcher`, pushed via the `fork` remote
 (`RufanMelfor/video-stitcher`, the real GitHub-recognized fork - **not**
@@ -31,7 +78,12 @@ the day-to-day `github` remote, which isn't fork-linked):
 - #428 `feat/export-metadata-comment`
 - #429 `feat/ground-top-tilt`
 - #430 `feat/export-roi-confirm`
-- #431 `feat/lookahead-8bit-downconvert` (added 2026-07-16, see below)
+- #431 `feat/lookahead-8bit-downconvert` (added 2026-07-16)
+- #432 `feat/audio-sync-waveform` (added 2026-07-16, see below)
+- #433 `feat/reco-gui-flat-restyle` (added 2026-07-16, see below)
+
+As of 2026-07-17 none of the 12 have been reviewed/merged yet
+(`reviewDecision` empty on all, all still `MERGEABLE`).
 
 **CLA bot fix**: all 9 original PRs initially showed a CLA-bot warning
 ("Rufan seems not to be a GitHub user") because commits were authored
@@ -100,8 +152,32 @@ running dev-build exe the user had open - see gotcha below), `cargo test
 waveform tests, 28 reco-io tests), clippy clean except the same
 pre-existing `reco-core` failures tracked by #423.
 
-**Not yet done**: none of the 11 PRs have been reviewed/merged upstream
-yet. Live AKAZE detection preview was not started. No new upstream
+**12th branch, `feat/reco-gui-flat-restyle` (PR #433, added
+2026-07-16)**: user asked for the "full UI restyle" as its own PR too -
+this had deliberately been left un-split in an earlier session (see
+`ba65939d`'s note) since it's bundled in fork commit `ba37aee5` together
+with 8 unrelated functional features. Scoped down further via
+AskUserQuestion to **pure visual restyle only** (user picked this over
+also including NumEdit or the Debug-panel feature). Hand-extracted:
+`FlatButton`/`TransportButton` components, `SectionHeader` rebuild
+(yellow expanded-indicator + chevron), color token re-base (cool-biased
+dark neutrals, brighter accent green - light-mode values untouched),
+`SegmentList` row restyle + red hover on remove ×, a non-interactive FOV
+pill overlaid on the preview, and a real bug fix noticed along the way:
+the toolbar's panel-toggle was a bare `Rectangle` with no `x` sibling to
+the toolbar's `HorizontalBox` - Slint centers an unpositioned element
+in its parent, so it likely floated in the middle of the toolbar on
+`origin/main` too. Moved into the row's own flow. 46 `Button {` call
+sites mechanically swapped to `FlatButton {` (verified none relied on
+`Button`-only properties first). Pure `.slint` change, zero Rust edits.
+Verified: `cargo check`/`test`/`clippy` all clean except the same
+pre-existing #423-tracked failures.
+
+**Not yet done**: none of the 12 PRs have been reviewed/merged upstream
+yet. Live AKAZE detection preview was not started. Two ideas were
+researched-only (not built, see the section above): direct YouTube
+upload after export, and cutting time-ranges out of a source video
+before stitching (e.g. removing a mid-match pause). No new upstream
 contribution work is queued right now - next session should check PR
 review status/comments on `reco-project/video-stitcher` before starting
 anything new.
