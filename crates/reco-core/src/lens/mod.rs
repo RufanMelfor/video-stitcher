@@ -314,7 +314,11 @@ pub fn distorted_to_undistorted(
     }
 
     let r = theta.tan();
-    let scale = if theta.abs() < 1e-12 { 1.0 } else { theta_d / r };
+    let scale = if theta.abs() < 1e-12 {
+        1.0
+    } else {
+        theta_d / r
+    };
     if !scale.is_finite() {
         return None;
     }

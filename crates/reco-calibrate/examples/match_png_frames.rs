@@ -72,9 +72,8 @@ fn main() {
     eprintln!("GPU: {}", gpu.gpu_name());
 
     let config = CalibrationConfig::default();
-    let result =
-        reco_calibrate::calibrate(&gpu, &frames, &cal.lenses[0], &cal.lenses[1], &config)
-            .unwrap_or_else(|e| panic!("calibration pipeline failed: {e}"));
+    let result = reco_calibrate::calibrate(&gpu, &frames, &cal.lenses[0], &cal.lenses[1], &config)
+        .unwrap_or_else(|e| panic!("calibration pipeline failed: {e}"));
 
     eprintln!(
         "\n{} total matches across {} frame pair(s), confidence {:.0}%",

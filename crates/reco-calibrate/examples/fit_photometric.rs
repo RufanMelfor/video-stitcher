@@ -50,11 +50,11 @@ use reco_calibrate::geometry::{self, OptParams};
 use reco_calibrate::photometric::{self, OverlapMask, ZnccReport};
 use reco_calibrate::types::{FrameMatches, MatchedPoint};
 use reco_core::calibration::{
-    Calibration, Framing, Lens, Topology, DEFAULT_BLEND_WIDTH, DEFAULT_COLOR_MATCH_BAND_WIDTH,
+    Calibration, DEFAULT_BLEND_WIDTH, DEFAULT_COLOR_MATCH_BAND_WIDTH,
     DEFAULT_COLOR_MATCH_EMA_ALPHA, DEFAULT_COLOR_MATCH_ENABLED, DEFAULT_COLOR_MATCH_GRID_COLS,
     DEFAULT_COLOR_MATCH_GRID_ROWS, DEFAULT_COLOR_MATCH_INTERVAL_FRAMES,
     DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET, DEFAULT_COLOR_MATCH_MAX_Y_OFFSET,
-    DEFAULT_TILT_BAND_WIDTH,
+    DEFAULT_TILT_BAND_WIDTH, Framing, Lens, Topology,
 };
 use reco_core::gpu::GpuContext;
 use reco_core::render::scene::SceneGeometry;
@@ -339,7 +339,11 @@ fn main() {
         seed_framing.axis_offset,
         refined_framing.axis_offset,
     );
-    check_delta("intersect", seed_topology.intersect, refined_topology.intersect);
+    check_delta(
+        "intersect",
+        seed_topology.intersect,
+        refined_topology.intersect,
+    );
     check_delta("x_ty", seed_topology.x_ty, refined_topology.x_ty);
     check_delta("x_rz", seed_topology.x_rz, refined_topology.x_rz);
     check_delta("z_rx", seed_topology.z_rx, refined_topology.z_rx);

@@ -115,8 +115,15 @@ fn main() {
         std::process::exit(1);
     }
 
-    let base_err =
-        summed_reprojection_error(&manual_points, &base_topology, &base_framing, 0.0, 0.0, k_x, k_z);
+    let base_err = summed_reprojection_error(
+        &manual_points,
+        &base_topology,
+        &base_framing,
+        0.0,
+        0.0,
+        k_x,
+        k_z,
+    );
     eprintln!(
         "\nBaseline (ground_tilt_x=ground_tilt_z=0.0): manual continuity error = {base_err:.8}"
     );

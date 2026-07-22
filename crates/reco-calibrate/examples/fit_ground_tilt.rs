@@ -104,7 +104,8 @@ fn main() {
     eprintln!("\n=== Baseline (today's flat-plane model, cx=cz=0.0) ===");
     let (baseline_topology, baseline_framing, baseline_residual) =
         optimizer::optimize(&points, &config).expect("baseline optimizer should converge");
-    let (base_near, base_far) = split_residual(&baseline_topology, &baseline_framing, &near, &far, 0.0, 0.0);
+    let (base_near, base_far) =
+        split_residual(&baseline_topology, &baseline_framing, &near, &far, 0.0, 0.0);
     print_result(
         "cx=+0.00 cz=+0.00 (baseline)",
         &baseline_topology,
@@ -182,7 +183,13 @@ fn main() {
             "\n=== Best candidate: cx={:+.3} cz={:+.3} ===",
             best.cx, best.cz
         );
-        print_result("best", &best.topology, &best.framing, best.near_err, best.far_err);
+        print_result(
+            "best",
+            &best.topology,
+            &best.framing,
+            best.near_err,
+            best.far_err,
+        );
 
         eprintln!("\nCompare against baseline core parameters:");
         eprintln!(

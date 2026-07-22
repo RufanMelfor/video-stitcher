@@ -43,6 +43,15 @@ pub struct SceneGeometry {
     pub plane_width: f32,
     /// Plane aspect ratio (width / height), default 16:9.
     pub plane_aspect: f32,
+    /// Local-space X of the left plane's seam-adjacent edge - where
+    /// `z_rx`/`z_rz` pivot instead of the plane's own local origin, so a
+    /// manual roll/tilt correction doesn't also drag the visible seam
+    /// across the screen. See `model_matrix_left`'s doc for why this
+    /// specific formula.
+    left_seam_pivot_x: f32,
+    /// Local-space X of the right plane's seam-adjacent edge - same
+    /// purpose as `left_seam_pivot_x`, for `x_rx`/`x_rz`.
+    right_seam_pivot_x: f32,
 }
 
 impl SceneGeometry {
@@ -58,6 +67,15 @@ impl SceneGeometry {
         let half_offset = (plane_width / 2.0) * (1.0 - topology.intersect as f32);
         let axis = framing.axis_offset as f32;
 
+        // Same formula as `renderer::seam_line_screen_points`'s `local_x`
+        // (see its own comment for the derivation from the shader's
+        // extended-uv seam test) - each plane's own mapping from
+        // `seam_offset` to where its seam-adjacent edge sits in local
+        // vertex space, independent of which plane currently fades.
+        let seam_offset = topology.seam_offset;
+        let left_seam_pivot_x = (0.5 - seam_offset) / 2.0;
+        let right_seam_pivot_x = (seam_offset - 0.5) / 2.0;
+
         Self {
             left_position: [0.0, 0.0, half_offset],
             left_rotation: [
@@ -70,38 +88,57 @@ impl SceneGeometry {
             camera_position: [axis, 0.0, axis],
             plane_width,
             plane_aspect: aspect,
+            left_seam_pivot_x,
+            right_seam_pivot_x,
         }
     }
 
     /// Model matrix for the left camera plane.
     ///
-    /// The z-plane base rotation is π/2 around Y (faces sideways).
-    /// `z_rx` is applied as a post-rotation around X so it acts as
-    /// a roll around the plane's final normal. `z_rz` is applied
-    /// as a pre-rotation (tilt correction).
+    /// The z-plane base rotation is π/2 around Y (faces sideways) - this
+    /// is mandatory L-shape geometry, not a correction, so unlike `z_rx`/
+    /// `z_rz` it always stays anchored at the plane's own local origin,
+    /// applied innermost (closest to the raw vertex). `z_rx` is applied as
+    /// a post-rotation around X so it acts as a roll around the plane's
+    /// final normal. `z_rz` is applied as a pre-rotation (tilt correction).
+    ///
+    /// The `z_rx`/`z_rz` correction pivots around `left_seam_pivot_x` (at
+    /// mid-height, y=0) instead of the plane's own local origin - pivoting
+    /// at the origin would swing the seam-adjacent edge across the screen
+    /// for any manual nudge, which is confusing when the whole point of
+    /// those sliders is a small roll/tilt correction, not a seam
+    /// reposition (that's what `seam_offset` is for). Pivoting here keeps
+    /// the seam's mid-height point fixed; top/bottom still swing somewhat
+    /// under a tilt (`z_rx`), same as tilting any real rigid plane around
+    /// a point on it - a further Y-adjustable pivot would remove that too
+    /// but isn't implemented yet. At `z_rx = z_rz = 0` the pivot sandwich
+    /// is the identity, so this is exactly the pre-pivot geometry.
     pub fn model_matrix_left(&self) -> Matrix4<f32> {
         let t = Translation3::new(
             self.left_position[0],
             self.left_position[1],
             self.left_position[2],
         );
-        // Base: π/2 Y rotation + z_rz tilt
-        let base = UnitQuaternion::from_euler_angles(
-            0.0,
-            self.left_rotation[1], // π/2
-            self.left_rotation[2], // z_rz
-        );
-        // Post-rotate: z_rx as roll around X (the plane's final normal)
-        let roll = UnitQuaternion::from_euler_angles(
-            self.left_rotation[0], // z_rx
-            0.0,
-            0.0,
-        );
-        let r = roll * base;
-        t.to_homogeneous() * r.to_homogeneous()
+        // Mandatory orientation, never pivoted.
+        let base = UnitQuaternion::from_euler_angles(0.0, self.left_rotation[1], 0.0);
+        // z_rz tilt correction (applied here as a pre-rotation, same as
+        // the original single combined-Euler construction).
+        let tilt = UnitQuaternion::from_euler_angles(0.0, 0.0, self.left_rotation[2]);
+        // z_rx roll correction (post-rotation, around the plane's final normal).
+        let roll = UnitQuaternion::from_euler_angles(self.left_rotation[0], 0.0, 0.0);
+        let correction = roll * tilt;
+        let pivot = Translation3::new(self.left_seam_pivot_x, 0.0, 0.0);
+        t.to_homogeneous()
+            * pivot.to_homogeneous()
+            * correction.to_homogeneous()
+            * pivot.inverse().to_homogeneous()
+            * base.to_homogeneous()
     }
 
     /// Model matrix for the right camera plane.
+    ///
+    /// See [`Self::model_matrix_left`]'s doc for why the rotation pivots
+    /// around `right_seam_pivot_x` instead of the plane's local origin.
     pub fn model_matrix_right(&self) -> Matrix4<f32> {
         let t = Translation3::new(
             self.right_position[0],
@@ -113,7 +150,11 @@ impl SceneGeometry {
             self.right_rotation[1],
             self.right_rotation[2],
         );
-        t.to_homogeneous() * r.to_homogeneous()
+        let pivot = Translation3::new(self.right_seam_pivot_x, 0.0, 0.0);
+        t.to_homogeneous()
+            * pivot.to_homogeneous()
+            * r.to_homogeneous()
+            * pivot.inverse().to_homogeneous()
     }
 }
 
