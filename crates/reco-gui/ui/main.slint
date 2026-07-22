@@ -495,6 +495,33 @@ component SectionHeader inherits Rectangle {
     }
 }
 
+/// Bordered card grouping related calibration sliders under a small-caps
+/// title, so a long flat list (Calibration panel) reads as distinct
+/// sections at a glance instead of one undifferentiated column.
+component CalGroupBox inherits Rectangle {
+    in property <string> title;
+
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: #2a2e33;
+    background: #16191c;
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 10px;
+
+        Text {
+            text: root.title;
+            color: #7a8087;
+            font-size: 10.5px;
+            font-weight: 700;
+            letter-spacing: 0.6px;
+        }
+
+        @children
+    }
+}
+
 /// Small flat transport button (jump/step/play/stop icons). The default
 /// `Button` widget from std-widgets renders noticeably bulkier than this
 /// - fine for the toolbar's full-size buttons, but too heavy for a tight
@@ -1468,15 +1495,29 @@ export component RecoApp inherits Window {
                     clicked => { root.open-export-dialog(); }
                 }
 
-                // Right controls-panel toggle, at the end of the toolbar row.
-                // has-both-videos (not files-loaded): the right panel also
-                // holds the auto-calibrate tuning knobs, reachable before
-                // the first calibration exists.
-                FlatButton {
-                    text: root.controls-open ? "◀ Expert Mode" : "Expert Mode ▶";
-                    enabled: root.has-both-videos;
-                    clicked => { root.controls-open = !root.controls-open; }
-                }
+            }
+
+            // Right controls-panel toggle. Absolutely positioned (not a
+            // HorizontalBox child like the other toolbar buttons) so its
+            // right edge can be pinned to the boundary between the middle
+            // (preview) column and the right panel - a `Rectangle{width:
+            // right-panel-width}` spacer added after it inside the
+            // HorizontalBox did not reserve space the way a fixed-size
+            // layout child normally would once a second non-stretch
+            // element competed with the existing `horizontal-stretch: 1`
+            // spacer, so this sidesteps that entirely with direct
+            // geometry instead of relying on the box layout's stretch math.
+            // has-both-videos (not files-loaded): the right panel also
+            // holds the auto-calibrate tuning knobs, reachable before the
+            // first calibration exists.
+            FlatButton {
+                x: parent.width - (root.controls-open ? root.right-panel-width : 0px) - self.width - 6px;
+                y: 7px;
+                width: 110px;
+                height: 28px;
+                text: root.controls-open ? "◀ Expert Mode" : "Expert Mode ▶";
+                enabled: root.has-both-videos;
+                clicked => { root.controls-open = !root.controls-open; }
             }
         }
 
@@ -1611,174 +1652,187 @@ export component RecoApp inherits Window {
 
                         if root.files-loaded: Text { text: "Stitching"; color: #aaa; font-size: 12px; font-weight: 600; }
 
-                        if root.files-loaded: LabeledSlider {
-                            tip: "Width of the feathered blend at the seam between the two cameras.";
-                            label: "Seam blend";
-                            minimum: 0;
-                            maximum: 0.3;
-                            value <=> root.blend-width;
-                            decimals: 2;
-                            step: 0.01;
-                            changed(v) => { root.changed-blend-width(v); }
-                        }
+                        if root.files-loaded: VerticalLayout {
+                            spacing: 10px;
 
-                        if root.files-loaded: Tip {
-                            tip: "Which camera fades in over the other at the seam. Off (default): right fades over a fixed left. On: left fades over a fixed right. Doesn't move the seam itself.";
-                            CheckBox {
-                                text: "Flip blend direction (left over right)";
-                                checked <=> root.blend-flip-direction;
-                                toggled => { root.changed-blend-flip-direction(self.checked); }
+                            CalGroupBox {
+                                title: "SEAM";
+
+                                LabeledSlider {
+                                    tip: "Width of the feathered blend at the seam between the two cameras.";
+                                    label: "Seam blend";
+                                    minimum: 0;
+                                    maximum: 0.3;
+                                    value <=> root.blend-width;
+                                    decimals: 2;
+                                    step: 0.01;
+                                    changed(v) => { root.changed-blend-width(v); }
+                                }
+
+                                Tip {
+                                    tip: "Which camera fades in over the other at the seam. Off (default): right fades over a fixed left. On: left fades over a fixed right. Doesn't move the seam itself.";
+                                    CheckBox {
+                                        text: "Flip blend direction (left over right)";
+                                        checked <=> root.blend-flip-direction;
+                                        toggled => { root.changed-blend-flip-direction(self.checked); }
+                                    }
+                                }
+
+                                Tip {
+                                    tip: "Spatial (multi-band) blend: blurs low frequencies over a wide band and keeps high frequencies over a narrow band, instead of a single crossfade. Lets the seam blend read as wider without doubling fine detail (ball, player edges, field lines) - but costs 10 render passes instead of 1. Experimental.";
+                                    CheckBox {
+                                        text: "Multi-band blend (experimental)";
+                                        checked <=> root.multiband-blend-enabled;
+                                        toggled => { root.changed-multiband-blend-enabled(self.checked); }
+                                    }
+                                }
+
+                                Tip {
+                                    tip: "Draws a thin red line at the exact geometric seam position, independent of how wide the seam blend is. Purely a visual aid for tuning Seam position and Flip blend direction - doesn't affect the render otherwise.";
+                                    CheckBox {
+                                        text: "Show seam line";
+                                        checked <=> root.show-seam-line;
+                                        toggled => { root.changed-show-seam-line(self.checked); }
+                                    }
+                                }
+
+                                LabeledSlider {
+                                    tip: "Moves the seam left/right by hand, independent of calibration - safe to drag freely, unlike Intersect (which can open a black gap if pushed too far). Or drag directly on the preview while Show seam line is on.";
+                                    label: "Seam position";
+                                    minimum: -0.3;
+                                    maximum: 0.3;
+                                    value <=> root.seam-offset;
+                                    decimals: 3;
+                                    step: 0.005;
+                                    changed(v) => { root.changed-seam-offset(v); }
+                                }
                             }
-                        }
 
-                        if root.files-loaded: Tip {
-                            tip: "Spatial (multi-band) blend: blurs low frequencies over a wide band and keeps high frequencies over a narrow band, instead of a single crossfade. Lets the seam blend read as wider without doubling fine detail (ball, player edges, field lines) - but costs 10 render passes instead of 1. Experimental.";
-                            CheckBox {
-                                text: "Multi-band blend (experimental)";
-                                checked <=> root.multiband-blend-enabled;
-                                toggled => { root.changed-multiband-blend-enabled(self.checked); }
-                            }
-                        }
+                            CalGroupBox {
+                                title: "RIG ALIGNMENT";
 
-                        if root.files-loaded: Tip {
-                            tip: "Draws a thin red line at the exact geometric seam position, independent of how wide the seam blend is. Purely a visual aid for tuning Seam position and Flip blend direction - doesn't affect the render otherwise.";
-                            CheckBox {
-                                text: "Show seam line";
-                                checked <=> root.show-seam-line;
-                                toggled => { root.changed-show-seam-line(self.checked); }
-                            }
-                        }
+                                LabeledSlider {
+                                    tip: "Forward/backward lean of the camera rig; straightens vertical lines at the panorama edges.";
+                                    label: "Rig tilt";
+                                    minimum: -30;
+                                    maximum: 30;
+                                    value <=> root.rig-tilt;
+                                    suffix: "°";
+                                    decimals: 1;
+                                    step: 0.1;
+                                    changed(v) => { root.changed-rig-tilt(v); }
+                                }
 
-                        if root.files-loaded: LabeledSlider {
-                            tip: "Moves the seam left/right by hand, independent of calibration - safe to drag freely, unlike Intersect (which can open a black gap if pushed too far). Or drag directly on the preview while Show seam line is on.";
-                            label: "Seam position";
-                            minimum: -0.3;
-                            maximum: 0.3;
-                            value <=> root.seam-offset;
-                            decimals: 3;
-                            step: 0.005;
-                            changed(v) => { root.changed-seam-offset(v); }
-                        }
+                                LabeledSlider {
+                                    tip: "Side-to-side tilt of the camera rig.";
+                                    label: "Rig roll";
+                                    minimum: -15;
+                                    maximum: 15;
+                                    value <=> root.rig-roll;
+                                    suffix: "°";
+                                    decimals: 1;
+                                    step: 0.1;
+                                    changed(v) => { root.changed-rig-roll(v); }
+                                }
 
-                        if root.files-loaded: LabeledSlider {
-                            tip: "Forward/backward lean of the camera rig; straightens vertical lines at the panorama edges.";
-                            label: "Rig tilt";
-                            minimum: -30;
-                            maximum: 30;
-                            value <=> root.rig-tilt;
-                            suffix: "°";
-                            decimals: 1;
-                            step: 0.1;
-                            changed(v) => { root.changed-rig-tilt(v); }
-                        }
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    Text { text: "Sync offset"; color: #aaa; font-size: 11px; vertical-alignment: center; }
+                                    sync-input := NumEdit {
+                                        text: root.sync-offset;
+                                        width: 70px;
+                                        accepted => { root.sync-offset = self.text.to-float(); root.changed-sync-offset(self.text.to-float()); }
+                                        escaped => { self.text = root.sync-offset; }
+                                    }
+                                    Text { text: "frames"; color: #777; font-size: 10px; vertical-alignment: center; }
+                                    FlatButton { text: "Apply"; clicked => { root.sync-offset = sync-input.text.to-float(); root.changed-sync-offset(sync-input.text.to-float()); } }
+                                }
 
-                        if root.files-loaded: LabeledSlider {
-                            tip: "Side-to-side tilt of the camera rig.";
-                            label: "Rig roll";
-                            minimum: -15;
-                            maximum: 15;
-                            value <=> root.rig-roll;
-                            suffix: "°";
-                            decimals: 1;
-                            step: 0.1;
-                            changed(v) => { root.changed-rig-roll(v); }
-                        }
-
-                        if root.files-loaded: HorizontalLayout {
-                            spacing: 4px;
-                            Text { text: "Sync offset"; color: #aaa; font-size: 11px; vertical-alignment: center; }
-                            sync-input := NumEdit {
-                                text: root.sync-offset;
-                                width: 70px;
-                                accepted => { root.sync-offset = self.text.to-float(); root.changed-sync-offset(self.text.to-float()); }
-                                escaped => { self.text = root.sync-offset; }
-                            }
-                            Text { text: "frames"; color: #777; font-size: 10px; vertical-alignment: center; }
-                            FlatButton { text: "Apply"; clicked => { root.sync-offset = sync-input.text.to-float(); root.changed-sync-offset(sync-input.text.to-float()); } }
-                        }
-
-                        if root.files-loaded: Tip {
-                            tip: "Detect the sync offset only (IMU telemetry, falling back to audio cross-correlation) - the same detection Auto-Calibrate uses internally, without running feature matching/optimization. Can take up to a minute or two on footage with heavy IMU telemetry.";
-                            FlatButton {
-                                text: root.detecting-sync ? "Detecting…" : "Detect Sync Offset";
-                                enabled: !root.detecting-sync && !root.calibrating;
-                                clicked => { root.compute-sync-offset(); }
-                            }
-                        }
-
-                        if root.files-loaded && (root.cal-dirty || root.lens-dirty): FlatButton {
-                            text: "Save Calibration";
-                            primary: true;
-                            clicked => { root.save-calibration(); }
-                        }
-
-                        // Field ROI status
-                        if root.files-loaded: Rectangle { height: 1px; background: root.border-subtle; }
-
-                        if root.files-loaded: HorizontalLayout {
-                            spacing: 6px;
-                            Text {
-                                text: root.has-roi ? "Field ROI: loaded" : "Field ROI: none";
-                                color: root.has-roi ? #8ae68a : #777;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
-                            }
-                        }
-
-                        if root.files-loaded: HorizontalLayout {
-                            spacing: 4px;
-                            FlatButton {
-                                text: root.roi-edit-mode ? "Done Editing ROI"
-                                    : (root.has-roi ? "Edit ROI..." : "Set ROI...");
-                                primary: root.roi-edit-mode;
-                                horizontal-stretch: 1;
-                                clicked => {
-                                    if (!root.roi-edit-mode) {
-                                        if (!root.lens-preview-active) {
-                                            root.lens-preview-active = true;
-                                            root.roi-edit-auto-lens-preview = true;
-                                            root.changed-lens-preview();
-                                        } else {
-                                            root.roi-edit-auto-lens-preview = false;
-                                        }
-                                        root.roi-edit-mode = true;
-                                    } else {
-                                        root.roi-edit-mode = false;
-                                        if (root.roi-edit-auto-lens-preview) {
-                                            root.roi-edit-auto-lens-preview = false;
-                                            root.lens-preview-active = false;
-                                            root.changed-lens-preview();
-                                        }
+                                Tip {
+                                    tip: "Detect the sync offset only (IMU telemetry, falling back to audio cross-correlation) - the same detection Auto-Calibrate uses internally, without running feature matching/optimization. Can take up to a minute or two on footage with heavy IMU telemetry.";
+                                    FlatButton {
+                                        text: root.detecting-sync ? "Detecting…" : "Detect Sync Offset";
+                                        enabled: !root.detecting-sync && !root.calibrating;
+                                        clicked => { root.compute-sync-offset(); }
                                     }
                                 }
                             }
-                            FlatButton {
-                                text: "Paste ROI";
-                                clicked => { root.paste-roi(); }
+
+                            if root.cal-dirty || root.lens-dirty: FlatButton {
+                                text: "Save Calibration";
+                                primary: true;
+                                clicked => { root.save-calibration(); }
                             }
-                        }
 
-                        if root.files-loaded: LineEdit {
-                            placeholder-text: "Or paste ROI JSON here...";
-                            accepted(text) => {
-                                root.roi-manual-json = text;
-                                root.paste-roi();
+                            CalGroupBox {
+                                title: "FIELD ROI";
+
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: root.has-roi ? "Field ROI: loaded" : "Field ROI: none";
+                                        color: root.has-roi ? #8ae68a : #777;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    FlatButton {
+                                        text: root.roi-edit-mode ? "Done Editing ROI"
+                                            : (root.has-roi ? "Edit ROI..." : "Set ROI...");
+                                        primary: root.roi-edit-mode;
+                                        horizontal-stretch: 1;
+                                        clicked => {
+                                            if (!root.roi-edit-mode) {
+                                                if (!root.lens-preview-active) {
+                                                    root.lens-preview-active = true;
+                                                    root.roi-edit-auto-lens-preview = true;
+                                                    root.changed-lens-preview();
+                                                } else {
+                                                    root.roi-edit-auto-lens-preview = false;
+                                                }
+                                                root.roi-edit-mode = true;
+                                            } else {
+                                                root.roi-edit-mode = false;
+                                                if (root.roi-edit-auto-lens-preview) {
+                                                    root.roi-edit-auto-lens-preview = false;
+                                                    root.lens-preview-active = false;
+                                                    root.changed-lens-preview();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    FlatButton {
+                                        text: "Paste ROI";
+                                        clicked => { root.paste-roi(); }
+                                    }
+                                }
+
+                                LineEdit {
+                                    placeholder-text: "Or paste ROI JSON here...";
+                                    accepted(text) => {
+                                        root.roi-manual-json = text;
+                                        root.paste-roi();
+                                    }
+                                }
+
+                                if root.roi-edit-mode: Text {
+                                    text: "Click the lens preview to add points, drag a point to move it, right-click a point to delete it. Switch Left/Right camera above to edit the other side.";
+                                    color: root.text-dim;
+                                    font-size: 10px;
+                                    wrap: word-wrap;
+                                }
+
+                                if !root.roi-edit-mode && !root.has-roi: Text {
+                                    text: "Or paste ROI JSON above (from another calibration, or scripted).";
+                                    color: root.text-dim;
+                                    font-size: 10px;
+                                    wrap: word-wrap;
+                                }
                             }
-                        }
-
-                        if root.files-loaded && root.roi-edit-mode: Text {
-                            text: "Click the lens preview to add points, drag a point to move it, right-click a point to delete it. Switch Left/Right camera above to edit the other side.";
-                            color: root.text-dim;
-                            font-size: 10px;
-                            wrap: word-wrap;
-                        }
-
-                        if root.files-loaded && !root.roi-edit-mode && !root.has-roi: Text {
-                            text: "Or paste ROI JSON above (from another calibration, or scripted).";
-                            color: root.text-dim;
-                            font-size: 10px;
-                            wrap: word-wrap;
                         }
 
                         Rectangle { height: 1px; background: root.border-subtle; }
@@ -2134,32 +2188,147 @@ export component RecoApp inherits Window {
                 }
 
                 // Current view state, surfaced over the preview where the
-                // eye already is. Non-interactive (no TouchArea) so pan/zoom
-                // drag underneath still works. Hidden until a clip loads.
-                if root.files-loaded && !root.lens-preview-active: Rectangle {
+                // eye already is. Clicking expands the badge into the actual
+                // FOV slider + Constrained look toggle, replacing the old
+                // separate "Camera" section in the right panel entirely.
+                // Hidden until a clip loads.
+                //
+                // Click-to-open, not hover: a hover-driven version (has-hover
+                // gating which content is instantiated) flickered and ate
+                // clicks, because the Slider/CheckBox that appear inside are
+                // themselves hoverable/clickable - the moment the pointer
+                // reached them they captured hover away from the badge's own
+                // TouchArea, which then collapsed the popover out from under
+                // the pointer, which exposed the badge again, which re-opened
+                // it, looping. Click-to-toggle (with an explicit × to close)
+                // is the same reliable pattern already used by every
+                // collapsible section in this app (SectionHeader) and has no
+                // such feedback loop.
+                if root.files-loaded && !root.lens-preview-active: fov-box := Rectangle {
                     x: (parent.width - self.width) / 2;
-                    y: 12px;
-                    width: fov-pill.preferred-width + 24px;
+                    // Negative: this element is a child of preview-column,
+                    // which sits directly below the 42px toolbar - this pulls
+                    // the (collapsed, 26px-tall) pill up to vertically center
+                    // in the toolbar band above, so it reads as level with
+                    // the "Files" button rather than floating lower down over
+                    // the video. preview-column itself isn't clipped (only
+                    // preview-box, its child, is), so the negative offset
+                    // renders fine instead of being cut off.
+                    y: -34px;
+                    width: 190px;
+                    height: 92px;
+                    clip: true;
+
+                    property <bool> open: false;
+
+                    if !fov-box.open: Rectangle {
+                        x: (parent.width - self.width) / 2;
+                        y: 0px;
+                        width: fov-pill-content.preferred-width + 24px;
+                        height: 26px;
+                        border-radius: 13px;
+                        background: #0d0f11d0;
+                        border-width: 1px;
+                        border-color: #2a2e33;
+
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { fov-box.open = true; }
+                        }
+
+                        fov-pill-content := HorizontalLayout {
+                            spacing: 7px;
+                            alignment: center;
+                            Text {
+                                text: "FOV " + round(root.fov) + "°";
+                                color: #9aa0a7;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                            if root.use-constrained-look: Text {
+                                text: "· Constrained";
+                                color: #6a7077;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    if self.open: Rectangle {
+                        width: 100%;
+                        height: 100%;
+                        border-radius: 10px;
+                        background: #0d0f11d0;
+                        border-width: 1px;
+                        border-color: #2a2e33;
+
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 6px;
+
+                            HorizontalLayout {
+                                Text {
+                                    text: "FOV " + round(root.fov) + "°";
+                                    color: #ccc;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                                TouchArea {
+                                    width: 16px;
+                                    height: 16px;
+                                    mouse-cursor: pointer;
+                                    clicked => { fov-box.open = false; }
+                                    Text {
+                                        text: "×";
+                                        color: #888;
+                                        font-size: 13px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            Slider {
+                                minimum: 20;
+                                maximum: 150;
+                                value <=> root.fov;
+                                changed(v) => { root.changed-fov(v); }
+                            }
+                            CheckBox {
+                                text: "Constrained look";
+                                checked <=> root.use-constrained-look;
+                                toggled => { root.changed-constrained-look(); }
+                            }
+                        }
+                    }
+                }
+
+                // Reset-view button - positioned independently (not inside
+                // the FOV badge above) so it can never shift that badge's
+                // centering. Same dark-pill styling as the FOV badge (not a
+                // FlatButton) so the two read as a matched pair rather than
+                // one being the app-wide blue action-button style.
+                if root.files-loaded && !root.lens-preview-active: Rectangle {
+                    x: parent.width / 2 + 78px;
+                    y: -34px;
+                    width: 70px;
                     height: 26px;
                     border-radius: 13px;
                     background: #0d0f11d0;
                     border-width: 1px;
                     border-color: #2a2e33;
-                    fov-pill := HorizontalLayout {
-                        spacing: 7px;
-                        alignment: center;
-                        Text {
-                            text: "FOV " + round(root.fov) + "°";
-                            color: #9aa0a7;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                        }
-                        if root.use-constrained-look: Text {
-                            text: "· Constrained";
-                            color: #6a7077;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                        }
+
+                    reset-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.reset-view(); }
+                    }
+
+                    Text {
+                        text: "Reset";
+                        color: reset-touch.has-hover ? #ccc : #9aa0a7;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
                     }
                 }
 
@@ -2226,35 +2395,10 @@ export component RecoApp inherits Window {
                     spacing: 10px;
                     alignment: start;
 
-                    // ── Camera (hidden during lens preview) ──
-                    if !root.lens-preview-active: Text {
-                        text: "Camera";
-                        color: #fff;
-                        font-size: 13px;
-                        font-weight: 600;
-                    }
-
-                    if !root.lens-preview-active: LabeledSlider {
-                        label: "Field of view";
-                        minimum: 20;
-                        maximum: 150;
-                        value <=> root.fov;
-                        suffix: "°";
-                        decimals: 0;
-                        changed(v) => { root.changed-fov(v); }
-                    }
-
-                    if !root.lens-preview-active: CheckBox {
-                        text: "Constrained look";
-                        checked <=> root.use-constrained-look;
-                        toggled => { root.changed-constrained-look(); }
-                    }
-
-                    if !root.lens-preview-active: FlatButton {
-                        text: "Reset View";
-                        clicked => { root.reset-view(); }
-                    }
-
+                    // Camera controls (FOV, Constrained look, Reset View) moved
+                    // to the hover-expandable pill over the preview - see the
+                    // `fov-hover` block above the preview column. Kept only for
+                    // lens-preview mode, which that pill doesn't cover.
                     if root.lens-preview-active: FlatButton {
                         text: "Reset Zoom";
                         clicked => {
@@ -2481,13 +2625,7 @@ export component RecoApp inherits Window {
                             FlatButton { text: "Right"; primary: root.lens-preview-side == "right"; clicked => { root.lens-preview-side = "right"; root.changed-lens-preview(); } }
                         }
 
-                        // Fine-tune: auto-expands in lens preview mode
-                        lens-tune := SectionHeader {
-                            title: "Fine-tune";
-                            expanded: root.lens-preview-active;
-                        }
-
-                        if lens-tune.expanded: VerticalLayout {
+                        VerticalLayout {
                             spacing: 4px;
 
                             HorizontalLayout {
@@ -2497,28 +2635,32 @@ export component RecoApp inherits Window {
                                 FlatButton { text: "Both"; primary: root.lens-selected-camera == "both"; clicked => { root.lens-selected-camera = "both"; } }
                             }
 
-                            if root.lens-selected-camera == "left" || root.lens-selected-camera == "both": VerticalLayout {
-                                spacing: 3px;
-                                LabeledSlider { tip: "Horizontal focal length in pixels."; label: "fx"; minimum: root.lens-fx-min; maximum: root.lens-fx-max; value <=> root.lens-left-fx; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { tip: "Vertical focal length in pixels."; label: "fy"; minimum: root.lens-fy-min; maximum: root.lens-fy-max; value <=> root.lens-left-fy; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { tip: "Horizontal optical center in pixels."; label: "cx"; minimum: root.lens-cx-min; maximum: root.lens-cx-max; value <=> root.lens-left-cx; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { tip: "Vertical optical center in pixels."; label: "cy"; minimum: root.lens-cy-min; maximum: root.lens-cy-max; value <=> root.lens-left-cy; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { tip: "Fisheye distortion coefficient 1 (KB4 model)."; label: "k1"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-left-k1; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { tip: "Fisheye distortion coefficient 2 (KB4 model)."; label: "k2"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-left-k2; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { tip: "Fisheye distortion coefficient 3 (KB4 model)."; label: "k3"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-left-k3; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { tip: "Fisheye distortion coefficient 4 (KB4 model)."; label: "k4"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-left-k4; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
-                            }
+                            CalGroupBox {
+                                title: "LENS PARAMETERS";
 
-                            if root.lens-selected-camera == "right": VerticalLayout {
-                                spacing: 3px;
-                                LabeledSlider { tip: "Horizontal focal length in pixels."; label: "fx"; minimum: root.lens-fx-min; maximum: root.lens-fx-max; value <=> root.lens-right-fx; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { tip: "Vertical focal length in pixels."; label: "fy"; minimum: root.lens-fy-min; maximum: root.lens-fy-max; value <=> root.lens-right-fy; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { tip: "Horizontal optical center in pixels."; label: "cx"; minimum: root.lens-cx-min; maximum: root.lens-cx-max; value <=> root.lens-right-cx; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { tip: "Vertical optical center in pixels."; label: "cy"; minimum: root.lens-cy-min; maximum: root.lens-cy-max; value <=> root.lens-right-cy; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { tip: "Fisheye distortion coefficient 1 (KB4 model)."; label: "k1"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-right-k1; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { tip: "Fisheye distortion coefficient 2 (KB4 model)."; label: "k2"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-right-k2; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { tip: "Fisheye distortion coefficient 3 (KB4 model)."; label: "k3"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-right-k3; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
-                                LabeledSlider { tip: "Fisheye distortion coefficient 4 (KB4 model)."; label: "k4"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-right-k4; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
+                                if root.lens-selected-camera == "left" || root.lens-selected-camera == "both": VerticalLayout {
+                                    spacing: 3px;
+                                    LabeledSlider { tip: "Horizontal focal length in pixels."; label: "fx"; minimum: root.lens-fx-min; maximum: root.lens-fx-max; value <=> root.lens-left-fx; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
+                                    LabeledSlider { tip: "Vertical focal length in pixels."; label: "fy"; minimum: root.lens-fy-min; maximum: root.lens-fy-max; value <=> root.lens-left-fy; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
+                                    LabeledSlider { tip: "Horizontal optical center in pixels."; label: "cx"; minimum: root.lens-cx-min; maximum: root.lens-cx-max; value <=> root.lens-left-cx; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
+                                    LabeledSlider { tip: "Vertical optical center in pixels."; label: "cy"; minimum: root.lens-cy-min; maximum: root.lens-cy-max; value <=> root.lens-left-cy; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
+                                    LabeledSlider { tip: "Fisheye distortion coefficient 1 (KB4 model)."; label: "k1"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-left-k1; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
+                                    LabeledSlider { tip: "Fisheye distortion coefficient 2 (KB4 model)."; label: "k2"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-left-k2; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
+                                    LabeledSlider { tip: "Fisheye distortion coefficient 3 (KB4 model)."; label: "k3"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-left-k3; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
+                                    LabeledSlider { tip: "Fisheye distortion coefficient 4 (KB4 model)."; label: "k4"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-left-k4; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
+                                }
+
+                                if root.lens-selected-camera == "right": VerticalLayout {
+                                    spacing: 3px;
+                                    LabeledSlider { tip: "Horizontal focal length in pixels."; label: "fx"; minimum: root.lens-fx-min; maximum: root.lens-fx-max; value <=> root.lens-right-fx; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
+                                    LabeledSlider { tip: "Vertical focal length in pixels."; label: "fy"; minimum: root.lens-fy-min; maximum: root.lens-fy-max; value <=> root.lens-right-fy; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
+                                    LabeledSlider { tip: "Horizontal optical center in pixels."; label: "cx"; minimum: root.lens-cx-min; maximum: root.lens-cx-max; value <=> root.lens-right-cx; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
+                                    LabeledSlider { tip: "Vertical optical center in pixels."; label: "cy"; minimum: root.lens-cy-min; maximum: root.lens-cy-max; value <=> root.lens-right-cy; decimals: 0; step: 1; changed(v) => { root.changed-lens-param(); } }
+                                    LabeledSlider { tip: "Fisheye distortion coefficient 1 (KB4 model)."; label: "k1"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-right-k1; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
+                                    LabeledSlider { tip: "Fisheye distortion coefficient 2 (KB4 model)."; label: "k2"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-right-k2; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
+                                    LabeledSlider { tip: "Fisheye distortion coefficient 3 (KB4 model)."; label: "k3"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-right-k3; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
+                                    LabeledSlider { tip: "Fisheye distortion coefficient 4 (KB4 model)."; label: "k4"; minimum: -root.lens-k-range; maximum: root.lens-k-range; value <=> root.lens-right-k4; decimals: 2; step: 0.01; changed(v) => { root.changed-lens-param(); } }
+                                }
                             }
 
                             FlatButton { text: "Reset Lens"; enabled: root.lens-dirty; clicked => { root.reset-lens(); } }
@@ -2534,141 +2676,143 @@ export component RecoApp inherits Window {
                     }
 
                     if cal-section.expanded: VerticalLayout {
-                        spacing: 8px;
+                        spacing: 10px;
 
-                        LabeledSlider {
-                            tip: "Overlap between the two camera planes; controls how much of each image is used.";
-                            label: "Intersect";
-                            minimum: -1.0;
-                            maximum: 1.0;
-                            value <=> root.cal-intersect;
-                            decimals: 5;
-                            step: 0.001;
-                            changed(v) => { root.changed-cal-intersect(v); }
+                        CalGroupBox {
+                            title: "GLOBAL PARAMETERS";
+
+                            LabeledSlider {
+                                tip: "Overlap between the two camera planes; controls how much of each image is used.";
+                                label: "Intersect";
+                                minimum: -1.0;
+                                maximum: 1.0;
+                                value <=> root.cal-intersect;
+                                decimals: 5;
+                                step: 0.001;
+                                changed(v) => { root.changed-cal-intersect(v); }
+                            }
+
+                            LabeledSlider {
+                                tip: "Distance of the virtual camera from the stitch origin; affects parallax at the seam.";
+                                label: "Camera axis offset";
+                                minimum: -0.6;
+                                maximum: 0.6;
+                                value <=> root.cal-camera-axis-offset;
+                                decimals: 5;
+                                step: 0.001;
+                                changed(v) => { root.changed-cal-camera-axis-offset(v); }
+                            }
                         }
 
-                        LabeledSlider {
-                            tip: "Distance of the virtual camera from the stitch origin; affects parallax at the seam.";
-                            label: "Camera axis offset";
-                            minimum: -0.6;
-                            maximum: 0.6;
-                            value <=> root.cal-camera-axis-offset;
-                            decimals: 5;
-                            step: 0.001;
-                            changed(v) => { root.changed-cal-camera-axis-offset(v); }
+                        CalGroupBox {
+                            title: "LEFT CAMERA";
+
+                            LabeledSlider {
+                                tip: "Independent rotation of the left camera's content. Manual control for the same angle the \"Force extra rotation fit (z_rz)\" checkbox below lets auto-calibrate solve for - use this to fine-tune by hand instead of (or after) re-running auto-calibrate.";
+                                label: "Rotation";
+                                minimum: -0.3;
+                                maximum: 0.3;
+                                value <=> root.cal-z-rz;
+                                decimals: 5;
+                                step: 0.001;
+                                changed(v) => { root.changed-cal-z-rz(v); }
+                            }
+
+                            LabeledSlider {
+                                tip: "Same as ground_tilt_x, for the left camera's content (z-plane).";
+                                label: "Near-field Tilt";
+                                minimum: -0.3;
+                                maximum: 0.3;
+                                value <=> root.cal-ground-tilt-z;
+                                decimals: 5;
+                                step: 0.001;
+                                changed(v) => { root.changed-cal-ground-tilt-z(v); }
+                            }
+
+                            LabeledSlider {
+                                tip: "Same as top_tilt_x, for the left camera's content (z-plane).";
+                                label: "Far-field Tilt";
+                                minimum: -0.3;
+                                maximum: 0.3;
+                                value <=> root.cal-top-tilt-z;
+                                decimals: 5;
+                                step: 0.001;
+                                changed(v) => { root.changed-cal-top-tilt-z(v); }
+                            }
                         }
 
-                        Text {
-                            text: "Left camera";
-                            color: root.text-muted;
-                            font-size: 11px;
-                            font-weight: 600;
+                        CalGroupBox {
+                            title: "RIGHT CAMERA";
+
+                            LabeledSlider {
+                                tip: "Vertical alignment correction between the two camera planes.";
+                                label: "Vertical Shift";
+                                minimum: -0.1;
+                                maximum: 0.1;
+                                value <=> root.cal-x-ty;
+                                decimals: 5;
+                                step: 0.001;
+                                changed(v) => { root.changed-cal-x-ty(v); }
+                            }
+
+                            LabeledSlider {
+                                tip: "Independent rotation of the right camera's content. Manual control for the same angle the \"Force extra rotation fit (x_rx)\" checkbox below lets auto-calibrate solve for - use this to fine-tune by hand instead of (or after) re-running auto-calibrate.";
+                                label: "Rotation";
+                                minimum: -0.3;
+                                maximum: 0.3;
+                                value <=> root.cal-x-rx;
+                                decimals: 5;
+                                step: 0.001;
+                                changed(v) => { root.changed-cal-x-rx(v); }
+                            }
+
+                            LabeledSlider {
+                                tip: "Near-field ground-plane tilt correction for the right camera's content (x-plane). Fixes a seam step in ground lines close to the camera that the flat two-plane model can't otherwise correct - only affects the bottom of frame, close to the camera; leaves everything else untouched.";
+                                label: "Near-field Tilt";
+                                minimum: -0.3;
+                                maximum: 0.3;
+                                value <=> root.cal-ground-tilt-x;
+                                decimals: 5;
+                                step: 0.001;
+                                changed(v) => { root.changed-cal-ground-tilt-x(v); }
+                            }
+
+                            LabeledSlider {
+                                tip: "Top-of-frame tilt correction for the right camera's content (x-plane). Mirror of ground_tilt_x, for far background content (distant structures, goal frames, skyline) instead of the near field - only affects the top of frame; leaves the ground band untouched. Manual only - no auto-fit yet.";
+                                label: "Far-field Tilt";
+                                minimum: -0.3;
+                                maximum: 0.3;
+                                value <=> root.cal-top-tilt-x;
+                                decimals: 5;
+                                step: 0.001;
+                                changed(v) => { root.changed-cal-top-tilt-x(v); }
+                            }
                         }
 
-                        LabeledSlider {
-                            tip: "Independent rotation of the left camera's content. Manual control for the same angle the \"Force extra rotation fit (z_rz)\" checkbox below lets auto-calibrate solve for - use this to fine-tune by hand instead of (or after) re-running auto-calibrate.";
-                            label: "Left cam rotation";
-                            minimum: -0.3;
-                            maximum: 0.3;
-                            value <=> root.cal-z-rz;
-                            decimals: 5;
-                            step: 0.001;
-                            changed(v) => { root.changed-cal-z-rz(v); }
-                        }
+                        CalGroupBox {
+                            title: "BAND WIDTH";
 
-                        LabeledSlider {
-                            tip: "Same as ground_tilt_x, for the left camera's content (z-plane).";
-                            label: "Left cam near-field tilt";
-                            minimum: -0.3;
-                            maximum: 0.3;
-                            value <=> root.cal-ground-tilt-z;
-                            decimals: 5;
-                            step: 0.001;
-                            changed(v) => { root.changed-cal-ground-tilt-z(v); }
-                        }
+                            LabeledSlider {
+                                tip: "How far into the frame ground_tilt_x/z's correction extends before reaching full strength (the ramp always starts at the same fixed point close to the seam). Wider spreads the correction more gradually; narrower concentrates it closer to the very bottom edge. Shared by both ground_tilt_x and ground_tilt_z.";
+                                label: "Near-tilt";
+                                minimum: 0.09;
+                                maximum: 0.4;
+                                value <=> root.cal-ground-tilt-band-width;
+                                decimals: 5;
+                                step: 0.01;
+                                changed(v) => { root.changed-cal-ground-tilt-band-width(v); }
+                            }
 
-                        LabeledSlider {
-                            tip: "Same as top_tilt_x, for the left camera's content (z-plane).";
-                            label: "Left cam far-field tilt";
-                            minimum: -0.3;
-                            maximum: 0.3;
-                            value <=> root.cal-top-tilt-z;
-                            decimals: 5;
-                            step: 0.001;
-                            changed(v) => { root.changed-cal-top-tilt-z(v); }
-                        }
-
-                        Text {
-                            text: "Right camera";
-                            color: root.text-muted;
-                            font-size: 11px;
-                            font-weight: 600;
-                        }
-
-                        LabeledSlider {
-                            tip: "Vertical alignment correction between the two camera planes.";
-                            label: "Right cam vertical shift";
-                            minimum: -0.1;
-                            maximum: 0.1;
-                            value <=> root.cal-x-ty;
-                            decimals: 5;
-                            step: 0.001;
-                            changed(v) => { root.changed-cal-x-ty(v); }
-                        }
-
-                        LabeledSlider {
-                            tip: "Independent rotation of the right camera's content. Manual control for the same angle the \"Force extra rotation fit (x_rx)\" checkbox below lets auto-calibrate solve for - use this to fine-tune by hand instead of (or after) re-running auto-calibrate.";
-                            label: "Right cam rotation";
-                            minimum: -0.3;
-                            maximum: 0.3;
-                            value <=> root.cal-x-rx;
-                            decimals: 5;
-                            step: 0.001;
-                            changed(v) => { root.changed-cal-x-rx(v); }
-                        }
-
-                        LabeledSlider {
-                            tip: "Near-field ground-plane tilt correction for the right camera's content (x-plane). Fixes a seam step in ground lines close to the camera that the flat two-plane model can't otherwise correct - only affects the bottom of frame, close to the camera; leaves everything else untouched.";
-                            label: "Right cam near-field tilt";
-                            minimum: -0.3;
-                            maximum: 0.3;
-                            value <=> root.cal-ground-tilt-x;
-                            decimals: 5;
-                            step: 0.001;
-                            changed(v) => { root.changed-cal-ground-tilt-x(v); }
-                        }
-
-                        LabeledSlider {
-                            tip: "Top-of-frame tilt correction for the right camera's content (x-plane). Mirror of ground_tilt_x, for far background content (distant structures, goal frames, skyline) instead of the near field - only affects the top of frame; leaves the ground band untouched. Manual only - no auto-fit yet.";
-                            label: "Right cam far-field tilt";
-                            minimum: -0.3;
-                            maximum: 0.3;
-                            value <=> root.cal-top-tilt-x;
-                            decimals: 5;
-                            step: 0.001;
-                            changed(v) => { root.changed-cal-top-tilt-x(v); }
-                        }
-
-                        LabeledSlider {
-                            tip: "How far into the frame ground_tilt_x/z's correction extends before reaching full strength (the ramp always starts at the same fixed point close to the seam). Wider spreads the correction more gradually; narrower concentrates it closer to the very bottom edge. Shared by both ground_tilt_x and ground_tilt_z.";
-                            label: "Near-tilt band width";
-                            minimum: 0.09;
-                            maximum: 0.4;
-                            value <=> root.cal-ground-tilt-band-width;
-                            decimals: 5;
-                            step: 0.01;
-                            changed(v) => { root.changed-cal-ground-tilt-band-width(v); }
-                        }
-
-                        LabeledSlider {
-                            tip: "Same as ground_tilt_band_width, for top_tilt_x/z's band (top of frame instead of the bottom).";
-                            label: "Far-tilt band width";
-                            minimum: 0.09;
-                            maximum: 0.4;
-                            value <=> root.cal-top-tilt-band-width;
-                            decimals: 5;
-                            step: 0.01;
-                            changed(v) => { root.changed-cal-top-tilt-band-width(v); }
+                            LabeledSlider {
+                                tip: "Same as ground_tilt_band_width, for top_tilt_x/z's band (top of frame instead of the bottom).";
+                                label: "Far-tilt";
+                                minimum: 0.09;
+                                maximum: 0.4;
+                                value <=> root.cal-top-tilt-band-width;
+                                decimals: 5;
+                                step: 0.01;
+                                changed(v) => { root.changed-cal-top-tilt-band-width(v); }
+                            }
                         }
 
                         // Saving lives in one place: the "Save Calibration"
@@ -2692,7 +2836,7 @@ export component RecoApp inherits Window {
                     }
 
                     if color-match-section.expanded: VerticalLayout {
-                        spacing: 6px;
+                        spacing: 10px;
 
                         Text {
                             text: root.color-match-status == "" ? "Measuring…" : root.color-match-status;
@@ -2710,82 +2854,90 @@ export component RecoApp inherits Window {
                             }
                         }
 
-                        LabeledSlider {
-                            tip: "Width of the seam-adjacent band sampled for the measurement, independent of the seam blend width. Updates live.";
-                            label: "MEAS Band Width";
-                            minimum: 0.02;
-                            maximum: 1.0;
-                            value <=> root.color-match-band-width;
-                            decimals: 2;
-                            step: 0.01;
-                            changed(v) => { root.changed-color-match-band-width(v); }
+                        CalGroupBox {
+                            title: "MEASUREMENT";
+
+                            LabeledSlider {
+                                tip: "Width of the seam-adjacent band sampled for the measurement, independent of the seam blend width. Updates live.";
+                                label: "MEAS Band Width";
+                                minimum: 0.02;
+                                maximum: 1.0;
+                                value <=> root.color-match-band-width;
+                                decimals: 2;
+                                step: 0.01;
+                                changed(v) => { root.changed-color-match-band-width(v); }
+                            }
+
+                            LabeledSlider {
+                                tip: "Re-measure color every N rendered frames. Updates live.";
+                                label: "Measure interval";
+                                minimum: 1;
+                                maximum: 120;
+                                value <=> root.color-match-interval-frames;
+                                suffix: " frames";
+                                decimals: 0;
+                                step: 1;
+                                changed(v) => { root.changed-color-match-interval-frames(v); }
+                            }
+
+                            LabeledSlider {
+                                tip: "Sample grid columns per camera. More = a more stable measurement, at a small extra cost. Updates live.";
+                                label: "Grid columns";
+                                minimum: 2;
+                                maximum: 32;
+                                value <=> root.color-match-grid-cols;
+                                decimals: 0;
+                                step: 1;
+                                changed(v) => { root.changed-color-match-grid-cols(v); }
+                            }
+
+                            LabeledSlider {
+                                tip: "Sample grid rows per camera. Updates live.";
+                                label: "Grid rows";
+                                minimum: 2;
+                                maximum: 64;
+                                value <=> root.color-match-grid-rows;
+                                decimals: 0;
+                                step: 1;
+                                changed(v) => { root.changed-color-match-grid-rows(v); }
+                            }
                         }
 
-                        LabeledSlider {
-                            tip: "Max luma (brightness) correction either camera can receive. Updates live.";
-                            label: "Max Y offset";
-                            minimum: 0;
-                            maximum: 0.2;
-                            value <=> root.color-match-max-y-offset;
-                            decimals: 3;
-                            step: 0.005;
-                            changed(v) => { root.changed-color-match-max-y-offset(v); }
-                        }
+                        CalGroupBox {
+                            title: "CORRECTION LIMITS";
 
-                        LabeledSlider {
-                            tip: "Max color (chroma) correction either camera can receive. Updates live.";
-                            label: "Max chroma offset";
-                            minimum: 0;
-                            maximum: 0.15;
-                            value <=> root.color-match-max-chroma-offset;
-                            decimals: 3;
-                            step: 0.005;
-                            changed(v) => { root.changed-color-match-max-chroma-offset(v); }
-                        }
+                            LabeledSlider {
+                                tip: "Max luma (brightness) correction either camera can receive. Updates live.";
+                                label: "Max Y offset";
+                                minimum: 0;
+                                maximum: 0.2;
+                                value <=> root.color-match-max-y-offset;
+                                decimals: 3;
+                                step: 0.005;
+                                changed(v) => { root.changed-color-match-max-y-offset(v); }
+                            }
 
-                        LabeledSlider {
-                            tip: "How fast the correction reacts to a new measurement (higher = faster, noisier). Updates live.";
-                            label: "Smoothing (EMA alpha)";
-                            minimum: 0.01;
-                            maximum: 1.0;
-                            value <=> root.color-match-ema-alpha;
-                            decimals: 2;
-                            step: 0.01;
-                            changed(v) => { root.changed-color-match-ema-alpha(v); }
-                        }
+                            LabeledSlider {
+                                tip: "Max color (chroma) correction either camera can receive. Updates live.";
+                                label: "Max chroma offset";
+                                minimum: 0;
+                                maximum: 0.15;
+                                value <=> root.color-match-max-chroma-offset;
+                                decimals: 3;
+                                step: 0.005;
+                                changed(v) => { root.changed-color-match-max-chroma-offset(v); }
+                            }
 
-                        LabeledSlider {
-                            tip: "Re-measure color every N rendered frames. Updates live.";
-                            label: "Measure interval";
-                            minimum: 1;
-                            maximum: 120;
-                            value <=> root.color-match-interval-frames;
-                            suffix: " frames";
-                            decimals: 0;
-                            step: 1;
-                            changed(v) => { root.changed-color-match-interval-frames(v); }
-                        }
-
-                        LabeledSlider {
-                            tip: "Sample grid columns per camera. More = a more stable measurement, at a small extra cost. Updates live.";
-                            label: "Grid columns";
-                            minimum: 2;
-                            maximum: 32;
-                            value <=> root.color-match-grid-cols;
-                            decimals: 0;
-                            step: 1;
-                            changed(v) => { root.changed-color-match-grid-cols(v); }
-                        }
-
-                        LabeledSlider {
-                            tip: "Sample grid rows per camera. Updates live.";
-                            label: "Grid rows";
-                            minimum: 2;
-                            maximum: 64;
-                            value <=> root.color-match-grid-rows;
-                            decimals: 0;
-                            step: 1;
-                            changed(v) => { root.changed-color-match-grid-rows(v); }
+                            LabeledSlider {
+                                tip: "How fast the correction reacts to a new measurement (higher = faster, noisier). Updates live.";
+                                label: "Smoothing (EMA alpha)";
+                                minimum: 0.01;
+                                maximum: 1.0;
+                                value <=> root.color-match-ema-alpha;
+                                decimals: 2;
+                                step: 0.01;
+                                changed(v) => { root.changed-color-match-ema-alpha(v); }
+                            }
                         }
 
                         HorizontalLayout {
@@ -2816,93 +2968,106 @@ export component RecoApp inherits Window {
                         }
 
                         if cal-advanced.expanded: VerticalLayout {
-                            spacing: 4px;
+                            spacing: 10px;
 
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text { text: "Frames:"; color: #888; font-size: 11px; vertical-alignment: center; }
-                                ComboBox {
-                                    model: ["2", "4", "6", "8"];
-                                    current-value: root.calibration-frames;
-                                    width: 56px;
-                                    enabled: !root.calibrating;
-                                    selected(v) => { root.calibration-frames = max(2, v.to-float()); }
+                            CalGroupBox {
+                                title: "SAMPLING";
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text { text: "Frames:"; color: #888; font-size: 11px; vertical-alignment: center; }
+                                    ComboBox {
+                                        model: ["2", "4", "6", "8"];
+                                        current-value: root.calibration-frames;
+                                        width: 56px;
+                                        enabled: !root.calibrating;
+                                        selected(v) => { root.calibration-frames = max(2, v.to-float()); }
+                                    }
+
+                                    CheckBox {
+                                        text: "IMU seeds";
+                                        checked <=> root.use-imu-seeds;
+                                        enabled: !root.calibrating;
+                                    }
                                 }
 
-                                CheckBox {
-                                    text: "IMU seeds";
-                                    checked <=> root.use-imu-seeds;
-                                    enabled: !root.calibrating;
+                                LabeledSlider {
+                                    tip: "Seconds to skip at the end of the clip when sampling calibration frames.";
+                                    label: "Skip end";
+                                    minimum: 0;
+                                    maximum: 60;
+                                    value <=> root.cal-skip-end-secs;
+                                    suffix: "s";
+                                    decimals: 0;
+                                    step: 1;
+                                    changed(v) => {}
                                 }
                             }
 
-                            LabeledSlider {
-                                tip: "Feature detector sensitivity. Lower = more (weaker) features detected. Updates the preview live.";
-                                label: "AKAZE threshold";
-                                minimum: 0.00005;
-                                maximum: 0.005;
-                                value <=> root.cal-akaze-threshold;
-                                decimals: 4;
-                                step: 0.0001;
-                                changed(v) => { root.detect-preview-tick(); }
-                            }
+                            CalGroupBox {
+                                title: "FEATURE DETECTION";
 
-                            LabeledSlider {
-                                tip: "Top edge of the vertical region used for feature detection (fraction of frame height). Updates the preview live.";
-                                label: "Detect Y min";
-                                minimum: 0;
-                                maximum: 0.5;
-                                value <=> root.cal-detect-y-min;
-                                decimals: 2;
-                                step: 0.01;
-                                changed(v) => { root.detect-preview-tick(); }
-                            }
+                                LabeledSlider {
+                                    tip: "Feature detector sensitivity. Lower = more (weaker) features detected. Updates the preview live.";
+                                    label: "AKAZE threshold";
+                                    minimum: 0.00005;
+                                    maximum: 0.005;
+                                    value <=> root.cal-akaze-threshold;
+                                    decimals: 4;
+                                    step: 0.0001;
+                                    changed(v) => { root.detect-preview-tick(); }
+                                }
 
-                            LabeledSlider {
-                                tip: "Bottom edge of the vertical region used for feature detection (fraction of frame height). Updates the preview live.";
-                                label: "Detect Y max";
-                                minimum: 0.5;
-                                maximum: 1.0;
-                                value <=> root.cal-detect-y-max;
-                                decimals: 2;
-                                step: 0.01;
-                                changed(v) => { root.detect-preview-tick(); }
-                            }
+                                LabeledSlider {
+                                    tip: "Top edge of the vertical region used for feature detection (fraction of frame height). Updates the preview live.";
+                                    label: "Detect Y min";
+                                    minimum: 0;
+                                    maximum: 0.5;
+                                    value <=> root.cal-detect-y-min;
+                                    decimals: 2;
+                                    step: 0.01;
+                                    changed(v) => { root.detect-preview-tick(); }
+                                }
 
-                            LabeledSlider {
-                                tip: "Seconds to skip at the end of the clip when sampling calibration frames.";
-                                label: "Skip end";
-                                minimum: 0;
-                                maximum: 60;
-                                value <=> root.cal-skip-end-secs;
-                                suffix: "s";
-                                decimals: 0;
-                                step: 1;
-                                changed(v) => {}
-                            }
+                                LabeledSlider {
+                                    tip: "Bottom edge of the vertical region used for feature detection (fraction of frame height). Updates the preview live.";
+                                    label: "Detect Y max";
+                                    minimum: 0.5;
+                                    maximum: 1.0;
+                                    value <=> root.cal-detect-y-max;
+                                    decimals: 2;
+                                    step: 0.01;
+                                    changed(v) => { root.detect-preview-tick(); }
+                                }
 
-                            Tip {
-                                tip: "Solve the right camera's independent pitch (x_rx), even without IMU data. Normally only auto-enabled when the IMU detects >2 deg differential pitch - cameras without a native gyro never get that seed. Try this if the two images still look rotated relative to each other after calibrating.";
-                                CheckBox {
-                                    text: "Force extra rotation fit (x_rx)";
-                                    checked <=> root.force-x-rx;
-                                    enabled: !root.calibrating;
+                                Tip {
+                                    tip: "Detect features at full video resolution instead of downscaling to 1920px wide. More precise on 4K+ footage, but slower.";
+                                    CheckBox {
+                                        text: "Full-resolution features (slower)";
+                                        checked <=> root.cal-full-res-features;
+                                        enabled: !root.calibrating;
+                                    }
                                 }
                             }
-                            Tip {
-                                tip: "Solve the left camera's independent roll (z_rz). There's no IMU signal for this angle, so it's always off unless checked here. Try this if the stitch still looks rotated after enabling Force extra rotation fit (x_rx).";
-                                CheckBox {
-                                    text: "Force extra rotation fit (z_rz)";
-                                    checked <=> root.force-z-rz;
-                                    enabled: !root.calibrating;
+
+                            CalGroupBox {
+                                title: "ROTATION FIT";
+
+                                Tip {
+                                    tip: "Solve the right camera's independent pitch (x_rx), even without IMU data. Normally only auto-enabled when the IMU detects >2 deg differential pitch - cameras without a native gyro never get that seed. Try this if the two images still look rotated relative to each other after calibrating.";
+                                    CheckBox {
+                                        text: "Force extra rotation fit (x_rx)";
+                                        checked <=> root.force-x-rx;
+                                        enabled: !root.calibrating;
+                                    }
                                 }
-                            }
-                            Tip {
-                                tip: "Detect features at full video resolution instead of downscaling to 1920px wide. More precise on 4K+ footage, but slower.";
-                                CheckBox {
-                                    text: "Full-resolution features (slower)";
-                                    checked <=> root.cal-full-res-features;
-                                    enabled: !root.calibrating;
+                                Tip {
+                                    tip: "Solve the left camera's independent roll (z_rz). There's no IMU signal for this angle, so it's always off unless checked here. Try this if the stitch still looks rotated after enabling Force extra rotation fit (x_rx).";
+                                    CheckBox {
+                                        text: "Force extra rotation fit (z_rz)";
+                                        checked <=> root.force-z-rz;
+                                        enabled: !root.calibrating;
+                                    }
                                 }
                             }
 
