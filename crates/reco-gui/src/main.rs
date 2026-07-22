@@ -291,6 +291,12 @@ struct AppState {
     /// through the camera-smoothing path but still need a re-render.
     /// Cleared by the timer after it renders.
     preview_dirty: bool,
+    /// Set when the user clicks "Remeasure now" in Color Mapping; the
+    /// measurement itself only completes on the *next* render call, so
+    /// this flags the timer tick to push a confirmation toast with the
+    /// fresh L/R values once that render has actually happened, instead
+    /// of trying to report a result that doesn't exist yet.
+    color_match_remeasure_pending: bool,
     /// Interrupt flag for a running export. Set to true when the user
     /// clicks Cancel; StitchJob checks it between frames and aborts.
     export_interrupted: Arc<AtomicBool>,
@@ -555,6 +561,7 @@ impl AppState {
             pending_seek: None,
             last_render_at: None,
             preview_dirty: false,
+            color_match_remeasure_pending: false,
             export_interrupted: Arc::new(AtomicBool::new(false)),
             export_last_progress_at: Arc::new(Mutex::new(None)),
             export_thread: None,
@@ -649,7 +656,14 @@ impl AppState {
             bridge.engine_mut().update_topology(layout);
             self.preview_dirty = true;
         }
-        self.clamp_targets();
+        // Deliberately no `clamp_targets()` here: almost every topology
+        // field shifts the no-black coverage boundary at least slightly,
+        // so re-clamping on every calibration slider drag could pull the
+        // camera pose (and everything on screen, including a seam-line
+        // the user is watching) away from where they left it, even
+        // though nothing they're actually panning/zooming changed. The
+        // clamp still runs from the real pan/zoom/reset paths below,
+        // which is where "Constrained look" is meant to intervene.
     }
 
     /// Apply edited framing (axis offset, tilt, roll) to the renderer.
@@ -661,7 +675,7 @@ impl AppState {
             bridge.engine_mut().update_framing(framing);
             self.preview_dirty = true;
         }
-        self.clamp_targets();
+        // See `apply_layout`'s comment - no auto-clamp on a calibration edit.
     }
 
     /// Persist the full `left_input` segment chain so a multi-segment
@@ -700,6 +714,21 @@ impl AppState {
         std::fs::write(path, json).map_err(|e| format!("write {}: {e}", path.display()))?;
         log::info!("Saved calibration to {}", path.display());
         Ok(())
+    }
+
+    /// Whether the calibration currently loaded is the one configured in
+    /// preferences as the Default Calibration - i.e. saving now would
+    /// overwrite the fallback future sessions rely on, not just this
+    /// session's own file. `None == None` deliberately doesn't count (no
+    /// default configured means nothing to protect).
+    fn is_default_calibration(&self) -> bool {
+        match (
+            &self.calibration_path,
+            &self.user_settings.default_calibration_path,
+        ) {
+            (Some(current), Some(default)) => current == default,
+            _ => false,
+        }
     }
 
     /// Restore Topology to the values loaded at init (or after auto-cal).
@@ -1017,14 +1046,29 @@ impl AppState {
 
     /// Set which camera fades over the other at the blend seam.
     fn set_blend_flip_direction(&mut self, flip: bool) {
+        // Mirror into the source-of-truth calibration first - see
+        // `set_blend_width`'s comment for why (same bug class: without
+        // this, any other topology slider clones the stale pre-flip
+        // value and silently reverts it).
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.blend_flip_direction = flip;
+        }
         if let Some(bridge) = self.bridge.as_mut() {
-            bridge.engine_mut().pipeline_mut().set_blend_flip_direction(flip);
+            bridge
+                .engine_mut()
+                .pipeline_mut()
+                .set_blend_flip_direction(flip);
             self.preview_dirty = true;
         }
     }
 
     /// Enable/disable the 2-band spatial seam blend.
     fn set_multiband_blend_enabled(&mut self, enabled: bool) {
+        // See `set_blend_width`'s comment for why this must also update
+        // the source-of-truth calibration, not just the live pipeline.
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.multiband_blend_enabled = enabled;
+        }
         if let Some(bridge) = self.bridge.as_mut() {
             bridge
                 .engine_mut()
@@ -1048,6 +1092,14 @@ impl AppState {
             bridge.engine_mut().pipeline_mut().set_seam_offset(offset);
             self.preview_dirty = true;
         }
+        // Keep AppState's own calibration copy in sync - every other
+        // calibration slider handler clones `self.calibration.topology`
+        // as its starting point before editing its own field, so without
+        // this the seam position would get silently reverted the next
+        // time ANY other slider fires (the "seam jumps back" bug).
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.seam_offset = offset;
+        }
     }
 
     /// Nudge the seam by a preview-width-normalized drag delta (dragging
@@ -1069,11 +1121,24 @@ impl AppState {
             .pipeline_mut()
             .set_seam_offset(new_value);
         self.preview_dirty = true;
-        Some(bridge.engine().pipeline().seam_offset())
+        // Keep AppState's own calibration copy in sync - see
+        // `set_seam_offset`'s comment for why this matters.
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.seam_offset = new_value;
+        }
+        Some(new_value)
     }
 
     /// Enable/disable automatic per-camera exposure/color matching.
     fn set_color_match_enabled(&mut self, enabled: bool) {
+        // See `set_blend_width`'s comment - every `color_match_*` setter
+        // below has the same bug class fixed here: without mirroring
+        // into `self.calibration`, any OTHER calibration slider (which
+        // clones `self.calibration.topology` as its starting point)
+        // would silently revert this back to its stale pre-edit value.
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.color_match_enabled = enabled;
+        }
         if let Some(bridge) = self.bridge.as_mut() {
             bridge
                 .engine_mut()
@@ -1083,7 +1148,29 @@ impl AppState {
         }
     }
 
+    /// Force an immediate color-match remeasure against the current frame,
+    /// without waiting for the periodic interval (which only advances while
+    /// rendering) or requiring a calibration change to trigger it.
+    fn remeasure_color_match(&mut self) {
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge
+                .engine_mut()
+                .pipeline_mut()
+                .force_color_match_remeasure();
+            self.preview_dirty = true;
+            // The actual measurement only completes on the next render
+            // call - flag it so the timer tick can push a toast with the
+            // real result once it's actually in, instead of reporting
+            // something that doesn't exist yet.
+            self.color_match_remeasure_pending = true;
+            log::info!("Color-match remeasure forced by user");
+        }
+    }
+
     fn set_color_match_band_width(&mut self, w: f32) {
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.color_match_band_width = w;
+        }
         if let Some(bridge) = self.bridge.as_mut() {
             bridge
                 .engine_mut()
@@ -1094,36 +1181,51 @@ impl AppState {
     }
 
     fn set_color_match_grid_cols(&mut self, cols: f32) {
+        let cols = cols.round().max(1.0) as u32;
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.color_match_grid_cols = cols;
+        }
         if let Some(bridge) = self.bridge.as_mut() {
             bridge
                 .engine_mut()
                 .pipeline_mut()
-                .set_color_match_grid_cols(cols.round().max(1.0) as u32);
+                .set_color_match_grid_cols(cols);
             self.preview_dirty = true;
         }
     }
 
     fn set_color_match_grid_rows(&mut self, rows: f32) {
+        let rows = rows.round().max(1.0) as u32;
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.color_match_grid_rows = rows;
+        }
         if let Some(bridge) = self.bridge.as_mut() {
             bridge
                 .engine_mut()
                 .pipeline_mut()
-                .set_color_match_grid_rows(rows.round().max(1.0) as u32);
+                .set_color_match_grid_rows(rows);
             self.preview_dirty = true;
         }
     }
 
     fn set_color_match_interval_frames(&mut self, frames: f32) {
+        let frames = frames.round().max(1.0) as u32;
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.color_match_interval_frames = frames;
+        }
         if let Some(bridge) = self.bridge.as_mut() {
             bridge
                 .engine_mut()
                 .pipeline_mut()
-                .set_color_match_interval_frames(frames.round().max(1.0) as u32);
+                .set_color_match_interval_frames(frames);
             self.preview_dirty = true;
         }
     }
 
     fn set_color_match_ema_alpha(&mut self, alpha: f32) {
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.color_match_ema_alpha = alpha;
+        }
         if let Some(bridge) = self.bridge.as_mut() {
             bridge
                 .engine_mut()
@@ -1134,6 +1236,9 @@ impl AppState {
     }
 
     fn set_color_match_max_y_offset(&mut self, v: f32) {
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.color_match_max_y_offset = v;
+        }
         if let Some(bridge) = self.bridge.as_mut() {
             bridge
                 .engine_mut()
@@ -1144,6 +1249,9 @@ impl AppState {
     }
 
     fn set_color_match_max_chroma_offset(&mut self, v: f32) {
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.color_match_max_chroma_offset = v;
+        }
         if let Some(bridge) = self.bridge.as_mut() {
             bridge
                 .engine_mut()
@@ -1185,7 +1293,7 @@ impl AppState {
             bridge.engine_mut().set_rig_tilt(deg.to_radians());
             self.preview_dirty = true;
         }
-        self.clamp_targets();
+        // See `apply_layout`'s comment - no auto-clamp on a calibration edit.
     }
 
     fn set_sync_offset(&mut self, frames: i32) {
@@ -1360,7 +1468,7 @@ impl AppState {
             bridge.engine_mut().set_rig_roll(deg.to_radians());
             self.preview_dirty = true;
         }
-        self.clamp_targets();
+        // See `apply_layout`'s comment - no auto-clamp on a calibration edit.
     }
 
     /// Reset yaw/pitch/fov targets to the rest pose. Routes through
@@ -2069,7 +2177,16 @@ fn main() -> anyhow::Result<()> {
             s.right_input = Some(input);
             s.right_path = Some(first);
         }
-        if let Some(cal) = s.user_settings.last_calibration() {
+        // Prefer the last calibration actually used in a session; only
+        // fall back to the user's configured default when there's no
+        // MRU entry (or it no longer exists on disk) - the default is a
+        // safety net for "no calibration available", not a preference
+        // over one the user picked themselves.
+        if let Some(cal) = s
+            .user_settings
+            .last_calibration()
+            .or_else(|| s.user_settings.default_calibration())
+        {
             app.set_calibration_path(display_name(&cal).into());
             s.calibration_path = Some(cal);
         }
@@ -2649,7 +2766,11 @@ fn main() -> anyhow::Result<()> {
             let lens = cal.lenses[if is_right { 1 } else { 0 }].clone();
             let norm = rectified_norm_to_raw_norm(rectified[0], rectified[1], &lens);
             if let Some(roi) = cal.field_roi.as_mut() {
-                let pts = if is_right { &mut roi.right } else { &mut roi.left };
+                let pts = if is_right {
+                    &mut roi.right
+                } else {
+                    &mut roi.left
+                };
                 if let Some(p) = pts.get_mut(index as usize) {
                     *p = norm;
                 }
@@ -2996,6 +3117,14 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_default()
                 .into(),
         );
+        app.set_prefs_default_calibration_path(
+            s.user_settings
+                .default_calibration_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default()
+                .into(),
+        );
         app.set_recording_codec(s.user_settings.recording_codec.clone().into());
         app.set_recording_quality(s.user_settings.recording_quality.clone().into());
         app.set_recording_folder(
@@ -3026,6 +3155,12 @@ fn main() -> anyhow::Result<()> {
             None
         } else {
             Some(PathBuf::from(model_path))
+        };
+        let default_cal_path = app.get_prefs_default_calibration_path().to_string();
+        s.user_settings.default_calibration_path = if default_cal_path.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(default_cal_path))
         };
         s.user_settings.recording_codec = app.get_recording_codec().to_string();
         s.user_settings.recording_quality = app.get_recording_quality().to_string();
@@ -3105,6 +3240,18 @@ fn main() -> anyhow::Result<()> {
             && let Some(app) = app_weak.upgrade()
         {
             app.set_prefs_ai_model_path(path.to_string_lossy().to_string().into());
+        }
+    });
+
+    let app_weak = app.as_weak();
+    app.on_pick_prefs_default_calibration(move || {
+        let dialog = rfd::FileDialog::new()
+            .set_title("Select default calibration")
+            .add_filter("Calibration JSON", &["json"]);
+        if let Some(path) = dialog.pick_file()
+            && let Some(app) = app_weak.upgrade()
+        {
+            app.set_prefs_default_calibration_path(path.to_string_lossy().to_string().into());
         }
     });
 
@@ -3673,6 +3820,11 @@ fn main() -> anyhow::Result<()> {
     });
 
     let state_ref = Rc::clone(&state);
+    app.on_remeasure_color_match(move || {
+        state_ref.borrow_mut().remeasure_color_match();
+    });
+
+    let state_ref = Rc::clone(&state);
     let app_weak = app.as_weak();
     app.on_reset_color_match(move || {
         state_ref.borrow_mut().reset_color_match();
@@ -3819,6 +3971,34 @@ fn main() -> anyhow::Result<()> {
 
     let app_weak = app.as_weak();
     let state_ref = Rc::clone(&state);
+    app.on_changed_cal_x_rx(move |v| {
+        let mut s = state_ref.borrow_mut();
+        let Some(mut layout) = s.calibration.as_ref().map(|c| c.topology.clone()) else {
+            return;
+        };
+        layout.x_rx = v as f64;
+        s.apply_layout(layout);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_cal_z_rz(move |v| {
+        let mut s = state_ref.borrow_mut();
+        let Some(mut layout) = s.calibration.as_ref().map(|c| c.topology.clone()) else {
+            return;
+        };
+        layout.z_rz = v as f64;
+        s.apply_layout(layout);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
     app.on_changed_cal_ground_tilt_x(move |v| {
         let mut s = state_ref.borrow_mut();
         let Some(mut layout) = s.calibration.as_ref().map(|c| c.topology.clone()) else {
@@ -3901,9 +4081,10 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    let app_weak = app.as_weak();
-    let state_ref = Rc::clone(&state);
-    app.on_save_calibration(move || {
+    // Shared by both `save-calibration` (after the default-calibration
+    // check passes) and `confirm-save-calibration` (user already said
+    // "yes, overwrite the default" in the warning modal).
+    fn do_save_calibration(state_ref: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<RecoApp>) {
         let save_result = state_ref.borrow().save_calibration();
         match save_result {
             Err(e) => {
@@ -3929,6 +4110,24 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+    }
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_save_calibration(move || {
+        if state_ref.borrow().is_default_calibration() {
+            if let Some(app) = app_weak.upgrade() {
+                app.set_overwrite_default_cal_warning_open(true);
+            }
+            return;
+        }
+        do_save_calibration(&state_ref, &app_weak);
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_confirm_save_calibration(move || {
+        do_save_calibration(&state_ref, &app_weak);
     });
 
     let app_weak = app.as_weak();
@@ -3940,6 +4139,8 @@ fn main() -> anyhow::Result<()> {
             app.set_cal_intersect(layout.topology.intersect as f32);
             app.set_cal_camera_axis_offset(layout.framing.axis_offset as f32);
             app.set_cal_x_ty(layout.topology.x_ty as f32);
+            app.set_cal_x_rx(layout.topology.x_rx as f32);
+            app.set_cal_z_rz(layout.topology.z_rz as f32);
             app.set_cal_ground_tilt_x(layout.topology.ground_tilt_x as f32);
             app.set_cal_ground_tilt_z(layout.topology.ground_tilt_z as f32);
             app.set_cal_top_tilt_x(layout.topology.top_tilt_x as f32);
@@ -5215,6 +5416,28 @@ fn vsync_render_tick(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<RecoA
                 )
                 .into(),
             );
+            // This render is the first one after "Remeasure now" was
+            // clicked (see `remeasure_color_match`), so `c` is the fresh
+            // result - surface it as a toast, since the Debug panel's log
+            // line is easy to miss and the status text alone is easy to
+            // scroll past if the Color Mapping section isn't expanded.
+            if s.color_match_remeasure_pending {
+                s.color_match_remeasure_pending = false;
+                s.toasts.push(
+                    Severity::Info,
+                    "Color match remeasured",
+                    format!(
+                        "L: Y{:+.3} U{:+.3} V{:+.3}   R: Y{:+.3} U{:+.3} V{:+.3}",
+                        c.left_offset[0],
+                        c.left_offset[1],
+                        c.left_offset[2],
+                        c.right_offset[0],
+                        c.right_offset[1],
+                        c.right_offset[2],
+                    ),
+                );
+                crate::toast::sync_to_ui(&s.toasts, &app);
+            }
         }
         return true;
     }
@@ -5416,10 +5639,12 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 .bridge
                 .as_ref()
                 .map(|b| b.engine().calibration().topology.color_match_grid_rows);
-            let color_match_interval_frames = s
-                .bridge
-                .as_ref()
-                .map(|b| b.engine().calibration().topology.color_match_interval_frames);
+            let color_match_interval_frames = s.bridge.as_ref().map(|b| {
+                b.engine()
+                    .calibration()
+                    .topology
+                    .color_match_interval_frames
+            });
             let color_match_ema_alpha = s
                 .bridge
                 .as_ref()
@@ -5428,10 +5653,12 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 .bridge
                 .as_ref()
                 .map(|b| b.engine().calibration().topology.color_match_max_y_offset);
-            let color_match_max_chroma_offset = s
-                .bridge
-                .as_ref()
-                .map(|b| b.engine().calibration().topology.color_match_max_chroma_offset);
+            let color_match_max_chroma_offset = s.bridge.as_ref().map(|b| {
+                b.engine()
+                    .calibration()
+                    .topology
+                    .color_match_max_chroma_offset
+            });
             // Lens-correction strength came in via the loaded calibration and
             // the renderer was seeded with it at bridge creation; mirror it
             // into AppState so a later save re-persists the right value.
@@ -5516,11 +5743,15 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                     app.set_cal_intersect(layout.topology.intersect as f32);
                     app.set_cal_camera_axis_offset(layout.framing.axis_offset as f32);
                     app.set_cal_x_ty(layout.topology.x_ty as f32);
+                    app.set_cal_x_rx(layout.topology.x_rx as f32);
+                    app.set_cal_z_rz(layout.topology.z_rz as f32);
                     app.set_cal_ground_tilt_x(layout.topology.ground_tilt_x as f32);
                     app.set_cal_ground_tilt_z(layout.topology.ground_tilt_z as f32);
                     app.set_cal_top_tilt_x(layout.topology.top_tilt_x as f32);
                     app.set_cal_top_tilt_z(layout.topology.top_tilt_z as f32);
-                    app.set_cal_ground_tilt_band_width(layout.topology.ground_tilt_band_width as f32);
+                    app.set_cal_ground_tilt_band_width(
+                        layout.topology.ground_tilt_band_width as f32,
+                    );
                     app.set_cal_top_tilt_band_width(layout.topology.top_tilt_band_width as f32);
                     app.set_cal_dirty(false);
                 }
@@ -5785,10 +6016,12 @@ fn handle_calibration_result(
                         .bridge
                         .as_ref()
                         .map(|b| b.engine().calibration().topology.color_match_grid_rows);
-                    let color_match_interval_frames = state
-                        .bridge
-                        .as_ref()
-                        .map(|b| b.engine().calibration().topology.color_match_interval_frames);
+                    let color_match_interval_frames = state.bridge.as_ref().map(|b| {
+                        b.engine()
+                            .calibration()
+                            .topology
+                            .color_match_interval_frames
+                    });
                     let color_match_ema_alpha = state
                         .bridge
                         .as_ref()
@@ -5797,10 +6030,12 @@ fn handle_calibration_result(
                         .bridge
                         .as_ref()
                         .map(|b| b.engine().calibration().topology.color_match_max_y_offset);
-                    let color_match_max_chroma_offset = state
-                        .bridge
-                        .as_ref()
-                        .map(|b| b.engine().calibration().topology.color_match_max_chroma_offset);
+                    let color_match_max_chroma_offset = state.bridge.as_ref().map(|b| {
+                        b.engine()
+                            .calibration()
+                            .topology
+                            .color_match_max_chroma_offset
+                    });
                     let lens_correction =
                         state.calibration.as_ref().map(|c| c.lenses[0].correction);
                     if let Some(lc) = lens_correction {
@@ -5867,6 +6102,8 @@ fn handle_calibration_result(
                             app.set_cal_intersect(layout.topology.intersect as f32);
                             app.set_cal_camera_axis_offset(layout.framing.axis_offset as f32);
                             app.set_cal_x_ty(layout.topology.x_ty as f32);
+                            app.set_cal_x_rx(layout.topology.x_rx as f32);
+                            app.set_cal_z_rz(layout.topology.z_rz as f32);
                             app.set_cal_ground_tilt_x(layout.topology.ground_tilt_x as f32);
                             app.set_cal_ground_tilt_z(layout.topology.ground_tilt_z as f32);
                             app.set_cal_top_tilt_x(layout.topology.top_tilt_x as f32);

@@ -78,6 +78,16 @@ spread-out play; Default is only the starting FOV before any players are
 detected. If a specific situation zooms in/out further than you'd like,
 adjust these bounds - not a "preferred" midpoint.
 
+**Dead-zone vs. frame margin - two different things, easy to conflate.**
+Dead-zone is a *reaction threshold*: how far the target must move before
+the camera moves at all (see above). It has nothing to do with how close
+a player/ball is allowed to get to the edge of frame. That's controlled
+by `ball_frame_margin_deg` (Action framing, widens the FOV to keep this
+much clearance around the ball) and `frame_all_margin_deg` (FrameAll,
+padding around the full player bounding box so nobody is clipped at the
+viewport edge) - see [Extra parameters](#extra-parameters-not-yet-exposed-in-the-gui);
+`ball_frame_margin_deg` has no GUI/CLI control today.
+
 ## Presets
 
 | Field | default() | `broadcast` | `action` | `frame_all` |

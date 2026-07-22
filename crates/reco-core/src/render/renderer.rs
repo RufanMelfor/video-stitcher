@@ -676,11 +676,6 @@ pub fn seam_line_screen_points(
     pitch: f32,
     output_aspect: f32,
 ) -> Option<((f32, f32), (f32, f32))> {
-    let blend_width = calibration.topology.blend_width;
-    if blend_width <= 0.0 {
-        return None;
-    }
-
     let plane_aspect = calibration.lenses[0].width as f32 / calibration.lenses[0].height as f32;
     let scene = SceneGeometry::new(&calibration.topology, &calibration.framing, plane_aspect);
 
@@ -1794,8 +1789,28 @@ impl Renderer {
         // wide Gaussian from too few taps. This is a deliberate ceiling,
         // not the "true" width `blend_width` might suggest - a real
         // N-level pyramid would scale better; see FRICTION.md.
+        //
+        // When color match is active, widen the *driver* of this blur to
+        // at least `color_match_band_width` instead of using `blend_width`
+        // alone: a very narrow `blend_width` (a deliberately sharp,
+        // near-hard seam) otherwise collapses this blur to its 2px floor,
+        // which is nowhere near wide enough to hide the residual color
+        // step color-match leaves behind (measurement noise, EMA lag, the
+        // safety clamp) - the exact thing multiband blending exists to
+        // hide. `color_match_band_width` is the region the measurement
+        // itself considers comparable between the two cameras, so it's a
+        // reasonable stand-in for "how wide a color transition is
+        // actually needed here," independent of how sharp the *structural*
+        // seam is meant to look. Left untouched when color match is off,
+        // so plain multiband use (no color correction) keeps its existing
+        // blend_width-only behavior.
+        let blur_width_driver = if calibration.topology.color_match_enabled {
+            blend_width.max(calibration.topology.color_match_band_width)
+        } else {
+            blend_width
+        };
         let texel_size = [1.0 / target_width as f32, 1.0 / target_height as f32];
-        let sigma_px = (blend_width * target_width as f32 * 0.12).clamp(2.0, 10.0);
+        let sigma_px = (blur_width_driver * target_width as f32 * 0.12).clamp(2.0, 10.0);
 
         let make_blur_uniform_bg = |sigma: f32, direction: [f32; 2], premultiply: bool| {
             let uniforms = BlurUniforms {
@@ -2543,11 +2558,16 @@ mod tests {
     }
 
     #[test]
-    fn seam_line_screen_points_none_when_blend_width_zero() {
+    fn seam_line_screen_points_some_when_blend_width_zero() {
+        // A hard cut (no crossfade band) still has a seam *position* -
+        // `blend_width` shapes the crossfade curve, it doesn't move the
+        // seam, so the debug line/hit-test must stay usable at 0.0 (the
+        // shader draws the line regardless of blend_width; the hit-test
+        // used to disagree, making the line visible but undraggable).
         let mut cal = seam_test_calibration();
         cal.topology.blend_width = 0.0;
         let viewport = ViewportConfig::default();
-        assert!(seam_line_screen_points(&cal, &viewport, 0.0, 0.0, 16.0 / 9.0).is_none());
+        assert!(seam_line_screen_points(&cal, &viewport, 0.0, 0.0, 16.0 / 9.0).is_some());
     }
 
     #[test]

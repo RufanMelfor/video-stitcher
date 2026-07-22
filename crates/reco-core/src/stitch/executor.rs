@@ -795,6 +795,169 @@ mod tests {
         assert!(matches!(err, StitchError::FrameSizeMismatch { .. }));
     }
 
+    /// Diagnostic for a user report: "auto color match looks broken (one
+    /// whole side goes extremely bright/dark) once Seam blend is very
+    /// narrow (0.01)". The measured L/R offset the user saw was tiny
+    /// (+/-0.021), which shouldn't produce an extreme visual result if
+    /// the correction is applied correctly - this checks whether the
+    /// actual *rendered pixel* shift from color-match is consistent
+    /// between a narrow and a wide blend_width, using a known, injected
+    /// brightness bias between the two cameras (not a measurement of the
+    /// user's real footage, which isn't available here).
+    #[test]
+    #[cfg(feature = "gpu")]
+    fn color_match_pixel_shift_is_consistent_across_blend_width() {
+        let (cam_w, cam_h) = (192u32, 108u32);
+        let (out_w, out_h) = (160u32, 90u32);
+        // Right camera's Y plane is uniformly 40/255 brighter than left's -
+        // a known, sizeable bias for color-match to correct toward the
+        // shared mean.
+        let (ly, luv) = nv12(cam_w, cam_h, 0);
+        let (ry, ruv) = nv12(cam_w, cam_h, 40);
+        let left = Nv12Planes { y: &ly, uv: &luv };
+        let right = Nv12Planes { y: &ry, uv: &ruv };
+        let (yaw, pitch) = (0.0f32, 0.0f32);
+
+        // Sample well away from the seam on the right half, same point
+        // for every run so only blend_width/color_match differ.
+        let sample_x = (out_w as f32 * 0.85) as u32;
+        let sample_y = out_h / 2;
+        let sample = |rgba: &[u8]| -> [u8; 3] {
+            let i = ((sample_y * out_w + sample_x) * 4) as usize;
+            [rgba[i], rgba[i + 1], rgba[i + 2]]
+        };
+
+        let render = |blend_width: f32, color_match_enabled: bool| -> [u8; 3] {
+            let Some(gpu) = gpu_or_skip() else {
+                panic!("GPU required for this diagnostic - RECO_REQUIRE_GPU or run manually");
+            };
+            let mut cal = calib(cam_w, cam_h);
+            cal.topology.blend_width = blend_width;
+            cal.topology.color_match_enabled = color_match_enabled;
+            // Converge in one frame instead of waiting/averaging over many,
+            // and don't let the safety clamp mask a real over-correction.
+            cal.topology.color_match_interval_frames = 1;
+            cal.topology.color_match_ema_alpha = 1.0;
+            cal.topology.color_match_max_y_offset = 0.5;
+            cal.topology.color_match_max_chroma_offset = 0.5;
+            let config = ViewportConfig {
+                width: out_w,
+                height: out_h,
+                ..Default::default()
+            };
+            let mut exec = GpuExecutor::new(
+                gpu,
+                GpuExecutorConfig {
+                    viewport: config,
+                    ..GpuExecutorConfig::new(cal, cam_w, cam_h, InputFormat::Nv12)
+                },
+            )
+            .expect("gpu backend");
+            // A few frames so the periodic measurement (interval=1) has
+            // definitely run and the EMA (alpha=1) has fully converged.
+            let mut rgba = exec.stitch(&left, &right, yaw, pitch).expect("stitch");
+            for _ in 0..3 {
+                rgba = exec.stitch(&left, &right, yaw, pitch).expect("stitch");
+            }
+            sample(&rgba)
+        };
+
+        let narrow_raw = render(0.001, false);
+        let narrow_corrected = render(0.001, true);
+        let wide_raw = render(0.2, false);
+        let wide_corrected = render(0.2, true);
+
+        let shift =
+            |raw: [u8; 3], corrected: [u8; 3]| -> i32 { corrected[0] as i32 - raw[0] as i32 };
+        let narrow_shift = shift(narrow_raw, narrow_corrected);
+        let wide_shift = shift(wide_raw, wide_corrected);
+
+        eprintln!(
+            "narrow blend_width=0.001: raw={narrow_raw:?} corrected={narrow_corrected:?} shift={narrow_shift}\n\
+             wide   blend_width=0.2:   raw={wide_raw:?} corrected={wide_corrected:?} shift={wide_shift}"
+        );
+
+        assert!(
+            (narrow_shift - wide_shift).abs() <= 5,
+            "color-match's pixel shift should be consistent regardless of blend_width - \
+             narrow gave {narrow_shift}, wide gave {wide_shift} (diff {})",
+            (narrow_shift - wide_shift).abs()
+        );
+    }
+
+    /// Diagnostic for a follow-up user report: with the same fixed
+    /// camera bias, the L/R color-match correction appeared to keep
+    /// growing frame after frame (during export) instead of settling -
+    /// this drives many repeated `stitch()` calls (realistic default
+    /// `ema_alpha`/`measure_interval_frames`, not the instant-converge
+    /// settings the other diagnostic uses) against an *unchanging* bias
+    /// and checks whether the correction actually converges to a stable
+    /// value, or keeps drifting/growing across iterations.
+    #[test]
+    #[cfg(feature = "gpu")]
+    fn color_match_converges_not_diverges_under_repeated_ticks() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let (cam_w, cam_h) = (192u32, 108u32);
+        let (out_w, out_h) = (160u32, 90u32);
+        // A modest, fixed 15/255 (~6%) bias - unchanging every call.
+        let (ly, luv) = nv12(cam_w, cam_h, 0);
+        let (ry, ruv) = nv12(cam_w, cam_h, 15);
+        let left = Nv12Planes { y: &ly, uv: &luv };
+        let right = Nv12Planes { y: &ry, uv: &ruv };
+
+        let mut cal = calib(cam_w, cam_h);
+        cal.topology.color_match_enabled = true;
+        // Realistic defaults, not the instant-converge settings the
+        // other diagnostic uses - this is what actually runs in the app.
+        cal.topology.color_match_interval_frames = 15;
+        cal.topology.color_match_ema_alpha = 0.15;
+        cal.topology.color_match_max_y_offset = 0.06;
+        cal.topology.color_match_max_chroma_offset = 0.04;
+        let config = ViewportConfig {
+            width: out_w,
+            height: out_h,
+            ..Default::default()
+        };
+        let mut exec = GpuExecutor::new(
+            gpu,
+            GpuExecutorConfig {
+                viewport: config,
+                ..GpuExecutorConfig::new(cal, cam_w, cam_h, InputFormat::Nv12)
+            },
+        )
+        .expect("gpu backend");
+
+        // Enough iterations to cross the 15-frame measure interval many
+        // times over (~13 remeasures) - a converging EMA should be flat
+        // by the end; a diverging one should be obviously still growing
+        // or pinned at the clamp from way earlier than expected.
+        let mut left_y_history = Vec::new();
+        for i in 0..900 {
+            exec.stitch(&left, &right, 0.0, 0.0).expect("stitch");
+            if i % 60 == 0 || i == 899 {
+                let c = exec.pipeline.color_match_correction();
+                left_y_history.push((i, c.left_offset[0]));
+            }
+        }
+
+        eprintln!("left Y offset over iterations: {left_y_history:?}");
+
+        let last = left_y_history.last().unwrap().1;
+        let second_last = left_y_history[left_y_history.len() - 2].1;
+        assert!(
+            (last - second_last).abs() < 0.0005,
+            "correction should have settled by iteration ~840-900, still moving: \
+             {second_last} -> {last} (diff {})",
+            (last - second_last).abs()
+        );
+        assert!(
+            last.abs() <= 0.06 + 1e-4,
+            "converged value {last} exceeds the configured max_y_offset clamp"
+        );
+    }
+
     #[test]
     #[cfg(feature = "gpu")]
     fn cpu_and_gpu_backends_agree() {

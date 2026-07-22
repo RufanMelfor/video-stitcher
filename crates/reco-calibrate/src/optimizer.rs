@@ -439,10 +439,12 @@ impl Optimizer for NelderMeadOptimizer {
             color_match_band_width: reco_core::calibration::DEFAULT_COLOR_MATCH_BAND_WIDTH,
             color_match_grid_cols: reco_core::calibration::DEFAULT_COLOR_MATCH_GRID_COLS,
             color_match_grid_rows: reco_core::calibration::DEFAULT_COLOR_MATCH_GRID_ROWS,
-            color_match_interval_frames: reco_core::calibration::DEFAULT_COLOR_MATCH_INTERVAL_FRAMES,
+            color_match_interval_frames:
+                reco_core::calibration::DEFAULT_COLOR_MATCH_INTERVAL_FRAMES,
             color_match_ema_alpha: reco_core::calibration::DEFAULT_COLOR_MATCH_EMA_ALPHA,
             color_match_max_y_offset: reco_core::calibration::DEFAULT_COLOR_MATCH_MAX_Y_OFFSET,
-            color_match_max_chroma_offset: reco_core::calibration::DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET,
+            color_match_max_chroma_offset:
+                reco_core::calibration::DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET,
             // Not fitted by this optimizer - see fit_ground_tilt_manual.rs
             // and FRICTION.md points 18-20 for the separate manual-line
             // workflow that fits these.

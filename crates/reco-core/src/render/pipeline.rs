@@ -457,10 +457,21 @@ impl StitchPipeline {
     /// each frame from the stored calibration and scene).
     ///
     /// No GPU pipeline recreation needed - only the uniform data changes.
+    ///
+    /// Also forces a color-match remeasure: any topology/framing change can
+    /// move where the visible seam sits (a rig tilt/roll, a plane rotation,
+    /// or a seam-offset drag), and the color-match correction was measured
+    /// against the *previous* geometry - stale until this call, it can look
+    /// actively wrong (not just slightly off) rather than merely outdated,
+    /// since it was tuned for content that's no longer at the seam. This
+    /// previously only happened on the interval-based automatic remeasure
+    /// (up to `color_match_interval_frames` rendered frames later, or never
+    /// while paused) - see `force_color_match_remeasure`'s own doc.
     pub fn update_calibration(&mut self, calibration: Calibration) {
         let aspect = calibration.lenses[0].width as f32 / calibration.lenses[0].height as f32;
         self.scene = SceneGeometry::new(&calibration.topology, &calibration.framing, aspect);
         self.calibration = calibration;
+        self.force_color_match_remeasure();
         log::debug!("Pipeline calibration updated");
     }
 
@@ -717,7 +728,13 @@ impl StitchPipeline {
     /// changing any `color_match_*` topology field so a live-tuning slider
     /// is reflected immediately instead of waiting up to
     /// `color_match_interval_frames` frames.
-    pub(crate) fn force_color_match_remeasure(&self) {
+    ///
+    /// Public so a consumer GUI can also expose an explicit "remeasure now"
+    /// action - useful while paused (the periodic interval only advances on
+    /// rendered frames, so nothing re-measures on its own without one) or
+    /// after seeking to a frame with different lighting than whatever was
+    /// last measured.
+    pub fn force_color_match_remeasure(&self) {
         self.color_match.lock().unwrap().force_remeasure();
     }
 
