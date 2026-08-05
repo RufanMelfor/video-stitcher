@@ -108,8 +108,12 @@ things stand:
      `D:\VOETBAL_VIDEO\RECO\training\cvat\cvat`, `docker compose up -d`
      from that directory (needed a retry once, first attempt hit a
      transient Docker Hub auth/network error, resumed fine).
-   - Superuser created: username `admin`, password `RecoTrain2026!`
-     (local-only account, user should change this eventually).
+   - Superuser created: username `admin`, password stored outside git
+     (was committed in plaintext here on 2026-08-05, caught and
+     redacted same day - rotate the actual CVAT password, it must be
+     treated as compromised regardless of repo being private. Do not
+     put real credentials in this file going forward - reference
+     "see password manager" instead).
    - Task 3 ("OJC-BGS pilot - person+ball pre-labels") created via
      `cvat-cli` (`pip install cvat-cli`), 300 images + 2491 imported
      annotation shapes, confirmed via the SDK. Reachable at
