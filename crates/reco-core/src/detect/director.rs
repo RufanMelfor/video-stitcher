@@ -29,8 +29,15 @@ pub struct MappedDetection {
     /// Which camera this detection came from.
     pub camera: CameraId,
 
-    /// Detection class index from the model (e.g. 0 = "ball", 1 = "person").
-    /// Map to a human-readable label via the detector's `class_names()`.
+    /// Detection class index from the model. Model-defined, not a fixed
+    /// reco-core convention - always resolve it via the detector's
+    /// `class_names()` rather than assuming a layout. A COCO-trained
+    /// export (the common case, e.g. `yolo26n.onnx`) uses COCO's own
+    /// ordering: 0 = "person", 32 = "sports ball" - verified empirically
+    /// against a real detections.jsonl run 2026-08-05 (class-0 boxes are
+    /// person-shaped, class-32 boxes are ball-shaped/near-square, and
+    /// several other COCO ids show up as noise on football footage:
+    /// baseball bat/snowboard/tennis racket/chair/frisbee/kite/backpack).
     pub class_id: u16,
 
     /// Confidence score in `[0.0, 1.0]`.
