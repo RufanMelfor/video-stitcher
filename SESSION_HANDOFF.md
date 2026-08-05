@@ -1,4 +1,4 @@
-# Session handoff — 2026-07-18
+# Session handoff — 2026-08-05
 
 Continuation note for resuming work on a different machine/session -
 git-tracked so it travels with `git pull`/`push` between the user's two
@@ -6,169 +6,155 @@ PCs. Overwrite wholesale at the end of a session rather than appending
 history - git history is the append-only log, this file is just "where
 things stand right now."
 
-## Current state
+## Immediate blocker (why this session paused)
 
-`main` has a large pile of **pre-existing, uncommitted WIP** that predates
-this session and was not finished or touched beyond what's noted below:
-`crates/reco-calibrate/examples/fit_ground_tilt*.rs`, `fit_photometric.rs`,
-`match_png_frames.rs`, `reco-calibrate/src/optimizer.rs`,
-`reco-core/src/lens/mod.rs`, `reco-core/src/render/{pipeline,renderer,
-scene}.rs`, `reco-core/src/stitch/executor.rs`, `docs/ai-panner-tuning.md`
-(+ untracked `docs/ai-panner-tuning.nl.md`). Judging by `main.slint`'s diff
-this includes independent left/right camera rotation sliders
-(`cal-x-rx`/`cal-z-rz`, "Force extra rotation fit"), Shift-held vertical-only
-drag panning while "Show seam line" is on, and a lens-zoom scroll-direction
-fix. **Not evaluated or verified this session** - whoever picks this back up
-should treat it as someone else's in-progress work, not assume it's done.
+User is restarting the PC to enable virtualization in BIOS/UEFI, needed
+for Docker Desktop (which is needed for CVAT, see below). Diagnosed via
+`systeminfo`: `Hyper-V Requirements: Virtualization Enabled In Firmware:
+No` (CPU supports it - `VM Monitor Mode Extensions: Yes` - just disabled
+in firmware). **Next step on resume**: confirm Docker Desktop starts
+cleanly after the BIOS change, then continue the CVAT setup below.
 
-Two things layered on top of that same dirty tree this session, **committed
-nowhere, debug-build-tested only**:
-- Color-match "Measurement band" slider (`crates/reco-gui/ui/main.slint`):
-  max raised 0.4 → 1.0, reordered above "Max Y offset", renamed to "MEAS Band
-  Width". User confirmed a wider band visibly fixes the left/right color
-  mismatch they reported (right camera looked much cooler/bluer than left
-  across the whole frame - the old 0.4 cap wasn't wide enough to correct it).
-- Nothing else from this session touches the fork's `main` - the Default
-  Calibration feature below was built fresh against `origin/main` in a
-  separate worktree, not layered onto this dirty tree.
+## Upstream PRs opened this session
 
-## PR #427 (`feat/color-matching-multiband`) - blocked, waiting on the owner
+- **PR #464** (`feat/reco-gui-card-redesign`) - groups Calibration/
+  Stitching/Advanced/Lens sliders into labeled `CalGroupBox` cards. Built
+  off `origin/main` (scoped down: Color Mapping and toolbar FOV/Reset/
+  Expert-Mode changes excluded, no upstream base for either - depend on
+  unmerged PR #427/#433). Opened, awaiting owner review. See
+  [[project_gui_card_redesign]].
+- **PR #427** (`feat/color-matching-multiband`) - was on hold pending the
+  owner's answer on how to handle drift from current `main`. **User
+  reports it's now "getest en is goed bevonden" (tested and found good)**
+  - not reflected as a formal GitHub review/merge yet, approval came
+    through some other channel. No longer blocking, no action needed.
+- **PR #435** (`feat/default-calibration-preference`) - user tested,
+  confirmed working, test-plan checkbox updated on GitHub. Awaiting owner
+  review/merge like the rest of the batch.
 
-Investigating "add the band-width tweaks to the existing PR" found PR #427
-is an old, toggle-only snapshot of color-match - none of the tunable sliders
-above exist there, and neither do the later `seam_offset`/
-`blend_flip_direction` measurement-band bug fixes documented in
-`crates/reco-core/FRICTION.md`. The two small tweaks can't be cherry-picked
-onto that branch in isolation since the sliders themselves don't exist yet
-on it.
+## reco-gui visual work (this fork's own `main`, committed+pushed to
+`github/main`, commits `e99c1380`/`ea2b6781`)
 
-Translated the situation to English for the user to relay to the
-`reco-project` owner, asking how to proceed: (a) bring PR #427 fully up to
-date with the current feature then layer the tweaks on top, (b) leave PR
-#427 as-is for now, or (c) discuss process first since **all 12 original
-PRs may have similar drift** (all were snapshotted off `origin/main` at
-whatever point they were prepared, then fork `main` kept moving).
+Card-grouped panels (Calibration/Stitching/Color Mapping/Advanced/Lens),
+toolbar-level FOV badge (click-to-open popover, not hover - see
+[[project_gui_card_redesign]] for *why* hover was abandoned, a real Slint
+gotcha worth remembering) + Reset pill, Expert Mode aligned to the right
+panel's actual boundary. All verified working by the user after several
+iteration rounds (stretch-to-fill-parent gotcha, vertical-centering-in-
+invisible-wrapper gotcha, hover-fights-with-child-controls gotcha - full
+detail in that memory file, worth reading before touching this area
+again).
 
-**Still pending as of 2026-07-18 - do not touch PR #427 until the user
-comes back with an answer.**
+**Not yet done**: app icon. User wants a custom round black/white camera-
+aperture/football icon embedded in both `reco-gui.exe` and `reco-cli.exe`
+(mechanism already scoped - mirror `crates/rig-calib/build.rs`'s
+`winresource` + Slint `icon: @image-url(...)` pattern, reco-gui currently
+has neither). Blocked on getting the actual source image file - a prior
+attempt to locate the user's pasted screenshot via `%TEMP%` heuristics
+found two unrelated (one apparently private) images by mistake; stopped
+that approach and asked for an explicit file path instead. Still not
+provided as of this session's end - ask again, don't resume guessing from
+temp files.
 
-## New feature: Default Calibration preference - DONE, PR #435 open
+**Also flagged, not started**: reco-gui's text renders with an uneven/
+"wobbly" baseline (`renderer-femtovg-wgpu` lacks ClearType-style hinting,
+worse at non-100% Windows display scaling). Fix would be switching to
+Slint's Skia renderer - bigger change, own Cargo feature flag, needs
+checking compatibility with the existing wgpu-28 shared-instance GPU path.
+See [[project_skia_renderer_future_task]].
 
-User asked for a Preferences-menu "Default Calibration" file that reco-gui
-falls back to whenever no calibration is otherwise loaded, plus a
-confirmation popup before saving over that specific file (protects it from
-being silently overwritten by an in-progress session's edits).
+## YOLO26n continued-training effort (new this session, biggest thread)
 
-Built as a 13th branch/PR, **directly off `origin/main`** in a throwaway
-`git worktree` (not layered onto the fork's dirty `main` above, which has
-unrelated WIP mixed into the exact files this touches). Confirmed
-`origin/main` already has all the base infrastructure needed (`GuiSettings`,
-Preferences dialog, `save_calibration`/`try_init`) with no fork-only
-dependency, so this was a clean from-scratch implementation rather than a
-port.
+User wants to keep training `yolo26n.onnx` (the ball/player model
+reco-detect runs). Full detail in [[project_yolo26n_training_pipeline]] -
+summary:
 
-- `GuiSettings::default_calibration_path: Option<PathBuf>` +
-  `default_calibration()` accessor (only returns the path if it still
-  exists on disk).
-- Preferences dialog: new "Default calibration" row (LineEdit + Browse…).
-- Fallback wired into `try_init_and_update` - the one point every
-  left/right/calibration pick path converges on before init - so an
-  explicit pick always wins, the default only applies when nothing else is
-  loaded.
-- `AppState::is_default_calibration()` + a new `overwrite-default-cal-
-  warning-open` modal: saving over the configured default now asks for
-  confirmation first instead of silently overwriting it.
+1. **Researched YOLO26**: it's an official Ultralytics release (Jan
+   2026), `yolo26n.pt` downloads free/public - no need to chase down the
+   external team that originally trained the `.onnx` the user has.
+2. **Found and fixed a real doc bug**: `MappedDetection::class_id`'s doc
+   comment in `crates/reco-core/src/detect/director.rs` claimed "0 =
+   ball, 1 = person" - wrong for the actual deployed model, which emits
+   standard COCO indices (0 = person, 32 = sports ball). Verified
+   empirically (box aspect ratios, confidence) against a real
+   `detections.jsonl` run. Comment rewritten to point at
+   `class_names()`-based resolution instead of a fixed number. **Fix is
+   committed** (see below).
+3. **Built an auto-labeling pipeline** (the "use the current model to
+   pre-label, human only fixes mistakes" approach the user asked for):
+   - `reco.exe stitch <L> <R> -c <cal> -o <throwaway> --model
+     yolo26n.onnx --events detections.jsonl --max-frames N --lookahead 0`
+     dumps raw per-frame detections to JSONL. Detection-bound at ~2.2
+     fps on this machine (RTX 3060 Ti, CPU/DirectML ORT path) - budget
+     real wall-clock time and run in the background, a first attempt
+     died to a 400s foreground tool timeout.
+   - New script `scripts/export_yolo_labels.py` (**committed**, not
+     fork-only) converts JSONL -> YOLO-format dataset: samples every Nth
+     frame, extracts the matching raw camera frame via ffmpeg, filters
+     to person(COCO 0)/ball(COCO 32) only (drops COCO noise classes -
+     tennis racket, frisbee, kite, etc. - that a general model
+     hallucinates on football footage), remaps to a clean local 2-class
+     scheme (`0=person, 1=ball`), writes YOLO `.txt` labels. Confidence
+     threshold deliberately low (0.20) since ball-class confidence
+     averages only ~0.29 - a stricter default would gut ball recall.
+   - Visually sanity-checked by drawing boxes back onto sample images
+     (PIL - no `cv2`/opencv in this Python env). Person boxes align
+     well; ball boxes are sometimes a few pixels off-center (expected,
+     real thing for the human reviewer to fix).
+4. **Pilot dataset produced**: `D:\VOETBAL_VIDEO\RECO\training\
+   pilot_ojc_bgs\dataset\` - "03 OJC - Berghem Sport" match (04-07-2026),
+   segment 1, first 4500 frames (~2.5 min), sampled every 30th frame ->
+   150 frames Γ— 2 cameras = 300 images + YOLO labels + `classes.txt` +
+   its own `README.md`. Left: 933 boxes/150 frames. Right: 1558
+   boxes/150 frames.
+5. **Read a forum thread the user linked** (forum.reco.cam,
+   "training-new-yolo-models-and-integrating-them") and verified its
+   technical claims against actual source - **critical for our own
+   eventual re-export**: reco-autocam resolves ball/person class ids **by
+   name** (`resolve_class_id()`/`resolve_or()` in `crates/reco-autocam/
+   src/lib.rs`, case-insensitive exact match against `"person"`/`"ball"`/
+   `"sports ball"`), falling back to hardcoded COCO ids 0/32 only if no
+   name matches. **When we fine-tune and re-export, the model's class
+   names must literally be `"person"`/`"ball"`** or the runtime lookup
+   silently falls back to COCO ids that won't exist in a reduced-class
+   model. Also confirmed: model must have end-to-end NMS baked in
+   (`nms=True` at export), output shape `[1, N, 6]`.
+6. **Labeling tool chosen**: CVAT, self-hosted via Docker - user
+   explicitly picked local/self-hosted over Roboflow specifically because
+   the footage includes a youth team ("Berghem Sport JO11-1" - onder-11,
+   likely minors in frame). Flagged this privacy angle proactively before
+   asking, user agreed it mattered. **This is why Docker Desktop is being
+   set up now** - currently blocked on the BIOS virtualization setting
+   (see top of this file).
 
-Verified: `cargo build`/`fmt --check` clean, `cargo test -p reco-gui
-settings::` 5/5 (3 new tests), clippy's 4 errors are the same pre-existing
-`reco-core` dead-code/unsafe-ptr issues already tracked by PR #423 (not
-caused by this change). **User manually tested the running feature and
-confirmed it works** - the PR's test-plan checkbox for manual verification
-was updated to checked (user approved that edit first).
+**Not done yet**: CVAT itself isn't installed/running (blocked on
+Docker). No labeling-tool review of the pilot batch. No `ultralytics`
+Python environment set up. No actual fine-tuning run. Only one pilot
+match/segment covered - user has 20+ full matches in `D:\VOETBAL_VIDEO\`
+for eventual training-set diversity, but scaling up should wait until the
+pilot batch's review workflow is validated end-to-end first.
 
-PR: [reco-project/video-stitcher#435](https://github.com/reco-project/video-stitcher/pull/435),
-branch `feat/default-calibration-preference`, pushed via `fork`
-(`RufanMelfor/video-stitcher`). Awaiting owner review/merge like the rest
-of the batch.
+## Uncommitted at end of session (needs a commit + push next time)
 
-## Upstream PRs: 13 opened, none merged yet
+- `crates/reco-core/src/detect/director.rs` - the class_id doc fix
+  (#2 above). Small, safe, verified via `cargo check -p reco-core`.
+- `scripts/export_yolo_labels.py` (untracked, new file) - the JSONL ->
+  YOLO converter (#3 above). Ran successfully twice on real data.
 
-- #422 `feat/windows-portability-fixes`
-- #423 `fix/d3d11-stage-frame-unsafe`
-- #424 `fix/concat-multisegment-seek`
-- #425 `feat/inapp-roi-editor`
-- #426 `feat/seam-positioning`
-- #427 `feat/color-matching-multiband` - **behind current `main`, fix pending owner's answer (see above)**
-- #428 `feat/export-metadata-comment`
-- #429 `feat/ground-top-tilt`
-- #430 `feat/export-roi-confirm`
-- #431 `feat/lookahead-8bit-downconvert`
-- #432 `feat/audio-sync-waveform`
-- #433 `feat/reco-gui-flat-restyle`
-- #435 `feat/default-calibration-preference` (added 2026-07-18, see above)
+Both are real, verified, useful changes - just hadn't been committed yet
+when the session paused for the Docker/BIOS issue. Commit these before
+starting anything else next session.
 
-CLA-bot email issue was already fixed in an earlier session (commits
-authored with the GitHub-verified `r.melfor@outlook.com`, not
-`info@thegrid-racing.com`) - `git config user.email` is already correct on
-this machine, confirmed again while preparing PR #435.
+## Machine-specific reminders (still valid)
 
-## Not yet done / next-session starting points
-
-1. **PR #427**: waiting on the owner's answer (relayed by the user) on how
-   to handle the drift described above. Don't start on it until that comes
-   back.
-2. **The uncommitted WIP on `main`** described in "Current state" above
-   (camera-rotation sliders, shift-drag panning, lens-zoom fix, plus the
-   color-match slider tweaks) - none of it is committed, tested with
-   `fmt`/`clippy`/`cargo test`, or turned into a PR. Needs picking back up
-   deliberately, not assumed finished.
-3. None of the 13 PRs have been reviewed/merged upstream yet - check
-   review status/comments on `reco-project/video-stitcher` before starting
-   new upstream work.
-4. Live AKAZE detection preview PR was never started.
-5. Two research-only findings from 2026-07-16, still not built:
-   - **Direct YouTube upload after export**: needs YouTube Data API v3
-     OAuth + resumable chunked upload; real blocker is the default API
-     quota (~6 uploads/day shared across every user of the app) unless
-     users register their own Google Cloud project or the project goes
-     through Google's quota-increase review. No official Google Rust SDK;
-     hand-rolling with `reqwest`+`oauth2` fits the project's style better
-     than the community `google-youtube3` crate.
-   - **Cutting time-ranges out of a source video before stitching** (not
-     just the existing single start/end trim): output PTS is already a
-     free-running counter decoupled from input timestamps, so the hard
-     part (output continuity across a skipped gap) is solved. Missing:
-     a real seek in the streaming decode path (current `skip_frames()` is
-     brute-force decode-and-discard), an autocam trajectory-smoothing
-     reset hook at cut points, a lookahead-buffer flush at each cut, audio
-     skipping the same ranges, and a new "multiple time-ranges in one
-     file" data structure/UI (`SegmentList`'s reorder UI is a plausible
-     starting point to adapt). Feasible, no fundamental blocker.
-
-## Stale/locked reco-gui.exe gotcha (recurring - stay vigilant)
-
-Checking out multiple branches in sequence for verification builds
-(`cargo build`) repeatedly overwrites `target/debug/reco-gui.exe` with
-whichever branch was built last. Always confirm `git branch
---show-current` = `main` and rebuild (`cargo build -p reco-gui`)
-immediately before telling the user to test.
-
-If the user has a just-built `reco-gui.exe` open to test, a verification
-build on a *different* branch/worktree will fail with `Toegang geweigerd`
-(access denied) trying to relink that same exe if it somehow shares a
-target dir. Building PR branches in a separate `git worktree` (own target
-dir) - as done for PR #435 this session - avoids this entirely and is the
-preferred approach going forward for any PR that isn't meant to touch the
-user's day-to-day debug build.
-
-## Build environment reminder (this machine, TGR_PC)
-
-Any fresh `target/` (e.g. a new worktree) needs, per-shell:
-
-```bash
-export FFMPEG_DIR="C:/Users/Rufan/AppData/Local/Microsoft/WinGet/Packages/BtbN.FFmpeg.GPL.Shared.7.1_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-n7.1.4-7-gadcf20da26-win64-gpl-shared-7.1"
-export PATH="/c/Program Files/LLVM/bin:$PATH"
-```
-
-Without it, `ffmpeg-sys-next`'s build script fails looking for vcpkg/
-pkg-config. See [[env_build_requirements]] for full detail.
+- FFMPEG_DIR + LLVM PATH needed per-shell for any build - see
+  [[env_build_requirements]].
+- This machine can corrupt loose git objects on large commits - run
+  `git fsck --full` before pushing (see [[feedback_git_object_corruption]]).
+- Rebuild + relaunch reco-gui.exe fully after any `.slint`/`.rs` change
+  before re-testing - a stale running process will silently show old
+  behavior (bit this session more than once during the toolbar work).
+- Don't drive reco-gui's UI with synthetic mouse/keyboard input - reliably
+  unreliable in this app, has corrupted real calibration data before.
+  Screenshot capture (no input) is fine and was used safely this session
+  to verify layout without the user's help.
