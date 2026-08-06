@@ -477,26 +477,30 @@ pub struct FieldRoi {
     pub right: Vec<[f64; 2]>,
 }
 
-/// Goal-mouth geometry for goal-scored detection, as polygons in panorama
-/// yaw/pitch space (radians) - deliberately NOT per-camera pixel space
-/// like `FieldRoi`, so a calibrated goal stays valid as the virtual camera
-/// pans/zooms across the stitched panorama.
+/// Goal-mouth geometry for goal-scored detection: one polygon per camera,
+/// same raw-distorted-frame-normalized `[0,1]` space and per-camera
+/// left/right convention as `FieldRoi` - a goal is edited in the same
+/// lens-preview window as the field ROI, so it needs the same coordinate
+/// space that window's other overlay already uses.
 ///
 /// A polygon rather than a 2-point line: a line only bounds width, so a
-/// ball lobbed over the crossbar at the same yaw as a valid goal would be
-/// indistinguishable from one that went in. 4+ points let the polygon also
-/// bound height (pitch), covering the actual goal mouth opening.
+/// ball lobbed over the crossbar at the same horizontal position as a
+/// valid goal would be indistinguishable from one that went in. 4+ points
+/// let the polygon also bound height, covering the actual goal-mouth
+/// opening as it appears in that camera's frame.
 ///
-/// A detection concern (consumed by `reco-autocam`), kept here
-/// transitionally like `FieldRoi`; it will move out of the calibration
-/// when detection config is extracted.
+/// A detection concern (consumed by `reco-autocam`, filtering raw
+/// per-camera detections the same way `RoiFilteredDetector` already does
+/// for `FieldRoi`), kept here transitionally like `FieldRoi`; it will move
+/// out of the calibration when detection config is extracted.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GoalGeometry {
-    /// Goal-mouth polygon vertices for the left-side goal (as seen looking
-    /// at the panorama), `[yaw, pitch]` radians pairs.
+    /// Goal-mouth polygon vertices visible in the left camera, normalized
+    /// `[0,1]`.
     #[serde(default)]
     pub left: Vec<[f64; 2]>,
-    /// Goal-mouth polygon vertices for the right-side goal, same convention.
+    /// Goal-mouth polygon vertices visible in the right camera, normalized
+    /// `[0,1]`.
     #[serde(default)]
     pub right: Vec<[f64; 2]>,
 }
@@ -1041,14 +1045,14 @@ mod tests {
         let mut cal: Calibration = serde_json::from_str(sample_json()).unwrap();
         assert!(cal.goal_geometry.is_none());
         cal.goal_geometry = Some(GoalGeometry {
-            left: vec![[-1.2, -0.05], [-1.2, 0.35], [-1.35, 0.35], [-1.35, -0.05]],
-            right: vec![[1.2, -0.05], [1.2, 0.35], [1.35, 0.35], [1.35, -0.05]],
+            left: vec![[0.05, 0.30], [0.05, 0.75], [0.22, 0.75], [0.22, 0.30]],
+            right: vec![[0.78, 0.32], [0.78, 0.70], [0.95, 0.70], [0.95, 0.32]],
         });
         let json = cal.to_json_pretty();
         let back: Calibration = serde_json::from_str(&json).unwrap();
         let goal = back.goal_geometry.as_ref().unwrap();
         assert_eq!(goal.left.len(), 4);
-        assert!((goal.right[2][1] - 0.35).abs() < 1e-9);
+        assert!((goal.right[2][1] - 0.70).abs() < 1e-9);
     }
 
     fn valid_cal() -> Calibration {
