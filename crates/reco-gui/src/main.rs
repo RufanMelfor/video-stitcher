@@ -345,10 +345,10 @@ struct AppState {
     /// projection instead of the stitched panorama.
     lens_preview_active: bool,
     /// Which camera to show in lens preview mode ("left" or "right").
+    /// Shared with the goal-geometry editor as its "which goal" selector
+    /// too (one Left/Right switch for both, per the merged DETECTION
+    /// ZONES card).
     lens_preview_side: String,
-    /// Which goal is being edited/displayed in the goal-geometry editor
-    /// ("left" or "right") - mirrors `lens_preview_side`'s role for ROI.
-    goal_edit_side: String,
     /// Lens correction amount for the preview (0.0 = raw, 1.0 = full).
     lens_correction_amount: f32,
     toasts: ToastManager,
@@ -585,7 +585,6 @@ impl AppState {
             use_constrained_look: true,
             lens_preview_active: false,
             lens_preview_side: "left".into(),
-            goal_edit_side: "left".into(),
             lens_correction_amount: 1.0,
             toasts: ToastManager::default(),
             telemetry: None,
@@ -1830,7 +1829,7 @@ fn panorama_letterbox_rect(box_w: f32, box_h: f32, output_aspect: f32) -> (f32, 
     (content_w, content_h, content_x, content_y)
 }
 
-/// Push the currently-selected goal's polygon (`state.goal_edit_side`) to
+/// Push the currently-selected goal's polygon (`state.lens_preview_side`) to
 /// the Slint overlay, converting each stored panorama `(yaw, pitch)`
 /// vertex to a screen fraction under the current view via
 /// `yaw_pitch_to_screen_fraction` - the exact inverse of how
@@ -1844,7 +1843,7 @@ fn sync_goal_points(state: &AppState, app: &RecoApp) {
         && let Some(goal) = &cal.goal_geometry
         && let Some(bridge) = state.bridge.as_ref()
     {
-        let is_right = state.goal_edit_side == "right";
+        let is_right = state.lens_preview_side == "right";
         let pts = if is_right { &goal.right } else { &goal.left };
         let pipeline = bridge.engine().pipeline();
         let output_aspect = pipeline.viewport().aspect_ratio();
@@ -3820,7 +3819,7 @@ fn main() -> anyhow::Result<()> {
             return -1;
         }
         let s = state_ref.borrow();
-        let is_right = s.goal_edit_side == "right";
+        let is_right = s.lens_preview_side == "right";
         let Some(cal) = s.calibration.as_ref() else {
             return -1;
         };
@@ -3861,7 +3860,7 @@ fn main() -> anyhow::Result<()> {
             return;
         }
         let mut s = state_ref.borrow_mut();
-        let is_right = s.goal_edit_side == "right";
+        let is_right = s.lens_preview_side == "right";
         let Some(bridge) = s.bridge.as_ref() else {
             return;
         };
@@ -3906,7 +3905,7 @@ fn main() -> anyhow::Result<()> {
             return;
         }
         let mut s = state_ref.borrow_mut();
-        let is_right = s.goal_edit_side == "right";
+        let is_right = s.lens_preview_side == "right";
         let Some(bridge) = s.bridge.as_ref() else {
             return;
         };
@@ -3955,7 +3954,7 @@ fn main() -> anyhow::Result<()> {
             return;
         }
         let mut s = state_ref.borrow_mut();
-        let is_right = s.goal_edit_side == "right";
+        let is_right = s.lens_preview_side == "right";
         // Extracted before touching `s.calibration` below (rather than
         // reached for from inside the `and_then` closure) so the two
         // stay disjoint shared borrows of `s` instead of one nested
@@ -4012,17 +4011,6 @@ fn main() -> anyhow::Result<()> {
             app.set_has_goal_geometry(has);
             sync_goal_points(&s, &app);
         }
-    });
-
-    let app_weak = app.as_weak();
-    let state_ref = Rc::clone(&state);
-    app.on_changed_goal_edit_side(move || {
-        let Some(app) = app_weak.upgrade() else {
-            return;
-        };
-        let mut s = state_ref.borrow_mut();
-        s.goal_edit_side = app.get_goal_edit_side().to_string();
-        sync_goal_points(&s, &app);
     });
 
     let state_ref = Rc::clone(&state);
