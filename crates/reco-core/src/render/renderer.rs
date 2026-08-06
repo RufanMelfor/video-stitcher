@@ -732,6 +732,72 @@ pub fn seam_line_screen_points(
     Some((top, bottom))
 }
 
+/// Inverse of the screen-projection math `seam_line_screen_points` uses:
+/// given a click position on the rendered panorama (screen fraction,
+/// `(0,0)` = top-left, same convention as [`project_to_screen_fraction`])
+/// and the current view state, returns the absolute `(yaw, pitch)` of
+/// whatever the click landed on - i.e. what `yaw`/`pitch` would need to be
+/// set to for that point to sit at the center of the view. Used by a GUI
+/// editor to convert "user clicked here on the live panorama preview" into
+/// a stable panorama-space coordinate (see [`crate::calibration`]'s goal
+/// geometry, which is stored in this same yaw/pitch space specifically so
+/// it stays meaningful regardless of where autocam currently points the
+/// virtual camera).
+///
+/// Same caveat as [`crate::projection::direction_to_yaw_pitch`] itself:
+/// does not account for non-zero `rig_tilt`/`rig_roll` (Model 4 does not
+/// take them) - accurate for a level, unrolled rig only. Verified via a
+/// self-consistency round-trip test with tilt=roll=0, mirroring
+/// `view_matrix_self_consistent_with_direction_to_yaw_pitch`.
+pub fn screen_fraction_to_yaw_pitch(
+    calibration: &Calibration,
+    viewport: &ViewportConfig,
+    yaw: f32,
+    pitch: f32,
+    output_aspect: f32,
+    screen_x: f32,
+    screen_y: f32,
+) -> crate::geometry::ViewportPosition {
+    let plane_aspect = calibration.lenses[0].width as f32 / calibration.lenses[0].height as f32;
+    let scene = SceneGeometry::new(&calibration.topology, &calibration.framing, plane_aspect);
+
+    let ndc_x = screen_x * 2.0 - 1.0;
+    let ndc_y = 1.0 - screen_y * 2.0;
+
+    // Inverse of Perspective3::new(aspect, fovy, near, far)'s x/y mapping:
+    // the camera-space ray direction at z = -1 that this NDC point sits on
+    // (right-handed, camera looks down -Z - same convention `view_matrix`
+    // and `Perspective3` both use).
+    let tan_half_fov = (viewport.fov_degrees.to_radians() * 0.5).tan();
+    let cam_dir = nalgebra::Vector3::new(
+        ndc_x * tan_half_fov * output_aspect,
+        ndc_y * tan_half_fov,
+        -1.0,
+    );
+
+    let view = view_matrix(
+        &scene.camera_position,
+        yaw,
+        pitch,
+        calibration.framing.tilt as f32,
+        calibration.framing.roll as f32,
+    );
+    // `view` maps world-space directions into camera space; its rotation
+    // part (upper-left 3x3) is orthonormal, so the transpose is its
+    // inverse - apply that to bring the camera-space ray back to world
+    // space instead of a general (more expensive, and undefined if
+    // singular) matrix inverse.
+    let rot = view.fixed_view::<3, 3>(0, 0).into_owned();
+    // `direction_to_yaw_pitch` computes pitch as `dir.y.asin()`, which is
+    // only the correct elevation angle for a unit vector - `cam_dir` isn't
+    // one (its length depends on how far the NDC point sits from center),
+    // so it must be normalized here, same as the other call site
+    // (`projection/mod.rs`'s world-point-to-yaw-pitch path).
+    let world_dir = (rot.transpose() * cam_dir).normalize();
+
+    crate::projection::direction_to_yaw_pitch(&world_dir, &scene.camera_position)
+}
+
 /// Project one local-space point on a plane (z=0) through an MVP matrix to
 /// a normalized `0.0..=1.0` screen fraction, `(0,0)` = top-left. `None` if
 /// the point is behind the camera (`w <= 0`), where the perspective divide
@@ -2626,6 +2692,92 @@ mod tests {
             "panning yaw should measurably move the projected seam column: \
              straight={straight} panned={panned}"
         );
+    }
+
+    #[test]
+    fn screen_fraction_to_yaw_pitch_center_screen_is_current_view() {
+        // Dead center of the screen, by definition, is whatever the camera
+        // currently looks at - regardless of what that yaw/pitch is. This
+        // alone wouldn't catch a wrong FOV/aspect scale factor (ndc=0
+        // cancels it out), so it's a sanity check, not the real proof -
+        // see the off-center round-trip test below for that.
+        let cal = seam_test_calibration();
+        let viewport = ViewportConfig::default();
+        for &(yaw, pitch) in &[(0.0_f32, 0.0_f32), (0.3, -0.1), (-0.5, 0.2)] {
+            let pos =
+                screen_fraction_to_yaw_pitch(&cal, &viewport, yaw, pitch, 16.0 / 9.0, 0.5, 0.5);
+            assert!(
+                (pos.yaw - yaw).abs() < 1e-4 && (pos.pitch - pitch).abs() < 1e-4,
+                "center screen should recover the current view exactly: \
+                 expected ({yaw}, {pitch}), got ({}, {})",
+                pos.yaw,
+                pos.pitch
+            );
+        }
+    }
+
+    #[test]
+    fn screen_fraction_to_yaw_pitch_round_trips_off_center_points() {
+        // Real proof the FOV/aspect math is right, not just the trivial
+        // center case: place a point at a *different* (yaw2, pitch2),
+        // forward-project where it lands on screen while the camera looks
+        // at (yaw, pitch), then feed that screen position back through
+        // `screen_fraction_to_yaw_pitch` and confirm it recovers
+        // (yaw2, pitch2) - the same round-trip discipline as
+        // `view_matrix_self_consistent_with_direction_to_yaw_pitch`.
+        //
+        // tilt/roll stay zero, same documented limitation as
+        // `direction_to_yaw_pitch` itself (Model 4 doesn't take them).
+        let cal = seam_test_calibration();
+        let viewport = ViewportConfig::default();
+        let aspect = 16.0_f32 / 9.0;
+        let camera_position =
+            SceneGeometry::new(&cal.topology, &cal.framing, aspect).camera_position;
+
+        let cases = [
+            (0.0_f32, 0.0_f32, 0.1_f32, 0.05_f32),
+            (0.0, 0.0, -0.2, 0.15),
+            (0.3, -0.1, 0.35, -0.05),
+            (-0.4, 0.2, -0.3, 0.1),
+        ];
+        for &(yaw, pitch, yaw2, pitch2) in &cases {
+            let dir2 = crate::projection::yaw_pitch_to_direction(yaw2, pitch2, &camera_position);
+            let target = nalgebra::Vector4::new(
+                camera_position[0] + dir2.x,
+                camera_position[1] + dir2.y,
+                camera_position[2] + dir2.z,
+                1.0,
+            );
+
+            let projection = opengl_to_wgpu_matrix()
+                * Perspective3::new(
+                    aspect,
+                    viewport.fov_degrees.to_radians(),
+                    NEAR_PLANE,
+                    FAR_PLANE,
+                )
+                .to_homogeneous();
+            let view = view_matrix(&camera_position, yaw, pitch, 0.0, 0.0);
+            let clip = projection * view * target;
+            assert!(
+                clip.w > 1e-4,
+                "target must be in front of the camera for this test case"
+            );
+            let screen_x = (clip.x / clip.w + 1.0) * 0.5;
+            let screen_y = (1.0 - clip.y / clip.w) * 0.5;
+
+            let pos = screen_fraction_to_yaw_pitch(
+                &cal, &viewport, yaw, pitch, aspect, screen_x, screen_y,
+            );
+            assert!(
+                (pos.yaw - yaw2).abs() < 1e-3 && (pos.pitch - pitch2).abs() < 1e-3,
+                "case (view_yaw={yaw}, view_pitch={pitch}, target_yaw={yaw2}, target_pitch={pitch2}): \
+                 expected to recover ({yaw2}, {pitch2}) from screen ({screen_x}, {screen_y}), \
+                 got ({}, {})",
+                pos.yaw,
+                pos.pitch
+            );
+        }
     }
 
     #[test]
