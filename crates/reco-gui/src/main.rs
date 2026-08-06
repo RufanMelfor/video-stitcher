@@ -1814,9 +1814,9 @@ fn roi_hit_test(pts: &[[f64; 2]], lx: f32, ly: f32, cw: f32, ch: f32) -> Option<
 /// Reconstruct Slint's `image-fit: contain` letterbox rect for the
 /// panorama preview (outside lens-preview mode, where - unlike lens
 /// preview - the displayed `Image` is sized to the box directly, so
-/// there's no `preview-box.content-*`-equivalent property to read; see
-/// `main.slint`'s `pano-content-*` properties, which mirror this same
-/// reconstruction for the goal-geometry overlay's drawing side).
+/// there's no `preview-box.content-*`-equivalent property to read).
+/// Used by the seam-line hit test; the goal-geometry editor does not need
+/// this since it lives in the lens-preview window, not the panorama one.
 fn panorama_letterbox_rect(box_w: f32, box_h: f32, output_aspect: f32) -> (f32, f32, f32, f32) {
     let box_aspect = box_w / box_h;
     let (content_w, content_h) = if box_aspect > output_aspect {
@@ -1829,54 +1829,29 @@ fn panorama_letterbox_rect(box_w: f32, box_h: f32, output_aspect: f32) -> (f32, 
     (content_w, content_h, content_x, content_y)
 }
 
-/// Push the currently-selected goal's polygon (`state.lens_preview_side`) to
-/// the Slint overlay, converting each stored panorama `(yaw, pitch)`
-/// vertex to a screen fraction under the current view via
-/// `yaw_pitch_to_screen_fraction` - the exact inverse of how
-/// `on_goal_pointer_add`/`on_goal_pointer_drag` convert a click back to
-/// `(yaw, pitch)` for storage. A vertex currently behind the camera (`None`)
-/// is dropped rather than drawn somewhere wrong; this only matters while
-/// panned far enough from the goal that seeing a partial outline is
-/// already the visually correct behavior.
+/// Push the currently-selected goal's polygon (`state.lens_preview_side`,
+/// shared with the ROI editor) to the Slint overlay - same raw-distorted-
+/// to-rectified conversion as `sync_roi_points`, just reading
+/// `cal.goal_geometry` instead of `cal.field_roi`.
 fn sync_goal_points(state: &AppState, app: &RecoApp) {
     let (xs, ys) = if let Some(cal) = &state.calibration
         && let Some(goal) = &cal.goal_geometry
-        && let Some(bridge) = state.bridge.as_ref()
     {
         let is_right = state.lens_preview_side == "right";
-        let pts = if is_right { &goal.right } else { &goal.left };
-        let pipeline = bridge.engine().pipeline();
-        let output_aspect = pipeline.viewport().aspect_ratio();
-        let pose = state.pose.current_pose();
-        let display: Vec<(f32, f32)> = pts
+        let side = if is_right { &goal.right } else { &goal.left };
+        let lens = &cal.lenses[if is_right { 1 } else { 0 }];
+        let display: Vec<[f64; 2]> = side
             .iter()
-            .filter_map(|p| {
-                reco_core::render::renderer::yaw_pitch_to_screen_fraction(
-                    pipeline.calibration(),
-                    pipeline.viewport(),
-                    pose.yaw,
-                    pose.pitch,
-                    output_aspect,
-                    p[0] as f32,
-                    p[1] as f32,
-                )
-            })
+            .map(|p| raw_norm_to_rectified_norm(p[0], p[1], lens))
             .collect();
-        (
-            display.iter().map(|p| p.0).collect(),
-            display.iter().map(|p| p.1).collect(),
-        )
+        let xs: Vec<f32> = display.iter().map(|p| p[0] as f32).collect();
+        let ys: Vec<f32> = display.iter().map(|p| p[1] as f32).collect();
+        (xs, ys)
     } else {
-        (Vec::new(), Vec::new())
+        (vec![], vec![])
     };
-    app.set_output_aspect(
-        state
-            .bridge
-            .as_ref()
-            .map(|b| b.engine().pipeline().viewport().aspect_ratio())
-            .unwrap_or(app.get_output_aspect()),
-    );
-    app.set_goal_path_commands(roi_path_commands(&xs, &ys, app.get_output_aspect()).into());
+    let aspect = app.get_lens_frame_aspect();
+    app.set_goal_path_commands(roi_path_commands(&xs, &ys, aspect).into());
     app.set_goal_points_x(slint::ModelRc::new(slint::VecModel::from(xs)));
     app.set_goal_points_y(slint::ModelRc::new(slint::VecModel::from(ys)));
 }
@@ -3805,14 +3780,12 @@ fn main() -> anyhow::Result<()> {
         dist <= SEAM_LINE_HIT_RADIUS_PX
     });
 
-    // In-app goal-geometry point editor, same interaction model as the
-    // field-ROI editor (`on_roi_pointer_*` above) but over the panorama
-    // preview: `(lx, ly, cw, ch)` are pixels within the *panorama*
-    // letterbox rect (`panorama_letterbox_rect`, not the lens-preview
-    // `content-w`/`content-h` the ROI callbacks use), and the stored
-    // point is `(yaw, pitch)` via `screen_fraction_to_yaw_pitch`/
-    // `yaw_pitch_to_screen_fraction` instead of a raw-pixel-normalized
-    // lens fraction - see `GoalGeometry`'s doc for why.
+    // In-app goal-geometry point editor. Same interaction model AND same
+    // raw-distorted-frame-normalized coordinate space as the field-ROI
+    // editor (`on_roi_pointer_*` above) - the two now share one lens-
+    // preview editing session (`zone-edit-mode`/`zone-edit-type` in
+    // main.slint), just targeting `cal.goal_geometry` instead of
+    // `cal.field_roi`.
     let state_ref = Rc::clone(&state);
     app.on_goal_pointer_hit_test(move |lx, ly, cw, ch| {
         if cw <= 0.0 || ch <= 0.0 {
@@ -3826,27 +3799,11 @@ fn main() -> anyhow::Result<()> {
         let Some(goal) = cal.goal_geometry.as_ref() else {
             return -1;
         };
-        let Some(bridge) = s.bridge.as_ref() else {
-            return -1;
-        };
         let pts = if is_right { &goal.right } else { &goal.left };
-        let pipeline = bridge.engine().pipeline();
-        let output_aspect = pipeline.viewport().aspect_ratio();
-        let pose = s.pose.current_pose();
+        let lens = &cal.lenses[if is_right { 1 } else { 0 }];
         let display: Vec<[f64; 2]> = pts
             .iter()
-            .filter_map(|p| {
-                reco_core::render::renderer::yaw_pitch_to_screen_fraction(
-                    pipeline.calibration(),
-                    pipeline.viewport(),
-                    pose.yaw,
-                    pose.pitch,
-                    output_aspect,
-                    p[0] as f32,
-                    p[1] as f32,
-                )
-                .map(|(x, y)| [x as f64, y as f64])
-            })
+            .map(|p| raw_norm_to_rectified_norm(p[0], p[1], lens))
             .collect();
         roi_hit_test(&display, lx, ly, cw, ch)
             .map(|i| i as i32)
@@ -3861,23 +3818,13 @@ fn main() -> anyhow::Result<()> {
         }
         let mut s = state_ref.borrow_mut();
         let is_right = s.lens_preview_side == "right";
-        let Some(bridge) = s.bridge.as_ref() else {
-            return;
-        };
-        let pipeline = bridge.engine().pipeline();
-        let output_aspect = pipeline.viewport().aspect_ratio();
-        let pose = s.pose.current_pose();
-        let target = reco_core::render::renderer::screen_fraction_to_yaw_pitch(
-            pipeline.calibration(),
-            pipeline.viewport(),
-            pose.yaw,
-            pose.pitch,
-            output_aspect,
-            (lx / cw).clamp(0.0, 1.0),
-            (ly / ch).clamp(0.0, 1.0),
-        );
-        let norm = [target.yaw as f64, target.pitch as f64];
+        let rectified = [
+            (lx / cw).clamp(0.0, 1.0) as f64,
+            (ly / ch).clamp(0.0, 1.0) as f64,
+        ];
         if let Some(cal) = s.calibration.as_mut() {
+            let lens = cal.lenses[if is_right { 1 } else { 0 }].clone();
+            let norm = rectified_norm_to_raw_norm(rectified[0], rectified[1], &lens);
             let goal = cal.goal_geometry.get_or_insert_with(Default::default);
             let pts = if is_right {
                 &mut goal.right
@@ -3906,32 +3853,22 @@ fn main() -> anyhow::Result<()> {
         }
         let mut s = state_ref.borrow_mut();
         let is_right = s.lens_preview_side == "right";
-        let Some(bridge) = s.bridge.as_ref() else {
-            return;
-        };
-        let pipeline = bridge.engine().pipeline();
-        let output_aspect = pipeline.viewport().aspect_ratio();
-        let pose = s.pose.current_pose();
-        let target = reco_core::render::renderer::screen_fraction_to_yaw_pitch(
-            pipeline.calibration(),
-            pipeline.viewport(),
-            pose.yaw,
-            pose.pitch,
-            output_aspect,
-            (lx / cw).clamp(0.0, 1.0),
-            (ly / ch).clamp(0.0, 1.0),
-        );
-        let norm = [target.yaw as f64, target.pitch as f64];
-        if let Some(cal) = s.calibration.as_mut()
-            && let Some(goal) = cal.goal_geometry.as_mut()
-        {
-            let pts = if is_right {
-                &mut goal.right
-            } else {
-                &mut goal.left
-            };
-            if let Some(p) = pts.get_mut(index as usize) {
-                *p = norm;
+        let rectified = [
+            (lx / cw).clamp(0.0, 1.0) as f64,
+            (ly / ch).clamp(0.0, 1.0) as f64,
+        ];
+        if let Some(cal) = s.calibration.as_mut() {
+            let lens = cal.lenses[if is_right { 1 } else { 0 }].clone();
+            let norm = rectified_norm_to_raw_norm(rectified[0], rectified[1], &lens);
+            if let Some(goal) = cal.goal_geometry.as_mut() {
+                let pts = if is_right {
+                    &mut goal.right
+                } else {
+                    &mut goal.left
+                };
+                if let Some(p) = pts.get_mut(index as usize) {
+                    *p = norm;
+                }
             }
         }
         if let Some(app) = app_weak.upgrade() {
@@ -3955,33 +3892,13 @@ fn main() -> anyhow::Result<()> {
         }
         let mut s = state_ref.borrow_mut();
         let is_right = s.lens_preview_side == "right";
-        // Extracted before touching `s.calibration` below (rather than
-        // reached for from inside the `and_then` closure) so the two
-        // stay disjoint shared borrows of `s` instead of one nested
-        // inside the other.
-        let Some(bridge) = s.bridge.as_ref() else {
-            return;
-        };
-        let pipeline = bridge.engine().pipeline();
-        let output_aspect = pipeline.viewport().aspect_ratio();
-        let pose = s.pose.current_pose();
         let Some(i) = s.calibration.as_ref().and_then(|cal| {
             let goal = cal.goal_geometry.as_ref()?;
             let pts = if is_right { &goal.right } else { &goal.left };
+            let lens = &cal.lenses[if is_right { 1 } else { 0 }];
             let display: Vec<[f64; 2]> = pts
                 .iter()
-                .filter_map(|p| {
-                    reco_core::render::renderer::yaw_pitch_to_screen_fraction(
-                        pipeline.calibration(),
-                        pipeline.viewport(),
-                        pose.yaw,
-                        pose.pitch,
-                        output_aspect,
-                        p[0] as f32,
-                        p[1] as f32,
-                    )
-                    .map(|(x, y)| [x as f64, y as f64])
-                })
+                .map(|p| raw_norm_to_rectified_norm(p[0], p[1], lens))
                 .collect();
             roi_hit_test(&display, lx, ly, cw, ch)
         }) else {
@@ -5671,12 +5588,6 @@ fn vsync_render_tick(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<RecoA
         if let Some(fov) = current.fov_degrees {
             app.set_fov(fov);
         }
-        // Goal-geometry overlay is drawn in screen space (see
-        // `yaw_pitch_to_screen_fraction`), so it must be recomputed every
-        // time the view moves - unlike the ROI overlay, which is a pure
-        // Slint-side transform of the same static lens texture and never
-        // needs Rust to push new points just because the camera panned.
-        sync_goal_points(&s, &app);
         if let Some(bridge) = s.bridge.as_ref() {
             let c = bridge.engine().pipeline().color_match_correction();
             app.set_color_match_status(
