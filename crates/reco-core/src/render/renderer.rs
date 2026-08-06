@@ -2620,6 +2620,7 @@ mod tests {
             },
             sync_offset: 0,
             field_roi: None,
+            goal_geometry: None,
         }
     }
 
@@ -2833,6 +2834,7 @@ mod tests {
             },
             sync_offset: 3,
             field_roi: None,
+            goal_geometry: None,
         };
         let viewport = ViewportConfig {
             fov_degrees: 75.0,
