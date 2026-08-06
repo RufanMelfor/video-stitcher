@@ -161,11 +161,20 @@ memory / earlier git history, not repeated here)
 - **YOLO26 training pipeline**: auto-labeling pipeline built and
   validated (pilot: 300 images, 2491 boxes). Labeling-tool plan pivoted
   CVAT -> Label Studio on a Raspberry Pi 5 (CVAT doesn't fit the NAS's
-  RAM or the Pi's arm64). Pi still physically unopened/not set up - see
-  project_yolo26n_training_pipeline.md for the full checklist and
-  status. `scripts/package_yolo_for_labelstudio.py` (committed) is ready
-  and tested, blocked only on the Pi's real `LOCAL_FILES_DOCUMENT_ROOT`
-  once it exists.
+  RAM or the Pi's arm64). Update 2026-08-06: Pi is now physically set up
+  and Label Studio is running, reachable at `http://192.168.191.204:8080`
+  - see project_yolo26n_training_pipeline.md for the full checklist and
+  status. Update 2026-08-06 (later): Label Studio project created on the
+  Pi via the Visual labeling-setup editor (Custom template), with a
+  `RectangleLabels` config for "person"/"ball" - object/control tag
+  names should be `image`/`label` (script defaults), confirm via the
+  Code toggle before importing tasks.json if unsure. Data import was
+  skipped at creation time. Next (from the other PC): point
+  `scripts/package_yolo_for_labelstudio.py` (committed, tested) at the
+  Pi's real `LOCAL_FILES_DOCUMENT_ROOT`, rsync the pilot dataset onto
+  the Pi, generate `tasks.json` with `--run-converter`, then import it
+  into this project and do the actual human review - that's the
+  remaining bottleneck before fine-tuning can start.
 - **Veo Cam 3 competitive roadmap**: `docs/research-veo-cam3-comparison.md`,
   5 phases, goal detection above is Phase 1 item 2. Not filed as GitHub
   issues yet.
