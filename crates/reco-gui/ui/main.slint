@@ -1278,80 +1278,58 @@ export component RecoApp inherits Window {
     property <float> lens-zoom: 1.0;
     property <length> lens-pan-x: 0px;
     property <length> lens-pan-y: 0px;
-    // In-app field-ROI point editor (click to add, drag to move,
-    // right-click to delete), replacing the old browser-based tool.
-    in-out property <bool> roi-edit-mode: false;
-    // Whether entering ROI-edit mode auto-enabled lens preview (it was
-    // off before); if so, leaving edit mode turns it back off too,
-    // returning to the stitched panorama view. Left alone if the user
-    // was already in lens preview for their own reasons.
-    property <bool> roi-edit-auto-lens-preview: false;
+    // In-app field-ROI / goal-geometry point editor (click to add, drag to
+    // move, right-click to delete), replacing the old browser-based tool.
+    // One shared session (`zone-edit-mode`) for both polygon types - both
+    // live in the same per-camera distorted lens-preview window (ROI and
+    // GOAL points are both raw-distorted-frame-normalized `[0,1]`, see
+    // `GoalGeometry`'s doc for why), so there is nothing type-specific
+    // about *entering* the session, only about which callbacks/overlay a
+    // click currently drives - that's `zone-edit-type`.
+    in-out property <bool> zone-edit-mode: false;
+    // Whether entering the session auto-enabled lens preview (it was off
+    // before); if so, leaving the session turns it back off too,
+    // returning to the stitched panorama view. Left alone if the user was
+    // already in lens preview for their own reasons.
+    property <bool> zone-edit-auto-lens-preview: false;
+    // Which polygon type the session's click/drag/right-click gestures
+    // currently apply to - "roi" or "goal". Also determines which status
+    // text/help text/toggle button is highlighted even while no session
+    // is active, so it stays put across a Done-then-Edit cycle.
+    in-out property <string> zone-edit-type: "roi";
     in-out property <string> roi-path-commands: "";
     callback roi-pointer-hit-test(float, float, float, float) -> int;
     callback roi-pointer-add(float, float, float, float);
     callback roi-pointer-drag(int, float, float, float, float);
     callback roi-pointer-up();
     callback roi-pointer-delete(float, float, float, float);
-
-    // In-app goal-mouth polygon editor, same click/drag/right-click
-    // interaction as the field-ROI editor above, but over the *panorama*
-    // preview (yaw/pitch space via `GoalGeometry`), not the per-camera
-    // lens preview - a calibrated goal must stay valid as the virtual
-    // camera pans/zooms. `output-aspect` mirrors `lens-frame-aspect`'s
-    // role for the ROI editor: Rust sets it (the render pipeline's
-    // aspect ratio) since Slint has no other way to know it. Shares
-    // `lens-preview-side` with the ROI editor as its Left/Right selector
-    // (one switch for both, per the merged "DETECTION ZONES" card).
     in-out property <bool> has-goal-geometry: false;
-    in-out property <bool> goal-edit-mode: false;
     in-out property <string> goal-path-commands: "";
-    in-out property <float> output-aspect: 1.7777777;
     callback goal-pointer-hit-test(float, float, float, float) -> int;
     callback goal-pointer-add(float, float, float, float);
     callback goal-pointer-drag(int, float, float, float, float);
     callback goal-pointer-up();
     callback goal-pointer-delete(float, float, float, float);
 
-    // Which polygon type the DETECTION ZONES card's buttons currently
-    // apply to - "roi" or "goal". A plain property, not tied 1:1 to
-    // `roi-edit-mode`/`goal-edit-mode` (those track whether a session is
-    // *active*; this tracks which one the ROI/GOAL toggle currently
-    // selects, including while no session is active at all).
-    in-out property <string> zone-edit-type: "roi";
-
-    // Shared enter/exit logic for both edit types, factored out so the
-    // DETECTION ZONES card's three buttons (ROI toggle, GOAL toggle, and
-    // the single Edit/Done button) can all hot-switch between the two
-    // without duplicating the lens-preview bookkeeping three times.
-    function enter-roi-edit() {
+    // Shared enter/exit logic, used by the DETECTION ZONES card's single
+    // Edit/Done button below.
+    function enter-zone-edit() {
         if (!root.lens-preview-active) {
             root.lens-preview-active = true;
-            root.roi-edit-auto-lens-preview = true;
+            root.zone-edit-auto-lens-preview = true;
             root.changed-lens-preview();
         } else {
-            root.roi-edit-auto-lens-preview = false;
+            root.zone-edit-auto-lens-preview = false;
         }
-        root.goal-edit-mode = false;
-        root.roi-edit-mode = true;
+        root.zone-edit-mode = true;
     }
-    function exit-roi-edit() {
-        root.roi-edit-mode = false;
-        if (root.roi-edit-auto-lens-preview) {
-            root.roi-edit-auto-lens-preview = false;
+    function exit-zone-edit() {
+        root.zone-edit-mode = false;
+        if (root.zone-edit-auto-lens-preview) {
+            root.zone-edit-auto-lens-preview = false;
             root.lens-preview-active = false;
             root.changed-lens-preview();
         }
-    }
-    function enter-goal-edit() {
-        if (root.lens-preview-active) {
-            root.lens-preview-active = false;
-            root.changed-lens-preview();
-        }
-        root.roi-edit-mode = false;
-        root.goal-edit-mode = true;
-    }
-    function exit-goal-edit() {
-        root.goal-edit-mode = false;
     }
 
     changed lens-preview-side => {
@@ -1364,9 +1342,7 @@ export component RecoApp inherits Window {
         root.lens-pan-x = 0px;
         root.lens-pan-y = 0px;
         if (!root.lens-preview-active) {
-            root.roi-edit-mode = false;
-        } else {
-            root.goal-edit-mode = false;
+            root.zone-edit-mode = false;
         }
     }
 
@@ -1832,98 +1808,51 @@ export component RecoApp inherits Window {
                             CalGroupBox {
                                 title: "DETECTION ZONES";
 
-                                // Which polygon type the click/drag gestures
-                                // below currently apply to - switching this
-                                // while an edit session is already active
-                                // (via the buttons' `enter-*`/`exit-*` calls
-                                // below) hot-switches the live session
-                                // instead of requiring Done then Edit again.
-                                HorizontalLayout {
-                                    spacing: 4px;
-                                    FlatButton {
-                                        text: "ROI";
-                                        primary: root.zone-edit-type == "roi";
-                                        horizontal-stretch: 1;
-                                        clicked => {
-                                            root.zone-edit-type = "roi";
-                                            if (root.goal-edit-mode) {
-                                                root.exit-goal-edit();
-                                                root.enter-roi-edit();
-                                            }
-                                        }
-                                    }
-                                    FlatButton {
-                                        text: "GOAL";
-                                        primary: root.zone-edit-type == "goal";
-                                        horizontal-stretch: 1;
-                                        clicked => {
-                                            root.zone-edit-type = "goal";
-                                            if (root.roi-edit-mode) {
-                                                root.exit-roi-edit();
-                                                root.enter-goal-edit();
-                                            }
-                                        }
-                                    }
-                                }
-
                                 HorizontalLayout {
                                     spacing: 6px;
                                     Text {
-                                        text: root.zone-edit-type == "roi"
-                                            ? (root.has-roi ? "Field ROI: loaded" : "Field ROI: none")
-                                            : (root.has-goal-geometry ? "Goal Geometry: loaded" : "Goal Geometry: none");
-                                        color: root.zone-edit-type == "roi"
-                                            ? (root.has-roi ? #8ae68a : #777)
-                                            : (root.has-goal-geometry ? #ffb066 : #777);
+                                        text: root.has-roi ? "Field ROI: loaded" : "Field ROI: none";
+                                        color: root.has-roi ? #8ae68a : #777;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: root.has-goal-geometry ? "Goal Geometry: loaded" : "Goal Geometry: none";
+                                        color: root.has-goal-geometry ? #ffb066 : #777;
                                         font-size: 11px;
                                         vertical-alignment: center;
                                         horizontal-stretch: 1;
                                     }
                                 }
 
-                                // Shared side selector - ROI reads it as
-                                // which camera's lens preview to show,
-                                // GOAL reads it as which goal's polygon to
-                                // edit. One switch instead of two.
+                                // Single entry point for both polygon types -
+                                // opens the distorted lens preview, where a
+                                // small ROI/GOAL toggle (top-left over the
+                                // video, see the preview section below)
+                                // picks which one the click/drag gestures
+                                // apply to. `zone-edit-type` remembers the
+                                // last choice across a Done-then-Edit cycle.
                                 HorizontalLayout {
                                     spacing: 4px;
                                     FlatButton {
-                                        text: "Left";
-                                        primary: root.lens-preview-side == "left";
-                                        horizontal-stretch: 1;
-                                        clicked => { root.lens-preview-side = "left"; root.changed-lens-preview(); }
-                                    }
-                                    FlatButton {
-                                        text: "Right";
-                                        primary: root.lens-preview-side == "right";
-                                        horizontal-stretch: 1;
-                                        clicked => { root.lens-preview-side = "right"; root.changed-lens-preview(); }
-                                    }
-                                }
-
-                                HorizontalLayout {
-                                    spacing: 4px;
-                                    FlatButton {
-                                        text: (root.zone-edit-type == "roi" ? root.roi-edit-mode : root.goal-edit-mode)
-                                            ? "Done Editing"
-                                            : "Edit...";
-                                        primary: root.zone-edit-type == "roi" ? root.roi-edit-mode : root.goal-edit-mode;
+                                        text: root.zone-edit-mode ? "Done Editing" : "Edit ROI / GOAL...";
+                                        primary: root.zone-edit-mode;
                                         horizontal-stretch: 1;
                                         clicked => {
-                                            if (root.zone-edit-type == "roi") {
-                                                if (root.roi-edit-mode) { root.exit-roi-edit(); } else { root.enter-roi-edit(); }
-                                            } else {
-                                                if (root.goal-edit-mode) { root.exit-goal-edit(); } else { root.enter-goal-edit(); }
-                                            }
+                                            if (root.zone-edit-mode) { root.exit-zone-edit(); } else { root.enter-zone-edit(); }
                                         }
                                     }
-                                    if root.zone-edit-type == "roi": FlatButton {
+                                    FlatButton {
                                         text: "Paste ROI";
                                         clicked => { root.paste-roi(); }
                                     }
                                 }
 
-                                if root.zone-edit-type == "roi": LineEdit {
+                                LineEdit {
                                     placeholder-text: "Or paste ROI JSON here...";
                                     accepted(text) => {
                                         root.roi-manual-json = text;
@@ -1931,21 +1860,21 @@ export component RecoApp inherits Window {
                                     }
                                 }
 
-                                if root.roi-edit-mode: Text {
+                                if root.zone-edit-mode && root.zone-edit-type == "roi": Text {
                                     text: "Click the lens preview to add points, drag a point to move it, right-click a point to delete it. Switch Left/Right above to edit the other camera.";
                                     color: root.text-dim;
                                     font-size: 10px;
                                     wrap: word-wrap;
                                 }
 
-                                if root.goal-edit-mode: Text {
-                                    text: "Click the panorama preview to add points, drag a point to move it, right-click a point to delete it. A goal needs 4+ points to bound both width and height. Switch Left/Right above to edit the other goal.";
+                                if root.zone-edit-mode && root.zone-edit-type == "goal": Text {
+                                    text: "Click the lens preview to add points, drag a point to move it, right-click a point to delete it. A goal needs 4+ points to bound both width and height. Switch Left/Right above to edit the other camera.";
                                     color: root.text-dim;
                                     font-size: 10px;
                                     wrap: word-wrap;
                                 }
 
-                                if root.zone-edit-type == "roi" && !root.roi-edit-mode && !root.has-roi: Text {
+                                if !root.zone-edit-mode && !root.has-roi: Text {
                                     text: "Or paste ROI JSON above (from another calibration, or scripted).";
                                     color: root.text-dim;
                                     font-size: 10px;
@@ -2039,23 +1968,6 @@ export component RecoApp inherits Window {
                     property <length> content-x: (preview-box.width - content-w) / 2 + root.lens-pan-x;
                     property <length> content-y: (preview-box.height - content-h) / 2 + root.lens-pan-y;
 
-                    // Letterboxed content rect for the panorama preview
-                    // (outside lens-preview mode), same `contain`-fit
-                    // reconstruction as `content-w`/`content-h` above but
-                    // keyed on `output-aspect` (the render pipeline's
-                    // aspect ratio) instead of `lens-frame-aspect` - the
-                    // goal-geometry overlay/pointer math needs this origin/
-                    // size the same way the ROI editor needs the lens one.
-                    // No pan/zoom term: the panorama view pans by
-                    // re-rendering at a new yaw/pitch, not by transforming
-                    // the displayed Image.
-                    property <length> pano-content-w:
-                        root.output-aspect > box-aspect ? preview-box.width : preview-box.height * root.output-aspect;
-                    property <length> pano-content-h:
-                        root.output-aspect > box-aspect ? preview-box.width / root.output-aspect : preview-box.height;
-                    property <length> pano-content-x: (preview-box.width - pano-content-w) / 2;
-                    property <length> pano-content-y: (preview-box.height - pano-content-h) / 2;
-
                     if root.files-loaded: Image {
                         source: root.preview-frame;
                         image-fit: contain;
@@ -2129,36 +2041,35 @@ export component RecoApp inherits Window {
                         border-color: #0f0;
                     }
 
-                    // Goal-geometry polygon outline (visible on the
-                    // panorama preview, i.e. outside lens-preview mode) -
-                    // same `Path` viewbox-aspect approach as the ROI
-                    // outline above (see its comment for why the y-scaling
-                    // is needed), but keyed on `output-aspect`/
-                    // `pano-content-*` instead of the lens ones. Deliberately
-                    // a different color (orange, not green) from the field
-                    // ROI so the two calibrated boundaries are never
-                    // confused at a glance.
-                    if !root.lens-preview-active && root.has-goal-geometry: Path {
-                        x: preview-box.pano-content-x;
-                        y: preview-box.pano-content-y;
-                        width: preview-box.pano-content-w;
-                        height: preview-box.pano-content-h;
+                    // Goal-geometry polygon outline - same lens-preview
+                    // content rect and `Path` viewbox-aspect approach as the
+                    // ROI outline above (see its comment for why the
+                    // y-scaling is needed), since goal points are stored in
+                    // the same raw-distorted-frame-normalized space as
+                    // FieldRoi. Deliberately a different color (orange, not
+                    // green) so the two calibrated boundaries are never
+                    // confused at a glance, even though only one is
+                    // editable at a time (`zone-edit-type`).
+                    if root.lens-preview-active && root.has-goal-geometry: Path {
+                        x: preview-box.content-x;
+                        y: preview-box.content-y;
+                        width: preview-box.content-w;
+                        height: preview-box.content-h;
                         viewbox-x: 0;
                         viewbox-y: 0;
                         viewbox-width: 1;
-                        viewbox-height: 1.0 / root.output-aspect;
+                        viewbox-height: 1.0 / root.lens-frame-aspect;
                         stroke: #ff8c1acc;
                         stroke-width: 2px;
                         commands: root.goal-path-commands;
                     }
 
                     // Goal-geometry vertex overlay - same idea as the ROI
-                    // dots above, positioned within the panorama letterbox
-                    // rect instead of the lens one.
+                    // dots above, same content rect.
                     for idx in root.goal-points-x.length: Rectangle {
-                        visible: !root.lens-preview-active && root.has-goal-geometry;
-                        x: preview-box.pano-content-x + root.goal-points-x[idx] * preview-box.pano-content-w - 4px;
-                        y: preview-box.pano-content-y + root.goal-points-y[idx] * preview-box.pano-content-h - 4px;
+                        visible: root.lens-preview-active && root.has-goal-geometry;
+                        x: preview-box.content-x + root.goal-points-x[idx] * preview-box.content-w - 4px;
+                        y: preview-box.content-y + root.goal-points-y[idx] * preview-box.content-h - 4px;
                         width: 8px;
                         height: 8px;
                         border-radius: 4px;
@@ -2206,11 +2117,6 @@ export component RecoApp inherits Window {
                             && self.local-y >= 0px && self.local-y <= preview-box.content-h;
                         property <int> goal-dragging-index: -1;
                         property <bool> goal-click-pending: false;
-                        property <length> pano-local-x: self.mouse-x - preview-box.pano-content-x;
-                        property <length> pano-local-y: self.mouse-y - preview-box.pano-content-y;
-                        property <bool> pano-local-in-bounds:
-                            self.pano-local-x >= 0px && self.pano-local-x <= preview-box.pano-content-w
-                            && self.pano-local-y >= 0px && self.pano-local-y <= preview-box.pano-content-h;
                         // Whether the mouse is currently near the seam debug
                         // line (hover feedback / drag gating - see
                         // `seam-hit-test`'s own doc). Only meaningful outside
@@ -2239,7 +2145,7 @@ export component RecoApp inherits Window {
                                         preview-box.height / 1px,
                                     );
 
-                                if (root.lens-preview-active && root.roi-edit-mode && self.local-in-bounds) {
+                                if (root.lens-preview-active && root.zone-edit-mode && root.zone-edit-type == "roi" && self.local-in-bounds) {
                                     if (e.button == PointerEventButton.right) {
                                         root.roi-pointer-delete(
                                             self.local-x / 1px,
@@ -2258,20 +2164,20 @@ export component RecoApp inherits Window {
                                             self.roi-click-pending = true;
                                         }
                                     }
-                                } else if (!root.lens-preview-active && root.goal-edit-mode && self.pano-local-in-bounds) {
+                                } else if (root.lens-preview-active && root.zone-edit-mode && root.zone-edit-type == "goal" && self.local-in-bounds) {
                                     if (e.button == PointerEventButton.right) {
                                         root.goal-pointer-delete(
-                                            self.pano-local-x / 1px,
-                                            self.pano-local-y / 1px,
-                                            preview-box.pano-content-w / 1px,
-                                            preview-box.pano-content-h / 1px,
+                                            self.local-x / 1px,
+                                            self.local-y / 1px,
+                                            preview-box.content-w / 1px,
+                                            preview-box.content-h / 1px,
                                         );
                                     } else if (e.button == PointerEventButton.left) {
                                         self.goal-dragging-index = root.goal-pointer-hit-test(
-                                            self.pano-local-x / 1px,
-                                            self.pano-local-y / 1px,
-                                            preview-box.pano-content-w / 1px,
-                                            preview-box.pano-content-h / 1px,
+                                            self.local-x / 1px,
+                                            self.local-y / 1px,
+                                            preview-box.content-w / 1px,
+                                            preview-box.content-h / 1px,
                                         );
                                         if (self.goal-dragging-index < 0) {
                                             self.goal-click-pending = true;
@@ -2299,10 +2205,10 @@ export component RecoApp inherits Window {
                                 }
                                 if (self.goal-click-pending) {
                                     root.goal-pointer-add(
-                                        self.pano-local-x / 1px,
-                                        self.pano-local-y / 1px,
-                                        preview-box.pano-content-w / 1px,
-                                        preview-box.pano-content-h / 1px,
+                                        self.local-x / 1px,
+                                        self.local-y / 1px,
+                                        preview-box.content-w / 1px,
+                                        preview-box.content-h / 1px,
                                     );
                                     self.goal-click-pending = false;
                                 }
@@ -2323,7 +2229,7 @@ export component RecoApp inherits Window {
                                 );
 
                             if (self.pressed) {
-                                if (root.lens-preview-active && root.roi-edit-mode && self.roi-dragging-index >= 0) {
+                                if (root.lens-preview-active && root.zone-edit-mode && root.zone-edit-type == "roi" && self.roi-dragging-index >= 0) {
                                     root.roi-pointer-drag(
                                         self.roi-dragging-index,
                                         self.local-x / 1px,
@@ -2331,7 +2237,7 @@ export component RecoApp inherits Window {
                                         preview-box.content-w / 1px,
                                         preview-box.content-h / 1px,
                                     );
-                                } else if (root.lens-preview-active && root.roi-edit-mode && self.roi-click-pending
+                                } else if (root.lens-preview-active && root.zone-edit-mode && root.zone-edit-type == "roi" && self.roi-click-pending
                                            && (Math.abs((self.mouse-x - self.press-x) / 1px) > 4
                                                || Math.abs((self.mouse-y - self.press-y) / 1px) > 4)) {
                                     // Moved past the click threshold: this is a
@@ -2343,33 +2249,29 @@ export component RecoApp inherits Window {
                                     self.roi-click-pending = false;
                                     root.lens-pan-x += self.mouse-x - self.last-x;
                                     root.lens-pan-y += self.mouse-y - self.last-y;
-                                } else if (root.lens-preview-active && root.roi-edit-mode && self.roi-click-pending) {
+                                } else if (root.lens-preview-active && root.zone-edit-mode && root.zone-edit-type == "roi" && self.roi-click-pending) {
+                                    // Still within the click threshold - wait.
+                                } else if (root.lens-preview-active && root.zone-edit-mode && root.zone-edit-type == "goal" && self.goal-dragging-index >= 0) {
+                                    root.goal-pointer-drag(
+                                        self.goal-dragging-index,
+                                        self.local-x / 1px,
+                                        self.local-y / 1px,
+                                        preview-box.content-w / 1px,
+                                        preview-box.content-h / 1px,
+                                    );
+                                } else if (root.lens-preview-active && root.zone-edit-mode && root.zone-edit-type == "goal" && self.goal-click-pending
+                                           && (Math.abs((self.mouse-x - self.press-x) / 1px) > 4
+                                               || Math.abs((self.mouse-y - self.press-y) / 1px) > 4)) {
+                                    // Same click-vs-pan disambiguation as the ROI
+                                    // branch above.
+                                    self.goal-click-pending = false;
+                                    root.lens-pan-x += self.mouse-x - self.last-x;
+                                    root.lens-pan-y += self.mouse-y - self.last-y;
+                                } else if (root.lens-preview-active && root.zone-edit-mode && root.zone-edit-type == "goal" && self.goal-click-pending) {
                                     // Still within the click threshold - wait.
                                 } else if (root.lens-preview-active) {
                                     root.lens-pan-x += self.mouse-x - self.last-x;
                                     root.lens-pan-y += self.mouse-y - self.last-y;
-                                } else if (!root.lens-preview-active && root.goal-edit-mode && self.goal-dragging-index >= 0) {
-                                    root.goal-pointer-drag(
-                                        self.goal-dragging-index,
-                                        self.pano-local-x / 1px,
-                                        self.pano-local-y / 1px,
-                                        preview-box.pano-content-w / 1px,
-                                        preview-box.pano-content-h / 1px,
-                                    );
-                                } else if (!root.lens-preview-active && root.goal-edit-mode && self.goal-click-pending
-                                           && (Math.abs((self.mouse-x - self.press-x) / 1px) > 4
-                                               || Math.abs((self.mouse-y - self.press-y) / 1px) > 4)) {
-                                    // Same click-vs-pan disambiguation as the ROI
-                                    // editor above, but panning here is the
-                                    // panorama's angular pan (`root.pan`), not the
-                                    // lens preview's pixel-offset pan.
-                                    self.goal-click-pending = false;
-                                    root.pan(
-                                        (self.mouse-x - self.last-x) / 1px,
-                                        (self.mouse-y - self.last-y) / 1px,
-                                    );
-                                } else if (!root.lens-preview-active && root.goal-edit-mode && self.goal-click-pending) {
-                                    // Still within the click threshold - wait.
                                 } else if (root.show-seam-line && self.seam-dragging) {
                                     // Seam-edit mode: horizontal drag nudges the
                                     // seam instead of panning, normalized by
@@ -2568,13 +2470,45 @@ export component RecoApp inherits Window {
                     }
                 }
 
+                // Zone-type switcher (ROI vs GOAL), top-left of the preview
+                // while a zone-edit session is active - determines which
+                // polygon the click/drag/right-click gestures below apply
+                // to. Positioned separately from the Left/Right pill
+                // (top-center, below) rather than combined into one wider
+                // pill, so both stay comfortably tappable.
+                if root.zone-edit-mode: Rectangle {
+                    x: 12px;
+                    y: 12px;
+                    width: zone-type-pill.preferred-width + 8px;
+                    height: 34px;
+                    border-radius: 17px;
+                    background: #0d0f11d0;
+                    border-width: 1px;
+                    border-color: #2a2e33;
+                    zone-type-pill := HorizontalLayout {
+                        padding: 4px;
+                        spacing: 4px;
+                        FlatButton {
+                            text: "ROI";
+                            primary: root.zone-edit-type == "roi";
+                            clicked => { root.zone-edit-type = "roi"; }
+                        }
+                        FlatButton {
+                            text: "GOAL";
+                            primary: root.zone-edit-type == "goal";
+                            clicked => { root.zone-edit-type = "goal"; }
+                        }
+                    }
+                }
+
                 // Side switcher, surfaced front-and-center while editing
                 // either zone type (the primary reason you'd need it in
-                // the moment) - not shown otherwise, since the DETECTION
-                // ZONES card's own Left/Right toggle covers normal use.
+                // the moment) - not shown otherwise, since the general
+                // Lens section elsewhere covers normal lens-preview use.
                 // Shared between ROI and GOAL editing (one `lens-preview-
-                // side` value, per the merged card).
-                if root.roi-edit-mode || root.goal-edit-mode: Rectangle {
+                // side` value - ROI reads it as which camera to show, GOAL
+                // as which goal's polygon to edit).
+                if root.zone-edit-mode: Rectangle {
                     x: (parent.width - self.width) / 2;
                     y: 12px;
                     width: zone-side-pill.preferred-width + 8px;
