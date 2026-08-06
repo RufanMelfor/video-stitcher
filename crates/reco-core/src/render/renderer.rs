@@ -798,6 +798,62 @@ pub fn screen_fraction_to_yaw_pitch(
     crate::projection::direction_to_yaw_pitch(&world_dir, &scene.camera_position)
 }
 
+/// Project an absolute panorama `(yaw, pitch)` (same coordinate system
+/// [`screen_fraction_to_yaw_pitch`] decodes clicks into) to a screen
+/// fraction under the given view state, `(0,0)` = top-left. `None` if the
+/// point falls behind the camera (`w <= 0`).
+///
+/// Exact inverse of [`screen_fraction_to_yaw_pitch`] - forward-projects a
+/// stored polygon vertex (e.g. `GoalGeometry`) back onto the current
+/// preview so it can be drawn overlaid on the live panorama, tracking pan/
+/// zoom/FOV the same way the seam-line overlay does for a fixed plane
+/// point. Same tilt/roll limitation as `direction_to_yaw_pitch`
+/// (zero-tilt/roll only) - see that function's doc.
+pub fn yaw_pitch_to_screen_fraction(
+    calibration: &Calibration,
+    viewport: &ViewportConfig,
+    yaw: f32,
+    pitch: f32,
+    output_aspect: f32,
+    target_yaw: f32,
+    target_pitch: f32,
+) -> Option<(f32, f32)> {
+    let plane_aspect = calibration.lenses[0].width as f32 / calibration.lenses[0].height as f32;
+    let scene = SceneGeometry::new(&calibration.topology, &calibration.framing, plane_aspect);
+
+    let dir = crate::geometry::VirtualCamera::new(&scene.camera_position)
+        .yaw_pitch_to_direction(target_yaw, target_pitch);
+    let target = nalgebra::Vector4::new(
+        scene.camera_position[0] + dir.x,
+        scene.camera_position[1] + dir.y,
+        scene.camera_position[2] + dir.z,
+        1.0,
+    );
+
+    let projection = opengl_to_wgpu_matrix()
+        * Perspective3::new(
+            output_aspect,
+            viewport.fov_degrees.to_radians(),
+            NEAR_PLANE,
+            FAR_PLANE,
+        )
+        .to_homogeneous();
+    let view = view_matrix(
+        &scene.camera_position,
+        yaw,
+        pitch,
+        calibration.framing.tilt as f32,
+        calibration.framing.roll as f32,
+    );
+    let clip = projection * view * target;
+    if clip.w <= 1e-4 {
+        return None;
+    }
+    let ndc_x = clip.x / clip.w;
+    let ndc_y = clip.y / clip.w;
+    Some(((ndc_x + 1.0) * 0.5, (1.0 - ndc_y) * 0.5))
+}
+
 /// Project one local-space point on a plane (z=0) through an MVP matrix to
 /// a normalized `0.0..=1.0` screen fraction, `(0,0)` = top-left. `None` if
 /// the point is behind the camera (`w <= 0`), where the perspective divide
@@ -2720,11 +2776,11 @@ mod tests {
     #[test]
     fn screen_fraction_to_yaw_pitch_round_trips_off_center_points() {
         // Real proof the FOV/aspect math is right, not just the trivial
-        // center case: place a point at a *different* (yaw2, pitch2),
-        // forward-project where it lands on screen while the camera looks
-        // at (yaw, pitch), then feed that screen position back through
-        // `screen_fraction_to_yaw_pitch` and confirm it recovers
-        // (yaw2, pitch2) - the same round-trip discipline as
+        // center case: forward-project a *different* (yaw2, pitch2) via
+        // `yaw_pitch_to_screen_fraction` (its own exact inverse) while the
+        // camera looks at (yaw, pitch), then feed the resulting screen
+        // position back through `screen_fraction_to_yaw_pitch` and confirm
+        // it recovers (yaw2, pitch2) - the same round-trip discipline as
         // `view_matrix_self_consistent_with_direction_to_yaw_pitch`.
         //
         // tilt/roll stay zero, same documented limitation as
@@ -2732,8 +2788,6 @@ mod tests {
         let cal = seam_test_calibration();
         let viewport = ViewportConfig::default();
         let aspect = 16.0_f32 / 9.0;
-        let camera_position =
-            SceneGeometry::new(&cal.topology, &cal.framing, aspect).camera_position;
 
         let cases = [
             (0.0_f32, 0.0_f32, 0.1_f32, 0.05_f32),
@@ -2742,30 +2796,9 @@ mod tests {
             (-0.4, 0.2, -0.3, 0.1),
         ];
         for &(yaw, pitch, yaw2, pitch2) in &cases {
-            let dir2 = crate::projection::yaw_pitch_to_direction(yaw2, pitch2, &camera_position);
-            let target = nalgebra::Vector4::new(
-                camera_position[0] + dir2.x,
-                camera_position[1] + dir2.y,
-                camera_position[2] + dir2.z,
-                1.0,
-            );
-
-            let projection = opengl_to_wgpu_matrix()
-                * Perspective3::new(
-                    aspect,
-                    viewport.fov_degrees.to_radians(),
-                    NEAR_PLANE,
-                    FAR_PLANE,
-                )
-                .to_homogeneous();
-            let view = view_matrix(&camera_position, yaw, pitch, 0.0, 0.0);
-            let clip = projection * view * target;
-            assert!(
-                clip.w > 1e-4,
-                "target must be in front of the camera for this test case"
-            );
-            let screen_x = (clip.x / clip.w + 1.0) * 0.5;
-            let screen_y = (1.0 - clip.y / clip.w) * 0.5;
+            let (screen_x, screen_y) =
+                yaw_pitch_to_screen_fraction(&cal, &viewport, yaw, pitch, aspect, yaw2, pitch2)
+                    .expect("target must be in front of the camera for this test case");
 
             let pos = screen_fraction_to_yaw_pitch(
                 &cal, &viewport, yaw, pitch, aspect, screen_x, screen_y,
