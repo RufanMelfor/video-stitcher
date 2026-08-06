@@ -44,6 +44,7 @@
 
 #![forbid(unsafe_code)]
 
+mod goal_events;
 pub mod panners;
 mod roi_filter;
 pub mod trackers;
@@ -64,6 +65,7 @@ pub use reco_detect::OrtGpuDetector;
 #[cfg(feature = "tensorrt-native")]
 pub use reco_detect::TrtGpuDetector;
 
+pub use goal_events::{GoalEntryDetector, GoalSide, ZoneEntryTracker};
 pub use roi_filter::{RoiAnchor, RoiFilteredDetector};
 pub mod wgpu_detector;
 pub use wgpu_detector::WgpuPreprocessingDetector;
