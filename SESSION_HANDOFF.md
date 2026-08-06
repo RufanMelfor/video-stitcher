@@ -45,6 +45,39 @@ camera's calibration space is NOT "the left half of the panorama," it's
 means "the goal visible in the left camera's frame," but that still
 needs confirming against which end of the pitch the user means.
 
+**UPDATE 2026-08-06, RUFAN_LAPTOP session - blocker resolved (mostly)**:
+user corrected the file location -
+`D:\VOETBAL VIDEO\RECO test vid\DJI_20260704095935_0028_D_L01.MP4`
+(note: different path/spacing than above, same match, local copy on
+this laptop with its own calibration file already containing
+`goal_geometry`). No YOLO ONNX model exists on this laptop at all
+(`ai_model_path: null` in this machine's `gui.json`, no `.onnx`
+anywhere on the drive - checked) so the actual `GoalEntryDetector`-vs-
+real-detections test still could not run here, that needs a machine
+with the model.
+
+But: used the calibration's own `goal_geometry.left` normalized
+coordinates directly (rather than eyeballing crop coordinates off a
+downscaled wide shot - that was tried first and landed on the wrong,
+distant goal on what looks like an adjacent pitch) to zoom into the
+correct goal via ffmpeg crop+scale. Found a strong visual candidate at
+**t=356-358s** in this exact file (close to the user's "5:55" /
+t=355s estimate, well within normal manual-timestamp error): a player
+down on the ground right in/near the goal mouth, several other players
+converging at the same moment - matches "hard to see" well (obscured by
+the scramble, not a clean shot-into-net view).
+
+So: "5:55" was raw file-time after all, off by only ~2-3s - the
+match-clock-vs-file-time theory above was likely a red herring. Frame
+crops were scratch files in this laptop session's temp dir, not saved
+persistently - re-extract from the source at t=350-362s if needed
+rather than hunting for them.
+
+**Next step, now unblocked**: on a machine with the ball-detection ONNX
+model available, run detection over roughly t=350-362s of this exact
+file/camera pair and feed the results through `GoalEntryDetector` to
+confirm it actually fires in that window.
+
 ## This session's main thread: goal-scored detection (branch
 `feat/goal-line-calibration`, pushed to `github` remote, not a PR yet -
 explicitly holding off until the raw signal is verified against real
