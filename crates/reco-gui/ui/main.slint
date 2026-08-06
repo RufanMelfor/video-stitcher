@@ -1299,18 +1299,60 @@ export component RecoApp inherits Window {
     // lens preview - a calibrated goal must stay valid as the virtual
     // camera pans/zooms. `output-aspect` mirrors `lens-frame-aspect`'s
     // role for the ROI editor: Rust sets it (the render pipeline's
-    // aspect ratio) since Slint has no other way to know it.
+    // aspect ratio) since Slint has no other way to know it. Shares
+    // `lens-preview-side` with the ROI editor as its Left/Right selector
+    // (one switch for both, per the merged "DETECTION ZONES" card).
     in-out property <bool> has-goal-geometry: false;
-    in-out property <string> goal-edit-side: "left";
     in-out property <bool> goal-edit-mode: false;
     in-out property <string> goal-path-commands: "";
     in-out property <float> output-aspect: 1.7777777;
-    callback changed-goal-edit-side();
     callback goal-pointer-hit-test(float, float, float, float) -> int;
     callback goal-pointer-add(float, float, float, float);
     callback goal-pointer-drag(int, float, float, float, float);
     callback goal-pointer-up();
     callback goal-pointer-delete(float, float, float, float);
+
+    // Which polygon type the DETECTION ZONES card's buttons currently
+    // apply to - "roi" or "goal". A plain property, not tied 1:1 to
+    // `roi-edit-mode`/`goal-edit-mode` (those track whether a session is
+    // *active*; this tracks which one the ROI/GOAL toggle currently
+    // selects, including while no session is active at all).
+    in-out property <string> zone-edit-type: "roi";
+
+    // Shared enter/exit logic for both edit types, factored out so the
+    // DETECTION ZONES card's three buttons (ROI toggle, GOAL toggle, and
+    // the single Edit/Done button) can all hot-switch between the two
+    // without duplicating the lens-preview bookkeeping three times.
+    function enter-roi-edit() {
+        if (!root.lens-preview-active) {
+            root.lens-preview-active = true;
+            root.roi-edit-auto-lens-preview = true;
+            root.changed-lens-preview();
+        } else {
+            root.roi-edit-auto-lens-preview = false;
+        }
+        root.goal-edit-mode = false;
+        root.roi-edit-mode = true;
+    }
+    function exit-roi-edit() {
+        root.roi-edit-mode = false;
+        if (root.roi-edit-auto-lens-preview) {
+            root.roi-edit-auto-lens-preview = false;
+            root.lens-preview-active = false;
+            root.changed-lens-preview();
+        }
+    }
+    function enter-goal-edit() {
+        if (root.lens-preview-active) {
+            root.lens-preview-active = false;
+            root.changed-lens-preview();
+        }
+        root.roi-edit-mode = false;
+        root.goal-edit-mode = true;
+    }
+    function exit-goal-edit() {
+        root.goal-edit-mode = false;
+    }
 
     changed lens-preview-side => {
         root.lens-zoom = 1.0;
@@ -1788,54 +1830,100 @@ export component RecoApp inherits Window {
                             }
 
                             CalGroupBox {
-                                title: "FIELD ROI";
+                                title: "DETECTION ZONES";
+
+                                // Which polygon type the click/drag gestures
+                                // below currently apply to - switching this
+                                // while an edit session is already active
+                                // (via the buttons' `enter-*`/`exit-*` calls
+                                // below) hot-switches the live session
+                                // instead of requiring Done then Edit again.
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    FlatButton {
+                                        text: "ROI";
+                                        primary: root.zone-edit-type == "roi";
+                                        horizontal-stretch: 1;
+                                        clicked => {
+                                            root.zone-edit-type = "roi";
+                                            if (root.goal-edit-mode) {
+                                                root.exit-goal-edit();
+                                                root.enter-roi-edit();
+                                            }
+                                        }
+                                    }
+                                    FlatButton {
+                                        text: "GOAL";
+                                        primary: root.zone-edit-type == "goal";
+                                        horizontal-stretch: 1;
+                                        clicked => {
+                                            root.zone-edit-type = "goal";
+                                            if (root.roi-edit-mode) {
+                                                root.exit-roi-edit();
+                                                root.enter-goal-edit();
+                                            }
+                                        }
+                                    }
+                                }
 
                                 HorizontalLayout {
                                     spacing: 6px;
                                     Text {
-                                        text: root.has-roi ? "Field ROI: loaded" : "Field ROI: none";
-                                        color: root.has-roi ? #8ae68a : #777;
+                                        text: root.zone-edit-type == "roi"
+                                            ? (root.has-roi ? "Field ROI: loaded" : "Field ROI: none")
+                                            : (root.has-goal-geometry ? "Goal Geometry: loaded" : "Goal Geometry: none");
+                                        color: root.zone-edit-type == "roi"
+                                            ? (root.has-roi ? #8ae68a : #777)
+                                            : (root.has-goal-geometry ? #ffb066 : #777);
                                         font-size: 11px;
                                         vertical-alignment: center;
                                         horizontal-stretch: 1;
                                     }
                                 }
 
+                                // Shared side selector - ROI reads it as
+                                // which camera's lens preview to show,
+                                // GOAL reads it as which goal's polygon to
+                                // edit. One switch instead of two.
                                 HorizontalLayout {
                                     spacing: 4px;
                                     FlatButton {
-                                        text: root.roi-edit-mode ? "Done Editing ROI"
-                                            : (root.has-roi ? "Edit ROI..." : "Set ROI...");
-                                        primary: root.roi-edit-mode;
+                                        text: "Left";
+                                        primary: root.lens-preview-side == "left";
+                                        horizontal-stretch: 1;
+                                        clicked => { root.lens-preview-side = "left"; root.changed-lens-preview(); }
+                                    }
+                                    FlatButton {
+                                        text: "Right";
+                                        primary: root.lens-preview-side == "right";
+                                        horizontal-stretch: 1;
+                                        clicked => { root.lens-preview-side = "right"; root.changed-lens-preview(); }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    FlatButton {
+                                        text: (root.zone-edit-type == "roi" ? root.roi-edit-mode : root.goal-edit-mode)
+                                            ? "Done Editing"
+                                            : "Edit...";
+                                        primary: root.zone-edit-type == "roi" ? root.roi-edit-mode : root.goal-edit-mode;
                                         horizontal-stretch: 1;
                                         clicked => {
-                                            if (!root.roi-edit-mode) {
-                                                if (!root.lens-preview-active) {
-                                                    root.lens-preview-active = true;
-                                                    root.roi-edit-auto-lens-preview = true;
-                                                    root.changed-lens-preview();
-                                                } else {
-                                                    root.roi-edit-auto-lens-preview = false;
-                                                }
-                                                root.goal-edit-mode = false;
-                                                root.roi-edit-mode = true;
+                                            if (root.zone-edit-type == "roi") {
+                                                if (root.roi-edit-mode) { root.exit-roi-edit(); } else { root.enter-roi-edit(); }
                                             } else {
-                                                root.roi-edit-mode = false;
-                                                if (root.roi-edit-auto-lens-preview) {
-                                                    root.roi-edit-auto-lens-preview = false;
-                                                    root.lens-preview-active = false;
-                                                    root.changed-lens-preview();
-                                                }
+                                                if (root.goal-edit-mode) { root.exit-goal-edit(); } else { root.enter-goal-edit(); }
                                             }
                                         }
                                     }
-                                    FlatButton {
+                                    if root.zone-edit-type == "roi": FlatButton {
                                         text: "Paste ROI";
                                         clicked => { root.paste-roi(); }
                                     }
                                 }
 
-                                LineEdit {
+                                if root.zone-edit-type == "roi": LineEdit {
                                     placeholder-text: "Or paste ROI JSON here...";
                                     accepted(text) => {
                                         root.roi-manual-json = text;
@@ -1844,69 +1932,21 @@ export component RecoApp inherits Window {
                                 }
 
                                 if root.roi-edit-mode: Text {
-                                    text: "Click the lens preview to add points, drag a point to move it, right-click a point to delete it. Switch Left/Right camera above to edit the other side.";
+                                    text: "Click the lens preview to add points, drag a point to move it, right-click a point to delete it. Switch Left/Right above to edit the other camera.";
                                     color: root.text-dim;
                                     font-size: 10px;
                                     wrap: word-wrap;
-                                }
-
-                                if !root.roi-edit-mode && !root.has-roi: Text {
-                                    text: "Or paste ROI JSON above (from another calibration, or scripted).";
-                                    color: root.text-dim;
-                                    font-size: 10px;
-                                    wrap: word-wrap;
-                                }
-                            }
-
-                            CalGroupBox {
-                                title: "GOAL LINE";
-
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    Text {
-                                        text: root.has-goal-geometry ? "Goal Geometry: loaded" : "Goal Geometry: none";
-                                        color: root.has-goal-geometry ? #ffb066 : #777;
-                                        font-size: 11px;
-                                        vertical-alignment: center;
-                                        horizontal-stretch: 1;
-                                    }
-                                }
-
-                                HorizontalLayout {
-                                    spacing: 4px;
-                                    FlatButton {
-                                        text: "Left Goal";
-                                        primary: root.goal-edit-side == "left";
-                                        horizontal-stretch: 1;
-                                        clicked => { root.goal-edit-side = "left"; root.changed-goal-edit-side(); }
-                                    }
-                                    FlatButton {
-                                        text: "Right Goal";
-                                        primary: root.goal-edit-side == "right";
-                                        horizontal-stretch: 1;
-                                        clicked => { root.goal-edit-side = "right"; root.changed-goal-edit-side(); }
-                                    }
-                                }
-
-                                FlatButton {
-                                    text: root.goal-edit-mode ? "Done Editing Goal" : "Edit Goal...";
-                                    primary: root.goal-edit-mode;
-                                    clicked => {
-                                        if (!root.goal-edit-mode) {
-                                            if (root.lens-preview-active) {
-                                                root.lens-preview-active = false;
-                                                root.changed-lens-preview();
-                                            }
-                                            root.roi-edit-mode = false;
-                                            root.goal-edit-mode = true;
-                                        } else {
-                                            root.goal-edit-mode = false;
-                                        }
-                                    }
                                 }
 
                                 if root.goal-edit-mode: Text {
-                                    text: "Click the panorama preview to add points, drag a point to move it, right-click a point to delete it. A goal needs 4+ points to bound both width and height. Switch Left/Right goal above to edit the other end.";
+                                    text: "Click the panorama preview to add points, drag a point to move it, right-click a point to delete it. A goal needs 4+ points to bound both width and height. Switch Left/Right above to edit the other goal.";
+                                    color: root.text-dim;
+                                    font-size: 10px;
+                                    wrap: word-wrap;
+                                }
+
+                                if root.zone-edit-type == "roi" && !root.roi-edit-mode && !root.has-roi: Text {
+                                    text: "Or paste ROI JSON above (from another calibration, or scripted).";
                                     color: root.text-dim;
                                     font-size: 10px;
                                     wrap: word-wrap;
@@ -2528,21 +2568,22 @@ export component RecoApp inherits Window {
                     }
                 }
 
-                // Camera-side switcher, surfaced front-and-center while
-                // editing the ROI (the primary reason you'd need it in
-                // the moment) - not shown otherwise, since the side
-                // panel's own Left/Right toggle covers normal lens
-                // preview use.
-                if root.roi-edit-mode: Rectangle {
+                // Side switcher, surfaced front-and-center while editing
+                // either zone type (the primary reason you'd need it in
+                // the moment) - not shown otherwise, since the DETECTION
+                // ZONES card's own Left/Right toggle covers normal use.
+                // Shared between ROI and GOAL editing (one `lens-preview-
+                // side` value, per the merged card).
+                if root.roi-edit-mode || root.goal-edit-mode: Rectangle {
                     x: (parent.width - self.width) / 2;
                     y: 12px;
-                    width: roi-side-pill.preferred-width + 8px;
+                    width: zone-side-pill.preferred-width + 8px;
                     height: 34px;
                     border-radius: 17px;
                     background: #0d0f11d0;
                     border-width: 1px;
                     border-color: #2a2e33;
-                    roi-side-pill := HorizontalLayout {
+                    zone-side-pill := HorizontalLayout {
                         padding: 4px;
                         spacing: 4px;
                         FlatButton {
@@ -2554,33 +2595,6 @@ export component RecoApp inherits Window {
                             text: "Right";
                             primary: root.lens-preview-side == "right";
                             clicked => { root.lens-preview-side = "right"; root.changed-lens-preview(); }
-                        }
-                    }
-                }
-
-                // Goal-side switcher, same idea as the ROI one above but
-                // for whichever goal is currently being edited.
-                if root.goal-edit-mode: Rectangle {
-                    x: (parent.width - self.width) / 2;
-                    y: 12px;
-                    width: goal-side-pill.preferred-width + 8px;
-                    height: 34px;
-                    border-radius: 17px;
-                    background: #0d0f11d0;
-                    border-width: 1px;
-                    border-color: #2a2e33;
-                    goal-side-pill := HorizontalLayout {
-                        padding: 4px;
-                        spacing: 4px;
-                        FlatButton {
-                            text: "Left Goal";
-                            primary: root.goal-edit-side == "left";
-                            clicked => { root.goal-edit-side = "left"; root.changed-goal-edit-side(); }
-                        }
-                        FlatButton {
-                            text: "Right Goal";
-                            primary: root.goal-edit-side == "right";
-                            clicked => { root.goal-edit-side = "right"; root.changed-goal-edit-side(); }
                         }
                     }
                 }
