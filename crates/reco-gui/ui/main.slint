@@ -926,6 +926,8 @@ export component RecoApp inherits Window {
     in-out property <[float]> roi-points-y: [];
     callback paste-roi();
     in-out property <string> roi-manual-json: "";
+    in-out property <[float]> goal-points-x: [];
+    in-out property <[float]> goal-points-y: [];
 
     // Camera view state (kept in sync with Rust AppState).
     in-out property <float> yaw: 0.0;      // radians
@@ -1291,6 +1293,25 @@ export component RecoApp inherits Window {
     callback roi-pointer-up();
     callback roi-pointer-delete(float, float, float, float);
 
+    // In-app goal-mouth polygon editor, same click/drag/right-click
+    // interaction as the field-ROI editor above, but over the *panorama*
+    // preview (yaw/pitch space via `GoalGeometry`), not the per-camera
+    // lens preview - a calibrated goal must stay valid as the virtual
+    // camera pans/zooms. `output-aspect` mirrors `lens-frame-aspect`'s
+    // role for the ROI editor: Rust sets it (the render pipeline's
+    // aspect ratio) since Slint has no other way to know it.
+    in-out property <bool> has-goal-geometry: false;
+    in-out property <string> goal-edit-side: "left";
+    in-out property <bool> goal-edit-mode: false;
+    in-out property <string> goal-path-commands: "";
+    in-out property <float> output-aspect: 1.7777777;
+    callback changed-goal-edit-side();
+    callback goal-pointer-hit-test(float, float, float, float) -> int;
+    callback goal-pointer-add(float, float, float, float);
+    callback goal-pointer-drag(int, float, float, float, float);
+    callback goal-pointer-up();
+    callback goal-pointer-delete(float, float, float, float);
+
     changed lens-preview-side => {
         root.lens-zoom = 1.0;
         root.lens-pan-x = 0px;
@@ -1302,6 +1323,8 @@ export component RecoApp inherits Window {
         root.lens-pan-y = 0px;
         if (!root.lens-preview-active) {
             root.roi-edit-mode = false;
+        } else {
+            root.goal-edit-mode = false;
         }
     }
 
@@ -1794,6 +1817,7 @@ export component RecoApp inherits Window {
                                                 } else {
                                                     root.roi-edit-auto-lens-preview = false;
                                                 }
+                                                root.goal-edit-mode = false;
                                                 root.roi-edit-mode = true;
                                             } else {
                                                 root.roi-edit-mode = false;
@@ -1828,6 +1852,61 @@ export component RecoApp inherits Window {
 
                                 if !root.roi-edit-mode && !root.has-roi: Text {
                                     text: "Or paste ROI JSON above (from another calibration, or scripted).";
+                                    color: root.text-dim;
+                                    font-size: 10px;
+                                    wrap: word-wrap;
+                                }
+                            }
+
+                            CalGroupBox {
+                                title: "GOAL LINE";
+
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: root.has-goal-geometry ? "Goal Geometry: loaded" : "Goal Geometry: none";
+                                        color: root.has-goal-geometry ? #ffb066 : #777;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    FlatButton {
+                                        text: "Left Goal";
+                                        primary: root.goal-edit-side == "left";
+                                        horizontal-stretch: 1;
+                                        clicked => { root.goal-edit-side = "left"; root.changed-goal-edit-side(); }
+                                    }
+                                    FlatButton {
+                                        text: "Right Goal";
+                                        primary: root.goal-edit-side == "right";
+                                        horizontal-stretch: 1;
+                                        clicked => { root.goal-edit-side = "right"; root.changed-goal-edit-side(); }
+                                    }
+                                }
+
+                                FlatButton {
+                                    text: root.goal-edit-mode ? "Done Editing Goal" : "Edit Goal...";
+                                    primary: root.goal-edit-mode;
+                                    clicked => {
+                                        if (!root.goal-edit-mode) {
+                                            if (root.lens-preview-active) {
+                                                root.lens-preview-active = false;
+                                                root.changed-lens-preview();
+                                            }
+                                            root.roi-edit-mode = false;
+                                            root.goal-edit-mode = true;
+                                        } else {
+                                            root.goal-edit-mode = false;
+                                        }
+                                    }
+                                }
+
+                                if root.goal-edit-mode: Text {
+                                    text: "Click the panorama preview to add points, drag a point to move it, right-click a point to delete it. A goal needs 4+ points to bound both width and height. Switch Left/Right goal above to edit the other end.";
                                     color: root.text-dim;
                                     font-size: 10px;
                                     wrap: word-wrap;
@@ -1920,6 +1999,23 @@ export component RecoApp inherits Window {
                     property <length> content-x: (preview-box.width - content-w) / 2 + root.lens-pan-x;
                     property <length> content-y: (preview-box.height - content-h) / 2 + root.lens-pan-y;
 
+                    // Letterboxed content rect for the panorama preview
+                    // (outside lens-preview mode), same `contain`-fit
+                    // reconstruction as `content-w`/`content-h` above but
+                    // keyed on `output-aspect` (the render pipeline's
+                    // aspect ratio) instead of `lens-frame-aspect` - the
+                    // goal-geometry overlay/pointer math needs this origin/
+                    // size the same way the ROI editor needs the lens one.
+                    // No pan/zoom term: the panorama view pans by
+                    // re-rendering at a new yaw/pitch, not by transforming
+                    // the displayed Image.
+                    property <length> pano-content-w:
+                        root.output-aspect > box-aspect ? preview-box.width : preview-box.height * root.output-aspect;
+                    property <length> pano-content-h:
+                        root.output-aspect > box-aspect ? preview-box.width / root.output-aspect : preview-box.height;
+                    property <length> pano-content-x: (preview-box.width - pano-content-w) / 2;
+                    property <length> pano-content-y: (preview-box.height - pano-content-h) / 2;
+
                     if root.files-loaded: Image {
                         source: root.preview-frame;
                         image-fit: contain;
@@ -1993,6 +2089,44 @@ export component RecoApp inherits Window {
                         border-color: #0f0;
                     }
 
+                    // Goal-geometry polygon outline (visible on the
+                    // panorama preview, i.e. outside lens-preview mode) -
+                    // same `Path` viewbox-aspect approach as the ROI
+                    // outline above (see its comment for why the y-scaling
+                    // is needed), but keyed on `output-aspect`/
+                    // `pano-content-*` instead of the lens ones. Deliberately
+                    // a different color (orange, not green) from the field
+                    // ROI so the two calibrated boundaries are never
+                    // confused at a glance.
+                    if !root.lens-preview-active && root.has-goal-geometry: Path {
+                        x: preview-box.pano-content-x;
+                        y: preview-box.pano-content-y;
+                        width: preview-box.pano-content-w;
+                        height: preview-box.pano-content-h;
+                        viewbox-x: 0;
+                        viewbox-y: 0;
+                        viewbox-width: 1;
+                        viewbox-height: 1.0 / root.output-aspect;
+                        stroke: #ff8c1acc;
+                        stroke-width: 2px;
+                        commands: root.goal-path-commands;
+                    }
+
+                    // Goal-geometry vertex overlay - same idea as the ROI
+                    // dots above, positioned within the panorama letterbox
+                    // rect instead of the lens one.
+                    for idx in root.goal-points-x.length: Rectangle {
+                        visible: !root.lens-preview-active && root.has-goal-geometry;
+                        x: preview-box.pano-content-x + root.goal-points-x[idx] * preview-box.pano-content-w - 4px;
+                        y: preview-box.pano-content-y + root.goal-points-y[idx] * preview-box.pano-content-h - 4px;
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: #ff8c1a88;
+                        border-width: 1px;
+                        border-color: #ff8c1a;
+                    }
+
                     // Pan/zoom (panorama or lens-preview) and, in lens
                     // preview + ROI-edit mode, field-boundary point
                     // editing: click empty space to add a point, drag an
@@ -2030,6 +2164,13 @@ export component RecoApp inherits Window {
                         property <bool> local-in-bounds:
                             self.local-x >= 0px && self.local-x <= preview-box.content-w
                             && self.local-y >= 0px && self.local-y <= preview-box.content-h;
+                        property <int> goal-dragging-index: -1;
+                        property <bool> goal-click-pending: false;
+                        property <length> pano-local-x: self.mouse-x - preview-box.pano-content-x;
+                        property <length> pano-local-y: self.mouse-y - preview-box.pano-content-y;
+                        property <bool> pano-local-in-bounds:
+                            self.pano-local-x >= 0px && self.pano-local-x <= preview-box.pano-content-w
+                            && self.pano-local-y >= 0px && self.pano-local-y <= preview-box.pano-content-h;
                         // Whether the mouse is currently near the seam debug
                         // line (hover feedback / drag gating - see
                         // `seam-hit-test`'s own doc). Only meaningful outside
@@ -2049,6 +2190,7 @@ export component RecoApp inherits Window {
                                 self.press-x = self.mouse-x;
                                 self.press-y = self.mouse-y;
                                 self.roi-click-pending = false;
+                                self.goal-click-pending = false;
                                 self.seam-dragging = !root.lens-preview-active && root.show-seam-line
                                     && root.seam-hit-test(
                                         self.mouse-x / 1px,
@@ -2076,6 +2218,25 @@ export component RecoApp inherits Window {
                                             self.roi-click-pending = true;
                                         }
                                     }
+                                } else if (!root.lens-preview-active && root.goal-edit-mode && self.pano-local-in-bounds) {
+                                    if (e.button == PointerEventButton.right) {
+                                        root.goal-pointer-delete(
+                                            self.pano-local-x / 1px,
+                                            self.pano-local-y / 1px,
+                                            preview-box.pano-content-w / 1px,
+                                            preview-box.pano-content-h / 1px,
+                                        );
+                                    } else if (e.button == PointerEventButton.left) {
+                                        self.goal-dragging-index = root.goal-pointer-hit-test(
+                                            self.pano-local-x / 1px,
+                                            self.pano-local-y / 1px,
+                                            preview-box.pano-content-w / 1px,
+                                            preview-box.pano-content-h / 1px,
+                                        );
+                                        if (self.goal-dragging-index < 0) {
+                                            self.goal-click-pending = true;
+                                        }
+                                    }
                                 }
                             }
                             if (e.kind == PointerEventKind.up) {
@@ -2091,6 +2252,19 @@ export component RecoApp inherits Window {
                                         preview-box.content-h / 1px,
                                     );
                                     self.roi-click-pending = false;
+                                }
+                                if (self.goal-dragging-index >= 0) {
+                                    root.goal-pointer-up();
+                                    self.goal-dragging-index = -1;
+                                }
+                                if (self.goal-click-pending) {
+                                    root.goal-pointer-add(
+                                        self.pano-local-x / 1px,
+                                        self.pano-local-y / 1px,
+                                        preview-box.pano-content-w / 1px,
+                                        preview-box.pano-content-h / 1px,
+                                    );
+                                    self.goal-click-pending = false;
                                 }
                                 self.seam-dragging = false;
                             }
@@ -2134,6 +2308,28 @@ export component RecoApp inherits Window {
                                 } else if (root.lens-preview-active) {
                                     root.lens-pan-x += self.mouse-x - self.last-x;
                                     root.lens-pan-y += self.mouse-y - self.last-y;
+                                } else if (!root.lens-preview-active && root.goal-edit-mode && self.goal-dragging-index >= 0) {
+                                    root.goal-pointer-drag(
+                                        self.goal-dragging-index,
+                                        self.pano-local-x / 1px,
+                                        self.pano-local-y / 1px,
+                                        preview-box.pano-content-w / 1px,
+                                        preview-box.pano-content-h / 1px,
+                                    );
+                                } else if (!root.lens-preview-active && root.goal-edit-mode && self.goal-click-pending
+                                           && (Math.abs((self.mouse-x - self.press-x) / 1px) > 4
+                                               || Math.abs((self.mouse-y - self.press-y) / 1px) > 4)) {
+                                    // Same click-vs-pan disambiguation as the ROI
+                                    // editor above, but panning here is the
+                                    // panorama's angular pan (`root.pan`), not the
+                                    // lens preview's pixel-offset pan.
+                                    self.goal-click-pending = false;
+                                    root.pan(
+                                        (self.mouse-x - self.last-x) / 1px,
+                                        (self.mouse-y - self.last-y) / 1px,
+                                    );
+                                } else if (!root.lens-preview-active && root.goal-edit-mode && self.goal-click-pending) {
+                                    // Still within the click threshold - wait.
                                 } else if (root.show-seam-line && self.seam-dragging) {
                                     // Seam-edit mode: horizontal drag nudges the
                                     // seam instead of panning, normalized by
@@ -2358,6 +2554,33 @@ export component RecoApp inherits Window {
                             text: "Right";
                             primary: root.lens-preview-side == "right";
                             clicked => { root.lens-preview-side = "right"; root.changed-lens-preview(); }
+                        }
+                    }
+                }
+
+                // Goal-side switcher, same idea as the ROI one above but
+                // for whichever goal is currently being edited.
+                if root.goal-edit-mode: Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: 12px;
+                    width: goal-side-pill.preferred-width + 8px;
+                    height: 34px;
+                    border-radius: 17px;
+                    background: #0d0f11d0;
+                    border-width: 1px;
+                    border-color: #2a2e33;
+                    goal-side-pill := HorizontalLayout {
+                        padding: 4px;
+                        spacing: 4px;
+                        FlatButton {
+                            text: "Left Goal";
+                            primary: root.goal-edit-side == "left";
+                            clicked => { root.goal-edit-side = "left"; root.changed-goal-edit-side(); }
+                        }
+                        FlatButton {
+                            text: "Right Goal";
+                            primary: root.goal-edit-side == "right";
+                            clicked => { root.goal-edit-side = "right"; root.changed-goal-edit-side(); }
                         }
                     }
                 }
