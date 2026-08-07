@@ -1,4 +1,4 @@
-# Session handoff - 2026-08-06
+# Session handoff - 2026-08-07
 
 Continuation note for resuming work on a different machine/session -
 git-tracked so it travels with `git pull`/`push` between the user's two
@@ -6,211 +6,147 @@ PCs. Overwrite wholesale at the end of a session rather than appending
 history - git history is the append-only log, this file is just "where
 things stand right now."
 
-## Immediate blocker (why this session paused)
+**No usernames/passwords/IP addresses in this file, ever** - explicit
+user instruction 2026-08-07 after a Pi IP address slipped in the day
+before. Reference "see password manager" / `zerotier-cli listnetworks`
+instead. This also applies to this assistant's own memory files, not
+just git-tracked ones.
 
-User is heading home to continue on the other PC. Mid-way through
-verifying the new goal-detection primitive (see below) against real
-match footage. Blocked on: could not confirm which moment "5:55, goal on
-the left side" refers to.
+## YOLO26 labeling pipeline - DONE end-to-end (2026-08-07)
 
-Found the right video pair + calibration (via
-`C:\Users\Rufan\AppData\Roaming\reco\config\gui.json`'s `recent_*`
-entries - this is the actual source of truth for "what was the GUI last
-looking at", not file mtimes):
-- Left: `D:\VOETBAL_VIDEO\Berghem Sport J011-1\03 OJC -Bergem Sport
-  04072026\L\DJI_20260704095935_0028_D_L01.MP4`
-- Right: same folder, `R\DJI_20260704095935_0029_D_R01.MP4`
-- Calibration: `D:\VOETBAL_VIDEO\Berghem Sport J011-1\03 OJC -Bergem
-  Sport 04072026\DJI Action4 Final_1.json` - already has a `goal_geometry`
-  (both `left` and `right` polygons present, drawn during this session's
-  live GUI test) and a `field_roi`.
+Full detail in project_yolo26n_training_pipeline.md. Summary: the
+Raspberry Pi is set up, Label Studio is running, the 300-image pilot
+batch (with person/ball predictions) is imported and verified working -
+images load, task/prediction counts confirmed via direct DB query. Two
+real Label Studio gotchas hit and fixed along the way, documented in the
+memory file:
+- `LOCAL_FILES_SERVING_ENABLED`/`LOCAL_FILES_DOCUMENT_ROOT` env vars
+  alone are not enough - also needs a registered Local Files storage
+  connection (UI: Project Settings -> Cloud Storage -> Add Source
+  Storage -> Local Files; or `POST /api/storages/localfiles`), or every
+  image request 404s even though the files are genuinely there.
+- Drag-and-drop import via the UI silently did nothing (confirmed via
+  direct SQLite inspection - zero rows, not even a failed-import
+  record). Re-did it via the REST API instead
+  (`POST /api/projects/<id>/import`), which worked and is verifiable.
+- API auth: legacy static tokens are disabled by default on this
+  version: a token from Account & Settings is a JWT *refresh* token,
+  single-use/rotates on exchange - trade it for a short-lived access
+  token via `POST /api/token/refresh/` first, and expect to need a fresh
+  one from the user each new session (can't be reused across sessions).
 
-Extracted frames at t=355s (5:55) and a contact-sheet sweep from
-t=280s to t=430s from both raw cameras (scratch files at
-`D:\VOETBAL_VIDEO\RECO\scratch_goal_check\`, not git-tracked, safe to
-delete) - no obvious goal-scoring moment visible in that window in
-either camera. Likely wrong assumption about the time reference: either
-"5:55" means match-clock time rather than raw-file time (the match spans
-4 files, 0028 through 0031, each ~20 min - if recording started before
-kickoff, match-time and file-time diverge), or it's simply a different
-segment. Asked the user to clarify (file? match-time vs file-time?) -
-question was interrupted by the user ending the session, so this is
-still genuinely open. Resume by getting a precise time reference before
-spending more time hunting frames.
+**Next**: human review of the pilot batch (user-driven), then set up
+`ultralytics` locally and actually fine-tune. Nothing else blocking.
 
-Also worth knowing for next time: the two cameras are an L-shape rig at
-the halfway line, each camera facing one end of the pitch - the left
-camera's calibration space is NOT "the left half of the panorama," it's
-"one full raw fisheye camera," so "goal on the left side" most likely
-means "the goal visible in the left camera's frame," but that still
-needs confirming against which end of the pitch the user means.
+## Goal-scored detection (branch `feat/goal-line-calibration`, pushed to
+`github` remote, not a PR yet)
 
-**UPDATE 2026-08-06, RUFAN_LAPTOP session - blocker resolved (mostly)**:
-user corrected the file location -
-`D:\VOETBAL VIDEO\RECO test vid\DJI_20260704095935_0028_D_L01.MP4`
-(note: different path/spacing than above, same match, local copy on
-this laptop with its own calibration file already containing
-`goal_geometry`). No YOLO ONNX model exists on this laptop at all
-(`ai_model_path: null` in this machine's `gui.json`, no `.onnx`
-anywhere on the drive - checked) so the actual `GoalEntryDetector`-vs-
-real-detections test still could not run here, that needs a machine
-with the model.
+Full context in project_goal_detection_idea.md. Built across this
+session and the previous one: `GoalGeometry` calibration field
+(per-camera raw-pixel space, mirrors `FieldRoi`), a merged reco-gui
+editor (single "Edit ROI / GOAL..." button, ROI/GOAL toggle over the
+lens preview), and `reco-autocam::GoalEntryDetector` (raw, unconfirmed
+polygon-entry signal - 7 tests, all passing). See git log on the branch
+for the full design-pivot story (yaw/pitch space abandoned in favor of
+per-camera pixel space, per user feedback).
 
-But: used the calibration's own `goal_geometry.left` normalized
-coordinates directly (rather than eyeballing crop coordinates off a
-downscaled wide shot - that was tried first and landed on the wrong,
-distant goal on what looks like an adjacent pitch) to zoom into the
-correct goal via ffmpeg crop+scale. Found a strong visual candidate at
-**t=356-358s** in this exact file (close to the user's "5:55" /
-t=355s estimate, well within normal manual-timestamp error): a player
-down on the ground right in/near the goal mouth, several other players
-converging at the same moment - matches "hard to see" well (obscured by
-the scramble, not a clean shot-into-net view).
+**2026-08-07 update - real-footage verification attempted, inconclusive
+in an informative way**: ran actual ball detection (`yolo26s.onnx`) over
+t=345-366s of the file/camera pair with the known goal moment (t=356-
+358s), fed the raw per-frame ball detections through the real
+`GoalEntryDetector` logic. Two findings, neither a code bug:
 
-So: "5:55" was raw file-time after all, off by only ~2-3s - the
-match-clock-vs-file-time theory above was likely a red herring. Frame
-crops were scratch files in this laptop session's temp dir, not saved
-persistently - re-extract from the source at t=350-362s if needed
-rather than hunting for them.
+1. **Zero ball detections in the t=356-358s window itself** - gap
+   between the nearest detections at t=351.97s and t=360.22s. Matches
+   the earlier visual check (a scramble of players right at the goal
+   mouth) - the ball was very likely occluded from the detector's view
+   at the critical moment. A real limitation of bounding-box detection
+   during a goal-mouth scramble, not something to "fix" in the entry-
+   detection logic itself.
+2. **The `goal_geometry.left` polygon drawn during this session's live
+   GUI test does not line up with the real goal at all** - polygon sits
+   around camera-x 0.40-0.45, but every ball detection on that camera in
+   this window sits around camera-x 0.71-0.79, a completely different
+   part of the frame. Almost certainly a rough test scribble from trying
+   out the editor, not a deliberately-traced goal boundary.
 
-**Next step, now unblocked**: on a machine with the ball-detection ONNX
-model available, run detection over roughly t=350-362s of this exact
-file/camera pair and feed the results through `GoalEntryDetector` to
-confirm it actually fires in that window.
+So: the entry-detection code itself checked out fine (no false fires,
+correctly requires the ball inside the polygon) but this specific
+real-footage attempt couldn't actually exercise it meaningfully. Left
+open with the user, unresolved which of two paths to take next:
+- Redraw `goal_geometry.left` accurately around the real goal (need a
+  reference frame around t=356-364s to click against), then re-run this
+  same verification script.
+- Find a cleaner example goal (ball clearly visible crossing the line,
+  not obscured by a scramble) to prove the detection logic end-to-end
+  before trusting it on harder cases.
 
-## This session's main thread: goal-scored detection (branch
-`feat/goal-line-calibration`, pushed to `github` remote, not a PR yet -
-explicitly holding off until the raw signal is verified against real
-footage per the user's own "als het goed gelukt is" requirement)
-
-Full context in project_goal_detection_idea.md (update it - it predates
-this session's design pivot) and the new project memory for this branch
-(save one referencing this file if not already present). Built, in
-order, across 8 commits:
-
-1. **First design attempt (superseded, still visible in git history -
-   branch was not rebased, new commits correct forward instead):**
-   `GoalGeometry` stored as panorama yaw/pitch-space polygons, with a
-   from-scratch `screen_fraction_to_yaw_pitch`/`yaw_pitch_to_screen_
-   fraction` inverse/forward projection pair in `reco-core` (real bug
-   caught by its own round-trip test: `direction_to_yaw_pitch` needs a
-   *normalized* direction vector, the unprojected camera ray wasn't
-   normalized - fixed). A reco-gui editor was built on the *panorama*
-   preview with a separate "GOAL LINE" card.
-
-2. **User feedback, twice, corrected the design:**
-   - First: don't put it on the panorama preview - reuse the exact same
-     distorted lens-preview window the Field ROI editor already uses,
-     with a single "Edit ROI / GOAL..." button and a small ROI/GOAL
-     toggle pill top-left over that preview to pick which polygon is
-     currently being drawn.
-   - This meant `GoalGeometry` actually needed to store per-camera raw-
-     distorted-frame-normalized `[0,1]` polygons - the *same* space as
-     `FieldRoi` - not yaw/pitch. Removed the now-unused yaw/pitch
-     projection functions and their tests from `reco-core` (no other
-     caller; straightforward to rebuild later if e.g. reco-obs's
-     interactive pan/zoom ever needs a panorama-click-to-yaw/pitch
-     primitive).
-   - The polygon-vs-line reasoning (a line only bounds width; a ball
-     lobbed over the crossbar at the same horizontal position as a real
-     goal would be indistinguishable without also bounding height) holds
-     equally well in per-camera pixel space, so nothing was lost by the
-     pivot.
-
-3. **Final reco-gui editor** (`main.slint`/`main.rs`): one merged
-   "DETECTION ZONES" card, single Edit/Done button, `zone-edit-mode` +
-   `zone-edit-type` ("roi"/"goal") replacing the earlier separate `roi-
-   edit-mode`/`goal-edit-mode` flags since both types now share identical
-   lens-preview enter/exit bookkeeping. Goal overlay uses a distinct
-   orange (`#ff8c1a`) vs the field ROI's green. User tested this live and
-   confirmed it works well.
-
-4. **`reco-autocam::GoalEntryDetector`** (new module
-   `crates/reco-autocam/src/goal_events.rs`): a generic
-   `ZoneEntryTracker` (outside->inside polygon transition, one event per
-   entry not per frame-inside, reusing the same `point_in_polygon`
-   primitive `RoiFilteredDetector` already relies on) plus a goal-
-   specific wrapper with one tracker per camera side. 7 new tests, all
-   passing. Deliberately scoped as a **raw, unconfirmed** signal -
-   documented clearly that a 2D polygon-entry event doesn't prove a real
-   goal (corner deliveries / shots over the bar can pass through the same
-   on-screen region). The planned confirmation layer (ball returns to a
-   kickoff/center-circle position) depends on kickoff detection, which
-   doesn't exist yet - tracked as a separate, not-yet-started item, not
-   stubbed out.
+Verification script (throwaway, not committed):
+`D:\VOETBAL_VIDEO\RECO\scratch_goal_check\verify_goal_entry.py` - reads
+the calibration's `goal_geometry` + a `reco stitch --events` JSONL dump,
+replicates `point_in_polygon`/the entry-transition check in Python.
+Re-runnable against a new events dump once the polygon or example
+changes. `events_356.jsonl` (raw detections) and `verify_out.mp4`
+(throwaway stitched output, not needed) also sit in that scratch dir -
+safe to delete, not git-tracked.
 
 **Not done yet, in order**:
-- Resolve the timestamp ambiguity above, then actually run the ball
-  detector (`yolo26s.onnx`, path already in gui.json) over the right
-  window and feed real detections through `GoalEntryDetector` to see if
-  it fires at the right frame - this was the goal of the session's last
-  stretch, interrupted before completion.
+- Resolve the polygon-accuracy / clean-example question above.
 - `GoalEntryDetector` is not wired into any live pipeline yet (no CLI
-  flag, no `--events` integration) - it's a tested, standalone primitive
-  only.
+  flag, no `--events` integration) - still a tested, standalone
+  primitive only.
 - Kickoff/restart detection (needed before a raw entry can become a
-  confirmed "goal scored" event).
-- Once verified end-to-end, prepare as an upstream PR per the user's
-  original instruction - probably rebuilt cleanly off `origin/main` in
-  an isolated worktree, same pattern as PR #435/#464, since this branch
-  has some now-superseded commits in its history from the design pivot.
+  confirmed "goal scored" event) - not started.
+- Once verified end-to-end, prepare as an upstream PR - probably rebuilt
+  cleanly off `origin/main` in an isolated worktree (this branch has
+  some now-superseded commits in its history from the yaw/pitch design
+  pivot), same pattern as PR #435/#464.
 
-## Other threads, unchanged since 2026-08-05 (condensed - full detail in
-memory / earlier git history, not repeated here)
+## Other threads, unchanged (condensed - full detail in memory)
 
-- **YOLO26 training pipeline**: auto-labeling pipeline built and
-  validated (pilot: 300 images, 2491 boxes). Labeling-tool plan pivoted
-  CVAT -> Label Studio on a Raspberry Pi 5 (CVAT doesn't fit the NAS's
-  RAM or the Pi's arm64). Update 2026-08-06: Pi is now physically set up
-  and Label Studio is running, reachable over the ZeroTier network (see
-  password manager / `zerotier-cli listnetworks` for host/address - not
-  recorded here) - see project_yolo26n_training_pipeline.md for the full
-  checklist and status. Update 2026-08-06 (later): Label Studio project created on the
-  Pi via the Visual labeling-setup editor (Custom template), with a
-  `RectangleLabels` config for "person"/"ball" - object/control tag
-  names should be `image`/`label` (script defaults), confirm via the
-  Code toggle before importing tasks.json if unsure. Data import was
-  skipped at creation time. Next (from the other PC): point
-  `scripts/package_yolo_for_labelstudio.py` (committed, tested) at the
-  Pi's real `LOCAL_FILES_DOCUMENT_ROOT`, rsync the pilot dataset onto
-  the Pi, generate `tasks.json` with `--run-converter`, then import it
-  into this project and do the actual human review - that's the
-  remaining bottleneck before fine-tuning can start.
 - **Veo Cam 3 competitive roadmap**: `docs/research-veo-cam3-comparison.md`,
   5 phases, goal detection above is Phase 1 item 2. Not filed as GitHub
   issues yet.
 - **Upstream PRs** (#422-435, #464): all still awaiting owner
-  review/merge on `reco-project/video-stitcher`. No new action needed
-  this session.
+  review/merge on `reco-project/video-stitcher`.
 - reco-gui app icon: still waiting on the user to provide a source image.
 
 ## Housekeeping this session
 
-- Confirmed `git fsck --full` clean before pushing (only harmless
-  dangling blobs, no corruption) - see feedback_git_object_corruption.md,
-  this machine has a known history of loose-object corruption on large
-  commits.
-- User confirmed (again) plain ASCII only, no special characters - see
-  feedback_no_em_dash.md.
+- Confirmed a real gap in cross-machine git identity: commits from
+  RUFAN_LAPTOP show a different author name/email than commits from
+  this machine - two different local `git config user.name`/
+  `user.email` setups, unrelated to which `gh` account has push access
+  (both work fine). Not a bug, don't "fix" it. See
+  feedback_cross_machine_handoff.md.
+- User confirmed (again) plain ASCII only, no special characters.
+- Explicit new rule this session: no usernames/passwords/IP addresses in
+  any tracked file or in this assistant's memory, ever - see
+  feedback_no_credentials_in_tracked_files.md (broadened scope
+  2026-08-07). A Pi IP address that slipped into this file the day
+  before was redacted (commit `56b4399b`).
 - User explicitly said not to bother with release builds while
-  iterating on this feature - debug build + smoke test (launch, load a
-  real calibration, confirm no errors) is enough for now. Still rebuild
-  and relaunch reco-gui.exe (debug) after every .slint/.rs change before
-  claiming something is ready to test - a stale running process silently
-  shows old behavior.
+  iterating on the goal-detection feature - debug build + smoke test is
+  enough. `reco-cli` release build IS worth it for real detection-
+  verification runs (debug + CPU ORT is far too slow for a real video
+  window).
 
 ## Machine-specific reminders (still valid)
 
 - FFMPEG_DIR and LLVM PATH needed per-shell for any build - see
   env_build_requirements.md. `FFMPEG_DIR/bin` also needs to be on PATH
-  to run reco-gui.exe/reco-cli.exe (dynamically linked) or to use the
-  standalone `ffmpeg.exe`/`ffprobe.exe` CLI tools for ad-hoc frame
-  extraction (used this session to pull verification frames).
+  to run `reco-gui.exe`/`reco.exe` (dynamically linked) or to use the
+  standalone `ffmpeg.exe` CLI for ad-hoc frame extraction.
 - Don't drive reco-gui's UI with synthetic mouse/keyboard input -
   reliably unreliable in this app, has corrupted real calibration data
   before.
 - reco-obs won't build on this machine right now (missing
-  `obs-frontend-api.lib`, headers-only OBS SDK setup - see
-  env_build_requirements.md's OBS section) - expected, exclude it
-  (`--exclude reco-obs`) from any workspace-wide build/test command
-  rather than treating it as a new regression.
+  `obs-frontend-api.lib`) - expected, exclude it (`--exclude reco-obs`)
+  from any workspace-wide build/test command rather than treating it as
+  a new regression.
+- `reco stitch` with `--model`/AI tracking defaults to a 1.5s lookahead
+  buffer that can exceed available VRAM on shorter GPUs even at modest
+  output resolutions - pass `--lookahead 0` for any run that doesn't
+  need the smoothed AI-panned output itself (e.g. a detection-only
+  `--events` dump), it's not needed for that and avoids the VRAM error
+  entirely.
