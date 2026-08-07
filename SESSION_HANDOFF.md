@@ -162,9 +162,10 @@ memory / earlier git history, not repeated here)
   validated (pilot: 300 images, 2491 boxes). Labeling-tool plan pivoted
   CVAT -> Label Studio on a Raspberry Pi 5 (CVAT doesn't fit the NAS's
   RAM or the Pi's arm64). Update 2026-08-06: Pi is now physically set up
-  and Label Studio is running, reachable at `http://192.168.191.204:8080`
-  - see project_yolo26n_training_pipeline.md for the full checklist and
-  status. Update 2026-08-06 (later): Label Studio project created on the
+  and Label Studio is running, reachable over the ZeroTier network (see
+  password manager / `zerotier-cli listnetworks` for host/address - not
+  recorded here) - see project_yolo26n_training_pipeline.md for the full
+  checklist and status. Update 2026-08-06 (later): Label Studio project created on the
   Pi via the Visual labeling-setup editor (Custom template), with a
   `RectangleLabels` config for "person"/"ball" - object/control tag
   names should be `image`/`label` (script defaults), confirm via the
