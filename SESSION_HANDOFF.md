@@ -175,6 +175,55 @@ memory / earlier git history, not repeated here)
   the Pi, generate `tasks.json` with `--run-converter`, then import it
   into this project and do the actual human review - that's the
   remaining bottleneck before fine-tuning can start.
+  **Update 2026-08-09 (RUFAN_LAPTOP session)**: the Pi's ZeroTier IP
+  (`192.168.191.204`) is currently broken from this laptop - ICMP
+  replies but every TCP port (8080, 22) times out, root cause not
+  diagnosed. Use the Pi's plain LAN IP instead, `http://192.168.1.73:8080`
+  (same subnet as this laptop, works directly). No SSH key set up to the
+  Pi either (password auth only) - rsync-onto-`LOCAL_FILES_DOCUMENT_ROOT`
+  steps still need real Pi access; worked around it entirely this
+  session by uploading images through Label Studio's own REST file-
+  upload API instead (`POST /api/projects/<id>/import` with the file as
+  multipart - creates one task per image directly in LS's own storage,
+  no rsync/SSH needed). Gotcha: that endpoint's response does *not*
+  include `task_ids` in this LS version (1.23.0) despite creating the
+  tasks fine - fetch `GET /api/tasks?project=<id>` afterwards and match
+  by filename (`/data/upload/<project>/<hash>-<original_filename>`) to
+  get real task ids back, e.g. before calling `POST /api/predictions/`.
+
+  Before committing further to yolo26x as the pre-label teacher model,
+  ran a visual side-by-side: same 150 frames (evenly sampled across
+  `D:\VOETBAL VIDEO\RECO test vid\DJI_20260704095935_0028_D_L01.MP4`,
+  left camera, ~20min) pushed into 4 new LS projects, each pre-labeled by
+  a different model via the API - project 9: `Adit-jain/soccana` (yolo11n,
+  football-trained, player/ball/referee); project 10: `martinjolif/yolo-
+  football-player-detection` (yolo11m, football-trained, 4-class incl.
+  goalkeeper); project 11: `martinjolif/yolo-football-ball-detection`
+  (yolo11n, ball-only specialist); project 12: stock `yolo26x.pt` (COCO-
+  pretrained, not football-trained, filtered to person/ball same as this
+  project's own convention). **User's verdict: soccana (project 9) looked
+  best of all four, beating even stock yolo26x** - domain-specific
+  football training outweighed yolo26x's newer/larger architecture here.
+  Ball-only specialist (project 11) was the weakest, missing the ball in
+  94/150 frames. Practical implication: prefer `Adit-jain/soccana` (or
+  similar football-trained yolo11) as the pre-label/teacher model in
+  `export_yolo_labels.py`'s workflow instead of yolo26x - now has
+  empirical support on this project's own footage, not just forum
+  opinion. Needs a class-name remap at export time (soccana's player+
+  referee -> person), same as already done for stock COCO.
+
+  Also connected a *live* Label Studio ML backend to project 9 (not just
+  static batch predictions): a small Flask app using the `label-studio-
+  ml` SDK (`LabelStudioMLBase` subclass wrapping the soccana model),
+  running locally on this laptop on port 9091, registered via `POST
+  /api/ml/` - shows "Connected" in the project's Model tab and returns
+  live predictions on demand. Needed a Windows Defender Firewall inbound
+  rule for TCP 9091 (`New-NetFirewallRule ... -LocalPort 9091`) - fails
+  with "Toegang geweigerd"/access denied unless PowerShell is run
+  elevated (Administrator). Only live while this laptop + that Python
+  process stay running; falls back to the static predictions otherwise.
+  All throwaway scripts/weights for this comparison live in the session
+  scratchpad, not git-tracked - this note is the only record of them.
 - **Veo Cam 3 competitive roadmap**: `docs/research-veo-cam3-comparison.md`,
   5 phases, goal detection above is Phase 1 item 2. Not filed as GitHub
   issues yet.
