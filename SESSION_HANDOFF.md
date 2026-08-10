@@ -37,7 +37,7 @@ not implemented, just flagged as a real idea.
 
 ## This session's full arc (started by mis-reading last weekend's work,
 then a very productive YOLO fine-tuning push - full technical detail in
-the git-tracked `YOLO26S_Training.md` at the repo root, this section is
+the git-tracked `YOLO26_Training.md` at the repo root, this section is
 the condensed narrative)
 
 1. **Corrected a wrong summary of "what happened over the weekend"**:
@@ -52,7 +52,7 @@ the condensed narrative)
    separate topic. See `project_goal_detection_idea` memory.
 
 2. **yolo26s round series** (`rough_v2` through `rough_v7`, full table
-   in `YOLO26S_Training.md`): confirmed `imgsz` (not epochs, not
+   in `YOLO26_Training.md`): confirmed `imgsz` (not epochs, not
    gradient accumulation - already automatic in ultralytics) was the
    real lever for the ~18px ball (3x3px at imgsz=640, 6x6px at 1280);
    found and fixed a real bug where `prepare_yolo_train_split_from_ls_export.py`
@@ -132,5 +132,5 @@ the condensed narrative)
 - `git fsck --full` before pushing, per feedback_git_object_corruption.md.
 - `soccana.pt` now lives at `D:\VOETBAL_VIDEO\RECO\training\models\soccana.pt`
   on this machine only - not git-tracked (third-party binary), redownload
-  from the Hugging Face URL in `YOLO26S_Training.md` if working from the
+  from the Hugging Face URL in `YOLO26_Training.md` if working from the
   other PC.

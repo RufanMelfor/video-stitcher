@@ -1,4 +1,4 @@
-# YOLO26s Training Log
+# YOLO26 Training Log
 
 Running log of the Label Studio + yolo26 fine-tuning thread. Update
 this file (don't just rely on git history) whenever a new training
