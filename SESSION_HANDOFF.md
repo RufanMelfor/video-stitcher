@@ -12,10 +12,11 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
-**Waiting on the user**: they're reviewing/correcting two new Label
-Studio projects tonight (18: "01 Vierluik - ball-rich pre-labels
-(soccana)", 556 tasks; 19: "02 RPC - ball-rich pre-labels (soccana)",
-200 tasks). Once done, the plan is: train **yolo26n** (not yolo26s -
+**Waiting on the user**: they ran out of time tonight (2026-08-10) and
+will pick review back up tomorrow **on the other PC** - see the new
+"Review-queue tooling" section below for what's ready to use and one
+open bug to chase first. Once review is done, the plan is: train
+**yolo26n** (not yolo26s -
 see scope change below) and **test it inside the real reco app**, not
 just check mAP numbers - this needs an ONNX export this time (`nms=True`
 baked in, output shape `[1, N, 6]`, class names literally
@@ -41,6 +42,68 @@ logic that made `imgsz` matter so much for us. Worth testing on a
 future yolo26n round (would mean pre-resizing/stretching source frames
 before training instead of relying on ultralytics' default resize) -
 not implemented, just flagged as a real idea.
+
+## Review-queue tooling (2026-08-10, RUFAN_LAPTOP session) - review not
+actually done yet, one open display bug
+
+Ahead of tonight's review of projects 18/19, built a read-only priority
+scan over both projects' predictions via the LS REST API (script in the
+session scratchpad, not committed - throwaway, easy to regenerate):
+flags each task as high-priority (no ball/no person detected, a box
+that's a statistical outlier in size for its class within that project,
+or a referee box present), common-pattern (extra ball box - there's only
+one ball in play, quick fix, not worth flagging individually), or clean
+(none of the above tripped). First pass was miscalibrated and flagged
+almost everything (fixed box-size thresholds are wrong for this aerial
+drone footage where a normal player box is already <0.1% of frame area;
+"overlapping person boxes" is *not* a useful signal here either -
+players legitimately cluster in real football footage) - recalibrated
+to per-class percentile-based size bounds computed from each project's
+own data, and dropped the person-overlap check entirely. Final split:
+project 18 (555 pending) - 231 high / 146 common / 178 clean; project 19
+(195 pending) - 71 high / 82 common / 42 clean.
+
+Result surfaced two ways:
+1. A published Claude Artifact checklist page (per-project tiers,
+   direct links into each LS task, checkbox state persisted via
+   localStorage) - ask the user for the URL if picking this up, not
+   recorded here since artifact links aren't secret but also aren't
+   worth hardcoding into a git-tracked file.
+2. Wrote the same priority tier directly onto each task's own `data`
+   field in LS (`data.priority` = `"1-hoog"` / `"2-patroon"` /
+   `"3-schoon"`, numeric-prefixed so alphabetical sort in the Data
+   Manager orders correctly) so it's usable as a native, sortable/
+   filterable Data Manager column without leaving Label Studio at all.
+   Note: tried LS's *built-in* prediction `score` field for this first
+   (would have used the native "Prediction score" DM column) - didn't
+   work, `predictions_score` is some kind of cached/denormalized field
+   that doesn't update on a plain `PATCH /api/predictions/<id>/`, and
+   didn't update even after delete+recreate the prediction with `score`
+   set at creation time. Gave up on that path, `data.priority` is the
+   one that actually works (verified round-tripping through the list
+   endpoint immediately).
+
+**Real bug found and fixed**: project 19 had `show_collab_predictions:
+false` (projects 8/9/18 all had it `true` - almost certainly set that
+way by accident when 19 was created). This hides predictions from the
+annotator's view entirely, which is exactly what looked like "these
+images have no labels at all" to the user - not a data problem, verified
+via the API that every one of the 200 tasks has valid, non-empty
+predictions with sane coordinates matching the project's label config.
+Flipped it to `true` via `PATCH /api/projects/19/`.
+
+**Still open, not resolved**: even after that fix and a hard refresh,
+individual tasks intermittently still show no boxes in the browser
+(reproduced on task ids 1764 then 1762, both independently confirmed via
+the API to have valid, well-formed prediction regions with names
+matching the label config exactly - not a backend data problem). Asked
+the user to check for a "Predictions" selector/dropdown near the Submit
+button (some LS versions need the prediction explicitly selected to load
+into the editor even with `show_collab_predictions=true`) and to check
+the browser devtools console for errors - no answer yet, session ended
+before follow-up. **Next session: get either of those two answers before
+guessing further** - the server side has been thoroughly checked out at
+this point and is not the problem.
 
 ## This session's full arc (started by mis-reading last weekend's work,
 then a very productive YOLO fine-tuning push - full technical detail in
