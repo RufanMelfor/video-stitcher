@@ -13,11 +13,15 @@ directory structure to flatten.
 
 Also does a class remap: LS's soccana-derived label set is
 0=ball, 1=person, 2=referee. This project's convention (matching
-export_yolo_labels.py) is 0=person, 1=ball - and referee folds into
-person (reco-autocam only resolves "person"/"ball" by name; a 3rd class
-in the checkpoint would just be dead weight for our detector). Default
-mapping below encodes that; override with --class-map if the LS export's
-classes.txt ever differs.
+export_yolo_labels.py) is 0=person, 1=ball, 2=referee - reordered to
+put referee last but otherwise kept as its own class (NOT folded into
+person - referee is a real, separately-corrected class in the human
+review, 141 instances in the "Finetuned yolo26n (rough v1)" project as
+of 2026-08-10, more than ball's 123. An earlier version of this script
+folded referee into person; every training round before rough_v7 was
+trained without it as a result). Default mapping below encodes the
+reorder; override with --class-map if the LS export's classes.txt ever
+differs.
 
 Usage:
   python3 prepare_yolo_train_split_from_ls_export.py \
@@ -32,9 +36,10 @@ import shutil
 import sys
 from pathlib import Path
 
-# LS class index -> our class index. person=0, ball=1; referee folds into person.
-DEFAULT_CLASS_MAP = {0: 1, 1: 0, 2: 0}  # ball->1, person->0, referee->0
-OUR_CLASS_NAMES = ["person", "ball"]
+# LS class index -> our class index. person=0, ball=1, referee=2 (kept
+# as its own class, not folded into person - see the module docstring).
+DEFAULT_CLASS_MAP = {0: 1, 1: 0, 2: 2}  # ball->1, person->0, referee->2
+OUR_CLASS_NAMES = ["person", "ball", "referee"]
 
 
 def remap_label_file(src: Path, dst: Path, class_map: dict[int, int]) -> None:
