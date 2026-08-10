@@ -20,9 +20,16 @@ see scope change below) and **test it inside the real reco app**, not
 just check mAP numbers - this needs an ONNX export this time (`nms=True`
 baked in, output shape `[1, N, 6]`, class names literally
 `person`/`ball` so `reco-autocam::resolve_class_id()` picks them up by
-name). **Still undecided**: how `reco-autocam` should treat the new
-`referee` class at runtime - raise this with the user before wiring the
-export in, don't assume "ignore it" or "filter it" without asking.
+name). **Resolved 2026-08-10**: user says do nothing with `referee` at
+runtime for now - it's being trained/labeled as a real 3rd class purely
+for future use, no reco-autocam behavior change wanted yet. Confirmed in
+code this needs zero changes to satisfy: `resolve_class_id()`
+(`crates/reco-autocam/src/lib.rs:581`) only ever looks up `"person"`/
+`"ball"` by name, so a `referee`-named class in the exported model is
+already naturally inert - never matched to the player or ball tracker,
+just silently unused. Safe to export the 3-class model as-is without
+touching reco-autocam; revisit only when an actual referee-aware autocam
+feature is wanted.
 
 **Also queued, not yet tried**: a YouTube tutorial (Roboflow's "Football
 AI Tutorial" by Piotr Skalski, `youtube.com/watch?v=aBVGKoNZQUw`) found
