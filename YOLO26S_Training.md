@@ -297,6 +297,26 @@ duplicates, referee-class findings) transfers directly to yolo26n -
 don't re-discover any of it from scratch. The yolo26s round history
 above is paused, not invalidated.
 
+**Review guidance given to the user**: correctly-detected people/objects
+that fall outside the field ROI (spectators, coaches, subs) should be
+left alone during LS correction, not deleted - `reco-autocam`'s
+`field_roi` filtering already excludes them at runtime, so training-data
+*correctness* is what matters (real object, right box), not whether it
+happens to stand on the pitch. Only fix genuinely wrong detections.
+
+**Idea queued for a future round, not yet tried**: Roboflow's "Football
+AI Tutorial" (Piotr Skalski, `youtube.com/watch?v=aBVGKoNZQUw`) found via
+its transcript that **stretching frames to a square canvas beat
+ultralytics' default letterbox-pad-to-square** for the presenter's
+keypoint-detection model specifically (his own 10-version test) - not
+explicitly confirmed for ball/player detection in that video, but the
+same "don't waste pixels on padding" logic that made `imgsz` matter so
+much here. Ultralytics letterboxes (preserve aspect ratio, pad with
+gray) by default; replicating "stretch" would mean pre-resizing source
+frames to a square target (ignoring aspect ratio) before training,
+outside ultralytics' own resize step - not implemented, worth a cheap
+A/B test on a future round given how fast these experiments run here.
+
 Once ball detection is meaningfully better, resume the
 `feat/goal-line-calibration` branch's real-footage verification (it was
 explicitly paused for exactly this reason - see that branch's
