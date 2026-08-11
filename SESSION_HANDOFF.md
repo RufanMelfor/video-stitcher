@@ -1,4 +1,4 @@
-# Session handoff - 2026-08-10 (TGR_PC)
+# Session handoff - 2026-08-11 (TGR_PC)
 
 Continuation note for resuming work on a different machine/session -
 git-tracked so it travels with `git pull`/`push` between the user's two
@@ -12,177 +12,123 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
-**Waiting on the user**: they ran out of time tonight (2026-08-10) and
-will pick review back up tomorrow **on the other PC** - see the new
-"Review-queue tooling" section below for what's ready to use and one
-open bug to chase first. Once review is done, the plan is: train
-**yolo26n** (not yolo26s -
-see scope change below) and **test it inside the real reco app**, not
-just check mAP numbers - this needs an ONNX export this time (`nms=True`
-baked in, output shape `[1, N, 6]`, class names literally
-`person`/`ball` so `reco-autocam::resolve_class_id()` picks them up by
-name). **Resolved 2026-08-10**: user says do nothing with `referee` at
-runtime for now - it's being trained/labeled as a real 3rd class purely
-for future use, no reco-autocam behavior change wanted yet. Confirmed in
-code this needs zero changes to satisfy: `resolve_class_id()`
-(`crates/reco-autocam/src/lib.rs:581`) only ever looks up `"person"`/
-`"ball"` by name, so a `referee`-named class in the exported model is
-already naturally inert - never matched to the player or ball tracker,
-just silently unused. Safe to export the 3-class model as-is without
-touching reco-autocam; revisit only when an actual referee-aware autocam
-feature is wanted.
+Full technical detail (every parameter tested, every number) is in the
+git-tracked `YOLO26_Training.md` at the repo root - read its "Current
+status / next step (end of day, 2026-08-11)" section at the very
+bottom first, this is the condensed version.
 
-**Also queued, not yet tried**: a YouTube tutorial (Roboflow's "Football
-AI Tutorial" by Piotr Skalski, `youtube.com/watch?v=aBVGKoNZQUw`) found
-via transcript that stretching frames to a square canvas beat
-ultralytics' default letterbox-pad-to-square for *his* keypoint-detection
-model (his own 10-version test) - not explicitly confirmed for
-ball/player detection, but the same "don't waste pixels on padding"
-logic that made `imgsz` matter so much for us. Worth testing on a
-future yolo26n round (would mean pre-resizing/stretching source frames
-before training instead of relying on ultralytics' default resize) -
-not implemented, just flagged as a real idea.
+**Two open items, in priority order:**
 
-## Review-queue tooling (2026-08-10, RUFAN_LAPTOP session) - review not
-actually done yet, one open display bug
+1. **Ask the user**: how should `reco-autocam`'s `ball_max_dist_from_cluster`
+   (default 0.5 rad, controls whether the panner will chase a real ball
+   that's far from the main player cluster - currently it won't, "Action"
+   framing stays on the crowd) be handled? Options: raise the value via
+   `--panner-config` (CLI-only, no GUI slider exists yet), add a GUI
+   slider for it, tell the user to switch **Tracking mode -> ball** for
+   matches where the ball matters more than the crowd, or leave as-is.
+   Not answered yet as of session end.
+2. **Waiting on the user**: LS project 8 ("Finetuned yolo26n (rough v1)")
+   now has **28 new pending tasks** (228 total, 200 finished) - hard
+   ball-miss frames from real footage, soccana pre-labeled, added this
+   session. Once reviewed/corrected, re-export from LS and train yolo26n
+   round 3 on the expanded (228-image) dataset.
 
-Ahead of tonight's review of projects 18/19, built a read-only priority
-scan over both projects' predictions via the LS REST API (script in the
-session scratchpad, not committed - throwaway, easy to regenerate):
-flags each task as high-priority (no ball/no person detected, a box
-that's a statistical outlier in size for its class within that project,
-or a referee box present), common-pattern (extra ball box - there's only
-one ball in play, quick fix, not worth flagging individually), or clean
-(none of the above tripped). First pass was miscalibrated and flagged
-almost everything (fixed box-size thresholds are wrong for this aerial
-drone footage where a normal player box is already <0.1% of frame area;
-"overlapping person boxes" is *not* a useful signal here either -
-players legitimately cluster in real football footage) - recalibrated
-to per-class percentile-based size bounds computed from each project's
-own data, and dropped the person-overlap check entirely. Final split:
-project 18 (555 pending) - 231 high / 146 common / 178 clean; project 19
-(195 pending) - 71 high / 82 common / 42 clean.
+## This session's full arc (continues yesterday's yolo26n pivot -
+2026-08-10's session ended with review not started; today's picked back
+up with project 8 confirmed fully reviewed, LS API used live to check
+18/19's status)
 
-Result surfaced two ways:
-1. A published Claude Artifact checklist page (per-project tiers,
-   direct links into each LS task, checkbox state persisted via
-   localStorage) - ask the user for the URL if picking this up, not
-   recorded here since artifact links aren't secret but also aren't
-   worth hardcoding into a git-tracked file.
-2. Wrote the same priority tier directly onto each task's own `data`
-   field in LS (`data.priority` = `"1-hoog"` / `"2-patroon"` /
-   `"3-schoon"`, numeric-prefixed so alphabetical sort in the Data
-   Manager orders correctly) so it's usable as a native, sortable/
-   filterable Data Manager column without leaving Label Studio at all.
-   Note: tried LS's *built-in* prediction `score` field for this first
-   (would have used the native "Prediction score" DM column) - didn't
-   work, `predictions_score` is some kind of cached/denormalized field
-   that doesn't update on a plain `PATCH /api/predictions/<id>/`, and
-   didn't update even after delete+recreate the prediction with `score`
-   set at creation time. Gave up on that path, `data.priority` is the
-   one that actually works (verified round-tripping through the list
-   endpoint immediately).
+1. **Confirmed via the LS API** (not by asking blind) that only project
+   8 (200/200 finished) was ready to train on; projects 18 ("01
+   Vierluik", 2/556) and 19 ("02 RPC", 19/200) are barely started -
+   deferred those, trained on project 8 only for a clean comparison to
+   the earlier yolo26s `rough_v7` round (identical data/split/hyperparams).
 
-**Real bug found and fixed**: project 19 had `show_collab_predictions:
-false` (projects 8/9/18 all had it `true` - almost certainly set that
-way by accident when 19 was created). This hides predictions from the
-annotator's view entirely, which is exactly what looked like "these
-images have no labels at all" to the user - not a data problem, verified
-via the API that every one of the 200 tasks has valid, non-empty
-predictions with sane coordinates matching the project's label config.
-Flipped it to `true` via `PATCH /api/projects/19/`.
+2. **Trained two yolo26n rounds** on project 8's 170/30 split (3-class,
+   person/ball/referee), fresh from stock `yolo26n.pt`:
+   - `yolo26n_v1_3class_1280_b4_e150` (150 epochs, fixed) - ball mAP50
+     0.649, all mAP50 0.736.
+   - `yolo26n_v2_3class_1280_b4_e300` (300-epoch budget, ultralytics'
+     own early-stopping kicked in at epoch 181, best checkpoint from
+     epoch 81) - ball mAP50 0.694 (better recall, worse precision than
+     v1), all mAP50 0.710. **v2 is the checkpoint in active use** -
+     chosen for the better ball recall, the actual project goal.
+   - Both a bit behind yolo26s's `rough_v7` on identical data (expected,
+     smaller model), ~25% faster to train.
 
-**Still open, not resolved**: even after that fix and a hard refresh,
-individual tasks intermittently still show no boxes in the browser
-(reproduced on task ids 1764 then 1762, both independently confirmed via
-the API to have valid, well-formed prediction regions with names
-matching the label config exactly - not a backend data problem). Asked
-the user to check for a "Predictions" selector/dropdown near the Submit
-button (some LS versions need the prediction explicitly selected to load
-into the editor even with `show_collab_predictions=true`) and to check
-the browser devtools console for errors - no answer yet, session ended
-before follow-up. **Next session: get either of those two answers before
-guessing further** - the server side has been thoroughly checked out at
-this point and is not the problem.
+3. **Exported v2 to ONNX** (`nms=True` requested; ultralytics forces it
+   off for this end2end architecture but the output shape is already
+   the needed `[1,300,6]` regardless - confirmed via direct `onnx.load`
+   metadata inspection: input `1x3x1280x1280`, output `1x300x6`, names
+   `{0:person,1:ball,2:referee}` in the exact dict-string format
+   `reco-detect` parses).
 
-## This session's full arc (started by mis-reading last weekend's work,
-then a very productive YOLO fine-tuning push - full technical detail in
-the git-tracked `YOLO26_Training.md` at the repo root, this section is
-the condensed narrative)
+4. **Tested in the real `reco` app end-to-end**, CPU then GPU:
+   - CPU (default `ort` feature): worked, ~1.7 fps, confirmed correct
+     class-id resolution and real ball-tracker acquire/lose behavior on
+     a live 03 OJC clip.
+   - **Found and fixed a real gap**: `reco-cli`'s `Cargo.toml` had no
+     `directml` feature passthrough (had `cuda`/`tensorrt`/`coreml`, not
+     `directml`) - added the missing line. Also explains why the CPU
+     run's log claimed "DirectML execution provider enabled" when it
+     had actually silently fallen back to CPU (`reco_detect::ort_session`
+     logs "enabled" on any `Ok` result without checking the EP actually
+     attached - not fixed, just understood).
+   - GPU (DirectML) build: **~18 fps avg, ~10x the CPU speed**,
+     comfortably real-time-capable. Hit and fixed a VRAM budget error
+     along the way (`--lookahead-reduced-bit-depth`, the fix already
+     shipped in an earlier session).
 
-1. **Corrected a wrong summary of "what happened over the weekend"**:
-   initially missed that `main` (not the `feat/goal-line-calibration`
-   branch) had the real weekend content, and that Friday's session had
-   *already* resolved the goal-detection timestamp blocker (t=356-358s)
-   and run a real verification (found the test `goal_geometry` polygon
-   was misplaced + zero ball detections during the actual goal moment,
-   due to occlusion). Also missed that goal-detection was explicitly
-   paused because ball-model quality was identified as the root blocker
-   - i.e. this whole session's YOLO thread *is* the fix for that, not a
-   separate topic. See `project_goal_detection_idea` memory.
+5. **Added 28 hard-frame training examples to LS project 8** - pulled
+   raw frames from two confirmed ball-miss windows in real footage,
+   soccana-pre-labeled (20/28 got a soccana ball box), pushed via the
+   REST import+predictions API (recreated the push script fresh this
+   session, scratchpad only). Hit and fixed one real bug: re-uploading
+   the same filename twice in one run silently mis-attaches the
+   prediction to the *first* matching task, leaving an orphaned
+   zero-prediction duplicate - caught via a `total_predictions==0`
+   sweep, deleted the orphan.
 
-2. **yolo26s round series** (`rough_v2` through `rough_v7`, full table
-   in `YOLO26_Training.md`): confirmed `imgsz` (not epochs, not
-   gradient accumulation - already automatic in ultralytics) was the
-   real lever for the ~18px ball (3x3px at imgsz=640, 6x6px at 1280);
-   found and fixed a real bug where `prepare_yolo_train_split_from_ls_export.py`
-   was silently folding the `referee` LS class into `person` (141
-   already-corrected referee instances discarded across every round
-   through `rough_v6`); confirmed YOLO26 is an end2end/NMS-free
-   architecture, so near-duplicate boxes are a training-convergence
-   symptom, not something any inference-time NMS flag fixes.
-
-3. **Downloaded `soccana.pt`** (user-approved, `Adit-jain/soccana` on
-   Hugging Face) to this machine and verified its real class order
-   empirically (`{0: Player, 1: Ball, 2: Referee}` - don't trust the
-   older LS project's classes.txt order, that was a different,
-   unrelated ordering set at labeling-config time).
-
-4. **Expanded training data to 3 more matches**: `01 Vierluik Oefen
-   20062026` (3 sub-matches sharing one rig/day) and `02 RPC -Berghem
-   Sport`, both under `D:\VOETBAL_VIDEO\Berghem Sport J011-1\`. Their
-   calibration files were in the old pre-2026-07-15 "match" format -
-   converted by hand using the exact mapping in
-   `project_calibration_format_migration` memory, verified via the
-   temp-`#[test]` approach (test removed after, no lasting repo change).
-
-5. **Built `scripts/select_ball_rich_frames.py`** (committed) - samples
-   candidate frames from raw video, runs soccana, keeps only the
-   frames richest in ball detections (user's explicit ask, not uniform
-   time-sampling). Real gotchas hit and fixed: `Path.replace()` can't
-   move files across drives on Windows (`WinError 17`, use
-   `shutil.move`); the generic `-hwaccel cuda` ffmpeg flag silently
-   falls back to software decode on this machine, need the explicit
-   `-c:v hevc_cuvid` decoder for a real ~1.35-1.4x realtime speedup.
-
-6. **User capped the dataset at 100 frames/camera** ("niet meer dan 100
-   per video anders ben ik nog maanden bezig met reviewen") - trimmed
-   an already-ranked 150/camera selection down to 100 without
-   re-running detection (frames are saved in ball-richness order).
-   Final: 01 Vierluik 556 images, 02 RPC 200 images - pushed to LS
-   projects 18/19 above via a second throwaway script
-   (`push_yolo_labels_to_ls.py`, scratchpad, not committed - posts
-   already-computed labels as predictions, no live model needed).
-
-7. **User guidance on review scope**: real people/objects correctly
-   detected outside the field ROI (spectators, coaches, subs) should
-   be **left as-is during correction**, not deleted - `reco-autocam`'s
-   `field_roi` filtering already handles field-boundary exclusion at
-   runtime, so training-data correctness (is it really a person, is
-   the box right) matters, not whether it happens to stand on the
-   pitch. Only genuinely wrong detections need fixing.
-
-8. **Scope change, same session**: user decided **yolo26n, not yolo26s,
-   is now the active training target** (still with referee as a real
-   3rd class). The yolo26s round history is paused, not abandoned - all
-   its findings (imgsz/batch/epoch/NMS-free/referee-fix) transfer
-   directly to yolo26n, don't re-discover them.
+6. **User reported a real symptom** from their own export test: camera
+   pans stuck for ~7s during real, continuous open play (not a
+   stoppage - confirmed by pulling actual video frames) whenever the
+   ball goes undetected for a few seconds. Root-caused through a long
+   back-and-forth of `--panner-config` A/B tests against the identical
+   clip:
+   - Dead-zone alone: didn't fix it.
+   - `cluster_mode: density -> trimmed_mean`: fixed the freeze (density
+     was locking onto a static sub-group of players instead of
+     following the whole formation).
+   - User then reported the *opposite* problem (wobbly/jittery) after
+     applying the fix - turned out their real GUI settings (shared via
+     screenshot) differed from this session's CLI reproduction in ways
+     that mattered: `ball_weight=1.0` (manually maxed, not the `action`
+     preset's own 0.35), `detection_interval=3`, `lookahead=0.5s`.
+     Reproduced the wobble exactly once matched. Swapped in a relabeled
+     `soccana.onnx` (fixed a real gotcha: `model.names[i]=...` on the
+     ultralytics Python wrapper doesn't persist to the exported ONNX,
+     had to patch the ONNX metadata directly) with identical settings -
+     jitter was the same or worse, **ruling out yolo26n's detection
+     quality as the cause**. Confirmed `ball_weight=1.0` was the actual
+     culprit - `0.35` roughly halved the jitter without bringing the
+     freeze back.
+   - User then asked if `field_roi` explains a separate "camera won't
+     reach the corner" symptom. Tested directly (calibration copy with
+     `field_roi` stripped) - ROI does filter real detections but didn't
+     change the camera's pan/tilt range. Found the real mechanism
+     instead by pulling the actual video frame at the exact timestamp:
+     a genuine, isolated ball far from the main player cluster gets
+     rejected by the panner's `ball_near_cluster` gate
+     (`ball_max_dist_from_cluster`, default 0.5 rad, not GUI-exposed) -
+     "Action" framing's designed behavior (stay with the crowd), not a
+     bug. Left as an open question for the user (see above).
 
 ## Other threads, unchanged since 2026-08-07
 
 - **Goal-scored detection** (`feat/goal-line-calibration` branch):
-  still paused pending better ball-model quality - directly downstream
-  of the thread above, resume once yolo26n is trained and tested.
+  still paused pending better ball-model quality - yolo26n_v2 is
+  meaningfully better than the original blocker, worth revisiting once
+  the two open items above are settled.
 - **Veo Cam 3 competitive roadmap**: `docs/research-veo-cam3-comparison.md`.
 - **Upstream PRs** (#422-435, #464): awaiting owner review/merge.
 - reco-gui app icon: still waiting on a source image from the user.
@@ -198,9 +144,16 @@ the condensed narrative)
   3060 Ti) - the CUDA build needed the explicit
   `--index-url https://download.pytorch.org/whl/cu128` at install time,
   default `pip install torch` gives CPU-only.
+- `python` isn't on PATH as a bare command in this session's shell -
+  use the full path,
+  `C:\Users\Rufan\AppData\Local\Programs\Python\Python314\python`.
 - Don't drive reco-gui's UI with synthetic mouse/keyboard input.
 - `git fsck --full` before pushing, per feedback_git_object_corruption.md.
-- `soccana.pt` now lives at `D:\VOETBAL_VIDEO\RECO\training\models\soccana.pt`
-  on this machine only - not git-tracked (third-party binary), redownload
-  from the Hugging Face URL in `YOLO26_Training.md` if working from the
-  other PC.
+- `soccana.pt` and the newly-relabeled `soccana.onnx` both live at
+  `D:\VOETBAL_VIDEO\RECO\training\models\` on this machine only - not
+  git-tracked (third-party-derived binaries), redownload/re-export from
+  the Hugging Face URL + relabeling steps in `YOLO26_Training.md` if
+  working from the other PC.
+- GPU renders can hit a transient `GetData timed out (>1M polls)`
+  D3D11VA staging error after many back-to-back runs in one session -
+  not reproducible, just retry.

@@ -99,6 +99,51 @@ val (deterministic last-15%, same stem-sort convention as
 
 | `rough_v7_3class_1280_b4_e150` | 1280 | 4 | 150 | 0.693 | 0.980 | 0.583 | 0.756 | 0.535 | 32 min |
 
+## yolo26n rounds (active target, 2026-08-11 onward)
+
+First yolo26n round, same data source and hyperparams as `rough_v7`
+(LS project 8, 170/30 split, 3-class person/ball/referee) for a direct
+model-size comparison. Trained fresh from stock `yolo26n.pt`, same
+reasoning as `rough_v7`'s fresh start (different class-head shape than
+the old 2-class `rough_v1`).
+
+| run | imgsz | batch | epochs | ball mAP50 | ball P | ball R | all mAP50 | mAP50-95 | wall time |
+|---|---|---|---|---|---|---|---|---|---|
+| `yolo26n_v1_3class_1280_b4_e150` | 1280 | 4 | 150 | 0.649 | 0.999 | 0.500 | 0.736 | 0.495 | 25 min |
+| `yolo26n_v2_3class_1280_b4_e300` | 1280 | 4 | 300 (early-stopped at 181, best @ 81) | 0.694 | 0.861 | 0.583 | 0.710 | 0.484 | 28 min |
+
+Checkpoints:
+`D:\VOETBAL_VIDEO\RECO\training\finetuned_yolo26n_roughv1_train_3class\runs\<run name>\weights\best.pt`.
+
+`yolo26n_v1_3class_1280_b4_e150` per-class: person mAP50 0.895 (P 0.876,
+R 0.842), ball mAP50 0.649 (P 0.999, R 0.500), referee mAP50 0.665 (P
+0.262, R 1.000, only 3 val instances - noise, not a real signal, same
+caveat as `rough_v7`).
+
+`yolo26n_v2_3class_1280_b4_e300` per-class: person mAP50 0.902 (P 0.927,
+R 0.814), ball mAP50 0.694 (P 0.861, R 0.583), referee mAP50 0.535 (P
+0.267, R 1.000, same 3-instance noise caveat).
+
+**Vs. `rough_v7` (yolo26s, identical data/hyperparams)**: yolo26n is
+uniformly a bit behind, as expected for the smaller architecture (2.5M
+params) - `v1` ball mAP50 0.649 vs 0.693, all mAP50 0.736 vs 0.756,
+person mAP50 0.895 vs 0.934. Training is ~25% faster (25 min vs 32 min)
+for the size/speed tradeoff.
+
+**`v1` vs `v2` (epoch-scaling on yolo26n specifically)**: ultralytics'
+own `EarlyStopping(patience=100)` kicked in at epoch 181 (no improvement
+for 100 epochs), with the actual best checkpoint from **epoch 81** - the
+300-epoch target was never reached, unlike `rough_v6` which trained the
+full 300 for yolo26s. Ball recall improved (0.500 -> 0.583) and ball
+mAP50 improved (0.649 -> 0.694), but ball precision dropped noticeably
+(0.999 -> 0.861) and all-class mAP50 dropped slightly (0.736 -> 0.710,
+driven mostly by referee's 0.665 -> 0.535 - within the 3-instance noise
+band, not a real signal). Net read: **yolo26n converges faster than
+yolo26s on this same small dataset and plateaus earlier** - more epochs
+past ~80-100 isn't buying more on this data size for the n-variant
+either, echoing rough_v4->v6's "epoch-scaling exhausted, need more
+ball-labeled data" conclusion, just reached sooner.
+
 All checkpoints under
 `D:\VOETBAL_VIDEO\RECO\training\finetuned_yolo26n_roughv1_train\runs\<run name>\weights\best.pt`
 (`rough_v7` under the `_3class` variant of that path - see its own row's
@@ -281,16 +326,117 @@ a model live.
 
 ## Current status / next step
 
-**SCOPE CHANGE**: yolo26n (not yolo26s) is now the active target, per
-the user - see the note at the top of this file. Plan: user
-reviews/corrects LS projects 18 and 19 tonight (2026-08-10), yolo26n
-gets trained and tested inside the real `reco` app the next day - which
-means an ONNX export step this time (`nms=True` baked in, output shape
-`[1, N, 6]`, class names literally `person`/`ball` for `reco-autocam`'s
-`resolve_class_id()`), not just an mAP table. **Undecided**: how
-`reco-autocam` should treat the new `referee` class at runtime (ignore
-it, filter it out, something new) - raise this with the user before
-wiring the export in.
+**yolo26n first round done (2026-08-11)**: `yolo26n_v1_3class_1280_b4_e150`
+trained on LS project 8's 200 fully-corrected images (170/30 split,
+3-class) - see the table above. LS projects 18 ("01 Vierluik", 2/556
+finished) and 19 ("02 RPC", 19/200 finished) are **not** review-complete
+yet (checked live via the LS API 2026-08-11) - this round used project 8
+only, same data as `rough_v7`, for a clean model-size comparison. Not
+re-training on 18/19 until the user finishes reviewing those.
+
+Next step: export `yolo26n_v1_3class_1280_b4_e150`'s `best.pt` to ONNX
+(`nms=True` baked in, output shape `[1, N, 6]`, class names literally
+`person`/`ball` for `reco-autocam`'s `resolve_class_id()`) and test
+inside the real `reco` app - not just the mAP table above. **Resolved
+2026-08-10**: referee needs zero `reco-autocam` changes to export safely
+- `resolve_class_id()` only looks up `"person"`/`"ball"` by name, so a
+`referee`-named class is already naturally inert. See
+`SESSION_HANDOFF.md` for the exact code reference.
+
+**(Superseded - see "Current status / next step" at the very end of
+this file for where things actually stand as of end of day
+2026-08-11.)**
+
+## First real-app test (2026-08-11)
+
+Exported `yolo26n_v2_3class_1280_b4_e300`'s `best.pt` (chosen over `v1`
+for its better ball recall - see the vs. comparison above) with `yolo
+export format=onnx imgsz=1280 nms=True`. Ultralytics overrode
+`nms=True` -> `False` itself ("not available for end2end models") but
+the output shape is `[1, 300, 6]` regardless - YOLO26's own end2end head
+already produces exactly the layout `reco-detect::detectors::cpu`
+expects, the export flag is a no-op for this model family. Verified via
+`onnx.load` before running anything: input `(1,3,1280,1280)`, output
+`(1,300,6)`, metadata `names = {0: 'person', 1: 'ball', 2: 'referee'}` -
+the exact dict-string format `parse_names_dict_string()` parses.
+
+Ran `reco stitch` (release build, default `autocam+ort` CPU-detection
+features) on a 30s clip of the 03 OJC match (t=300-330s,
+`DJI_20260704095935_0028/0029`, `--tracking field --no-zero-copy`).
+Ran clean end to end, no errors/panics, 899 frames encoded successfully
+to `yolo26n_v2_ONNX_test1.mp4` in the match folder. `resolve_class_id()`
+picked up the model correctly at startup: `ball=1, person=0`; referee
+loaded but inert as expected, no code changes needed.
+
+Detection stats across the clip's `--events` JSONL (899 frames):
+
+| class | frames with >=1 det | total dets | mean conf | max conf |
+|---|---|---|---|---|
+| person | ~100% | 17836 | 0.607 | 0.988 |
+| ball | 98 (10.9%) | 198 | 0.477 | 0.983 |
+| referee | 812 (**90.3%**) | 1161 | 0.591 | 0.987 |
+
+Ball tracker (from the run log): acquired the ball 3 times over 30s
+(conf 0.10/0.60/0.16 at acquisition), lost track twice after the 20-
+coast-frame timeout - consistent with the 0.583 val recall, not
+continuous but picks it up repeatedly rather than never.
+
+**Real finding, not a pipeline bug**: referee fires in 90.3% of frames -
+that's the low val precision (0.267, see the table above) showing up in
+practice, not just a small-val-set statistical artifact. The model is
+much more trigger-happy on "referee" than the 3-instance val set alone
+suggested. Doesn't affect anything today (referee is inert at runtime,
+confirmed above), but worth knowing before anyone builds a real
+referee-aware feature on top of this checkpoint - would need either more
+referee-labeled data or a stricter confidence threshold for that class
+specifically.
+
+CPU-only detection (default `ort` feature, no CUDA/TensorRT EP) ran the
+full pipeline at only ~1.7 fps average (899 frames / 538.7s wall,
+excluding the ~29s lookahead pre-fill) - expected for imgsz=1280 YOLO on
+CPU, not a regression. A GPU-backed EP build (`--features cuda` or
+`tensorrt`) would be needed before this is usable at real-time capture
+speed; today's test was purely to validate correctness end-to-end,
+timing was not the point.
+
+## GPU-backed (DirectML) re-run, same clip (2026-08-11)
+
+**Found a real gap while wiring this up**: `reco-cli`'s `Cargo.toml` had
+`cuda`/`tensorrt`/`coreml` feature passthroughs to `reco-autocam` but no
+`directml` one, even though `reco-detect`/`reco-autocam` already
+implement it. That's also why the first CPU run's log line
+("`ORT: DirectML execution provider enabled`") was misleading - `ort`
+itself logged a WARN two lines earlier that DirectML couldn't register
+because its Cargo feature wasn't compiled in, but `reco_detect::ort_session`
+logs its own "enabled" INFO unconditionally on the `Ok` result rather
+than checking whether the EP actually attached, so the session silently
+fell back to CPU while claiming GPU. Fixed by adding the missing
+`directml = ["autocam", "reco-autocam/directml"]` line (same pattern as
+the other three EPs) - `crates/reco-cli/Cargo.toml`. The misleading-log
+part (real EP vs. requested-but-silently-declined) wasn't touched, only
+the missing feature wiring that was the actual gap - worth a closer look
+if it causes confusion again.
+
+Rebuilt with `--features directml`, re-ran the identical clip (dropped
+`--no-zero-copy` since GPU detection no longer needs CPU-resident
+frames). First attempt hit a real, expected wall: `not enough VRAM for a
+1.5s lookahead` - zero-copy's lookahead pool needs ~4.7 GB for 71 slots
+at the source's native 3840x2880 10-bit, only ~4.1 GB was usable on the
+3060 Ti's 8 GB (shared with the DirectML detection session + OS
+display). Fixed with the already-shipped `--lookahead-reduced-bit-depth`
+flag (see `project_export_vram_lookahead` memory) - halves the pool's
+VRAM cost for 10-bit sources.
+
+Result: `Successfully registered DmlExecutionProvider` confirmed in the
+log (the real thing this time, not the misleading CPU-fallback message).
+Same 899-frame clip, same ball-tracker acquire/lose pattern (identical
+detections - DirectML vs CPU gave the same results, as expected for the
+same weights/inputs) but **17.9 fps avg / up to ~650 fps burst** vs the
+CPU run's 1.7 fps - roughly a 10x speedup, comfortably real-time-capable
+for live capture at this resolution. Output:
+`yolo26n_v2_ONNX_test2_gpu.mp4` in the match folder. Bottleneck shifted
+to GPU readback (0.7ms/frame) rather than detection - detection is no
+longer the pipeline's limiting factor on this hardware.
 
 Everything in "Key finding 1/2/3" above (imgsz, batch, epoch, NMS-free-
 duplicates, referee-class findings) transfers directly to yolo26n -
@@ -321,3 +467,257 @@ Once ball detection is meaningfully better, resume the
 `feat/goal-line-calibration` branch's real-footage verification (it was
 explicitly paused for exactly this reason - see that branch's
 `SESSION_HANDOFF.md` history and `project_goal_detection_idea` memory).
+
+## Targeted hard-frame batch added to project 8 (2026-08-11)
+
+The user's own `test_v054_yolo26n_v2.mp4` export (03 OJC, t=100-130s)
+surfaced a real symptom: the panner froze on the player cluster for ~7s
+during continuous, moving open play (confirmed via extracted frames -
+not a stoppage/corner-kick) because the ball went completely
+undetected the whole stretch. Root-caused as two compounding factors:
+`yolo26n_v2`'s ball recall (0.583 val, ~11% of frames in the earlier
+GPU test) makes multi-second ball-less stretches common, and
+`reco-autocam`'s `FieldPanner` default `dead_zone_rad=0.20` combined
+with its slow `cluster_alpha=0.012` EMA makes cluster-only tracking
+(no ball to blend toward) very sticky when nothing large enough occurs
+to escape the dead zone - not a crash, a config/tuning interaction. See
+this session's chat log for the full diagnosis (events-JSONL frame-by-
+frame analysis + extracted video frames). `dead_zone_rad` is exposed in
+`reco-gui`'s export settings (Dead-zone slider, `ui/main.slint`, range
+0.0-0.5 rad, default 0.20) - worth the user trying a lower value (e.g.
+0.05-0.08) before any code change; `cluster_alpha` is not GUI-exposed.
+
+Pulled 28 raw per-camera frames (14 left + 14 right, `hevc_cuvid`
+decode, no rotation filter - matches `select_ball_rich_frames.py`'s
+convention) from the two confirmed ball-miss windows: t=111-121s
+("winA", the user's freeze) and t=311-321s (a similar miss stretch in
+this session's own earlier GPU test clip), same first-segment 03 OJC
+source videos, 1 frame/1.5s. Ran `soccana.pt` as the pre-label teacher
+(same model/conf=0.15/imgsz=1280 as `select_ball_rich_frames.py`) - 20/28
+got a soccana ball box (the other 8 are hard even for the stronger
+teacher, still useful as review candidates). Pushed all 28 into LS
+project 8 ("Finetuned yolo26n (rough v1)") via the same one-file-per-
+request import API + separate predictions POST pattern as
+`push_rough_v2_to_ls.py`/`push_yolo_labels_to_ls.py` (recreated fresh
+in-session, scratchpad only, not committed - hit and fixed one real bug
+this time: matching a newly-imported task back to its file by filename
+substring breaks if the same filename gets uploaded twice in one run,
+silently attaches the prediction to the *first* match and leaves an
+orphaned zero-prediction duplicate task - hit this for one frame,
+caught it via a `total_predictions==0` sweep afterward, deleted the
+orphan). Project 8 is now **228 tasks, 200 already finished, 28 new
+pending** - ready for the user to review before the next yolo26n
+training round.
+
+## Panner freeze: dead-zone alone didn't fix it, cluster_mode did (2026-08-11)
+
+Re-ran the exact same clip/model 3x via `reco stitch --panner-config`
+(shallow JSON overlay onto `FieldPannerConfig`, accepts any struct field
+- confirmed by reading `crates/reco-cli/src/stitch.rs`, not just the
+GUI-curated subset) to isolate the real fix, using
+`--lookahead-reduced-bit-depth` + GPU/DirectML build throughout:
+
+1. `dead_zone_rad=0.06` alone (default 0.20) - **did not fix it**. Pose
+   still froze bit-exact across the same ~440-660 frame window. This
+   ruled out the dead-zone-alone theory from the earlier diagnosis.
+2. `dead_zone_rad=0.06` + `cluster_alpha=0.05` (default 0.012, not
+   GUI-exposed) - partial improvement (moved for ~100 frames) then
+   froze again at a *different* fixed point for another ~80 frames.
+   Ruled out "EMA too slow" as the sole cause too.
+3. `dead_zone_rad=0.06` + `cluster_mode=trimmed_mean` (default
+   `density`, **is** GUI-exposed as a dropdown) - the freeze
+   essentially resolved: continuous drift through the whole previous
+   freeze window, down to one short ~2s settle that reads as natural
+   rather than stuck (vs. the original ~7s hard lock).
+
+**Real conclusion, revising the earlier diagnosis**: the dominant cause
+wasn't the dead-zone or the EMA rate, it was `ClusterMode::Density`
+itself - picking the single densest neighbor-count peak (bandwidth 0.30
+rad) tends to lock onto a compact, relatively static group (e.g. a
+defensive line) rather than the group actually carrying the play,
+especially once the ball is no longer detected to break the lock via
+`ball_weight` blending. `trimmed_mean` (confidence-weighted mean of the
+`keep_fraction`-closest 80% of *all* tracked players, not a density
+peak) tracks the whole formation's drift instead and doesn't get stuck
+the same way. Side effect worth knowing, not a bug: `trimmed_mean`
+framed noticeably wider (FOV crept up toward ~55° vs. `density`'s
+~30-40° here) since it isn't zeroing in on one tight sub-group.
+
+**Recommendation for the user's export settings**: switch **Cluster
+mode -> trimmed_mean** and lower **Dead-zone -> ~0.05-0.08** (both
+already GUI sliders/dropdown, no code change needed). Test outputs for
+comparison, same clip/model throughout:
+`test_v054_yolo26n_v2_lowdz.mp4` (dead-zone only, still froze),
+`test_v054_yolo26n_v2_lowdz_fastalpha.mp4` (dead-zone + alpha, partial),
+`test_v054_yolo26n_v2_trimmed.mp4` (dead-zone + trimmed_mean, best) -
+all in the 03 OJC match folder alongside the original
+`test_v054_yolo26n_v2.mp4`.
+
+**User's own export of this recommendation felt "wiebelig en
+schommelig" (wobbly/jittery)** - not reproduced by this session's own
+30s test-clip numbers (frame-to-frame `|dyaw|`: `dz=0.06 density`
+mean 0.00115/p95 0.00423/flips 10, `dz=0.06 trimmed_mean` mean
+0.00077/p95 0.00297/flips 3 - trimmed_mean was *smoother* by this
+metric on this clip, not jitterier), so either the user's dead-zone
+value, clip/timerange, or other settings (ball_weight?) differed from
+this session's test, or real crowded-scramble footage exposes
+whole-formation-mean noise this calm 30s window didn't. Tried the
+obvious middle ground - `dead_zone_rad=0.12` + `trimmed_mean` - and it
+confirmed a genuine, structural tension rather than a free lunch: jitter
+dropped further (mean 0.00052, flips 2) but the longest freeze-run grew
+to **327 frames (~11s)**, worse than `dz=0.06`'s 55-frame (~1.8s) one.
+Single dead-zone knob trades freeze-resistance against wobble-
+resistance directly - raising it to kill wobble measurably brings the
+freeze back. Asked the user for their exact settings/clip before
+tuning further rather than guessing blind; `velocity_alpha` (default
+0.06, downstream smoothing of the actual camera motion, separate from
+the dead-zone's "move at all" gate) flagged as the next lever to try if
+dead-zone alone can't hit both goals at once - not tested yet.
+
+**Resolved: not a yolo26n problem, it's `ball_weight`.** User shared
+their actual export-settings screenshot - real values differed from
+this session's earlier CLI tests in ways that mattered:
+`--panner-preset action` (not `broadcast`), **`ball_weight=1.0`** (not
+the `action` preset's own default 0.35 - manually maxed by the user),
+`detection_interval=3` (not the default 1), `lookahead=0.5s` (not the
+1.5s default). Re-ran with those exact settings and it reproduced the
+wobble: `mean|dyaw|=0.00299` vs. this session's earlier `dz=0.06
+trimmed_mean` test's `0.00077` - a real ~4x jump, freeze gone
+(`longest_frozen_run` down to 21 frames).
+
+To isolate model vs. config, relabeled `soccana.pt`'s class names
+(`Player/Ball/Referee` -> `person/ball/referee` - direct ONNX metadata
+patch via the `onnx` lib, not `model.names[i]=...` on the ultralytics
+wrapper, which silently doesn't persist back to the exported graph;
+`resolve_class_id` only matches `"person"` literally, `"player"` is not
+an accepted alias) and exported with `nms=True` (works for this
+non-end2end yolo11n architecture, unlike yolo26's forced `nms=False`).
+Ran the identical settings with `soccana.onnx` swapped in for the model
+- **jitter was the same or slightly worse** (`mean|dyaw|=0.00502`,
+`longest_frozen_run=51`), despite soccana being the established
+stronger ball-detection teacher. A better ball model didn't fix it,
+which rules out "yolo26n's ball detection is too flaky" as the cause -
+confirms this is a panner-config interaction, not a model-quality one.
+
+Confirmed the specific lever: same run with **`ball_weight=0.35`**
+(the `action` preset's own default, everything else unchanged) roughly
+**halved** the jitter (`mean|dyaw|=0.00142`, p95 `0.00685` vs. `0.01384`
+at `ball_weight=1.0`) while keeping the freeze suppressed
+(`longest_frozen_run=52` frames, ~1.7s - still far short of the
+original 222-327 frame freezes). **Recommendation for the user:** bring
+Ball weight back down from 1.0 to somewhere around 0.35-0.5, keep
+`trimmed_mean` + the lowered dead-zone (~0.05-0.08) for the freeze fix -
+`ball_weight=1.0` was the one setting doing the most damage. Test
+outputs: `test_v054_yolo26n_v2_repro.mp4` (ball_weight=1, the wobbly
+repro), `test_v054_soccana_repro.mp4` (same settings, soccana model),
+`test_v054_yolo26n_v2_bw035.mp4` (ball_weight=0.35, the fix).
+
+## "Camera doesn't go to the corner" - not `field_roi`, it's the `ball_near_cluster` gate
+
+With `ball_weight=0.35` fixing the wobble, the user asked whether
+`field_roi` was clipping the camera away from a corner where the ball
+kept disappearing. Tested directly: re-ran the identical clip/settings
+against a calibration copy with `field_roi` stripped entirely (`if let
+Some(roi) = cal.field_roi` in `reco-cli/src/stitch.rs` - omitting the
+key skips `RoiFilteredDetector` wrapping altogether, confirmed by the
+absence of the "Autocam: field ROI filtering enabled" log line).
+
+Result: ROI *is* filtering real detections (without it: 28.4 avg
+players/frame vs. 21.6 with it, 530/899 vs. 419/899 frames with a
+tracked ball - both real, measurable effects, filtering is doing
+something) but the camera's actual pan/tilt **range did not widen**
+without it (yaw span 0.522 rad without ROI vs. 0.617 rad with it -
+if anything slightly narrower without ROI, no evidence of a clipped
+corner being freed up). Ruled out `field_roi` as the cause of this
+specific symptom.
+
+Found the real mechanism by pulling the raw frame at the exact
+timestamp of a high-confidence (0.83), long-tracked (19 frames) ball
+detection the camera never panned to (`yaw=-0.612, pitch=-0.300`,
+frame 702 of the clip = ~t123.4s match time, right camera): it's a
+**real ball**, sitting alone near the touchline/corner, well separated
+from the main body of players still clustered further up-field (visual
+check confirms this, not a false positive). Computed the actual gate
+in `panners/field.rs::decide_with_lookahead` -
+`ball_near_cluster = dist(ball, cluster_centroid) < ball_max_dist_from_cluster`
+(default `0.5` rad) - with players clustered around pitch~0.135 and the
+ball at pitch=-0.300, the distance comfortably exceeds 0.5 rad, so
+`ball_near_cluster` is false and **`ball_weight` never engages at all**
+for this detection, regardless of its value. This is "Action" framing
+working as designed (stay on the main group, don't whip-pan to an
+isolated/stray ball) rather than a bug - but it means no `ball_weight`
+tuning alone fixes a ball that has strayed this far from the pack.
+
+`ball_max_dist_from_cluster` is **not GUI-exposed** (checked
+`ui/main.slint` and `reco-gui/src/{main,export}.rs` - no property/
+binding for it anywhere), only reachable via `--panner-config` on the
+CLI. Options if the user wants the camera to follow an isolated ball
+like this: (a) raise `ball_max_dist_from_cluster` past 0.5 rad via
+`--panner-config` (no GUI path yet - would need one added if this
+should be user-tunable), (b) switch **Tracking mode -> ball** for
+clips/matches where prioritizing the ball over the crowd is preferred
+(forces ball-only following, no cluster gate), or (c) accept current
+behavior as intended broadcast-style framing for this specific
+scenario. Not yet decided with the user which of these to pursue.
+
+## Current status / next step (end of day, 2026-08-11)
+
+This is the up-to-date summary - the "Current status" note earlier in
+this file (right after the first yolo26n round) is superseded, kept
+only for its own paragraph's context.
+
+**Where things stand:**
+
+1. **`yolo26n_v2_3class_1280_b4_e300`** (`ball_max_dist_from_cluster`
+   section above has its exact checkpoint path) is the current best
+   yolo26n checkpoint - trained, ONNX-exported (`nms=True` requested,
+   ultralytics auto-no-ops it for this end2end architecture but the
+   output shape is already `[1,300,6]` regardless), and verified
+   end-to-end in the real `reco` app on both CPU and GPU (DirectML)
+   builds. `reco-cli`'s `Cargo.toml` now has the `directml` feature
+   wired up (was missing, real gap - see the GPU-backed-rerun section
+   above).
+2. **28 hard-frame tasks added to LS project 8** ("Finetuned yolo26n
+   (rough v1)", now 228 total / 200 finished / **28 pending**) -
+   ball-miss frames from two confirmed real-play windows, soccana
+   pre-labeled. **Waiting on the user to review these** before the next
+   training round (round 3) - once done, re-run
+   `prepare_yolo_train_split_from_ls_export.py` against project 8's
+   fresh export (will now be 228 images, not 200) and retrain.
+3. **Panner tuning for `reco-autocam`'s `FieldPanner`** (all findings
+   from this session, GUI-actionable unless noted):
+   - **Cluster mode -> `trimmed_mean`** (was `density`) - fixes the
+     multi-second freeze during ball-less stretches; `density` locks
+     onto a static sub-group instead of following the whole formation.
+   - **Dead-zone -> ~0.05-0.08** (was 0.20 default / 0.12 for the
+     `action` preset) - needed alongside `trimmed_mean`, tested and
+     recommended.
+   - **Ball weight -> ~0.35-0.5** (not `1.0`) - confirmed via a soccana
+     side-by-side that pinning it to the max causes visible wobble
+     regardless of which model supplies the ball detections; this was
+     the dominant wobble cause, not model quality.
+   - **`ball_max_dist_from_cluster`** (default `0.5` rad, **not
+     GUI-exposed**) is why the camera won't swing to a real, isolated
+     ball far from the main player cluster ("Action" framing's designed
+     behavior, not a bug) - **open question for the user**: raise this
+     via `--panner-config` (CLI-only today), add it as a GUI slider,
+     switch to **Tracking mode -> ball** for matches where the ball
+     matters more than the crowd, or leave as-is. Not decided yet -
+     ask the user first thing next session if not already answered.
+   - `field_roi` was tested and ruled out as the cause of the
+     "camera won't reach the corner" symptom (A/B calibration test,
+     see above) - it does filter some real detections but didn't
+     change the camera's actual pan/tilt range.
+4. Test videos for all of the above live in the 03 OJC match folder
+   (`D:\VOETBAL_VIDEO\Berghem Sport J011-1\03 OJC -Bergem Sport
+   04072026\`), prefixed `test_v054_*` and `yolo26n_v2_ONNX_*` -
+   filenames map to settings in each section above; keep them for
+   reference per the user's standing "don't delete test artifacts"
+   preference.
+
+**Concretely, tomorrow:**
+- Get the user's answer on the `ball_max_dist_from_cluster` question
+  above (raise it / add GUI slider / use ball tracking mode / leave it).
+- Nudge on reviewing the 28 pending LS project-8 tasks if not done yet.
+- Once both are settled, round-3 yolo26n training with the expanded,
+  corrected project-8 data is the natural next step.
