@@ -4936,6 +4936,7 @@ fn main() -> anyhow::Result<()> {
             model_path: app.get_export_model_path().to_string(),
             tracking_mode: app.get_export_tracking_mode().to_string(),
             detection_interval: app.get_export_detection_interval() as u32,
+            player_anchor_rad: app.get_export_player_anchor_rad(),
             lookahead_secs: app.get_export_lookahead_secs() as f64,
             lookahead_reduced_bit_depth: app.get_export_lookahead_reduced_bit_depth(),
             preset: app.get_export_panner_preset().to_string(),

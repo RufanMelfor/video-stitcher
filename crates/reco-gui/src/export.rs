@@ -45,6 +45,11 @@ pub struct AutocamUiConfig {
     pub tracking_mode: String,
     /// Run the detector every N frames.
     pub detection_interval: u32,
+    /// Max distance (radians) a raw ball detection may be from the
+    /// nearest tracked player and still be accepted by the ball tracker,
+    /// before the panner ever sees it. See
+    /// `reco_autocam::AutocamConfig::player_anchor_max_rad`.
+    pub player_anchor_rad: f32,
     /// Lookahead buffer depth in seconds (0 = off).
     pub lookahead_secs: f64,
     /// Downconvert the lookahead pool to 8-bit NV12 even for 10-bit
@@ -217,6 +222,7 @@ pub fn run_export(
                 "model_path": &autocam.model_path,
                 "tracking_mode": &autocam.tracking_mode,
                 "detection_interval": autocam.detection_interval,
+                "player_anchor_rad": autocam.player_anchor_rad,
                 "lookahead_secs": autocam.lookahead_secs,
                 "lookahead_reduced_bit_depth": autocam.lookahead_reduced_bit_depth,
                 "preset": &autocam.preset,
@@ -375,7 +381,8 @@ pub fn run_export(
             let mut autocam_config = reco_autocam::AutocamConfig::new(&ac.model_path)
                 .with_tracking_mode(mode)
                 .with_detection_interval(ac.detection_interval as u64)
-                .with_10bit(is_10bit);
+                .with_10bit(is_10bit)
+                .with_player_anchor_rad(ac.player_anchor_rad);
             autocam_config.field_panner_config = Some(panner_cfg);
             // Ball-only models need a higher floor than the 0.10 field
             // default (matches the CLI's ball-mode override).

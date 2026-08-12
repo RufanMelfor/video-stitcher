@@ -18,6 +18,23 @@ in between reuse the last detection. Lower = fresher positions during
 fast action, higher = cheaper. `3` (every ~0.1s at 30fps) is a good
 default; push to 10-15 only if you need the compute back.
 
+**Ball anchor range** (radians, `player_anchor_max_rad`) - a gate inside
+the ball *tracker* (`crates/reco-autocam/src/trackers/ball.rs`), upstream
+of everything else in this doc. A raw ball detection is only accepted at
+all if it lies within this distance of at least one currently-tracked
+player; farther detections are dropped as likely false positives (a
+ball-shaped object in the crowd or background) before the panner ever
+sees them. `0.20 rad` (~11deg) is the default. This runs *before* Ball
+reach (below), so a genuine, isolated ball - the exact breakaway/corner
+scenario Ball reach and FOV Wide are meant to handle - can be silently
+discarded here first, making those two settings look like they aren't
+working. Confirmed via raw-detection log inspection (not guessed): the
+model correctly detected a breakaway ball at 0.97 confidence while the
+tracker was coasting/losing it, because the detection sat outside this
+gate. Widen it (0.3-0.5+) if the panner never seems to acquire a ball
+that's genuinely far from the pack; keep it tight if the model
+false-positives on background clutter.
+
 **Style preset** - a one-shot action that overwrites every slider below
 (framing, cluster mode, lock-pitch, cluster bandwidth, dead-zone, ball
 weight, ball reach, FOV) with a tuned bundle. You can still tweak any
@@ -146,9 +163,16 @@ Source: `FieldPannerConfig::{broadcast, action, frame_all}` in
   adjust the FOV Tight/Wide bounds directly - they're bounds, not
   targets, so widening/narrowing them changes the *range* the dynamic
   zoom is allowed to explore.
-- **Camera won't follow the ball into a corner / on a breakaway**: raise
-  `ball reach` (`ball_max_dist_from_cluster`) above its 0.5 rad default -
-  **and raise FOV Wide too (try 65-70°)**. Ball reach alone only unlocks
+- **Camera won't follow the ball into a corner / on a breakaway**: check
+  three settings together, in this order (each gates the next):
+  1. **Ball anchor range** - if the tracker never accepts the far
+     detection in the first place, nothing downstream matters. Widen it
+     (0.3-0.5+) first and confirm via `--events`/the events JSONL that
+     the ball's `state` goes `Tracking` rather than staying
+     `Coasting`/`Lost` during the breakaway.
+  2. Raise `ball reach` (`ball_max_dist_from_cluster`) above its 0.5 rad
+     default - **and**
+  3. raise FOV Wide too (try 65-70°). Ball reach alone only unlocks
   the aim-pull toward the ball; the shot still needs `fov_wide` high
   enough for the widen-for-ball calculation (see above) to actually reach
   its target instead of clamping. Verified via a controlled A/B render on
