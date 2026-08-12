@@ -246,6 +246,13 @@ enum Commands {
         /// VRAM for a Ns lookahead" error. No effect on 8-bit sources.
         /// The same buffered frames feed the final render too, so this
         /// trades a little gradient smoothness for memory.
+        ///
+        /// Currently also REQUIRED (not just a VRAM fallback) for a
+        /// 10-bit source under the default zero-copy decode path: native
+        /// bit depth hits a known wgpu/Dx12 copy-compatibility panic
+        /// there - see `VramPool::copy_from_d3d11`'s doc comment in
+        /// reco-core. `--no-zero-copy` also avoids it, at a real decode
+        /// speed cost.
         #[arg(long)]
         lookahead_reduced_bit_depth: bool,
 

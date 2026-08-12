@@ -25,6 +25,12 @@ Model: `yolo26n_v2` is the production checkpoint as of this writing, but
 `yolo26s_v3` (round 3, ONNX-exported) tested dramatically better in a
 real in-app run on the same clip - raw ball detections 19.7% -> 48.7% of
 frames. Not yet promoted to "the" default - see `YOLO26_Training.md`.
+Even `yolo26s_v3` genuinely misses the ball for extended stretches on
+this clip though - frames 720-898 (the last ~6s of the validated
+100-130s 03 OJC window) have zero raw ball detections at all, confirmed
+2026-08-12 across all three `ball_weight` A/B renders. A real model
+recall gap, not something any panner setting fixes - see the training
+notes for known hard cases.
 
 ```
 Tracking mode:                      field
@@ -35,12 +41,12 @@ Style preset:                       action
 Framing:                            action
 Pitch - Lock (horizontal-only):     off
 Lookahead:                          0.5s
-Reduce lookahead memory (8-bit):    off             (only on a VRAM error)
+Reduce lookahead memory (8-bit):    on for a 10-bit source (see note below), off otherwise
 
 Advanced panner
 ----------------
 Cluster mode:                       trimmed_mean
-Ball weight:                        0.35
+Ball weight:                        0.5             (action preset default 0.35)
 Dead-zone:                          0.05-0.08 rad
 Cluster bandwidth:                  0.3 rad         (preset default, not separately tuned)
 Ball reach:                         1.0 rad         (default 0.5)
@@ -53,7 +59,18 @@ Aim smoothing (cluster_alpha):      0.05-0.08       (default 0.012)
 
 Why each of these, briefly: **Cluster mode -> trimmed_mean** fixes the
 multi-second freeze during ball-less stretches. **Dead-zone** is needed
-alongside `trimmed_mean`, tested together. **Ball weight 0.35** - `1.0`
+alongside `trimmed_mean`, tested together. **Ball weight 0.5** (raised
+from the action preset's 0.35, validated 2026-08-12 against real
+100-130s 03 OJC footage) - at 0.35 the aim blend still leans too hard on
+the player-cluster centroid when the ball separates from it vertically
+(e.g. breaking toward the near touchline while players stay upfield):
+the *computed target* itself never gets close enough to the ball, which
+then drifts out of frame regardless of how fast smoothing reacts - not
+a smoothing problem, a blend-weight one. 0.5 keeps the ball in frame for
+the entire tested breakaway; 0.6 also works with no further benefit
+found. Cost: frame-to-frame camera movement rises with it (+33% mean,
++32% p95 delta per frame at 0.5 vs 0.35 in the same test) - some real
+wobble tradeoff, though nowhere near `1.0`, which is what actually
 caused visible wobble regardless of model quality. **Ball reach** lets
 the panner pull toward a genuinely isolated ball instead of ignoring it.
 **FOV Wide** - without raising this, the ball-reach widen logic clamps
@@ -63,7 +80,21 @@ often too slow to actually reach the wider/repositioned target before a
 brief breakaway is over (see below) - raise these if the camera visibly
 "gives up" following a fast ball event partway through.
 
-The three ball-related settings gate each other, in this order: **Ball
+**Reduce lookahead memory (8-bit) - currently required for 10-bit
+sources, not just a VRAM fallback.** With it off, a 10-bit source (e.g.
+DJI Action 4 HEVC, `P010`) under the default zero-copy decode path hits
+a reproducible crash: wgpu's Dx12 backend rejects the lookahead pool's
+plane copy with `Source format (P010) and destination format
+(R16Unorm) are not copy-compatible`. Confirmed 2026-08-12 stitching a
+real clip with `--lookahead 0.5` and no `--lookahead-reduced-bit-depth`
+- see [`VramPool::copy_from_d3d11`](../crates/reco-core/src/session/vram_pool.rs)'s
+doc comment for the full repro and root-cause notes. Not yet fixed -
+until it is, leave this **on** for any 10-bit source with lookahead
+enabled (or pass `--no-zero-copy`, at a real decode speed cost, or
+`--lookahead 0` to disable lookahead entirely). 8-bit sources are
+unaffected either way.
+
+The three ball-related *gates* filter each other, in this order: **Ball
 anchor range -> Ball reach -> FOV Wide**. Ball anchor range decides
 whether the *tracker* accepts a far detection at all; Ball reach decides
 whether the *panner* lets it pull the aim; FOV Wide decides whether the
@@ -71,6 +102,15 @@ whether the *panner* lets it pull the aim; FOV Wide decides whether the
 the others won't fully fix a missed breakaway - see the "Camera won't
 follow the ball into a corner" bullet further down for the full
 reasoning and how each was verified (not just recommended by guess).
+
+**Ball weight is not a gate but decides how hard the aim actually chases
+the ball once it clears all three** - validated 2026-08-12 that even with
+every gate above open, `ball_weight 0.35` still isn't enough on its own:
+if the ball separates far enough from the player cluster *vertically*
+(a near-touchline break, not just a horizontal one), the blend keeps the
+computed aim target too close to the cluster and the ball drifts out of
+frame anyway. See the "Ball weight" entry above and the "Camera won't
+follow the ball into a corner" checklist below (now 5 settings, not 4).
 
 **Every settings table above is also written into the events JSONL.**
 When "Record pipeline events" (`--events` on the CLI) is on *and* AI
@@ -257,7 +297,8 @@ Source: `FieldPannerConfig::{broadcast, action, frame_all}` in
   targets, so widening/narrowing them changes the *range* the dynamic
   zoom is allowed to explore.
 - **Camera won't follow the ball into a corner / on a breakaway**: check
-  three settings together, in this order (each gates the next):
+  five settings together, in this order (each gates or determines the
+  next):
   1. **Ball anchor range** - if the tracker never accepts the far
      detection in the first place, nothing downstream matters. Widen it
      (0.3-0.5+) first and confirm via `--events`/the events JSONL that
@@ -284,6 +325,17 @@ Source: `FieldPannerConfig::{broadcast, action, frame_all}` in
      (~3s time constant) are often too slow to reach the wider/repositioned
      target before a brief breakaway is already over, even though the
      target itself computed correctly. Raise both to ~0.05-0.08.
+  5. If the ball still drops out specifically when it separates from the
+     player cluster **vertically** (breaking toward the near touchline,
+     not just sideways) even with all four above raised and smoothing
+     already fast, raise **Ball weight** (0.5, up from the `action`
+     preset's 0.35). Verified via a real CLI A/B render (same clip, same
+     everything else) that at 0.35 the computed aim target itself never
+     gets close enough to the ball in this scenario - not a gate or a
+     smoothing-speed problem, the blend simply leans too hard on the
+     cluster centroid. Trade-off: raises overall camera movement
+     (+30-33% average frame-to-frame pose delta at 0.5 vs 0.35 in the
+     same test) - real, but well short of the visible wobble `1.0` causes.
 
 ## Extra parameters (not yet exposed in the GUI)
 
