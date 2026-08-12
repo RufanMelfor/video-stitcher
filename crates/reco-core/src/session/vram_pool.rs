@@ -122,12 +122,31 @@ impl VramPool {
         let mut slots = Vec::with_capacity(n_slots);
         let mut free = VecDeque::with_capacity(n_slots);
 
+        // RENDER_ATTACHMENT is only exercised when `downconverter` is Some
+        // (the downconvert render pass writes into these textures) - and
+        // must NOT be requested otherwise: some pool formats (P010's Y
+        // plane, `R16Unorm`) are not renderable on all backends, so an
+        // unconditional RENDER_ATTACHMENT request fails allocation for
+        // every `LookaheadBitDepth::Native` 10-bit source (e.g. DJI Action
+        // 4 HEVC) even though the pass that would need it never runs. Was
+        // requested unconditionally before "harmless otherwise" turned out
+        // to be false - surfaced as a wgpu validation panic ("Texture
+        // usages TextureUsages(RENDER_ATTACHMENT) are not allowed on a
+        // texture of type R16Unorm") misreported by the caller as a VRAM
+        // budget failure.
+        let render_attachment_needed = downconverter.is_some();
+
         // wgpu panics on OOM in create_texture. We use catch_unwind
         // to convert the panic into a clean error. Error scopes deadlock
         // when the driver is in a bad state from failed allocations.
         for i in 0..n_slots {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let create_tex = |label: &str, fmt, w, h| {
+                    let mut usage =
+                        wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING;
+                    if render_attachment_needed {
+                        usage |= wgpu::TextureUsages::RENDER_ATTACHMENT;
+                    }
                     gpu.device.create_texture(&wgpu::TextureDescriptor {
                         label: Some(label),
                         size: wgpu::Extent3d {
@@ -139,13 +158,7 @@ impl VramPool {
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
                         format: fmt,
-                        // RENDER_ATTACHMENT is only exercised when
-                        // `downconverter` is Some (the downconvert render
-                        // pass writes into these textures); harmless to
-                        // request unconditionally otherwise.
-                        usage: wgpu::TextureUsages::COPY_DST
-                            | wgpu::TextureUsages::TEXTURE_BINDING
-                            | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        usage,
                         view_formats: &[],
                     })
                 };
@@ -338,6 +351,27 @@ impl VramPool {
     /// runs the same `LookaheadDownconverter` render pass
     /// `copy_from_textures` uses, via the pre-built plane views (a render
     /// pass only needs a view).
+    ///
+    /// **Known bug, `LookaheadBitDepth::Native` + 10-bit source (the
+    /// `None` branch below), Windows/D3D11 zero-copy only**: wgpu's Dx12
+    /// backend rejects the plane-aspect-selected `copy_texture_to_texture`
+    /// here with "Source format (P010) and destination format (R16Unorm)
+    /// are not copy-compatible (they may only differ in srgb-ness)" -
+    /// reproduced 2026-08-12 stitching a real DJI Action 4 HEVC (P010)
+    /// clip with `--lookahead 0.5` and no `--lookahead-reduced-bit-depth`.
+    /// wgpu's copy-compatibility check appears to compare the *source
+    /// texture's own declared format* (the aggregate `P010`) against the
+    /// destination's declared format (`R16Unorm`), not the per-plane
+    /// shape a `Plane0`/`Plane1` aspect selects - even though the actual
+    /// bytes being copied are R16Unorm-shaped either way. Unconfirmed
+    /// whether this is a real wgpu/Dx12 backend limitation or a
+    /// specification misread; not yet root-caused enough to fix safely.
+    /// Until this is fixed, `LookaheadBitDepth::Native` is NOT safe to
+    /// use with lookahead enabled on a 10-bit source under zero-copy -
+    /// `--lookahead-reduced-bit-depth` (or `--no-zero-copy`, or
+    /// `--lookahead 0`) is currently required, not just a VRAM-budget
+    /// fallback as the CLI/GUI help text previously implied - see
+    /// `docs/ai-panner-tuning.md`'s "Lookahead" note.
     pub fn copy_from_d3d11(
         &self,
         gpu: &crate::gpu::GpuContext,
