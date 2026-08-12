@@ -27,7 +27,13 @@ Model: `yolo26n_v2` is de productiecheckpoint op moment van schrijven,
 maar `yolo26s_v3` (ronde 3, ONNX-geëxporteerd) scoorde dramatisch beter
 in een echte in-app test op dezelfde clip - ruwe baldetecties van 19,7%
 naar 48,7% van de frames. Nog niet gepromoveerd tot "de" standaard, zie
-`YOLO26_Training.md`.
+`YOLO26_Training.md`. Zelfs `yolo26s_v3` mist de bal echter voor langere
+tijd op deze clip - frames 720-898 (de laatste ~6sec van het
+gevalideerde 100-130sec 03 OJC-venster) hebben helemaal geen ruwe
+baldetecties, bevestigd 2026-08-12 over alle drie de `ball_weight`
+A/B-renders heen. Een reëel model-recall-gat, niet iets dat een
+panner-instelling oplost - zie de trainingsnotities voor bekende
+lastige gevallen.
 
 ```
 Tracking mode:                      field
@@ -38,12 +44,12 @@ Style preset:                       action
 Framing:                            action
 Pitch - Lock (alleen horizontaal):  uit
 Lookahead:                          0,5s
-Reduce lookahead memory (8-bit):    uit             (alleen bij een VRAM-error)
+Reduce lookahead memory (8-bit):    aan bij een 10-bit bron (zie notitie hieronder), anders uit
 
 Advanced panner
 ----------------
 Cluster mode:                       trimmed_mean
-Ball weight:                        0,35
+Ball weight:                        0,5             (standaard van de action preset is 0,35)
 Dead-zone:                          0,05-0,08 rad
 Cluster bandwidth:                  0,3 rad         (preset-standaard, niet apart getuned)
 Ball reach:                         1,0 rad         (standaard 0,5)
@@ -56,8 +62,20 @@ Aim smoothing (cluster_alpha):      0,05-0,08       (standaard 0,012)
 
 Waarom elk van deze, kort: **Cluster mode -> trimmed_mean** fixt de
 freeze van meerdere seconden bij balloze fases. **Dead-zone** is nodig
-samen met `trimmed_mean`, samen getest. **Ball weight 0,35** - `1,0` gaf
-zichtbare wobble, ongeacht modelkwaliteit. **Ball reach** laat de panner
+samen met `trimmed_mean`, samen getest. **Ball weight 0,5** (opgetrokken
+van de action-preset-standaard 0,35, gevalideerd 2026-08-12 tegen echte
+100-130sec 03 OJC-beelden) - bij 0,35 leunt de aim-blend nog te zwaar op
+het middelpunt van de spelerscluster zodra de bal daar verticaal van
+losbreekt (bv. richting de dichtstbijzijnde zijlijn terwijl de spelers
+hoger op het veld blijven): het *berekende doel* zelf komt dan nooit
+dicht genoeg bij de bal, die vervolgens uit beeld drijft ongeacht hoe
+snel de smoothing reageert - geen smoothing-probleem, een
+blend-weight-probleem. 0,5 houdt de bal in beeld voor de hele geteste
+uitbraak; 0,6 werkt ook, zonder verder voordeel. Kosten: camerabeweging
+per frame stijgt mee (+33% gemiddeld, +32% p95 verschil per frame bij
+0,5 t.o.v. 0,35 in dezelfde test) - een reële wobble-afweging, maar bij
+lange na niet zo erg als `1,0`, wat de daadwerkelijk zichtbare wobble
+gaf, ongeacht modelkwaliteit. **Ball reach** laat de panner
 richting een echt geïsoleerde bal trekken i.p.v. 'm te negeren. **FOV
 Wide** - zonder dit op te trekken clamped de bal-reach-verbredingslogica
 voordat het beeld echt breed genoeg kan worden. **Zoom/Aim smoothing** -
@@ -67,15 +85,40 @@ daadwerkelijk te bereiken voordat een korte uitbraak alweer voorbij is
 (zie hieronder) - trek deze op als de camera een snelle balactie
 halverwege lijkt "op te geven".
 
-De drie bal-gerelateerde instellingen filteren voor elkaar, in deze
-volgorde: **Ball anchor range → Ball reach → FOV Wide**. Ball anchor
-range bepaalt of de *tracker* een verre detectie überhaupt accepteert;
+**Reduce lookahead memory (8-bit) - momenteel verplicht bij 10-bit
+bronnen, niet alleen een VRAM-noodgreep.** Staat dit uit, dan crasht een
+10-bit bron (bv. DJI Action 4 HEVC, `P010`) via het standaard zero-copy
+decodepad reproduceerbaar: wgpu's Dx12-backend weigert de plane-copy van
+de lookahead-pool met `Source format (P010) and destination format
+(R16Unorm) are not copy-compatible`. Bevestigd 2026-08-12 bij het
+stitchen van een echte clip met `--lookahead 0.5` zonder
+`--lookahead-reduced-bit-depth` - zie de doc-comment bij
+[`VramPool::copy_from_d3d11`](../crates/reco-core/src/session/vram_pool.rs)
+voor de volledige repro en root-cause-notities. Nog niet gefixt - laat
+dit tot die tijd **aan** staan bij elke 10-bit bron met lookahead
+ingeschakeld (of gebruik `--no-zero-copy`, ten koste van echte
+decodesnelheid, of `--lookahead 0` om lookahead helemaal uit te
+schakelen). 8-bit bronnen ondervinden hier geen last van.
+
+De drie bal-gerelateerde *gates* filteren voor elkaar, in deze
+volgorde: **Ball anchor range -> Ball reach -> FOV Wide**. Ball anchor
+range bepaalt of de *tracker* een verre detectie uberhaupt accepteert;
 Ball reach bepaalt of de *panner* 'm de aim mag laten trekken; FOV Wide
 bepaalt of het *beeld* daadwerkelijk breed genoeg kan worden om het te
 tonen. Alleen één van de drie verhogen lost een gemiste uitbraak niet
 volledig op - zie de bullet "Camera volgt de bal niet de hoek in"
 verderop voor de volledige onderbouwing en hoe elk is geverifieerd (niet
 alleen aanbevolen op basis van een gok).
+
+**Ball weight is geen gate maar bepaalt hoe hard de aim daadwerkelijk
+achter de bal aan gaat zodra die alle drie doorstaat** - gevalideerd
+2026-08-12 dat zelfs met elke gate hierboven open, `ball_weight 0,35` op
+zichzelf nog niet genoeg is: als de bal ver genoeg *verticaal* van de
+spelerscluster losbreekt (een uitbraak richting de zijlijn, niet alleen
+horizontaal), houdt de blend het berekende aim-doel te dicht bij de
+cluster en drijft de bal alsnog uit beeld. Zie de "Ball weight"-regel
+hierboven en de checklist "Camera volgt de bal niet de hoek in" verderop
+(nu 5 instellingen, niet 4).
 
 **Elke instellingentabel hierboven wordt ook weggeschreven naar de
 events-JSONL.** Als "Record pipeline events" (`--events` op de CLI) aan
@@ -278,8 +321,8 @@ Bron: `FieldPannerConfig::{broadcast, action, frame_all}` in
   pas de FOV Tight/Wide-grenzen direct aan - het zijn grenzen, geen
   doelwaarden, dus verbreden/versmallen ervan verandert het *bereik*
   waarbinnen de dynamische zoom mag bewegen.
-- **Camera volgt de bal niet de hoek in / bij een uitbraak**: check drie
-  instellingen samen, in deze volgorde (elke poort filtert voor de
+- **Camera volgt de bal niet de hoek in / bij een uitbraak**: check vijf
+  instellingen samen, in deze volgorde (elke stap filtert of bepaalt de
   volgende):
   1. **Ball anchor range** - als de tracker de verre detectie al
      nooit accepteert, maakt de rest niets uit. Verbreed 'm eerst
@@ -310,6 +353,18 @@ Bron: `FieldPannerConfig::{broadcast, action, frame_all}` in
      zijn om de bredere/verplaatste doelwaarde te bereiken voordat een
      korte uitbraak alweer voorbij is, ook al werd de doelwaarde zelf
      wel correct berekend. Trek beide op naar ~0,05-0,08.
+  5. Als de bal specifiek uit beeld valt zodra die *verticaal* van de
+     spelerscluster losbreekt (richting de dichtstbijzijnde zijlijn, niet
+     alleen zijwaarts), zelfs met alle vier bovenstaande al opgetrokken en
+     smoothing al snel, trek dan **Ball weight** op (0,5, vanaf de
+     `action`-preset-standaard van 0,35). Geverifieerd via een echte
+     CLI-A/B-render (dezelfde clip, verder alles gelijk) dat het berekende
+     aim-doel bij 0,35 in dit scenario nooit dicht genoeg bij de bal komt
+     - geen poort- of smoothing-snelheidsprobleem, de blend leunt gewoon
+     te zwaar op het middelpunt van de cluster. Afweging: verhoogt de
+     algehele camerabeweging (+30-33% gemiddeld verschil per frame bij 0,5
+     t.o.v. 0,35 in dezelfde test) - reëel, maar ruim onder de zichtbare
+     wobble die `1,0` veroorzaakt.
 
 ## Extra parameters (nog niet beschikbaar in de GUI)
 

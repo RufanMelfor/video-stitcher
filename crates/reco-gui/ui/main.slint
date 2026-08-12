@@ -4710,7 +4710,7 @@ export component RecoApp inherits Window {
                         }
 
                         Tip {
-                            tip: "Buffers the lookahead at 8-bit instead of the source's native bit depth, roughly halving its VRAM cost on 10-bit footage (e.g. DJI Action 4 HEVC) - lets a longer lookahead fit on lower-VRAM cards. No effect on already-8-bit sources. The same buffered frames feed the final render too, so this trades a little gradient smoothness (sky, grass, floodlit surfaces) for memory - leave off unless you're hitting a VRAM error.";
+                            tip: "Buffers the lookahead at 8-bit instead of the source's native bit depth, roughly halving its VRAM cost on 10-bit footage (e.g. DJI Action 4 HEVC) - lets a longer lookahead fit on lower-VRAM cards. No effect on already-8-bit sources. The same buffered frames feed the final render too, so this trades a little gradient smoothness (sky, grass, floodlit surfaces) for memory. Currently also REQUIRED for 10-bit sources, not just a VRAM fallback - leaving it off crashes with a known wgpu texture-copy bug, fix pending.";
                             CheckBox {
                                 text: "Reduce lookahead memory (8-bit)";
                                 checked <=> root.export-lookahead-reduced-bit-depth;
