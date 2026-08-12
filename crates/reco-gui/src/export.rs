@@ -68,6 +68,10 @@ pub struct AutocamUiConfig {
     pub dead_zone_rad: f32,
     /// Ball-vs-cluster blend weight (0..1); forced to 1.0 in ball mode.
     pub ball_weight: f32,
+    /// Max panorama distance (radians) the ball may be from the player
+    /// cluster and still blend into the aim; beyond it the ball is treated
+    /// as off-the-action and ignored (Action framing only).
+    pub ball_max_dist_from_cluster: f32,
     /// Tight / wide / default field-of-view, degrees.
     pub fov_tight: f32,
     pub fov_wide: f32,
@@ -222,6 +226,7 @@ pub fn run_export(
                 "cluster_bandwidth_rad": autocam.cluster_bandwidth_rad,
                 "dead_zone_rad": autocam.dead_zone_rad,
                 "ball_weight": autocam.ball_weight,
+                "ball_max_dist_from_cluster": autocam.ball_max_dist_from_cluster,
                 "fov_tight": autocam.fov_tight,
                 "fov_wide": autocam.fov_wide,
                 "fov_default": autocam.fov_default,
@@ -356,6 +361,7 @@ pub fn run_export(
                 cluster_bandwidth_rad: ac.cluster_bandwidth_rad,
                 dead_zone_rad: ac.dead_zone_rad,
                 ball_weight: ac.ball_weight,
+                ball_max_dist_from_cluster: ac.ball_max_dist_from_cluster,
                 lock_pitch: ac.lock_pitch,
                 fov_tight: ac.fov_tight,
                 fov_wide: ac.fov_wide,

@@ -1016,6 +1016,7 @@ export component RecoApp inherits Window {
     in-out property <float> export-cluster-bandwidth: 0.30;
     in-out property <float> export-dead-zone: 0.20;
     in-out property <float> export-ball-weight: 0.20;
+    in-out property <float> export-ball-max-dist-from-cluster: 0.5;
     in-out property <float> export-fov-tight: 22.0;
     in-out property <float> export-fov-wide: 58.0;
     in-out property <float> export-fov-default: 40.0;
@@ -4724,6 +4725,15 @@ export component RecoApp inherits Window {
                                 minimum: 0.0;
                                 maximum: 0.5;
                                 value <=> root.export-dead-zone;
+                                suffix: " rad";
+                                decimals: 2;
+                            }
+                            LabeledSlider {
+                                label: "Ball reach";
+                                tip: "How far the ball may stray from the player cluster and still pull the aim (Action framing only). Beyond this the ball is treated as off-the-action - a stray detection or the far goal - and ignored. Raise it if the camera won't follow a real ball that's broken away from the pack, e.g. into a corner.";
+                                minimum: 0.0;
+                                maximum: 1.5;
+                                value <=> root.export-ball-max-dist-from-cluster;
                                 suffix: " rad";
                                 decimals: 2;
                             }
