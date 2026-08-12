@@ -98,6 +98,8 @@ pub struct StitchJob {
     /// set this when AI tracking is actually enabled - see
     /// [`Self::ai_run_config`]).
     ai_run_config: Option<reco_core::calibration::AutocamDefaults>,
+    /// Model path paired with `ai_run_config` above.
+    ai_run_model_path: Option<String>,
 
     /// Free-form text embedded in the output container's "comment"
     /// metadata tag. See [`Self::metadata_comment`].
@@ -284,6 +286,7 @@ impl StitchJob {
             lookahead_reduced_bit_depth: false,
             events_path: None,
             ai_run_config: None,
+            ai_run_model_path: None,
             metadata_comment: None,
         }
     }
@@ -557,12 +560,18 @@ impl StitchJob {
         self
     }
 
-    /// AI/panner settings to write as the events JSONL's first line
-    /// (a [`PipelineEvent::RunConfig`](reco_core::detect::pipeline_event::PipelineEvent::RunConfig)),
+    /// AI/panner settings (plus which model produced this run) to write
+    /// as the events JSONL's first line (a
+    /// [`PipelineEvent::RunConfig`](reco_core::detect::pipeline_event::PipelineEvent::RunConfig)),
     /// so the trace file is self-describing. Only takes effect together
     /// with [`Self::events`]; caller should only set this when AI
     /// tracking is actually enabled for the run.
-    pub fn ai_run_config(mut self, config: reco_core::calibration::AutocamDefaults) -> Self {
+    pub fn ai_run_config(
+        mut self,
+        model_path: impl Into<String>,
+        config: reco_core::calibration::AutocamDefaults,
+    ) -> Self {
+        self.ai_run_model_path = Some(model_path.into());
         self.ai_run_config = Some(config);
         self
     }
@@ -772,7 +781,8 @@ impl StitchJob {
                     log::info!("Pipeline events -> {}", events_path.display());
                     if let Some(config) = self.ai_run_config.take() {
                         use reco_core::detect::pipeline_event::{PipelineEvent, PipelineEventSink};
-                        sink.emit(PipelineEvent::RunConfig { config });
+                        let model_path = self.ai_run_model_path.take().unwrap_or_default();
+                        sink.emit(PipelineEvent::RunConfig { model_path, config });
                     }
                     session.set_event_sink(Box::new(sink));
                 }

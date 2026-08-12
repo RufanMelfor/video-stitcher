@@ -46,7 +46,15 @@ pub enum PipelineEvent {
     /// cross-referencing the export command or GUI state separately.
     /// Only emitted when AI tracking is actually enabled - see
     /// `docs/ai-panner-tuning.md` for what each field controls.
+    ///
+    /// `model_path` is deliberately not part of `AutocamDefaults` itself
+    /// (that struct is also used for `Calibration::autocam_defaults`,
+    /// where a machine-local absolute path doesn't belong) - it's a
+    /// sibling field here, first in declaration order so it serializes
+    /// first in the JSON object (which checkpoint produced this trace is
+    /// usually the first thing worth knowing when reading one back).
     RunConfig {
+        model_path: String,
         config: crate::calibration::AutocamDefaults,
     },
 
@@ -468,6 +476,7 @@ mod tests {
         // own events. Lock both the serialization shape and that
         // invariant here.
         let ev = PipelineEvent::RunConfig {
+            model_path: "yolo26n_v2_3class_1280_b4_e300.onnx".into(),
             config: crate::calibration::AutocamDefaults {
                 tracking_mode: "field".into(),
                 detection_interval: 3,
@@ -490,7 +499,11 @@ mod tests {
         assert_eq!(ev.frame_index(), 0);
         let json = serde_json::to_string(&ev).unwrap();
         assert!(json.contains(r#""kind":"run_config""#));
+        assert!(json.contains(r#""model_path":"yolo26n_v2_3class_1280_b4_e300.onnx""#));
         assert!(json.contains(r#""tracking_mode":"field""#));
         assert!(json.contains(r#""ball_max_dist_from_cluster":1.0"#));
+        // model_path must serialize before config's fields - "which
+        // checkpoint" is the first thing worth knowing reading this back.
+        assert!(json.find("model_path").unwrap() < json.find("tracking_mode").unwrap());
     }
 }
