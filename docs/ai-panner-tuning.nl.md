@@ -21,8 +21,8 @@ rekenkracht echt nodig hebt.
 
 **Style preset** - een eenmalige actie die elke slider hieronder
 overschrijft (framing, cluster mode, lock-pitch, cluster bandwidth,
-dead-zone, ball weight, FOV) met een afgestemde set waarden. Je kunt
-daarna nog elke slider los aanpassen; een andere preset kiezen
+dead-zone, ball weight, ball reach, FOV) met een afgestemde set waarden.
+Je kunt daarna nog elke slider los aanpassen; een andere preset kiezen
 overschrijft alles opnieuw. Zie [Presets](#presets) hieronder voor de
 exacte waarden per preset.
 
@@ -61,6 +61,16 @@ frame is `ball_weight × ball_presence` (een waarde die oploopt zolang de
 bal dicht bij de groep is en afneemt zodra dat niet meer zo is), dus het
 trekt de camera alleen terwijl de bal daadwerkelijk aanwezig en dichtbij
 is. Wordt geforceerd naar `1,0` in Ball-tracking-modus.
+
+**Ball reach** (radialen, `ball_max_dist_from_cluster`) - hoe ver de bal
+van het middelpunt van de spelersgroep mag afwijken en toch nog in de
+aim wordt meegenomen (alleen bij Action-framing). Voorbij deze straal
+wordt de bal behandeld als niet-relevant - een losse detectie of het
+verre doel - en genegeerd, zodat hij de camera niet van het spel af kan
+trekken. `0,5 rad` is de standaard. Verhoog dit als de camera een echte,
+geïsoleerde bal niet volgt (bijv. de hoek in, bij een lange bal of een
+uitbraak); verlaag het om de camera bij de groep te houden, ook als de
+bal even loskomt.
 
 **Cluster bandwidth** (radialen) - de straal van de buurt die `density`
 gebruikt om te bepalen welke spelers bij "de" groep horen. Breder trekt
@@ -106,6 +116,7 @@ wordt afgesneden) - zie [Extra parameters](#extra-parameters-nog-niet-beschikbaa
 | dead_zone_rad | 0,20 | 0,20 | **0,12** | 0,20 |
 | fov_tight / default / wide | 22 / 40 / 58 | 22 / 40 / 58 | **20 / 34 / 48** | 22 / 40 / **70** |
 | ball_weight | 0,50 | **0,20** | **0,35** | **0,0** |
+| ball_max_dist_from_cluster | 0,50 | 0,50 | 0,50 | 0,50 |
 | edge_push | 0,15 | 0,15 | **0,20** | 0,15 |
 | lookahead_reactivity | 2,5 | 2,5 | **3,0** | 2,5 |
 | frame_all_margin_deg | 8,0 | 8,0 | 8,0 | **10,0** |
@@ -139,6 +150,15 @@ Bron: `FieldPannerConfig::{broadcast, action, frame_all}` in
   pas de FOV Tight/Wide-grenzen direct aan - het zijn grenzen, geen
   doelwaarden, dus verbreden/versmallen ervan verandert het *bereik*
   waarbinnen de dynamische zoom mag bewegen.
+- **Camera volgt de bal niet de hoek in / bij een uitbraak**: verhoog
+  `ball reach` (`ball_max_dist_from_cluster`) boven de standaard van 0,5
+  rad. Dit is een bewuste ontwerpkeuze van Action-framing - een echte,
+  geïsoleerde bal ver van de groep wordt met opzet genegeerd zodat een
+  losse detectie of het verre doel de camera niet kan wegtrekken; de
+  grens verhogen betekent meer vertrouwen in de detector, met het risico
+  dat af en toe een valse positieve wordt gevolgd. Als bal-acties
+  belangrijker zijn dan bij de groep blijven, is overschakelen naar
+  **Tracking mode -> ball** voor die wedstrijd vaak een betere keuze.
 
 ## Extra parameters (nog niet beschikbaar in de GUI)
 
@@ -150,6 +170,6 @@ aanspreekt: `min_cluster`, `edge_push`, `fov_alpha`,
 `cluster_alpha`, `max_velocity_rad_per_sec`, `velocity_alpha`,
 `pitch_bias`, `ball_presence_decay`/`ball_presence_attack`,
 `velocity_fov_bias_max`, `ball_frame_margin_deg`,
-`ball_max_dist_from_cluster`, `lead_gain`/`lead_alpha`,
+`lead_gain`/`lead_alpha`,
 `keep_fraction` (alleen trimmed-mean). Zie de doc-comments per veld in
 `crates/reco-autocam/src/panners/field.rs` voor wat elk precies doet.

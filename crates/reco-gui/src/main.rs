@@ -4669,6 +4669,7 @@ fn main() -> anyhow::Result<()> {
             app.set_export_cluster_bandwidth(cfg.cluster_bandwidth_rad);
             app.set_export_dead_zone(cfg.dead_zone_rad);
             app.set_export_ball_weight(cfg.ball_weight);
+            app.set_export_ball_max_dist_from_cluster(cfg.ball_max_dist_from_cluster);
             app.set_export_fov_tight(cfg.fov_tight);
             app.set_export_fov_wide(cfg.fov_wide);
             app.set_export_fov_default(cfg.fov_default);
@@ -4758,6 +4759,7 @@ fn main() -> anyhow::Result<()> {
             cluster_bandwidth_rad: app.get_export_cluster_bandwidth(),
             dead_zone_rad: app.get_export_dead_zone(),
             ball_weight: app.get_export_ball_weight(),
+            ball_max_dist_from_cluster: app.get_export_ball_max_dist_from_cluster(),
             fov_tight: app.get_export_fov_tight(),
             fov_wide: app.get_export_fov_wide(),
             fov_default: app.get_export_fov_default(),
