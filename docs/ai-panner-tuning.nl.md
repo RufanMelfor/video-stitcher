@@ -5,6 +5,52 @@ Naslagwerk voor de sectie **AI Tracking** in het Export-dialoogvenster
 afstemt voor voetbal. Gebaseerd op `crates/reco-autocam/src/panners/field.rs`
 en `crates/reco-autocam/src/tracking_mode.rs` - niet geraden.
 
+## Aanbevolen startinstellingen
+
+Eind-tot-eind gevalideerd (2026-08-12) tegen een echte hoek-uitbraak-clip
+- onderstaande waarden lossen "camera volgt de bal niet de hoek in /
+bij een uitbraak" op, voor zover instellingen dat alleen kunnen. Begin
+hier, stem niet vanaf nul handmatig af. Deze staan ook per calibratie
+opgeslagen zodra je op **Save calibration** klikt in het
+Export-dialoogvenster - zie
+[`Calibration::autocam_defaults`](../crates/reco-core/src/calibration.rs).
+
+**Model & hoofdniveau**
+
+| Instelling | Waarde |
+|---|---|
+| Model | huidige beste checkpoint - `yolo26n_v2` in productie op moment van schrijven; `yolo26n_v3`/`yolo26s_v3` getraind en ONNX-geëxporteerd maar nog niet in de app getest, zie `YOLO26_Training.md` |
+| Tracking mode | `field` |
+| Detect every N frames | `3` |
+| Ball anchor range | `0,3-0,5 rad` (standaard `0,20`) |
+| Style preset | `action` (als basis, daarna hieronder overschrijven) |
+| Framing | `action` |
+| Pitch - Lock (alleen horizontaal) | uit |
+| Lookahead (soepelheid) | `0,5s` |
+| Reduce lookahead memory (8-bit) | uit (alleen bij een VRAM-error) |
+
+**Advanced panner**
+
+| Instelling | Waarde | Waarom |
+|---|---|---|
+| Cluster mode | `trimmed_mean` | fixt de freeze van meerdere seconden bij balloze fases |
+| Dead-zone | `0,05-0,08 rad` | nodig samen met `trimmed_mean`, samen getest |
+| Ball weight | `0,35` | `1,0` gaf zichtbare wobble, ongeacht modelkwaliteit |
+| Ball reach | `1,0 rad` (standaard `0,5`) | laat de panner richting een echt geïsoleerde bal trekken i.p.v. 'm te negeren |
+| FOV Wide | `65-70°` (standaard van de `action` preset is `48°`) | zonder dit clamped de bal-reach-verbredingslogica voordat het beeld echt breed genoeg kan worden |
+| FOV Tight / Default | laat op preset-waarde (`20°` / `34°`) | niet apart getuned |
+| Cluster bandwidth | laat op preset-waarde | niet apart getuned |
+
+De drie bal-gerelateerde instellingen filteren voor elkaar, in deze
+volgorde: **Ball anchor range → Ball reach → FOV Wide**. Ball anchor
+range bepaalt of de *tracker* een verre detectie überhaupt accepteert;
+Ball reach bepaalt of de *panner* 'm de aim mag laten trekken; FOV Wide
+bepaalt of het *beeld* daadwerkelijk breed genoeg kan worden om het te
+tonen. Alleen één van de drie verhogen lost een gemiste uitbraak niet
+volledig op - zie de bullet "Camera volgt de bal niet de hoek in"
+verderop voor de volledige onderbouwing en hoe elk is geverifieerd (niet
+alleen aanbevolen op basis van een gok).
+
 ## Instellingen op hoofdniveau
 
 **Tracking mode** - `field` (standaard): volgt de groep spelers + de bal

@@ -5,6 +5,50 @@ Explains what each control actually does and how to tune it for football.
 Grounded in `crates/reco-autocam/src/panners/field.rs` and
 `crates/reco-autocam/src/tracking_mode.rs` - not guessed.
 
+## Recommended starting settings
+
+Validated end-to-end (2026-08-12) against a real corner-breakaway clip -
+the values below fix "camera won't follow the ball into a corner /
+breakaway" as far as settings alone can. Start here, don't hand-tune
+from scratch. These are also saved per-calibration once you hit **Save
+calibration** in the Export dialog - see
+[`Calibration::autocam_defaults`](../crates/reco-core/src/calibration.rs).
+
+**Model & top-level**
+
+| Setting | Value |
+|---|---|
+| Model | current best checkpoint - `yolo26n_v2` in production use as of this writing; `yolo26n_v3`/`yolo26s_v3` trained and ONNX-exported but not yet app-tested, see `YOLO26_Training.md` |
+| Tracking mode | `field` |
+| Detect every N frames | `3` |
+| Ball anchor range | `0.3-0.5 rad` (default `0.20`) |
+| Style preset | `action` (as the base, then override below) |
+| Framing | `action` |
+| Pitch - Lock (horizontal-only) | off |
+| Lookahead (smoothness) | `0.5s` |
+| Reduce lookahead memory (8-bit) | off (only on a VRAM error) |
+
+**Advanced panner**
+
+| Setting | Value | Why |
+|---|---|---|
+| Cluster mode | `trimmed_mean` | fixes the multi-second freeze during ball-less stretches |
+| Dead-zone | `0.05-0.08 rad` | needed alongside `trimmed_mean`, tested together |
+| Ball weight | `0.35` | `1.0` caused visible wobble regardless of model quality |
+| Ball reach | `1.0 rad` (default `0.5`) | lets the panner pull toward a genuinely isolated ball instead of ignoring it |
+| FOV Wide | `65-70°` (`action` preset default `48°`) | without this the ball-reach widen logic clamps before it can actually open the shot up |
+| FOV Tight / Default | leave at preset (`20°` / `34°`) | not separately tuned |
+| Cluster bandwidth | leave at preset | not separately tuned |
+
+The three ball-related settings gate each other, in this order: **Ball
+anchor range -> Ball reach -> FOV Wide**. Ball anchor range decides
+whether the *tracker* accepts a far detection at all; Ball reach decides
+whether the *panner* lets it pull the aim; FOV Wide decides whether the
+*shot* can actually widen enough to show it. Raising only one without
+the others won't fully fix a missed breakaway - see the "Camera won't
+follow the ball into a corner" bullet further down for the full
+reasoning and how each was verified (not just recommended by guess).
+
 ## Top-level controls
 
 **Tracking mode** - `field` (default): follows the player cluster + ball
