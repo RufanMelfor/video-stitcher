@@ -12,52 +12,51 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
-**Three things landed this session, all pushed to `github/main`
-(`ebd850bb`) or their own branch. None are upstream-PR'd yet.**
+**Workflow change this session, apply going forward**: user wants every
+feature branch merged into `main` and pushed as soon as it builds, not
+held back on its own branch pending testing/confirmation - `main` is the
+always-integrated local test build. See
+[[feedback_merge_features_into_main_immediately]]. Upstream PRs (via the
+fork) are cut from `main`'s history later, once a feature is actually
+confirmed working - being merged into `main` and being "PR-ready" are
+independent.
 
-1. **`feat/goal-line-calibration` merged into `main`** (user's explicit
-   request, so future test builds have the Goal editor without needing a
-   separate branch). Only conflict was `SESSION_HANDOFF.md` (resolved by
-   keeping this session's version - the goal branch's was from
-   2026-08-06/07, long superseded). Everything else auto-merged clean.
-   **Known limitation carried over, unchanged**: real-footage
-   verification (from that branch's own history) found the test goal
-   polygon misplaced - not yet a confirmed-working feature, needs that
-   fix before it's PR-ready upstream. See
+**Three things landed and are now all merged into `main`, pushed to
+`github/main` (`45741a99`). None are upstream-PR'd yet.**
+
+1. **`feat/goal-line-calibration`**: Goal editor/calibration/entry-
+   detection now in `main`. **Known limitation carried over, unchanged**:
+   real-footage verification (from that branch's own history) found the
+   test goal polygon misplaced - not yet a confirmed-working feature,
+   needs that fix before it's PR-ready upstream. See
    [[project_goal_detection_idea]].
-2. **Skia renderer swap, on its own branch `feat/skia-text-renderer`**
-   (pushed, not merged into `main` yet - `main` still builds with
-   femtovg-wgpu). Fixes the wobbly-text report
-   ([[project_skia_renderer_future_task]]): `renderer-femtovg-wgpu` ->
-   `renderer-skia` in `crates/reco-gui/Cargo.toml`. User confirmed **text
-   now looks good**, but noted it renders slightly larger than before -
-   fixed by pinning `default-font-family: "Segoe UI"` on the root Window
-   (Skia/DirectWrite and femtovg/fontdb were resolving the unset generic
-   sans-serif fallback to fonts with different em-box metrics). Build +
-   zero-copy-preview smoke-test both clean. **Still open**: `cargo clippy
-   -D warnings` fails on a pre-existing, unrelated `cuda_nv12_frames`
-   dead-code warning in `reco-core` (not caused by this change) - needs
-   its own fix before this branch's PR can pass CI. Ready for the user to
-   do a fuller visual pass (this was only a "does it look bigger/smaller"
-   check, not a full click-through) before opening the PR.
-3. **Ball-reach GUI slider, on its own branch
-   `feat/ball-reach-gui-slider`** (pushed, not merged into `main` yet).
-   Answers 2026-08-11's open question about `ball_max_dist_from_cluster`
-   - user picked "add a GUI slider". New "Ball reach" slider in the
-   Export dialog's Advanced panner section. Build-verified only so far -
-   **not yet tested against the actual corner-ball footage** from
-   2026-08-11's investigation (see that session's recommended test
-   settings further down, and the new
+2. **Skia renderer swap** (fixes the wobbly-text report,
+   [[project_skia_renderer_future_task]]): `renderer-femtovg-wgpu` ->
+   `renderer-skia` in `crates/reco-gui/Cargo.toml`, plus
+   `default-font-family: "Segoe UI"` pinned on the root Window (fixes a
+   slightly-larger-text side effect the user caught - Skia/DirectWrite
+   and femtovg/fontdb were resolving the previously-unset generic
+   sans-serif fallback to fonts with different em-box metrics). **User
+   confirmed text looks good** after the font-family fix. **Still open**:
+   `cargo clippy -D warnings` fails on a pre-existing, unrelated
+   `cuda_nv12_frames` dead-code warning in `reco-core` (not caused by
+   this change) - needs its own fix before this can pass CI for an
+   upstream PR.
+3. **Ball-reach GUI slider**: answers 2026-08-11's open question about
+   `ball_max_dist_from_cluster` (user picked "add a GUI slider"). New
+   "Ball reach" slider in the Export dialog's Advanced panner section.
+   Build-verified only so far - **not yet tested against the actual
+   corner-ball footage** from 2026-08-11's investigation (see that
+   session's recommended test settings further down, and the new
    `D:\VOETBAL_VIDEO\Berghem Sport J011-1\03 OJC -Bergem Sport
-   04072026\TEST VIDEO\` location the user moved test clips to). Once
-   confirmed working, open the upstream PR.
+   04072026\TEST VIDEO\` location the user moved test clips to).
 
-**Build state**: debug `reco-gui.exe` rebuilt from merged `main` and
-smoke-tested clean (loads calibration, zero-copy preview initializes, no
-panics). `cargo test -p reco-autocam -p reco-gui` all green (102 tests,
-including the ROI-polygon tests the goal-editor merge touches).
-`cargo test -p reco-core` has 2 pre-existing, unrelated CUDA-context
-failures (`interop::cuda::tests::test_cuda_available`/
+**Build state**: debug `reco-gui.exe` rebuilt from `main` with all three
+merged and smoke-tested clean (loads calibration, zero-copy preview
+initializes, no panics). `cargo test -p reco-autocam -p reco-gui` all
+green (102 tests, including the ROI-polygon tests the goal-editor merge
+touches). `cargo test -p reco-core` has 2 pre-existing, unrelated
+CUDA-context failures (`interop::cuda::tests::test_cuda_available`/
 `test_shared_memory_allocation`, `cudaGetDevice` error code 3) -
 untouched module, looks like GPU-context contention from another running
 process rather than a real regression, not investigated further.
