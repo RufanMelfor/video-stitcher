@@ -1033,6 +1033,33 @@ export component RecoApp inherits Window {
     in-out property <bool> export-replay-enabled: false;
     in-out property <bool> export-events-enabled: false;
 
+    // Fires once per AI Tracking / panner slider edit above, so Rust can
+    // persist the new value as the app-level last-used default (see
+    // `GuiSettings::autocam_defaults` / `crate::settings`) without
+    // requiring an explicit Save calibration click. Deliberately not
+    // wired for `export-model-path` (already has its own dedicated
+    // persistence in `on_pick_export_model`) or the progress/status
+    // fields below (not tuning parameters).
+    callback autocam-settings-changed();
+    changed export-tracking-mode => { root.autocam-settings-changed(); }
+    changed export-detection-interval => { root.autocam-settings-changed(); }
+    changed export-player-anchor-rad => { root.autocam-settings-changed(); }
+    changed export-panner-preset => { root.autocam-settings-changed(); }
+    changed export-lookahead-secs => { root.autocam-settings-changed(); }
+    changed export-lookahead-reduced-bit-depth => { root.autocam-settings-changed(); }
+    changed export-framing => { root.autocam-settings-changed(); }
+    changed export-lock-pitch => { root.autocam-settings-changed(); }
+    changed export-cluster-mode => { root.autocam-settings-changed(); }
+    changed export-cluster-bandwidth => { root.autocam-settings-changed(); }
+    changed export-dead-zone => { root.autocam-settings-changed(); }
+    changed export-ball-weight => { root.autocam-settings-changed(); }
+    changed export-ball-max-dist-from-cluster => { root.autocam-settings-changed(); }
+    changed export-fov-tight => { root.autocam-settings-changed(); }
+    changed export-fov-wide => { root.autocam-settings-changed(); }
+    changed export-fov-default => { root.autocam-settings-changed(); }
+    changed export-fov-alpha => { root.autocam-settings-changed(); }
+    changed export-cluster-alpha => { root.autocam-settings-changed(); }
+
     // Export progress (also used by the main status bar).
     in-out property <bool> export-in-progress: false;
     in-out property <float> export-progress: 0.0; // 0..1
