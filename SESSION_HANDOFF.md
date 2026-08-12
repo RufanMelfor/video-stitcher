@@ -13,17 +13,25 @@ manager" / `zerotier-cli listnetworks` instead.
 ## Immediate state / what to do next
 
 **Events JSONL is now self-describing, merged into `main`
-(`ae7e199c`).** User asked: when AI logging is on, put all the AI/panner
-parameters at the top of the events JSONL, in English. Done - the very
-first line of any `--events` output is now `{"kind":"run_config", ...}`
-with every field from `docs/ai-panner-tuning.md`'s settings tables
-(tracking mode, Ball anchor range, Ball reach, FOV Wide, etc.), before
-any `frame_start` line. New `PipelineEvent::RunConfig` variant in
-reco-core reuses the `Calibration::AutocamDefaults` struct added earlier
-this session (same schema, no duplication) - wired through
-`StitchJob::ai_run_config()` in reco-io, populated from both reco-cli
-(resolved CLI args + panner preset/config overlay) and reco-gui
-(`AutocamUiConfig` directly). Verified with a real CLI run
+(`8ba19adc`).** User asked: when AI logging is on, put all the AI/panner
+parameters at the top of the events JSONL, in English, and mention
+which YOLO model was used right at the top too. Done in two passes -
+the very first line of any `--events` output is now
+`{"kind":"run_config","model_path":"...","config":{...}}` with
+`model_path` first (which checkpoint produced the trace is the first
+thing worth knowing) and every field from `docs/ai-panner-tuning.md`'s
+settings tables inside `config`, before any `frame_start` line. New
+`PipelineEvent::RunConfig` variant in reco-core reuses the
+`Calibration::AutocamDefaults` struct added earlier this session for
+`config` (same schema, no duplication) but keeps `model_path` as a
+sibling field, not part of that struct - a machine-local absolute path
+doesn't belong in the calibration-persisted version. Wired through
+`StitchJob::ai_run_config(model_path, config)` in reco-io, populated
+from both reco-cli (resolved CLI args + panner preset/config overlay)
+and reco-gui (`AutocamUiConfig` directly). Also asked to reformat the
+doc's settings tables as a plain aligned block instead of markdown
+tables - done in both EN/NL, matches the `run_config` field order.
+Verified with a real CLI run
 (`--player-anchor-rad 0.35`) - the JSONL's first line matched exactly.
 Docs updated (EN+NL) to mention this. Nothing outstanding here.
 
