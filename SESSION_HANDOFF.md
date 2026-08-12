@@ -12,66 +12,60 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
-**"Lost my GOAL selection in the ROI editor" - not a regression, a branch
-mismatch.** User reported this after testing the ball-reach-slider debug
-build below. Checked: `crates/reco-gui/ui/main.slint` on `main` has zero
-references to goal/goal-line anywhere - the Goal ROI editor
-([[project_goal_detection_idea]], `feat/goal-line-calibration` branch)
-was **never merged into `main`**, it only exists on that separate,
-unmerged branch (still paused there pending better ball-model quality
-per that memory). The build the user tested was built from `main` for
-the ball-reach slider work, which never had the Goal feature to begin
-with - nothing was lost, it just isn't in this build. **Open question
-for the user, not yet answered**: merge/rebase `feat/goal-line-calibration`
-onto current `main` so both features coexist in one build, or keep them
-on separate branches (in which case: which branch should "the" test
-build be built from going forward)?
+**Three things landed this session, all pushed to `github/main`
+(`ebd850bb`) or their own branch. None are upstream-PR'd yet.**
 
-**Second ask this session - Skia renderer swap (fixes wobbly text,
-[[project_skia_renderer_future_task]]):** done and build/smoke-test
-verified, needs the user's visual confirmation next.
-- `crates/reco-gui/Cargo.toml`: `slint` feature `renderer-femtovg-wgpu`
-  -> `renderer-skia` (kept `unstable-wgpu-28`). Checked feasibility first
-  per that memory's own caution (Skia's shared-wgpu-28-device path was
-  unverified): confirmed `i-slint-renderer-skia` 1.15.1 ships a
-  `wgpu_28_surface.rs` handling `WGPUTexture::WGPU28Texture` the same way
-  femtovg-wgpu does, and `BackendSelector::require_wgpu_28()` in
-  `main.rs` is renderer-agnostic - no reco-gui code changes needed beyond
-  the one Cargo.toml line.
-- **Verified**: `cargo build -p reco-gui` clean; launched the resulting
-  exe and confirmed the *exact same* zero-copy preview startup sequence
-  as the femtovg build ("Captured Slint wgpu 28 device/queue for
-  zero-copy preview" -> `GpuContext from external device: Slint-shared
-  wgpu 28 device (Vulkan)` -> pipeline initialized), no errors.
-- **Checked the DPI theory** ([[project_skia_renderer_future_task]]
-  assumed non-100% scaling as the likely trigger): this machine's
-  primary display is actually at 100% scale (`AppliedDPI: 96`), so that
-  specific theory doesn't apply here - femtovg's lack of ClearType
-  hinting may still be the cause even at 100% scale, but this wasn't
-  confirmed the way the memory expected. **User needs to visually
-  confirm the text actually looks crisper now** - can't judge font
-  rendering quality myself.
-- **Not yet done**: `cargo clippy -p reco-gui --all-targets -- -D
-  warnings` hit a **pre-existing, unrelated** failure -
-  `cuda_nv12_frames` dead-code in `reco-core`
-  (`crates/reco-core/src/session/detection_dispatch.rs:79`) - present
-  before this session's changes too (showed as a plain warning in
-  `cargo build`), not something introduced by the renderer swap or the
-  ball-reach slider. Left alone since it's out of scope; needs its own
-  look before any PR merges cleanly through CI.
-- Both this and the ball-reach slider below are **uncommitted on `main`**
-  as of session end - nothing branched/committed yet, deliberately
-  waiting on user confirmation for both before deciding how to split
-  them into PRs (likely two separate ones - unrelated changes).
+1. **`feat/goal-line-calibration` merged into `main`** (user's explicit
+   request, so future test builds have the Goal editor without needing a
+   separate branch). Only conflict was `SESSION_HANDOFF.md` (resolved by
+   keeping this session's version - the goal branch's was from
+   2026-08-06/07, long superseded). Everything else auto-merged clean.
+   **Known limitation carried over, unchanged**: real-footage
+   verification (from that branch's own history) found the test goal
+   polygon misplaced - not yet a confirmed-working feature, needs that
+   fix before it's PR-ready upstream. See
+   [[project_goal_detection_idea]].
+2. **Skia renderer swap, on its own branch `feat/skia-text-renderer`**
+   (pushed, not merged into `main` yet - `main` still builds with
+   femtovg-wgpu). Fixes the wobbly-text report
+   ([[project_skia_renderer_future_task]]): `renderer-femtovg-wgpu` ->
+   `renderer-skia` in `crates/reco-gui/Cargo.toml`. User confirmed **text
+   now looks good**, but noted it renders slightly larger than before -
+   fixed by pinning `default-font-family: "Segoe UI"` on the root Window
+   (Skia/DirectWrite and femtovg/fontdb were resolving the unset generic
+   sans-serif fallback to fonts with different em-box metrics). Build +
+   zero-copy-preview smoke-test both clean. **Still open**: `cargo clippy
+   -D warnings` fails on a pre-existing, unrelated `cuda_nv12_frames`
+   dead-code warning in `reco-core` (not caused by this change) - needs
+   its own fix before this branch's PR can pass CI. Ready for the user to
+   do a fuller visual pass (this was only a "does it look bigger/smaller"
+   check, not a full click-through) before opening the PR.
+3. **Ball-reach GUI slider, on its own branch
+   `feat/ball-reach-gui-slider`** (pushed, not merged into `main` yet).
+   Answers 2026-08-11's open question about `ball_max_dist_from_cluster`
+   - user picked "add a GUI slider". New "Ball reach" slider in the
+   Export dialog's Advanced panner section. Build-verified only so far -
+   **not yet tested against the actual corner-ball footage** from
+   2026-08-11's investigation (see that session's recommended test
+   settings further down, and the new
+   `D:\VOETBAL_VIDEO\Berghem Sport J011-1\03 OJC -Bergem Sport
+   04072026\TEST VIDEO\` location the user moved test clips to). Once
+   confirmed working, open the upstream PR.
 
-**Top priority - awaiting user test before opening a PR:**
-
-Built a GUI slider for `reco-autocam`'s `ball_max_dist_from_cluster`
-(answers 2026-08-11's open item 1 below - user picked "add a GUI slider"
-over raising the default or CLI-only). Uncommitted on `main` as of this
-session; **not yet merged/branched/PR'd** - waiting on the user to click
-through the Export dialog and confirm the corner-ball framing problem is
-actually fixed before that happens.
+**Build state**: debug `reco-gui.exe` rebuilt from merged `main` and
+smoke-tested clean (loads calibration, zero-copy preview initializes, no
+panics). `cargo test -p reco-autocam -p reco-gui` all green (102 tests,
+including the ROI-polygon tests the goal-editor merge touches).
+`cargo test -p reco-core` has 2 pre-existing, unrelated CUDA-context
+failures (`interop::cuda::tests::test_cuda_available`/
+`test_shared_memory_allocation`, `cudaGetDevice` error code 3) -
+untouched module, looks like GPU-context contention from another running
+process rather than a real regression, not investigated further.
+**Release build not yet done this session** - attempting it was blocked
+by the harness's permission classifier; run `cargo build --release -p
+reco-gui` manually (with the FFMPEG_DIR/LLVM PATH env vars, see
+env_build_requirements.md) before relying on a release binary, per
+[[feedback_rebuild_gui_before_user_test]].
 
 - **What changed** (mirrors the existing `ball_weight` slider's plumbing
   exactly):
