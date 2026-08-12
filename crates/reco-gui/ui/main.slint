@@ -999,6 +999,7 @@ export component RecoApp inherits Window {
     in-out property <string> export-model-path: "";
     in-out property <string> export-tracking-mode: "field";
     in-out property <int> export-detection-interval: 3;
+    in-out property <float> export-player-anchor-rad: 0.20;
     in-out property <bool> export-autocam-enabled: false;
     // Panner tuning (mapped onto FieldPannerConfig in export.rs). Defaults
     // mirror the validated football defaults; lookahead defaults on because
@@ -4599,6 +4600,16 @@ export component RecoApp inherits Window {
                                     }
                                 }
                             }
+                        }
+
+                        LabeledSlider {
+                            label: "Ball anchor range";
+                            tip: "Before the panner ever sees a ball position, the ball tracker itself requires a raw detection to be within this distance of at least one tracked player - farther detections are dropped as likely false positives (crowd, background). This runs ahead of Ball reach below, so a genuine isolated ball (e.g. a breakaway) can be silently discarded here even with Ball reach raised. Widen it if the panner never even coasts onto a real, far-from-the-pack ball.";
+                            minimum: 0.1;
+                            maximum: 0.8;
+                            value <=> root.export-player-anchor-rad;
+                            suffix: " rad";
+                            decimals: 2;
                         }
 
                         // Style preset: sets the controls below; tweak after.
