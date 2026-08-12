@@ -2122,6 +2122,60 @@ fn install_panic_hook() {
     }));
 }
 
+/// Snapshot the Export dialog's AI Tracking sliders into an
+/// `AutocamDefaults`. Shared by calibration-level persistence
+/// (`do_save_calibration`) and app-level persistence (the
+/// `autocam-settings-changed` handler below) so the two never drift
+/// out of sync with each other or with the slider list in `main.slint`.
+fn snapshot_autocam_defaults(app: &RecoApp) -> reco_core::calibration::AutocamDefaults {
+    reco_core::calibration::AutocamDefaults {
+        tracking_mode: app.get_export_tracking_mode().to_string(),
+        detection_interval: app.get_export_detection_interval() as u32,
+        player_anchor_rad: app.get_export_player_anchor_rad(),
+        lookahead_secs: app.get_export_lookahead_secs() as f64,
+        lookahead_reduced_bit_depth: app.get_export_lookahead_reduced_bit_depth(),
+        preset: app.get_export_panner_preset().to_string(),
+        framing: app.get_export_framing().to_string(),
+        lock_pitch: app.get_export_lock_pitch(),
+        cluster_mode: app.get_export_cluster_mode().to_string(),
+        cluster_bandwidth_rad: app.get_export_cluster_bandwidth(),
+        dead_zone_rad: app.get_export_dead_zone(),
+        ball_weight: app.get_export_ball_weight(),
+        ball_max_dist_from_cluster: app.get_export_ball_max_dist_from_cluster(),
+        fov_tight: app.get_export_fov_tight(),
+        fov_wide: app.get_export_fov_wide(),
+        fov_default: app.get_export_fov_default(),
+        fov_alpha: app.get_export_fov_alpha(),
+        cluster_alpha: app.get_export_cluster_alpha(),
+    }
+}
+
+/// Apply a persisted `AutocamDefaults` onto the Export dialog's AI
+/// Tracking sliders - the inverse of `snapshot_autocam_defaults`. Used
+/// both for calibration-level restore (`try_init_and_update`) and
+/// app-level restore (last-used settings, applied at startup before
+/// any calibration is loaded).
+fn apply_autocam_defaults(app: &RecoApp, ac: &reco_core::calibration::AutocamDefaults) {
+    app.set_export_tracking_mode(ac.tracking_mode.clone().into());
+    app.set_export_detection_interval(ac.detection_interval as i32);
+    app.set_export_player_anchor_rad(ac.player_anchor_rad);
+    app.set_export_lookahead_secs(ac.lookahead_secs as f32);
+    app.set_export_lookahead_reduced_bit_depth(ac.lookahead_reduced_bit_depth);
+    app.set_export_panner_preset(ac.preset.clone().into());
+    app.set_export_framing(ac.framing.clone().into());
+    app.set_export_lock_pitch(ac.lock_pitch);
+    app.set_export_cluster_mode(ac.cluster_mode.clone().into());
+    app.set_export_cluster_bandwidth(ac.cluster_bandwidth_rad);
+    app.set_export_dead_zone(ac.dead_zone_rad);
+    app.set_export_ball_weight(ac.ball_weight);
+    app.set_export_ball_max_dist_from_cluster(ac.ball_max_dist_from_cluster);
+    app.set_export_fov_tight(ac.fov_tight);
+    app.set_export_fov_wide(ac.fov_wide);
+    app.set_export_fov_default(ac.fov_default);
+    app.set_export_fov_alpha(ac.fov_alpha);
+    app.set_export_cluster_alpha(ac.cluster_alpha);
+}
+
 fn main() -> anyhow::Result<()> {
     init_tracing();
     install_panic_hook();
@@ -2192,6 +2246,16 @@ fn main() -> anyhow::Result<()> {
     {
         let s = state.borrow();
         app.set_dark_mode(s.user_settings.dark_mode);
+        // App-level "last used" AI Tracking / panner settings, restored
+        // before any video/calibration is loaded so the Export dialog
+        // doesn't reset to hardcoded literals just because the user
+        // hasn't explicitly clicked Save calibration this session. A
+        // calibration with its own `autocam_defaults` still overrides
+        // this once loaded (see the `RenderingSetup` branch below).
+        if let Some(ac) = s.user_settings.autocam_defaults.as_ref() {
+            apply_autocam_defaults(&app, ac);
+            log::info!("Restored AI Tracking defaults from last session");
+        }
     }
 
     // Reopen the last-used left/right video and calibration file (if they
@@ -4276,28 +4340,10 @@ fn main() -> anyhow::Result<()> {
         // the topology/lens/blend sliders, these aren't part of the live
         // renderer, so they're only synced here rather than on every edit.
         if let Some(app) = app_weak.upgrade() {
+            let ac = snapshot_autocam_defaults(&app);
             let mut s = state_ref.borrow_mut();
             if let Some(cal) = s.calibration.as_mut() {
-                cal.autocam_defaults = Some(reco_core::calibration::AutocamDefaults {
-                    tracking_mode: app.get_export_tracking_mode().to_string(),
-                    detection_interval: app.get_export_detection_interval() as u32,
-                    player_anchor_rad: app.get_export_player_anchor_rad(),
-                    lookahead_secs: app.get_export_lookahead_secs() as f64,
-                    lookahead_reduced_bit_depth: app.get_export_lookahead_reduced_bit_depth(),
-                    preset: app.get_export_panner_preset().to_string(),
-                    framing: app.get_export_framing().to_string(),
-                    lock_pitch: app.get_export_lock_pitch(),
-                    cluster_mode: app.get_export_cluster_mode().to_string(),
-                    cluster_bandwidth_rad: app.get_export_cluster_bandwidth(),
-                    dead_zone_rad: app.get_export_dead_zone(),
-                    ball_weight: app.get_export_ball_weight(),
-                    ball_max_dist_from_cluster: app.get_export_ball_max_dist_from_cluster(),
-                    fov_tight: app.get_export_fov_tight(),
-                    fov_wide: app.get_export_fov_wide(),
-                    fov_default: app.get_export_fov_default(),
-                    fov_alpha: app.get_export_fov_alpha(),
-                    cluster_alpha: app.get_export_cluster_alpha(),
-                });
+                cal.autocam_defaults = Some(ac);
             }
         }
         let save_result = state_ref.borrow().save_calibration();
@@ -4860,6 +4906,23 @@ fn main() -> anyhow::Result<()> {
             let mut s = state_ref.borrow_mut();
             s.user_settings.ai_model_path = Some(path);
             s.user_settings.save();
+        }
+    });
+
+    // Fires on every AI Tracking / panner slider edit (see the
+    // `changed export-xxx` handlers in main.slint). Persists immediately
+    // to `GuiSettings` so the values survive an app restart even if the
+    // user never explicitly clicks Save calibration - see
+    // `GuiSettings::autocam_defaults`.
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_autocam_settings_changed(move || {
+        if let Some(app) = app_weak.upgrade() {
+            let ac = snapshot_autocam_defaults(&app);
+            state_ref
+                .borrow_mut()
+                .user_settings
+                .set_autocam_defaults(ac);
         }
     });
 
@@ -5902,24 +5965,7 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                     .as_ref()
                     .and_then(|c| c.autocam_defaults.as_ref())
                 {
-                    app.set_export_tracking_mode(ac.tracking_mode.clone().into());
-                    app.set_export_detection_interval(ac.detection_interval as i32);
-                    app.set_export_player_anchor_rad(ac.player_anchor_rad);
-                    app.set_export_lookahead_secs(ac.lookahead_secs as f32);
-                    app.set_export_lookahead_reduced_bit_depth(ac.lookahead_reduced_bit_depth);
-                    app.set_export_panner_preset(ac.preset.clone().into());
-                    app.set_export_framing(ac.framing.clone().into());
-                    app.set_export_lock_pitch(ac.lock_pitch);
-                    app.set_export_cluster_mode(ac.cluster_mode.clone().into());
-                    app.set_export_cluster_bandwidth(ac.cluster_bandwidth_rad);
-                    app.set_export_dead_zone(ac.dead_zone_rad);
-                    app.set_export_ball_weight(ac.ball_weight);
-                    app.set_export_ball_max_dist_from_cluster(ac.ball_max_dist_from_cluster);
-                    app.set_export_fov_tight(ac.fov_tight);
-                    app.set_export_fov_wide(ac.fov_wide);
-                    app.set_export_fov_default(ac.fov_default);
-                    app.set_export_fov_alpha(ac.fov_alpha);
-                    app.set_export_cluster_alpha(ac.cluster_alpha);
+                    apply_autocam_defaults(&app, ac);
                     log::info!("Restored AI Tracking defaults from calibration");
                 }
                 // Lookahead VRAM risk thresholds for the export slider. The

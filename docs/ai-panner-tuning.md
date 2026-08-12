@@ -14,6 +14,13 @@ from scratch. These are also saved per-calibration once you hit **Save
 calibration** in the Export dialog - see
 [`Calibration::autocam_defaults`](../crates/reco-core/src/calibration.rs).
 
+Every slider in this section also auto-saves as your app-level "last
+used" default the moment you change it - no Save calibration click
+needed. Restarting `reco-gui` restores these values before any video or
+calibration is loaded; opening a calibration that has its own saved
+`autocam_defaults` then overrides them, same priority as before. See
+[`GuiSettings::autocam_defaults`](../crates/reco-gui/src/settings.rs).
+
 Model: `yolo26n_v2` is the production checkpoint as of this writing, but
 `yolo26s_v3` (round 3, ONNX-exported) tested dramatically better in a
 real in-app run on the same clip - raw ball detections 19.7% -> 48.7% of

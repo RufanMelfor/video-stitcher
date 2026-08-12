@@ -15,6 +15,14 @@ opgeslagen zodra je op **Save calibration** klikt in het
 Export-dialoogvenster - zie
 [`Calibration::autocam_defaults`](../crates/reco-core/src/calibration.rs).
 
+Elke schuifregelaar in deze sectie slaat bovendien meteen op als jouw
+app-brede "laatst gebruikte" standaard, zodra je hem wijzigt - geen
+Save calibration nodig. Bij het herstarten van `reco-gui` worden deze
+waarden hersteld voordat er video of calibratie geladen is; een
+calibratie met eigen opgeslagen `autocam_defaults` overschrijft ze
+daarna alsnog, zelfde prioriteit als voorheen. Zie
+[`GuiSettings::autocam_defaults`](../crates/reco-gui/src/settings.rs).
+
 Model: `yolo26n_v2` is de productiecheckpoint op moment van schrijven,
 maar `yolo26s_v3` (ronde 3, ONNX-geëxporteerd) scoorde dramatisch beter
 in een echte in-app test op dezelfde clip - ruwe baldetecties van 19,7%
