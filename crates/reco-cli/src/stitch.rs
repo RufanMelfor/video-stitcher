@@ -366,35 +366,38 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         if args.events_path.is_some() {
             use reco_autocam::panners::{ClusterMode, FramingMode};
             let fp = panner_cfg.clone().unwrap_or_default();
-            job = job.ai_run_config(reco_core::calibration::AutocamDefaults {
-                tracking_mode: mode_str.clone(),
-                detection_interval: interval as u32,
-                player_anchor_rad: player_anchor_rad
-                    .unwrap_or(reco_autocam::trackers::ball::DEFAULT_PLAYER_ANCHOR_RAD),
-                lookahead_secs: args.lookahead,
-                lookahead_reduced_bit_depth: args.lookahead_reduced_bit_depth,
-                preset: args.panner_preset.unwrap_or("").to_string(),
-                framing: if fp.framing == FramingMode::FrameAll {
-                    "frame_all"
-                } else {
-                    "action"
-                }
-                .to_string(),
-                lock_pitch: fp.lock_pitch,
-                cluster_mode: if fp.cluster_mode == ClusterMode::TrimmedMean {
-                    "trimmed_mean"
-                } else {
-                    "density"
-                }
-                .to_string(),
-                cluster_bandwidth_rad: fp.cluster_bandwidth_rad,
-                dead_zone_rad: fp.dead_zone_rad,
-                ball_weight: fp.ball_weight,
-                ball_max_dist_from_cluster: fp.ball_max_dist_from_cluster,
-                fov_tight: fp.fov_tight,
-                fov_wide: fp.fov_wide,
-                fov_default: fp.fov_default,
-            });
+            job = job.ai_run_config(
+                model_path.clone(),
+                reco_core::calibration::AutocamDefaults {
+                    tracking_mode: mode_str.clone(),
+                    detection_interval: interval as u32,
+                    player_anchor_rad: player_anchor_rad
+                        .unwrap_or(reco_autocam::trackers::ball::DEFAULT_PLAYER_ANCHOR_RAD),
+                    lookahead_secs: args.lookahead,
+                    lookahead_reduced_bit_depth: args.lookahead_reduced_bit_depth,
+                    preset: args.panner_preset.unwrap_or("").to_string(),
+                    framing: if fp.framing == FramingMode::FrameAll {
+                        "frame_all"
+                    } else {
+                        "action"
+                    }
+                    .to_string(),
+                    lock_pitch: fp.lock_pitch,
+                    cluster_mode: if fp.cluster_mode == ClusterMode::TrimmedMean {
+                        "trimmed_mean"
+                    } else {
+                        "density"
+                    }
+                    .to_string(),
+                    cluster_bandwidth_rad: fp.cluster_bandwidth_rad,
+                    dead_zone_rad: fp.dead_zone_rad,
+                    ball_weight: fp.ball_weight,
+                    ball_max_dist_from_cluster: fp.ball_max_dist_from_cluster,
+                    fov_tight: fp.fov_tight,
+                    fov_wide: fp.fov_wide,
+                    fov_default: fp.fov_default,
+                },
+            );
         }
 
         job = job.on_session(move |session, source| {
