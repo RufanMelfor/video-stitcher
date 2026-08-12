@@ -520,9 +520,11 @@ pub fn setup_autocam(
             TrackingMode::Field => {
                 let ball_tracker = crate::trackers::BallTracker::new(ball_id)
                     .with_max_jump_rad(0.8)
-                    .with_player_anchor_rad(config.player_anchor_max_rad.unwrap_or(
-                        crate::trackers::ball::DEFAULT_PLAYER_ANCHOR_RAD,
-                    ));
+                    .with_player_anchor_rad(
+                        config
+                            .player_anchor_max_rad
+                            .unwrap_or(crate::trackers::ball::DEFAULT_PLAYER_ANCHOR_RAD),
+                    );
                 target.set_ball_tracker(Box::new(ball_tracker));
 
                 // Attach the player provider only when the model actually
@@ -567,9 +569,11 @@ pub fn setup_autocam(
                 // consistency in case that ever changes.
                 let ball_tracker = crate::trackers::BallTracker::new(ball_id)
                     .with_max_jump_rad(0.5)
-                    .with_player_anchor_rad(config.player_anchor_max_rad.unwrap_or(
-                        crate::trackers::ball::DEFAULT_PLAYER_ANCHOR_RAD,
-                    ));
+                    .with_player_anchor_rad(
+                        config
+                            .player_anchor_max_rad
+                            .unwrap_or(crate::trackers::ball::DEFAULT_PLAYER_ANCHOR_RAD),
+                    );
                 // No player provider - ball-only mode, even if the model
                 // has a player class (the user asked to track the ball).
                 target.set_ball_tracker(Box::new(ball_tracker));
