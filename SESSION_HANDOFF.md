@@ -12,6 +12,103 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
+**AI Tracking / panner settings now auto-persist app-wide, no Save
+calibration needed - merged into `main` (`e96dfb5f`).** User asked, right
+after the `fov_alpha`/`cluster_alpha` feature below shipped: "save all
+AI planner parameters as soon as they change, I don't want to re-enter
+them every time I restart the program." The existing
+`Calibration::autocam_defaults` only survives a restart if you
+explicitly click **Save calibration** - this closes that gap one layer
+up.
+- New `GuiSettings::autocam_defaults` (`crates/reco-gui/src/settings.rs`,
+  `<config>/reco/gui.json`) - same `AutocamDefaults` struct, but
+  app-level and independent of any calibration.
+- `main.slint`: new `autocam-settings-changed` callback, fired by
+  `changed export-xxx => {...}` on all 18 AI Tracking/panner properties
+  (every field `AutocamDefaults` covers). Not wired for
+  `export-model-path` (already has its own MRU-style persistence) or
+  progress/status fields.
+- `main.rs`: factored the previously-duplicated 18-field snapshot/restore
+  code (was inline in both `do_save_calibration` and
+  `try_init_and_update`) into shared `snapshot_autocam_defaults()` /
+  `apply_autocam_defaults()` helpers, now used by three call sites:
+  calibration save, calibration load, and the new save-on-change
+  handler.
+- **Restore priority, in order**: `GuiSettings`' last-used values apply
+  at startup, before any video/calibration is loaded; a loaded
+  calibration's own `autocam_defaults` then overrides them if present -
+  calibration-level priority unchanged, just with a real fallback
+  underneath instead of hardcoded `.slint` literals.
+- Docs updated (EN+NL) to explain the auto-save/restore + priority order.
+- Tests: 3 new in `settings.rs` (JSON roundtrip, absent-until-set,
+  missing-field backward compat). `cargo test -p reco-gui --bin
+  reco-gui settings::` - 12/12 pass. `cargo fmt --check` and `cargo
+  clippy -p reco-gui` clean (modulo the two pre-existing, unrelated
+  issues noted below).
+- **Nothing outstanding** - build+test verified on merged `main`,
+  pushed. Next slider drag in the Export dialog should already persist;
+  next app restart should already restore it without touching a
+  calibration file.
+
+**`fov_alpha`/`cluster_alpha` (Zoom/Aim smoothing speed) now tunable,
+merged into `main` (`40c532f3`).** Root-caused from a real trace ("Ai
+Planner Test v7"): user reported "from frame 701 I no longer see the
+ball." Even with Ball anchor range, Ball reach, and FOV Wide all raised
+correctly, `FieldPannerConfig`'s own smoothing rates
+(`fov_alpha`/`cluster_alpha`, both already fields, never wired to any
+consumer) default to ~0.01/0.012 - a ~3s time constant at 30fps. On the
+trace: FOV climbed 38.7 -> only 39.9deg (target was past 65deg) over the
+~20 frames the ball stayed trackable; aim pitch barely moved while the
+ball's pitch shifted 0.24 rad in the same window. The computed target
+was correct - the smoothing just hadn't caught up before the ball left
+frame.
+- `reco-core`: `fov_alpha`/`cluster_alpha` added to
+  `Calibration::AutocamDefaults` (and so also to the events.jsonl
+  `run_config` header - see below). `#[serde(default = "...")]` falls
+  back to `FieldPannerConfig`'s own defaults (0.01/0.012), not `0.0`
+  ("never move"), for calibrations saved before this field existed.
+- `reco-cli`: new `--fov-alpha`/`--cluster-alpha` flags, applied last
+  (highest priority) over `--panner-preset`/`--panner-config`; starts
+  from `FieldPannerConfig::default()` if neither preset nor config file
+  was given but one of these flags was.
+- `reco-gui`: two new sliders ("Zoom (FOV)", "Aim (cluster)") under a
+  new "Smoothing speed" subsection in Advanced panner, wired through
+  the same 4 sites as every other panner slider this session.
+- Docs (EN+NL): new explainer section citing the v7 trace numbers, added
+  as gate #4 on the corner-breakaway checklist (Ball anchor range ->
+  Ball reach -> FOV Wide -> Zoom/Aim smoothing), removed from "not yet
+  exposed in the GUI".
+- Verified via a real CLI run (`--fov-alpha 0.06 --cluster-alpha 0.05`):
+  events.jsonl's `run_config` line reflects both values correctly.
+- **Also fixed in passing**: two pieces of pre-existing `cargo fmt`
+  debt from earlier this session's Ball-anchor-range feature
+  (`crates/reco-autocam/src/lib.rs`) - unrelated to this feature,
+  committed separately (`40c532f3`'s parent).
+- **Still pre-existing, not touched, both block a clean
+  `cargo clippy --all-targets -D warnings` run**: (1)
+  `cuda_nv12_frames` dead-code warning in
+  `crates/reco-core/src/session/detection_dispatch.rs` (also already
+  called out below under the Skia renderer entry - predates this
+  session, from the upstream-merge commit `6ff32c37`); (2)
+  `clippy::field_reassign_with_default` in two tests in
+  `crates/reco-gui/src/settings.rs` (predates this session, commit
+  `e99c1380`). Neither is new debt from this session's work - flagging
+  so they don't get mistaken for a regression later, but not fixed
+  here (out of scope for either feature that touched nearby code).
+- **Nothing outstanding** on this feature itself.
+
+**Both debug and release `reco-gui.exe` rebuilt from `main` with the
+above two features** (per
+[[feedback_rebuild_gui_before_user_test]] - the release build was the
+part called out as "not yet done" in the previous handoff, now done).
+`cargo test -p reco-core -p reco-cli -p reco-autocam -p reco-io -p
+reco-gui` all green except the same 2 pre-existing CUDA-context test
+failures noted below (untouched module, not a regression).
+`reco-obs` doesn't build in this environment at all (missing
+`libobs`/`OBS_INCLUDE_DIR`, pre-existing, unrelated) - excluded from
+the workspace-wide build/test commands this session, built the
+touched crates explicitly instead.
+
 **Events JSONL is now self-describing, merged into `main`
 (`8ba19adc`).** User asked: when AI logging is on, put all the AI/panner
 parameters at the top of the events JSONL, in English, and mention
