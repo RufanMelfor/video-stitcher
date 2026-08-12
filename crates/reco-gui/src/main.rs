@@ -345,6 +345,9 @@ struct AppState {
     /// projection instead of the stitched panorama.
     lens_preview_active: bool,
     /// Which camera to show in lens preview mode ("left" or "right").
+    /// Shared with the goal-geometry editor as its "which goal" selector
+    /// too (one Left/Right switch for both, per the merged DETECTION
+    /// ZONES card).
     lens_preview_side: String,
     /// Lens correction amount for the preview (0.0 = raw, 1.0 = full).
     lens_correction_amount: f32,
@@ -1806,6 +1809,51 @@ fn roi_hit_test(pts: &[[f64; 2]], lx: f32, ly: f32, cw: f32, ch: f32) -> Option<
         .filter(|(_, d)| *d <= ROI_HIT_RADIUS_PX)
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(i, _)| i)
+}
+
+/// Reconstruct Slint's `image-fit: contain` letterbox rect for the
+/// panorama preview (outside lens-preview mode, where - unlike lens
+/// preview - the displayed `Image` is sized to the box directly, so
+/// there's no `preview-box.content-*`-equivalent property to read).
+/// Used by the seam-line hit test; the goal-geometry editor does not need
+/// this since it lives in the lens-preview window, not the panorama one.
+fn panorama_letterbox_rect(box_w: f32, box_h: f32, output_aspect: f32) -> (f32, f32, f32, f32) {
+    let box_aspect = box_w / box_h;
+    let (content_w, content_h) = if box_aspect > output_aspect {
+        (box_h * output_aspect, box_h)
+    } else {
+        (box_w, box_w / output_aspect)
+    };
+    let content_x = (box_w - content_w) / 2.0;
+    let content_y = (box_h - content_h) / 2.0;
+    (content_w, content_h, content_x, content_y)
+}
+
+/// Push the currently-selected goal's polygon (`state.lens_preview_side`,
+/// shared with the ROI editor) to the Slint overlay - same raw-distorted-
+/// to-rectified conversion as `sync_roi_points`, just reading
+/// `cal.goal_geometry` instead of `cal.field_roi`.
+fn sync_goal_points(state: &AppState, app: &RecoApp) {
+    let (xs, ys) = if let Some(cal) = &state.calibration
+        && let Some(goal) = &cal.goal_geometry
+    {
+        let is_right = state.lens_preview_side == "right";
+        let side = if is_right { &goal.right } else { &goal.left };
+        let lens = &cal.lenses[if is_right { 1 } else { 0 }];
+        let display: Vec<[f64; 2]> = side
+            .iter()
+            .map(|p| raw_norm_to_rectified_norm(p[0], p[1], lens))
+            .collect();
+        let xs: Vec<f32> = display.iter().map(|p| p[0] as f32).collect();
+        let ys: Vec<f32> = display.iter().map(|p| p[1] as f32).collect();
+        (xs, ys)
+    } else {
+        (vec![], vec![])
+    };
+    let aspect = app.get_lens_frame_aspect();
+    app.set_goal_path_commands(roi_path_commands(&xs, &ys, aspect).into());
+    app.set_goal_points_x(slint::ModelRc::new(slint::VecModel::from(xs)));
+    app.set_goal_points_y(slint::ModelRc::new(slint::VecModel::from(ys)));
 }
 
 /// Hit-test radius (pixels) for grabbing the seam debug line - see
@@ -3709,21 +3757,8 @@ fn main() -> anyhow::Result<()> {
         let output_aspect = pipeline.viewport().aspect_ratio();
         let pose = s.pose.current_pose();
 
-        // Reconstruct Slint's `image-fit: contain` letterbox rect within the
-        // preview box - outside lens-preview mode the displayed Image is
-        // sized to the box directly (no `content-w`/`content-h` properties
-        // exist for this case, unlike lens-preview - those are letter-
-        // boxed against `lens-frame-aspect`, a different, unrelated ratio),
-        // so it's the *box*, not any pre-existing property, that actually
-        // letterboxes to the real output aspect ratio.
-        let box_aspect = box_w / box_h;
-        let (content_w, content_h) = if box_aspect > output_aspect {
-            (box_h * output_aspect, box_h)
-        } else {
-            (box_w, box_w / output_aspect)
-        };
-        let content_x = (box_w - content_w) / 2.0;
-        let content_y = (box_h - content_h) / 2.0;
+        let (content_w, content_h, content_x, content_y) =
+            panorama_letterbox_rect(box_w, box_h, output_aspect);
         let lx = mouse_x - content_x;
         let ly = mouse_y - content_y;
         if lx < 0.0 || lx > content_w || ly < 0.0 || ly > content_h {
@@ -3743,6 +3778,156 @@ fn main() -> anyhow::Result<()> {
         let bottom_px = (bottom.0 * content_w, bottom.1 * content_h);
         let dist = point_to_segment_distance(lx, ly, top_px.0, top_px.1, bottom_px.0, bottom_px.1);
         dist <= SEAM_LINE_HIT_RADIUS_PX
+    });
+
+    // In-app goal-geometry point editor. Same interaction model AND same
+    // raw-distorted-frame-normalized coordinate space as the field-ROI
+    // editor (`on_roi_pointer_*` above) - the two now share one lens-
+    // preview editing session (`zone-edit-mode`/`zone-edit-type` in
+    // main.slint), just targeting `cal.goal_geometry` instead of
+    // `cal.field_roi`.
+    let state_ref = Rc::clone(&state);
+    app.on_goal_pointer_hit_test(move |lx, ly, cw, ch| {
+        if cw <= 0.0 || ch <= 0.0 {
+            return -1;
+        }
+        let s = state_ref.borrow();
+        let is_right = s.lens_preview_side == "right";
+        let Some(cal) = s.calibration.as_ref() else {
+            return -1;
+        };
+        let Some(goal) = cal.goal_geometry.as_ref() else {
+            return -1;
+        };
+        let pts = if is_right { &goal.right } else { &goal.left };
+        let lens = &cal.lenses[if is_right { 1 } else { 0 }];
+        let display: Vec<[f64; 2]> = pts
+            .iter()
+            .map(|p| raw_norm_to_rectified_norm(p[0], p[1], lens))
+            .collect();
+        roi_hit_test(&display, lx, ly, cw, ch)
+            .map(|i| i as i32)
+            .unwrap_or(-1)
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_goal_pointer_add(move |lx, ly, cw, ch| {
+        if cw <= 0.0 || ch <= 0.0 {
+            return;
+        }
+        let mut s = state_ref.borrow_mut();
+        let is_right = s.lens_preview_side == "right";
+        let rectified = [
+            (lx / cw).clamp(0.0, 1.0) as f64,
+            (ly / ch).clamp(0.0, 1.0) as f64,
+        ];
+        if let Some(cal) = s.calibration.as_mut() {
+            let lens = cal.lenses[if is_right { 1 } else { 0 }].clone();
+            let norm = rectified_norm_to_raw_norm(rectified[0], rectified[1], &lens);
+            let goal = cal.goal_geometry.get_or_insert_with(Default::default);
+            let pts = if is_right {
+                &mut goal.right
+            } else {
+                &mut goal.left
+            };
+            let idx = roi_insert_index(pts, norm);
+            pts.insert(idx, norm);
+        }
+        // A confirmed click-to-add is a complete gesture on its own (no
+        // separate `goal_pointer_up` follows it), so save right away.
+        if let Err(e) = s.save_calibration() {
+            log::error!("Failed to save calibration after goal point add: {e}");
+        }
+        if let Some(app) = app_weak.upgrade() {
+            app.set_has_goal_geometry(true);
+            sync_goal_points(&s, &app);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_goal_pointer_drag(move |index, lx, ly, cw, ch| {
+        if cw <= 0.0 || ch <= 0.0 || index < 0 {
+            return;
+        }
+        let mut s = state_ref.borrow_mut();
+        let is_right = s.lens_preview_side == "right";
+        let rectified = [
+            (lx / cw).clamp(0.0, 1.0) as f64,
+            (ly / ch).clamp(0.0, 1.0) as f64,
+        ];
+        if let Some(cal) = s.calibration.as_mut() {
+            let lens = cal.lenses[if is_right { 1 } else { 0 }].clone();
+            let norm = rectified_norm_to_raw_norm(rectified[0], rectified[1], &lens);
+            if let Some(goal) = cal.goal_geometry.as_mut() {
+                let pts = if is_right {
+                    &mut goal.right
+                } else {
+                    &mut goal.left
+                };
+                if let Some(p) = pts.get_mut(index as usize) {
+                    *p = norm;
+                }
+            }
+        }
+        if let Some(app) = app_weak.upgrade() {
+            sync_goal_points(&s, &app);
+        }
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_goal_pointer_up(move || {
+        let s = state_ref.borrow();
+        if let Err(e) = s.save_calibration() {
+            log::error!("Failed to save calibration after goal edit: {e}");
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_goal_pointer_delete(move |lx, ly, cw, ch| {
+        if cw <= 0.0 || ch <= 0.0 {
+            return;
+        }
+        let mut s = state_ref.borrow_mut();
+        let is_right = s.lens_preview_side == "right";
+        let Some(i) = s.calibration.as_ref().and_then(|cal| {
+            let goal = cal.goal_geometry.as_ref()?;
+            let pts = if is_right { &goal.right } else { &goal.left };
+            let lens = &cal.lenses[if is_right { 1 } else { 0 }];
+            let display: Vec<[f64; 2]> = pts
+                .iter()
+                .map(|p| raw_norm_to_rectified_norm(p[0], p[1], lens))
+                .collect();
+            roi_hit_test(&display, lx, ly, cw, ch)
+        }) else {
+            return;
+        };
+        if let Some(goal) = s
+            .calibration
+            .as_mut()
+            .and_then(|c| c.goal_geometry.as_mut())
+        {
+            let pts = if is_right {
+                &mut goal.right
+            } else {
+                &mut goal.left
+            };
+            pts.remove(i);
+        }
+        let has = s
+            .calibration
+            .as_ref()
+            .and_then(|c| c.goal_geometry.as_ref())
+            .is_some_and(|g| !g.left.is_empty() || !g.right.is_empty());
+        if let Err(e) = s.save_calibration() {
+            log::error!("Failed to save calibration after goal point delete: {e}");
+        }
+        if let Some(app) = app_weak.upgrade() {
+            app.set_has_goal_geometry(has);
+            sync_goal_points(&s, &app);
+        }
     });
 
     let state_ref = Rc::clone(&state);
@@ -4531,6 +4716,7 @@ fn main() -> anyhow::Result<()> {
             app.set_lens_frame_aspect(w as f32 / h as f32);
         }
         sync_roi_points(&s, &app);
+        sync_goal_points(&s, &app);
         s.preview_dirty = true;
     });
 
@@ -5717,6 +5903,13 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                         .and_then(|c| c.field_roi.as_ref())
                         .is_some_and(|r| !r.left.is_empty() || !r.right.is_empty()),
                 );
+                app.set_has_goal_geometry(
+                    s.calibration
+                        .as_ref()
+                        .and_then(|c| c.goal_geometry.as_ref())
+                        .is_some_and(|g| !g.left.is_empty() || !g.right.is_empty()),
+                );
+                sync_goal_points(&s, &app);
                 sync_frame_display(&app, s.playback.frame_index(), total, fps);
                 app.set_fps(fps as f32);
                 app.set_playback_speed(s.playback.speed() as f32);
@@ -6087,6 +6280,14 @@ fn handle_calibration_result(
                                 .and_then(|c| c.field_roi.as_ref())
                                 .is_some_and(|r| !r.left.is_empty() || !r.right.is_empty()),
                         );
+                        app.set_has_goal_geometry(
+                            state
+                                .calibration
+                                .as_ref()
+                                .and_then(|c| c.goal_geometry.as_ref())
+                                .is_some_and(|g| !g.left.is_empty() || !g.right.is_empty()),
+                        );
+                        sync_goal_points(state, &app);
                         app.set_calibration_path(cal_label.into());
                         sync_recent_paths(&state.user_settings, &app);
                         sync_frame_display(&app, state.playback.frame_index(), total, fps);

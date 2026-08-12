@@ -477,6 +477,34 @@ pub struct FieldRoi {
     pub right: Vec<[f64; 2]>,
 }
 
+/// Goal-mouth geometry for goal-scored detection: one polygon per camera,
+/// same raw-distorted-frame-normalized `[0,1]` space and per-camera
+/// left/right convention as `FieldRoi` - a goal is edited in the same
+/// lens-preview window as the field ROI, so it needs the same coordinate
+/// space that window's other overlay already uses.
+///
+/// A polygon rather than a 2-point line: a line only bounds width, so a
+/// ball lobbed over the crossbar at the same horizontal position as a
+/// valid goal would be indistinguishable from one that went in. 4+ points
+/// let the polygon also bound height, covering the actual goal-mouth
+/// opening as it appears in that camera's frame.
+///
+/// A detection concern (consumed by `reco-autocam`, filtering raw
+/// per-camera detections the same way `RoiFilteredDetector` already does
+/// for `FieldRoi`), kept here transitionally like `FieldRoi`; it will move
+/// out of the calibration when detection config is extracted.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GoalGeometry {
+    /// Goal-mouth polygon vertices visible in the left camera, normalized
+    /// `[0,1]`.
+    #[serde(default)]
+    pub left: Vec<[f64; 2]>,
+    /// Goal-mouth polygon vertices visible in the right camera, normalized
+    /// `[0,1]`.
+    #[serde(default)]
+    pub right: Vec<[f64; 2]>,
+}
+
 /// The calibration document: canonical, serializable source of truth.
 ///
 /// Everything the stitch needs to turn source frames into a panorama. Plain
@@ -502,6 +530,10 @@ pub struct Calibration {
     /// Optional per-camera detection ROI. Transitional (a detection concern).
     #[serde(default)]
     pub field_roi: Option<FieldRoi>,
+    /// Optional goal-mouth polygons for goal detection, in panorama
+    /// yaw/pitch space. Transitional (a detection concern).
+    #[serde(default)]
+    pub goal_geometry: Option<GoalGeometry>,
 }
 
 /// Maximum calibration file size (1 MB).
@@ -509,7 +541,7 @@ const MAX_CALIBRATION_FILE_SIZE: u64 = 1_048_576;
 
 impl Calibration {
     /// Assemble a calibration from its parts (current schema version, no sync
-    /// offset, no ROI).
+    /// offset, no ROI, no goal geometry).
     pub fn new(lenses: Vec<Lens>, topology: Topology, framing: Framing) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
@@ -518,6 +550,7 @@ impl Calibration {
             framing,
             sync_offset: 0,
             field_roi: None,
+            goal_geometry: None,
         }
     }
 
@@ -1007,6 +1040,21 @@ mod tests {
         assert!((roi.right[1][1] - 0.68).abs() < 1e-6);
     }
 
+    #[test]
+    fn parse_calibration_with_goal_geometry() {
+        let mut cal: Calibration = serde_json::from_str(sample_json()).unwrap();
+        assert!(cal.goal_geometry.is_none());
+        cal.goal_geometry = Some(GoalGeometry {
+            left: vec![[0.05, 0.30], [0.05, 0.75], [0.22, 0.75], [0.22, 0.30]],
+            right: vec![[0.78, 0.32], [0.78, 0.70], [0.95, 0.70], [0.95, 0.32]],
+        });
+        let json = cal.to_json_pretty();
+        let back: Calibration = serde_json::from_str(&json).unwrap();
+        let goal = back.goal_geometry.as_ref().unwrap();
+        assert_eq!(goal.left.len(), 4);
+        assert!((goal.right[2][1] - 0.70).abs() < 1e-9);
+    }
+
     fn valid_cal() -> Calibration {
         let lens = || Lens {
             width: 1920,
@@ -1054,6 +1102,7 @@ mod tests {
             },
             sync_offset: 0,
             field_roi: None,
+            goal_geometry: None,
         }
     }
 
