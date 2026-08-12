@@ -339,24 +339,27 @@ pub fn run_export(
     #[cfg(feature = "autocam")]
     if autocam.enabled && !autocam.model_path.is_empty() {
         if events_path.is_some() {
-            job = job.ai_run_config(reco_core::calibration::AutocamDefaults {
-                tracking_mode: autocam.tracking_mode.clone(),
-                detection_interval: autocam.detection_interval,
-                player_anchor_rad: autocam.player_anchor_rad,
-                lookahead_secs: autocam.lookahead_secs,
-                lookahead_reduced_bit_depth: autocam.lookahead_reduced_bit_depth,
-                preset: autocam.preset.clone(),
-                framing: autocam.framing.clone(),
-                lock_pitch: autocam.lock_pitch,
-                cluster_mode: autocam.cluster_mode.clone(),
-                cluster_bandwidth_rad: autocam.cluster_bandwidth_rad,
-                dead_zone_rad: autocam.dead_zone_rad,
-                ball_weight: autocam.ball_weight,
-                ball_max_dist_from_cluster: autocam.ball_max_dist_from_cluster,
-                fov_tight: autocam.fov_tight,
-                fov_wide: autocam.fov_wide,
-                fov_default: autocam.fov_default,
-            });
+            job = job.ai_run_config(
+                autocam.model_path.clone(),
+                reco_core::calibration::AutocamDefaults {
+                    tracking_mode: autocam.tracking_mode.clone(),
+                    detection_interval: autocam.detection_interval,
+                    player_anchor_rad: autocam.player_anchor_rad,
+                    lookahead_secs: autocam.lookahead_secs,
+                    lookahead_reduced_bit_depth: autocam.lookahead_reduced_bit_depth,
+                    preset: autocam.preset.clone(),
+                    framing: autocam.framing.clone(),
+                    lock_pitch: autocam.lock_pitch,
+                    cluster_mode: autocam.cluster_mode.clone(),
+                    cluster_bandwidth_rad: autocam.cluster_bandwidth_rad,
+                    dead_zone_rad: autocam.dead_zone_rad,
+                    ball_weight: autocam.ball_weight,
+                    ball_max_dist_from_cluster: autocam.ball_max_dist_from_cluster,
+                    fov_tight: autocam.fov_tight,
+                    fov_wide: autocam.fov_wide,
+                    fov_default: autocam.fov_default,
+                },
+            );
         }
         let ac = autocam.clone();
         let status_weak = app_weak.clone();
