@@ -12,6 +12,64 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
+**Ball weight raised 0.35 -> 0.5, validated via real CLI A/B renders I
+ran myself - merged into `main` (`9cf3fede`). Also found+fixed a real
+VramPool crash bug, and found (not yet fixed) a deeper one.** User
+reported a new test ("Ai Planner Test v9") still lost the ball around
+frame 704 despite the fov_alpha/cluster_alpha fix below, then asked me
+to run the A/B tests myself against the real 03 OJC 100-130s clip
+instead of iterating manually in the GUI each time.
+- Root-caused by computing `field.rs`'s actual `target_pitch =
+  (cluster_pitch + pitch_bias)*(1-w) + ball_pitch*w` blend against the
+  real v9 events: at `ball_weight 0.35`, when the ball breaks toward
+  the near touchline (drops in *pitch* while players stay up-pitch),
+  the blended aim target never gets close enough to the ball - not a
+  gate problem (Ball anchor range/Ball reach/FOV Wide all already
+  correct) or a smoothing problem (fov_alpha/cluster_alpha already
+  raised), a blend-weight problem specific to vertical separation.
+- **Verified via 3 real CLI renders** (`reco.exe stitch --start-time
+  100 --end-time 130` on the actual `DJI_20260704095935_0028_D_L01` /
+  `0029_D_R01` pair + `DJI Action4 Final_1.json` + `yolo26s_v3`,
+  everything else held constant): `ball_weight 0.35` reproduces the
+  exact symptom (ball outside half-FOV for 15 frames, 696-710);
+  `0.50`/`0.60` both fully fix it. Cost: +33%/+32% mean/p95
+  frame-to-frame camera movement at 0.5 vs 0.35 - real but far short of
+  the wobble `1.0` was already known to cause. Docs updated (EN+NL):
+  Ball weight recommendation 0.35 -> 0.5, corner-breakaway checklist
+  now 5 steps (added Ball weight as the 5th).
+- **Also found, separate, not settings-fixable**: frames 720-898 (last
+  ~6s of the 100-130s window) have zero raw ball detections at all
+  across all three renders - a genuine `yolo26s_v3` recall gap on this
+  clip. Noted in the doc's "Model" paragraph.
+- **Real bug found+fixed along the way**: the first CLI attempt (Native
+  bit depth, matching the docs' then-current "off, only on a VRAM
+  error" recommendation) crashed immediately with a wgpu validation
+  panic (`RENDER_ATTACHMENT not allowed on R16Unorm`), misreported by
+  the caller as "VRAM allocation failed". `VramPool::new`
+  (`crates/reco-core/src/session/vram_pool.rs`) requested
+  `RENDER_ATTACHMENT` on every pool texture unconditionally on a
+  stated-but-false "harmless otherwise" assumption - P010's Y plane
+  isn't renderable on this backend regardless. **Fixed**: only request
+  it when the downconvert pass actually needs it.
+- **Second, deeper bug found, NOT fixed** (documented in place in
+  `copy_from_d3d11`'s doc comment, needs its own session): after that
+  fix, texture *creation* succeeds but the actual D3D11 zero-copy plane
+  copy still fails - `Source format (P010) and destination format
+  (R16Unorm) are not copy-compatible`. **Practical upshot**:
+  `LookaheadBitDepth::Native` is currently broken end-to-end for any
+  10-bit source under zero-copy with lookahead on -
+  `--lookahead-reduced-bit-depth` is a hard requirement right now, not
+  an optional VRAM fallback. Corrected the CLI help text, GUI tooltip,
+  and both docs (previously all three said some version of "leave off
+  unless you hit a VRAM error", which would crash any 10-bit-source
+  user who followed that advice).
+- Build+test verified on merged `main`: `cargo test -p reco-core --lib`
+  182/182 (excluding the 2 pre-existing unrelated CUDA-context
+  failures), `cargo fmt`/`cargo clippy` clean. Both debug and release
+  `reco-gui.exe`/`reco.exe` rebuilt from merged `main`. Pushed
+  (`main` + `fix/vram-pool-native-10bit-render-attachment`).
+- See [[project_ball_weight_vertical_break_fix]] for full detail.
+
 **AI Tracking / panner settings now auto-persist app-wide, no Save
 calibration needed - merged into `main` (`e96dfb5f`).** User asked, right
 after the `fov_alpha`/`cluster_alpha` feature below shipped: "save all
