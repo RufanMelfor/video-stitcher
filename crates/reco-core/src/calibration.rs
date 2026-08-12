@@ -505,6 +505,66 @@ pub struct GoalGeometry {
     pub right: Vec<[f64; 2]>,
 }
 
+/// Default AI-tracking / panner settings saved alongside a calibration,
+/// so opening it in a consumer (e.g. `reco-gui`'s Export dialog)
+/// re-populates the AI Tracking controls instead of resetting to
+/// hardcoded literals every session. Mirrors the tunable subset of
+/// `reco_autocam::AutocamConfig` + `panners::FieldPannerConfig` -
+/// deliberately excludes the model path (machine-local, already
+/// persisted separately) and the enabled toggle (a per-run choice, not
+/// a calibration property). Transitional (a detection/autocam concern).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutocamDefaults {
+    /// `"field"`, `"ball"`, or `"sweep"`.
+    #[serde(default)]
+    pub tracking_mode: String,
+    /// Run the detector every N frames.
+    #[serde(default)]
+    pub detection_interval: u32,
+    /// Ball tracker's player-anchor gate (radians) - see
+    /// `reco_autocam::AutocamConfig::player_anchor_max_rad`.
+    #[serde(default)]
+    pub player_anchor_rad: f32,
+    /// Lookahead buffer depth in seconds (0 = off).
+    #[serde(default)]
+    pub lookahead_secs: f64,
+    /// Downconvert the lookahead pool to 8-bit for lower VRAM cost.
+    #[serde(default)]
+    pub lookahead_reduced_bit_depth: bool,
+    /// Style preset name used as the panner config base.
+    #[serde(default)]
+    pub preset: String,
+    /// `"action"` or `"frame_all"`.
+    #[serde(default)]
+    pub framing: String,
+    /// Horizontal-only pan (hold pitch level).
+    #[serde(default)]
+    pub lock_pitch: bool,
+    /// `"density"` or `"trimmed_mean"`.
+    #[serde(default)]
+    pub cluster_mode: String,
+    /// Density-peak neighborhood / trim window, radians.
+    #[serde(default)]
+    pub cluster_bandwidth_rad: f32,
+    /// Soft dead-zone radius, radians.
+    #[serde(default)]
+    pub dead_zone_rad: f32,
+    /// Ball-vs-cluster blend weight (0..1).
+    #[serde(default)]
+    pub ball_weight: f32,
+    /// Max panorama distance (radians) the ball may be from the player
+    /// cluster and still blend into the aim ("Ball reach").
+    #[serde(default)]
+    pub ball_max_dist_from_cluster: f32,
+    /// Tight / wide / default field-of-view, degrees.
+    #[serde(default)]
+    pub fov_tight: f32,
+    #[serde(default)]
+    pub fov_wide: f32,
+    #[serde(default)]
+    pub fov_default: f32,
+}
+
 /// The calibration document: canonical, serializable source of truth.
 ///
 /// Everything the stitch needs to turn source frames into a panorama. Plain
@@ -534,6 +594,10 @@ pub struct Calibration {
     /// yaw/pitch space. Transitional (a detection concern).
     #[serde(default)]
     pub goal_geometry: Option<GoalGeometry>,
+    /// Optional saved AI-tracking / panner defaults. Transitional (a
+    /// detection/autocam concern).
+    #[serde(default)]
+    pub autocam_defaults: Option<AutocamDefaults>,
 }
 
 /// Maximum calibration file size (1 MB).
@@ -551,6 +615,7 @@ impl Calibration {
             sync_offset: 0,
             field_roi: None,
             goal_geometry: None,
+            autocam_defaults: None,
         }
     }
 
@@ -1055,6 +1120,46 @@ mod tests {
         assert!((goal.right[2][1] - 0.70).abs() < 1e-9);
     }
 
+    #[test]
+    fn old_calibration_without_autocam_defaults_still_parses() {
+        // sample_json() predates this field entirely - #[serde(default)]
+        // must let it parse as None rather than erroring.
+        let cal: Calibration = serde_json::from_str(sample_json()).unwrap();
+        assert!(cal.autocam_defaults.is_none());
+    }
+
+    #[test]
+    fn parse_calibration_with_autocam_defaults() {
+        let mut cal: Calibration = serde_json::from_str(sample_json()).unwrap();
+        cal.autocam_defaults = Some(AutocamDefaults {
+            tracking_mode: "field".into(),
+            detection_interval: 3,
+            player_anchor_rad: 0.35,
+            lookahead_secs: 0.5,
+            lookahead_reduced_bit_depth: true,
+            preset: "action".into(),
+            framing: "action".into(),
+            lock_pitch: false,
+            cluster_mode: "trimmed_mean".into(),
+            cluster_bandwidth_rad: 0.30,
+            dead_zone_rad: 0.05,
+            ball_weight: 0.35,
+            ball_max_dist_from_cluster: 1.0,
+            fov_tight: 20.0,
+            fov_wide: 70.0,
+            fov_default: 34.0,
+        });
+        let json = cal.to_json_pretty();
+        let back: Calibration = serde_json::from_str(&json).unwrap();
+        let ac = back.autocam_defaults.as_ref().unwrap();
+        assert_eq!(ac.tracking_mode, "field");
+        assert_eq!(ac.cluster_mode, "trimmed_mean");
+        assert!((ac.player_anchor_rad - 0.35).abs() < 1e-6);
+        assert!((ac.ball_max_dist_from_cluster - 1.0).abs() < 1e-6);
+        assert!((ac.fov_wide - 70.0).abs() < 1e-6);
+        assert!(ac.lookahead_reduced_bit_depth);
+    }
+
     fn valid_cal() -> Calibration {
         let lens = || Lens {
             width: 1920,
@@ -1103,6 +1208,7 @@ mod tests {
             sync_offset: 0,
             field_roi: None,
             goal_geometry: None,
+            autocam_defaults: None,
         }
     }
 
