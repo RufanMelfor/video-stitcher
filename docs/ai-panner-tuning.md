@@ -88,6 +88,15 @@ spread-out play; Default is only the starting FOV before any players are
 detected. If a specific situation zooms in/out further than you'd like,
 adjust these bounds - not a "preferred" midpoint.
 
+**Wide is also the ceiling on the ball-reach widen** - `target_fov` (the
+same function computing the bounds above) already widens the shot to
+keep a tracked ball in frame (`ball_offset` + `ball_frame_margin_deg`,
+doubled), but that computed value is then clamped to `fov_wide`. On a
+genuine breakaway the needed width can exceed the `action`/`broadcast`
+presets' 48-58° ceiling, so the shot never actually opens up enough to
+hold both the ball-carrier and the main group, even with **Ball reach**
+raised - see the corner-breakaway bullet below.
+
 **Dead-zone vs. frame margin - two different things, easy to conflate.**
 Dead-zone is a *reaction threshold*: how far the target must move before
 the camera moves at all (see above). It has nothing to do with how close
@@ -138,13 +147,20 @@ Source: `FieldPannerConfig::{broadcast, action, frame_all}` in
   targets, so widening/narrowing them changes the *range* the dynamic
   zoom is allowed to explore.
 - **Camera won't follow the ball into a corner / on a breakaway**: raise
-  `ball reach` (`ball_max_dist_from_cluster`) above its 0.5 rad default.
-  This is Action framing's designed trade-off - a genuine, isolated ball
-  far from the main group is rejected by design so a stray detection or
-  the far goal can't drag the camera off the play; raising the gate trusts
-  the detector more and accepts occasionally chasing a false positive. If
-  ball plays like this matter more than staying with the crowd, switching
-  **Tracking mode -> ball** for that match is often a better fit.
+  `ball reach` (`ball_max_dist_from_cluster`) above its 0.5 rad default -
+  **and raise FOV Wide too (try 65-70°)**. Ball reach alone only unlocks
+  the aim-pull toward the ball; the shot still needs `fov_wide` high
+  enough for the widen-for-ball calculation (see above) to actually reach
+  its target instead of clamping. Verified via a controlled A/B render on
+  the same clip/moment, every other setting held constant: at `fov_wide:
+  48°` (the `action` preset's default) the ball-carrier and the main
+  group don't both fit; at `70°` they do. This is Action framing's
+  designed trade-off - a genuine, isolated ball far from the main group
+  is rejected by default so a stray detection or the far goal can't drag
+  the camera off the play; raising both knobs trusts the detector more
+  and accepts occasionally chasing a false positive. If ball plays like
+  this matter more than staying with the crowd, switching **Tracking
+  mode -> ball** for that match is often a better fit.
 
 ## Extra parameters (not yet exposed in the GUI)
 

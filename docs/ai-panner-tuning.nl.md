@@ -96,6 +96,16 @@ Default is enkel de startwaarde voordat er spelers gedetecteerd zijn.
 Als een specifieke situatie verder in-/uitzoomt dan gewenst, pas dan
 deze grenzen aan - het is geen "voorkeurs"-middenwaarde.
 
+**Wide is ook het plafond voor de bal-reach-verbreding** - `target_fov`
+(dezelfde functie die de grenzen hierboven berekent) verbreedt het beeld
+al om een gevolgde bal in beeld te houden (`ball_offset` +
+`ball_frame_margin_deg`, verdubbeld), maar die berekende waarde wordt
+daarna geclamped op `fov_wide`. Bij een echte uitbraak kan de benodigde
+breedte het plafond van de `action`/`broadcast` presets (48-58°)
+overschrijden, waardoor het beeld nooit breed genoeg wordt om zowel de
+balbezitter als de hoofdgroep vast te houden - ook niet met **Ball
+reach** opgetrokken. Zie de hoek-uitbraak-bullet hieronder.
+
 **Dead-zone versus beeldmarge - twee verschillende dingen, makkelijk te
 verwarren.** Dead-zone is een *reactiedrempel*: hoeveel het doelwit moet
 bewegen voordat de camera überhaupt beweegt (zie hierboven). Dit heeft
@@ -152,13 +162,21 @@ Bron: `FieldPannerConfig::{broadcast, action, frame_all}` in
   waarbinnen de dynamische zoom mag bewegen.
 - **Camera volgt de bal niet de hoek in / bij een uitbraak**: verhoog
   `ball reach` (`ball_max_dist_from_cluster`) boven de standaard van 0,5
-  rad. Dit is een bewuste ontwerpkeuze van Action-framing - een echte,
-  geïsoleerde bal ver van de groep wordt met opzet genegeerd zodat een
-  losse detectie of het verre doel de camera niet kan wegtrekken; de
-  grens verhogen betekent meer vertrouwen in de detector, met het risico
-  dat af en toe een valse positieve wordt gevolgd. Als bal-acties
-  belangrijker zijn dan bij de groep blijven, is overschakelen naar
-  **Tracking mode -> ball** voor die wedstrijd vaak een betere keuze.
+  rad - **en verhoog ook FOV Wide (probeer 65-70°)**. Ball reach alleen
+  ontgrendelt de aim-pull richting de bal; het beeld heeft daarnaast een
+  hoge genoeg `fov_wide` nodig zodat de bal-verbredingsberekening
+  (zie hierboven) zijn doelwaarde ook echt kan bereiken in plaats van
+  geclamped te worden. Geverifieerd via een gecontroleerde A/B-render op
+  dezelfde clip/moment, alle andere instellingen gelijk gehouden: bij
+  `fov_wide: 48°` (de standaard van de `action` preset) passen de
+  balbezitter en de hoofdgroep niet allebei in beeld; bij `70°` wel. Dit
+  is een bewuste ontwerpkeuze van Action-framing - een echte, geïsoleerde
+  bal ver van de groep wordt standaard genegeerd zodat een losse detectie
+  of het verre doel de camera niet kan wegtrekken; beide knoppen verhogen
+  betekent meer vertrouwen in de detector, met het risico dat af en toe
+  een valse positieve wordt gevolgd. Als bal-acties belangrijker zijn dan
+  bij de groep blijven, is overschakelen naar **Tracking mode -> ball**
+  voor die wedstrijd vaak een betere keuze.
 
 ## Extra parameters (nog niet beschikbaar in de GUI)
 
