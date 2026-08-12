@@ -19,6 +19,24 @@ posities tijdens snelle actie, hoger = goedkoper. `3` (ongeveer elke
 0,1s bij 30fps) is een goede standaard; ga alleen naar 10-15 als je de
 rekenkracht echt nodig hebt.
 
+**Ball anchor range** (radialen, `player_anchor_max_rad`) - een poort
+binnen de bal-*tracker* zelf (`crates/reco-autocam/src/trackers/ball.rs`),
+vóór alles anders in dit document. Een ruwe baldetectie wordt alleen
+geaccepteerd als hij binnen deze afstand van minstens één gevolgde
+speler ligt; verdere detecties worden als vermoedelijke valse
+positieven (een balvormig object in het publiek of de achtergrond)
+weggegooid voordat de panner ze ooit ziet. `0,20 rad` (~11°) is de
+standaard. Dit gebeurt *vóór* Ball reach (hieronder), dus een echte,
+geïsoleerde bal - precies het uitbraak/hoek-scenario waar Ball reach en
+FOV Wide voor bedoeld zijn - kan hier al stilletjes worden weggegooid,
+waardoor die twee instellingen lijken alsof ze niet werken. Geverifieerd
+via inspectie van de ruwe detectielogs (niet geraden): het model
+detecteerde een uitgebroken bal correct met 0,97 zekerheid terwijl de
+tracker aan het coasten was / de bal kwijtraakte, omdat de detectie
+buiten deze poort viel. Verbreed 'm (0,3-0,5+) als de panner een bal die
+echt ver van de groep is nooit lijkt op te pikken; houd 'm smal als het
+model valse positieven geeft op rommel op de achtergrond.
+
 **Style preset** - een eenmalige actie die elke slider hieronder
 overschrijft (framing, cluster mode, lock-pitch, cluster bandwidth,
 dead-zone, ball weight, ball reach, FOV) met een afgestemde set waarden.
@@ -160,9 +178,17 @@ Bron: `FieldPannerConfig::{broadcast, action, frame_all}` in
   pas de FOV Tight/Wide-grenzen direct aan - het zijn grenzen, geen
   doelwaarden, dus verbreden/versmallen ervan verandert het *bereik*
   waarbinnen de dynamische zoom mag bewegen.
-- **Camera volgt de bal niet de hoek in / bij een uitbraak**: verhoog
-  `ball reach` (`ball_max_dist_from_cluster`) boven de standaard van 0,5
-  rad - **en verhoog ook FOV Wide (probeer 65-70°)**. Ball reach alleen
+- **Camera volgt de bal niet de hoek in / bij een uitbraak**: check drie
+  instellingen samen, in deze volgorde (elke poort filtert voor de
+  volgende):
+  1. **Ball anchor range** - als de tracker de verre detectie al
+     nooit accepteert, maakt de rest niets uit. Verbreed 'm eerst
+     (0,3-0,5+) en bevestig via `--events`/de events-JSONL dat de
+     `state` van de bal op `Tracking` staat in plaats van te blijven
+     hangen op `Coasting`/`Lost` tijdens de uitbraak.
+  2. verhoog `ball reach` (`ball_max_dist_from_cluster`) boven de
+     standaard van 0,5 rad - **en**
+  3. verhoog ook FOV Wide (probeer 65-70°). Ball reach alleen
   ontgrendelt de aim-pull richting de bal; het beeld heeft daarnaast een
   hoge genoeg `fov_wide` nodig zodat de bal-verbredingsberekening
   (zie hierboven) zijn doelwaarde ook echt kan bereiken in plaats van
