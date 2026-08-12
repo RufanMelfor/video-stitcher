@@ -563,6 +563,34 @@ pub struct AutocamDefaults {
     pub fov_wide: f32,
     #[serde(default)]
     pub fov_default: f32,
+    /// Zoom-target smoothing rate (EMA alpha per frame, `(0,1]`) - see
+    /// `reco_autocam::panners::FieldPannerConfig::fov_alpha`. Governs how
+    /// fast the dynamic FOV catches up to its computed target; the
+    /// default (`0.01`, a ~3s time constant at 30fps) is often too slow
+    /// to keep a fast, brief ball event in frame - see "Camera doesn't
+    /// react fast enough" in `docs/ai-panner-tuning.md`. Defaults to
+    /// `FieldPannerConfig`'s own default when absent from older saved
+    /// data (not `0.0`, which would mean "never move").
+    #[serde(default = "default_fov_alpha")]
+    pub fov_alpha: f32,
+    /// Cluster-position smoothing rate (EMA alpha per frame, `(0,1]`) -
+    /// see `reco_autocam::panners::FieldPannerConfig::cluster_alpha`.
+    /// Governs how fast the aim point catches up to the player cluster
+    /// centroid. Same slow-default caveat as `fov_alpha`.
+    #[serde(default = "default_cluster_alpha")]
+    pub cluster_alpha: f32,
+}
+
+/// `FieldPannerConfig::default().fov_alpha` - kept in sync manually
+/// since `AutocamDefaults` can't depend on `reco-autocam` (would be a
+/// dependency cycle: reco-autocam already depends on reco-core).
+fn default_fov_alpha() -> f32 {
+    0.01
+}
+
+/// `FieldPannerConfig::default().cluster_alpha` - see [`default_fov_alpha`].
+fn default_cluster_alpha() -> f32 {
+    0.012
 }
 
 /// The calibration document: canonical, serializable source of truth.
@@ -1148,6 +1176,8 @@ mod tests {
             fov_tight: 20.0,
             fov_wide: 70.0,
             fov_default: 34.0,
+            fov_alpha: 0.05,
+            cluster_alpha: 0.05,
         });
         let json = cal.to_json_pretty();
         let back: Calibration = serde_json::from_str(&json).unwrap();
@@ -1158,6 +1188,20 @@ mod tests {
         assert!((ac.ball_max_dist_from_cluster - 1.0).abs() < 1e-6);
         assert!((ac.fov_wide - 70.0).abs() < 1e-6);
         assert!(ac.lookahead_reduced_bit_depth);
+        assert!((ac.fov_alpha - 0.05).abs() < 1e-6);
+        assert!((ac.cluster_alpha - 0.05).abs() < 1e-6);
+    }
+
+    #[test]
+    fn old_autocam_defaults_without_alpha_fields_gets_sane_defaults() {
+        // Older saved calibrations (or events written before this
+        // change) won't have fov_alpha/cluster_alpha at all -
+        // #[serde(default)] must fall back to FieldPannerConfig's own
+        // defaults (0.01/0.012), not 0.0 ("never move").
+        let json = r#"{"tracking_mode":"field","detection_interval":3}"#;
+        let ac: AutocamDefaults = serde_json::from_str(json).unwrap();
+        assert!((ac.fov_alpha - 0.01).abs() < 1e-9);
+        assert!((ac.cluster_alpha - 0.012).abs() < 1e-9);
     }
 
     fn valid_cal() -> Calibration {

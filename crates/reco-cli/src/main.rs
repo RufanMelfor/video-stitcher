@@ -334,6 +334,24 @@ enum Commands {
         /// degrees), the ball tracker's own built-in default.
         #[arg(long = "player-anchor-rad")]
         player_anchor_rad: Option<f32>,
+
+        /// Zoom-target smoothing rate (EMA alpha per frame, `(0,1]`) -
+        /// how fast the dynamic FOV catches up to its computed target.
+        /// Default 0.01 has a ~3s time constant at 30fps, often too slow
+        /// to keep a brief, fast ball event in frame even with FOV Wide
+        /// raised - the target simply hasn't been reached by the time
+        /// the moment is over. Overlays on top of --panner-preset /
+        /// --panner-config if both set.
+        #[arg(long = "fov-alpha")]
+        fov_alpha: Option<f32>,
+
+        /// Cluster-position smoothing rate (EMA alpha per frame,
+        /// `(0,1]`) - how fast the aim point catches up to the player
+        /// cluster centroid. Same slow-default caveat as --fov-alpha
+        /// (default 0.012). Overlays on top of --panner-preset /
+        /// --panner-config if both set.
+        #[arg(long = "cluster-alpha")]
+        cluster_alpha: Option<f32>,
     },
 
     /// Open an interactive preview window to debug the stitch.
@@ -900,6 +918,8 @@ fn main() -> anyhow::Result<()> {
             panner_config,
             panner_preset,
             player_anchor_rad,
+            fov_alpha,
+            cluster_alpha,
         } => stitch::run_stitch(
             stitch::StitchArgs {
                 left: &left,
@@ -938,6 +958,8 @@ fn main() -> anyhow::Result<()> {
                 panner_config_path: panner_config.as_deref(),
                 panner_preset: panner_preset.as_deref(),
                 player_anchor_rad,
+                fov_alpha,
+                cluster_alpha,
             },
             &interrupted,
         ),

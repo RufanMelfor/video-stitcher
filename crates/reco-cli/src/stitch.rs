@@ -85,6 +85,12 @@ pub struct StitchArgs<'a> {
     /// Ball tracker's player-anchor gate override (radians). See
     /// `reco_autocam::AutocamConfig::player_anchor_max_rad`.
     pub player_anchor_rad: Option<f32>,
+    /// Zoom-target smoothing rate override. See
+    /// `reco_autocam::panners::FieldPannerConfig::fov_alpha`.
+    pub fov_alpha: Option<f32>,
+    /// Cluster-position smoothing rate override. See
+    /// `reco_autocam::panners::FieldPannerConfig::cluster_alpha`.
+    pub cluster_alpha: Option<f32>,
 }
 
 /// Run the stitch subcommand.
@@ -360,6 +366,24 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
             }
         };
 
+        // --fov-alpha/--cluster-alpha win over --panner-preset/--panner-config,
+        // applied last. Neither is part of any named preset's own values,
+        // so if no preset/config file was given but one of these flags
+        // was, start from FieldPannerConfig::default() so it has a base
+        // to land on (matches setup_autocam's own fallback base).
+        let panner_cfg = if args.fov_alpha.is_some() || args.cluster_alpha.is_some() {
+            let mut c = panner_cfg.unwrap_or_default();
+            if let Some(a) = args.fov_alpha {
+                c.fov_alpha = a;
+            }
+            if let Some(a) = args.cluster_alpha {
+                c.cluster_alpha = a;
+            }
+            Some(c)
+        } else {
+            panner_cfg
+        };
+
         // Snapshot the resolved AI/panner settings for the events JSONL
         // header (see StitchJob::ai_run_config) - built here, before
         // panner_cfg moves into the on_session closure below.
@@ -396,6 +420,8 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                     fov_tight: fp.fov_tight,
                     fov_wide: fp.fov_wide,
                     fov_default: fp.fov_default,
+                    fov_alpha: fp.fov_alpha,
+                    cluster_alpha: fp.cluster_alpha,
                 },
             );
         }
