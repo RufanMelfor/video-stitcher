@@ -12,6 +12,30 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
+**AI Tracking settings now persist in the calibration JSON, merged into
+`main` (`9d8f778e`).** User asked to stop re-entering the same panner
+settings after every build/session. New `Calibration::autocam_defaults`
+(`crates/reco-core/src/calibration.rs`) holds the tunable subset of
+`AutocamConfig`/`FieldPannerConfig` (tracking mode, detection interval,
+**Ball anchor range**, lookahead, preset/framing, cluster mode/bandwidth,
+dead-zone, ball weight, **Ball reach**, **FOV Wide/Tight/Default**) -
+deliberately excludes the model path (already persisted separately via
+`user_settings`) and the enabled toggle.
+- `reco-gui`: `do_save_calibration` snapshots the current Export-dialog
+  slider values into `cal.autocam_defaults` on every "Save calibration"
+  (these aren't part of the live renderer like topology/lens sliders, so
+  sync-on-save rather than sync-on-every-edit); `try_init_and_update`
+  restores them onto the sliders right after a calibration loads
+  (before the VRAM lookahead-safety clamp, so a restored value still
+  gets clamped if it wouldn't fit).
+- `#[serde(default)]` throughout, so calibrations saved before this
+  change keep loading fine (verified via a dedicated test).
+- **Not yet done**: user hasn't actually saved a calibration with the
+  recommended settings dialed in yet - next time they open the Export
+  dialog, set the values below, and hit **Save calibration**, that
+  calibration file becomes self-contained and won't need re-entering
+  them again.
+
 **New GUI slider merged into `main` (`ce036017`) - "Ball anchor range",
 the real fix for the corner-breakaway ball going "Lost".** Follow-on
 from the FOV Wide finding below: user asked to test the FOV Wide fix,
