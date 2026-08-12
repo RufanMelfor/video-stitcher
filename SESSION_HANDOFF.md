@@ -12,6 +12,44 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
+**Panner testing (this session, continues 2026-08-11's investigation) -
+FOV Wide is the missing piece, not new panner code.** User exported
+`Ai Planner Test v1/v2.mp4` + `.events.jsonl` (in the `TEST VIDEO`
+folder) with Ball reach already raised to 1.0 rad, and compared against
+a competitor's output (`Once AutoCam 100-130sec.mp4`, same match, t=24s)
+that keeps a breakaway ball-carrier and the main group in frame
+together - something our export couldn't reproduce yet.
+- Root-caused by reading `FieldPanner::target_fov`
+  (`crates/reco-autocam/src/panners/field.rs:745-777`): the widen-for-
+  the-ball logic **already exists** (`needed = (ball_offset_deg +
+  ball_frame_margin_deg) * 2`, then `fov.max(needed)`) but is clamped to
+  `fov_wide`, and the `action`/`broadcast` presets cap that at 48/58° -
+  too low for a genuine breakaway to ever open the shot up enough.
+  **Confirmed by a controlled CLI A/B render** (same clip/moment/every
+  other setting held constant, only `fov_wide` changed): 48° clips one
+  of the two actors, 70° holds both, matching the competitor's framing
+  style. No panner code change needed - `fov_wide` is already
+  GUI-tunable up to 90°.
+- **Updated recommendation** (now in `docs/ai-panner-tuning.md`/`.nl.md`):
+  action preset + cluster_mode trimmed_mean + dead_zone 0.05-0.08 +
+  ball_weight 0.35 + **ball_max_dist_from_cluster (Ball reach) 1.0** +
+  **fov_wide (FOV Wide) 65-70°** (was just Ball reach alone before this
+  session - that wasn't sufficient by itself, this session found why).
+- Wrote an English problem write-up for the user to discuss with an
+  engineer, initially claiming this needed new panner logic - **that
+  write-up was wrong and was corrected once the A/B test disproved it**;
+  don't reuse the first version if it's referenced anywhere.
+- Analysis gotcha for next time: the events JSONL's `timestamp_ms`
+  field (`frame_start`/`world_state`/etc.) is wall-clock elapsed
+  *processing* time, not video presentation timestamp - correctly
+  documented as such in `crates/reco-core/src/detect/panner.rs`'s doc
+  comments, just easy to misread as video-relative time by the field
+  name alone. Use `frame_index / output_fps` for actual video-relative
+  timing when correlating events to specific moments in the exported
+  clip.
+- **Not yet done**: user hasn't re-tested their own export with the new
+  `fov_wide: 65-70` recommendation applied.
+
 **Workflow change this session, apply going forward**: user wants every
 feature branch merged into `main` and pushed as soon as it builds, not
 held back on its own branch pending testing/confirmation - `main` is the
