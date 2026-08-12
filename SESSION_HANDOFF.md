@@ -12,6 +12,21 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
+**Events JSONL is now self-describing, merged into `main`
+(`ae7e199c`).** User asked: when AI logging is on, put all the AI/panner
+parameters at the top of the events JSONL, in English. Done - the very
+first line of any `--events` output is now `{"kind":"run_config", ...}`
+with every field from `docs/ai-panner-tuning.md`'s settings tables
+(tracking mode, Ball anchor range, Ball reach, FOV Wide, etc.), before
+any `frame_start` line. New `PipelineEvent::RunConfig` variant in
+reco-core reuses the `Calibration::AutocamDefaults` struct added earlier
+this session (same schema, no duplication) - wired through
+`StitchJob::ai_run_config()` in reco-io, populated from both reco-cli
+(resolved CLI args + panner preset/config overlay) and reco-gui
+(`AutocamUiConfig` directly). Verified with a real CLI run
+(`--player-anchor-rad 0.35`) - the JSONL's first line matched exactly.
+Docs updated (EN+NL) to mention this. Nothing outstanding here.
+
 **Round-3 yolo26n training done + a yolo26s comparison run alongside
 it, both ONNX-exported, neither tested in the real app yet.** LS
 project 8's 228 corrected tasks (200 original + 28 hard frames) used
