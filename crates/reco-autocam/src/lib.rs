@@ -123,6 +123,15 @@ pub struct AutocamConfig {
     /// Detector confidence threshold override. When set, replaces
     /// the default 0.10 threshold. Ball-only models need 0.25+.
     pub confidence_threshold: Option<f32>,
+    /// Override for [`trackers::ball::BallTracker`]'s player-anchor gate
+    /// (radians). A raw ball detection is only accepted if it lies within
+    /// this distance of at least one tracked player; farther detections
+    /// are dropped before they ever reach the panner, so a genuine,
+    /// isolated ball (e.g. a breakaway) can be silently ignored even with
+    /// `field_panner_config.ball_max_dist_from_cluster` raised. `None`
+    /// keeps the tracker's own default
+    /// ([`trackers::ball::DEFAULT_PLAYER_ANCHOR_RAD`], ~0.20 rad / 11deg).
+    pub player_anchor_max_rad: Option<f32>,
 }
 
 impl AutocamConfig {
@@ -136,6 +145,7 @@ impl AutocamConfig {
             is_10bit: false,
             field_panner_config: None,
             confidence_threshold: None,
+            player_anchor_max_rad: None,
         }
     }
 
@@ -163,6 +173,13 @@ impl AutocamConfig {
     /// samples to 8-bit before NPP color conversion.
     pub fn with_10bit(mut self, is_10bit: bool) -> Self {
         self.is_10bit = is_10bit;
+        self
+    }
+
+    /// Override the ball tracker's player-anchor gate (radians). See
+    /// [`AutocamConfig::player_anchor_max_rad`] for what this controls.
+    pub fn with_player_anchor_rad(mut self, rad: f32) -> Self {
+        self.player_anchor_max_rad = Some(rad);
         self
     }
 }
@@ -501,8 +518,11 @@ pub fn setup_autocam(
 
         match tracking_mode {
             TrackingMode::Field => {
-                let ball_tracker =
-                    crate::trackers::BallTracker::new(ball_id).with_max_jump_rad(0.8);
+                let ball_tracker = crate::trackers::BallTracker::new(ball_id)
+                    .with_max_jump_rad(0.8)
+                    .with_player_anchor_rad(config.player_anchor_max_rad.unwrap_or(
+                        crate::trackers::ball::DEFAULT_PLAYER_ANCHOR_RAD,
+                    ));
                 target.set_ball_tracker(Box::new(ball_tracker));
 
                 // Attach the player provider only when the model actually
@@ -542,8 +562,14 @@ pub fn setup_autocam(
                 target.set_panner(Box::new(field_panner));
             }
             TrackingMode::Ball => {
-                let ball_tracker =
-                    crate::trackers::BallTracker::new(ball_id).with_max_jump_rad(0.5);
+                // No player provider is attached below, so the player-anchor
+                // gate is a no-op regardless of this value - set anyway for
+                // consistency in case that ever changes.
+                let ball_tracker = crate::trackers::BallTracker::new(ball_id)
+                    .with_max_jump_rad(0.5)
+                    .with_player_anchor_rad(config.player_anchor_max_rad.unwrap_or(
+                        crate::trackers::ball::DEFAULT_PLAYER_ANCHOR_RAD,
+                    ));
                 // No player provider - ball-only mode, even if the model
                 // has a player class (the user asked to track the ball).
                 target.set_ball_tracker(Box::new(ball_tracker));

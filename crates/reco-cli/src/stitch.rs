@@ -82,6 +82,9 @@ pub struct StitchArgs<'a> {
     pub panner_config_path: Option<&'a str>,
     /// Named panner preset (base config); JSON overlays on top.
     pub panner_preset: Option<&'a str>,
+    /// Ball tracker's player-anchor gate override (radians). See
+    /// `reco_autocam::AutocamConfig::player_anchor_max_rad`.
+    pub player_anchor_rad: Option<f32>,
 }
 
 /// Run the stitch subcommand.
@@ -146,6 +149,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                 "lookahead_reduced_bit_depth": args.lookahead_reduced_bit_depth,
                 "panner_preset": args.panner_preset,
                 "panner_config_path": args.panner_config_path,
+                "player_anchor_rad": args.player_anchor_rad,
             }
         }
     })
@@ -312,6 +316,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         let interval = args.detection_interval;
         let mode_str = args.tracking_mode.to_owned();
         let allow_fallback = args.allow_no_tracking;
+        let player_anchor_rad = args.player_anchor_rad;
         let tracking_failed = Arc::clone(&tracking_failed);
         // Resolve FieldPanner tuning up front so a bad preset/file fails
         // before rendering. Preset is the base; --panner-config overlays.
@@ -373,6 +378,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
             if let Some(ref cfg) = panner_cfg {
                 autocam_config.field_panner_config = Some(cfg.clone());
             }
+            autocam_config.player_anchor_max_rad = player_anchor_rad;
             let autocam_config = if let Some(roi) = field_roi {
                 autocam_config.with_field_roi(roi)
             } else {

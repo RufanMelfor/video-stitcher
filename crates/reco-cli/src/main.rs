@@ -324,6 +324,16 @@ enum Commands {
         /// Named panner preset: broadcast (default), action, frame_all.
         #[arg(long = "panner-preset")]
         panner_preset: Option<String>,
+
+        /// Max distance (radians) a raw ball detection may be from the
+        /// nearest tracked player and still be accepted by the ball
+        /// tracker. Farther detections are dropped before they ever
+        /// reach the panner, so a genuine isolated ball (e.g. a
+        /// breakaway) can be silently ignored even with the panner's own
+        /// `ball_max_dist_from_cluster` raised. Default: ~0.20 rad (11
+        /// degrees), the ball tracker's own built-in default.
+        #[arg(long = "player-anchor-rad")]
+        player_anchor_rad: Option<f32>,
     },
 
     /// Open an interactive preview window to debug the stitch.
@@ -889,6 +899,7 @@ fn main() -> anyhow::Result<()> {
             trajectory,
             panner_config,
             panner_preset,
+            player_anchor_rad,
         } => stitch::run_stitch(
             stitch::StitchArgs {
                 left: &left,
@@ -926,6 +937,7 @@ fn main() -> anyhow::Result<()> {
                 trajectory_path: trajectory.as_deref(),
                 panner_config_path: panner_config.as_deref(),
                 panner_preset: panner_preset.as_deref(),
+                player_anchor_rad,
             },
             &interrupted,
         ),
