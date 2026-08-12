@@ -1,4 +1,4 @@
-# Session handoff - 2026-08-11 (TGR_PC)
+# Session handoff - 2026-08-12 (TGR_PC)
 
 Continuation note for resuming work on a different machine/session -
 git-tracked so it travels with `git pull`/`push` between the user's two
@@ -12,26 +12,124 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
-Full technical detail (every parameter tested, every number) is in the
-git-tracked `YOLO26_Training.md` at the repo root - read its "Current
-status / next step (end of day, 2026-08-11)" section at the very
-bottom first, this is the condensed version.
+**"Lost my GOAL selection in the ROI editor" - not a regression, a branch
+mismatch.** User reported this after testing the ball-reach-slider debug
+build below. Checked: `crates/reco-gui/ui/main.slint` on `main` has zero
+references to goal/goal-line anywhere - the Goal ROI editor
+([[project_goal_detection_idea]], `feat/goal-line-calibration` branch)
+was **never merged into `main`**, it only exists on that separate,
+unmerged branch (still paused there pending better ball-model quality
+per that memory). The build the user tested was built from `main` for
+the ball-reach slider work, which never had the Goal feature to begin
+with - nothing was lost, it just isn't in this build. **Open question
+for the user, not yet answered**: merge/rebase `feat/goal-line-calibration`
+onto current `main` so both features coexist in one build, or keep them
+on separate branches (in which case: which branch should "the" test
+build be built from going forward)?
 
-**Two open items, in priority order:**
+**Second ask this session - Skia renderer swap (fixes wobbly text,
+[[project_skia_renderer_future_task]]):** done and build/smoke-test
+verified, needs the user's visual confirmation next.
+- `crates/reco-gui/Cargo.toml`: `slint` feature `renderer-femtovg-wgpu`
+  -> `renderer-skia` (kept `unstable-wgpu-28`). Checked feasibility first
+  per that memory's own caution (Skia's shared-wgpu-28-device path was
+  unverified): confirmed `i-slint-renderer-skia` 1.15.1 ships a
+  `wgpu_28_surface.rs` handling `WGPUTexture::WGPU28Texture` the same way
+  femtovg-wgpu does, and `BackendSelector::require_wgpu_28()` in
+  `main.rs` is renderer-agnostic - no reco-gui code changes needed beyond
+  the one Cargo.toml line.
+- **Verified**: `cargo build -p reco-gui` clean; launched the resulting
+  exe and confirmed the *exact same* zero-copy preview startup sequence
+  as the femtovg build ("Captured Slint wgpu 28 device/queue for
+  zero-copy preview" -> `GpuContext from external device: Slint-shared
+  wgpu 28 device (Vulkan)` -> pipeline initialized), no errors.
+- **Checked the DPI theory** ([[project_skia_renderer_future_task]]
+  assumed non-100% scaling as the likely trigger): this machine's
+  primary display is actually at 100% scale (`AppliedDPI: 96`), so that
+  specific theory doesn't apply here - femtovg's lack of ClearType
+  hinting may still be the cause even at 100% scale, but this wasn't
+  confirmed the way the memory expected. **User needs to visually
+  confirm the text actually looks crisper now** - can't judge font
+  rendering quality myself.
+- **Not yet done**: `cargo clippy -p reco-gui --all-targets -- -D
+  warnings` hit a **pre-existing, unrelated** failure -
+  `cuda_nv12_frames` dead-code in `reco-core`
+  (`crates/reco-core/src/session/detection_dispatch.rs:79`) - present
+  before this session's changes too (showed as a plain warning in
+  `cargo build`), not something introduced by the renderer swap or the
+  ball-reach slider. Left alone since it's out of scope; needs its own
+  look before any PR merges cleanly through CI.
+- Both this and the ball-reach slider below are **uncommitted on `main`**
+  as of session end - nothing branched/committed yet, deliberately
+  waiting on user confirmation for both before deciding how to split
+  them into PRs (likely two separate ones - unrelated changes).
 
-1. **Ask the user**: how should `reco-autocam`'s `ball_max_dist_from_cluster`
-   (default 0.5 rad, controls whether the panner will chase a real ball
-   that's far from the main player cluster - currently it won't, "Action"
-   framing stays on the crowd) be handled? Options: raise the value via
-   `--panner-config` (CLI-only, no GUI slider exists yet), add a GUI
-   slider for it, tell the user to switch **Tracking mode -> ball** for
-   matches where the ball matters more than the crowd, or leave as-is.
-   Not answered yet as of session end.
-2. **Waiting on the user**: LS project 8 ("Finetuned yolo26n (rough v1)")
-   now has **28 new pending tasks** (228 total, 200 finished) - hard
-   ball-miss frames from real footage, soccana pre-labeled, added this
-   session. Once reviewed/corrected, re-export from LS and train yolo26n
-   round 3 on the expanded (228-image) dataset.
+**Top priority - awaiting user test before opening a PR:**
+
+Built a GUI slider for `reco-autocam`'s `ball_max_dist_from_cluster`
+(answers 2026-08-11's open item 1 below - user picked "add a GUI slider"
+over raising the default or CLI-only). Uncommitted on `main` as of this
+session; **not yet merged/branched/PR'd** - waiting on the user to click
+through the Export dialog and confirm the corner-ball framing problem is
+actually fixed before that happens.
+
+- **What changed** (mirrors the existing `ball_weight` slider's plumbing
+  exactly):
+  - `crates/reco-gui/ui/main.slint`: new `export-ball-max-dist-from-cluster`
+    property (default 0.5) + a "Ball reach" `LabeledSlider` (0.0-1.5 rad)
+    in the Export dialog's "Advanced panner" section, directly under
+    Dead-zone.
+  - `crates/reco-gui/src/export.rs`: new field on `AutocamUiConfig`,
+    included in the export-run JSON and mapped onto
+    `reco_autocam::panners::FieldPannerConfig`.
+  - `crates/reco-gui/src/main.rs`: wired both directions - preset
+    application sets the slider, export-start reads it back out.
+  - `docs/ai-panner-tuning.md` + `.nl.md`: new "Ball reach" explainer
+    paragraph, added to the presets table (0.5 in every preset - no
+    preset overrides it), removed from the "not yet exposed in the GUI"
+    list, and a new "camera won't follow the ball into a corner"
+    practical-tuning bullet pointing at this slider (or `Tracking mode ->
+    ball` as the alternative).
+- **Verified this session**: `cargo build -p reco-gui` clean (no new
+  warnings), and the built exe was launched (not clicked through - no
+  synthetic mouse input, per feedback_synthetic_gui_automation_risk.md)
+  and confirmed to start cleanly: loaded the last-used calibration/inputs,
+  GPU pipeline and zero-copy preview came up with no errors in the log.
+  **Not yet visually confirmed in the Export dialog UI**, and not yet
+  tested against the actual "camera won't follow the ball into the
+  corner" symptom from 2026-08-11.
+- **Next step**: user opens the Export dialog, confirms the "Ball reach"
+  slider renders correctly under Advanced panner -> Dead-zone, raises it
+  above 0.5 rad, and re-runs the same corner-ball clip from 2026-08-11's
+  `--panner-config` A/B testing to confirm the camera now follows. Once
+  confirmed, branch off `main` (e.g. `feat/ball-reach-gui-slider`), commit,
+  and open the upstream PR (see project_upstream_pr_workflow.md for the
+  fork/PR mechanics used for every other feature PR so far).
+
+**Also unresolved from 2026-08-11** (unchanged, see that session's full
+arc below for detail):
+
+1. **Waiting on the user**: LS project 8 ("Finetuned yolo26n (rough v1)")
+   had 28 new pending tasks (228 total, 200 finished) as of 2026-08-11 -
+   hard ball-miss frames from real footage, soccana pre-labeled. Per the
+   (uncommitted, unmerged) `feat/mlpipe-gui` branch's own handoff note,
+   the user confirmed later that same evening (on RUFAN_LAPTOP) that all
+   228 are now reviewed/corrected - but round-3 training itself is still
+   blocked there (no CUDA/data-drive on that machine) and needs to run
+   **here on TGR_PC**: re-run `prepare_yolo_train_split_from_ls_export.py`
+   against project 8's fresh 228-image export, then train `yolo26n_v3`
+   (same 1280/b4/e300 hyperparams as `v2`).
+2. **New branch discovered this session**: `git pull` on `main` looked
+   like a no-op ("already up to date"), but a full `git fetch --all` found
+   the user had pushed real work to a new, unmerged branch overnight -
+   `feat/mlpipe-gui` (1 commit, `d5071077`): a Streamlit GUI
+   (`scripts/mlpipe/`) consolidating the yolo26n export/train/ONNX-export
+   pipeline, 15 regression tests, verified against the real Pi-hosted LS
+   instance. Local tracking branch `feat/mlpipe-gui` now created (tracks
+   `github/feat/mlpipe-gui`). Per its own handoff note it still needs a
+   real run-through on a CUDA+data-drive machine (i.e. here) and a manual
+   browser click-through - not done yet this session, deferred in favor of
+   the ball-reach slider work above.
 
 ## This session's full arc (continues yesterday's yolo26n pivot -
 2026-08-10's session ended with review not started; today's picked back
