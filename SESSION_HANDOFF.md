@@ -12,8 +12,40 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
-**Panner testing (this session, continues 2026-08-11's investigation) -
-FOV Wide is the missing piece, not new panner code.** User exported
+**New GUI slider merged into `main` (`ce036017`) - "Ball anchor range",
+the real fix for the corner-breakaway ball going "Lost".** Follow-on
+from the FOV Wide finding below: user asked to test the FOV Wide fix,
+checked ball detection around t=24s in `Ai Planner Test v3.mp4`, and the
+ball tracker was coasting/going `Lost` right through a moment where the
+raw YOLO26 model actually detected the ball at **0.97 confidence** -
+confirmed via raw `detections_raw` events, ruling out a model/recall
+problem.
+- Root cause: `BallTracker` (`crates/reco-autocam/src/trackers/ball.rs`)
+  has its own **player-anchor gate**, upstream of everything in
+  `FieldPanner` - a raw ball detection is only accepted if it's within
+  `player_anchor_max_rad` (hardcoded `DEFAULT_PLAYER_ANCHOR_RAD = 0.20`
+  rad / ~11deg) of at least one tracked player. A genuine breakaway ball
+  sits outside this on purpose (that's what makes it a breakaway), so it
+  gets dropped before the panner - and before Ball reach or FOV Wide -
+  ever sees it. `with_player_anchor_rad()` existed as a builder method
+  but was dead code in production (only unit tests called it).
+- **Built and merged**: `AutocamConfig::player_anchor_max_rad` (new
+  field + builder in `reco-autocam/src/lib.rs`, wired into both
+  `BallTracker` construction sites), a `reco-cli --player-anchor-rad`
+  flag, and a new **"Ball anchor range"** GUI slider (0.1-0.8 rad,
+  top-level AI Tracking controls, next to "Detect every N frames" - it's
+  a tracker knob, not part of `FieldPannerConfig` presets). Docs updated
+  with the full 3-gate order (Ball anchor range -> Ball reach -> FOV
+  Wide). `cargo test -p reco-autocam -p reco-gui -p reco-cli` all green,
+  build+launch smoke-tested clean.
+- **Not yet done**: user hasn't re-tested with Ball anchor range raised
+  (try 0.3-0.5+) to confirm the t=24s breakaway is now actually tracked
+  end to end (check the events JSONL for `state: Tracking` instead of
+  `Coasting`/`Lost` during that window) and that the resulting shot
+  matches the Once AutoCam reference framing.
+
+**Panner testing (earlier this session, continues 2026-08-11's
+investigation) - FOV Wide is the missing piece, not new panner code.** User exported
 `Ai Planner Test v1/v2.mp4` + `.events.jsonl` (in the `TEST VIDEO`
 folder) with Ball reach already raised to 1.0 rad, and compared against
 a competitor's output (`Once AutoCam 100-130sec.mp4`, same match, t=24s)
