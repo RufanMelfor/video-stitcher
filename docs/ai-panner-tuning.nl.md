@@ -15,9 +15,11 @@ opgeslagen zodra je op **Save calibration** klikt in het
 Export-dialoogvenster - zie
 [`Calibration::autocam_defaults`](../crates/reco-core/src/calibration.rs).
 
-Model: huidige beste checkpoint - `yolo26n_v2` in productie op moment
-van schrijven; `yolo26n_v3`/`yolo26s_v3` getraind en ONNX-geëxporteerd
-maar nog niet in de app getest, zie `YOLO26_Training.md`.
+Model: `yolo26n_v2` is de productiecheckpoint op moment van schrijven,
+maar `yolo26s_v3` (ronde 3, ONNX-geëxporteerd) scoorde dramatisch beter
+in een echte in-app test op dezelfde clip - ruwe baldetecties van 19,7%
+naar 48,7% van de frames. Nog niet gepromoveerd tot "de" standaard, zie
+`YOLO26_Training.md`.
 
 ```
 Tracking mode:                      field
@@ -40,6 +42,8 @@ Ball reach:                         1,0 rad         (standaard 0,5)
 FOV Tight:                          20deg           (preset-standaard, niet apart getuned)
 FOV Default:                        34deg           (preset-standaard, niet apart getuned)
 FOV Wide:                           65-70deg        (standaard van de action preset is 48deg)
+Zoom smoothing (fov_alpha):         0,05-0,08       (standaard 0,01)
+Aim smoothing (cluster_alpha):      0,05-0,08       (standaard 0,012)
 ```
 
 Waarom elk van deze, kort: **Cluster mode -> trimmed_mean** fixt de
@@ -48,7 +52,12 @@ samen met `trimmed_mean`, samen getest. **Ball weight 0,35** - `1,0` gaf
 zichtbare wobble, ongeacht modelkwaliteit. **Ball reach** laat de panner
 richting een echt geïsoleerde bal trekken i.p.v. 'm te negeren. **FOV
 Wide** - zonder dit op te trekken clamped de bal-reach-verbredingslogica
-voordat het beeld echt breed genoeg kan worden.
+voordat het beeld echt breed genoeg kan worden. **Zoom/Aim smoothing** -
+zelfs met Ball reach en FOV Wide opgetrokken zijn de *standaard*
+smoothing-snelheden vaak te traag om de bredere/verplaatste doelwaarde
+daadwerkelijk te bereiken voordat een korte uitbraak alweer voorbij is
+(zie hieronder) - trek deze op als de camera een snelle balactie
+halverwege lijkt "op te geven".
 
 De drie bal-gerelateerde instellingen filteren voor elkaar, in deze
 volgorde: **Ball anchor range → Ball reach → FOV Wide**. Ball anchor
@@ -188,6 +197,25 @@ overschrijden, waardoor het beeld nooit breed genoeg wordt om zowel de
 balbezitter als de hoofdgroep vast te houden - ook niet met **Ball
 reach** opgetrokken. Zie de hoek-uitbraak-bullet hieronder.
 
+**Zoom smoothing / Aim smoothing** (`fov_alpha` / `cluster_alpha`) - hoe
+snel de *gesmoothde* zoom en aim van de panner elk frame hun berekende
+doelwaarde bijtrekken, als een exponentieel-voortschrijdend-gemiddelde-
+snelheid (geen vertraging of plafond). Dit is een compleet losse knop
+van Lookahead: Lookahead bepaalt hoeveel toekomst/verleden wordt
+meegemiddeld in de doelwaarde zelf; deze twee bepalen hoe snel de
+getoonde waarde die doelwaarde achterna gaat zodra die berekend is. De
+standaardwaarden (`fov_alpha: 0,01`, `cluster_alpha: 0,012`) hebben een
+tijdconstante van ongeveer **3 seconden bij 30fps** - bevestigd via een
+echte trace: op een hoek-uitbraak-clip klom de FOV maar van 38,7° naar
+39,9° (doelwaarde was al voorbij 65°+) over de ~20 frames dat de bal
+volgbaar bleef, en de aim-pitch bewoog nauwelijks terwijl de pitch van
+de bal in datzelfde venster 0,24 rad verschoof. De bal was het beeld al
+uit voordat de smoothing had bijgetrokken. Trek beide op als de camera
+een snelle uitbraak halverwege lijkt "op te geven" ondanks dat Ball
+reach/FOV Wide al hoog genoeg staan; te ver optrekken kan de wobble
+terugbrengen die deze twee juist moesten voorkomen, want een sneller
+reagerende camera jaagt ook gretiger een ruizige detectie achterna.
+
 **Dead-zone versus beeldmarge - twee verschillende dingen, makkelijk te
 verwarren.** Dead-zone is een *reactiedrempel*: hoeveel het doelwit moet
 bewegen voordat de camera überhaupt beweegt (zie hierboven). Dit heeft
@@ -267,15 +295,22 @@ Bron: `FieldPannerConfig::{broadcast, action, frame_all}` in
   een valse positieve wordt gevolgd. Als bal-acties belangrijker zijn dan
   bij de groep blijven, is overschakelen naar **Tracking mode -> ball**
   voor die wedstrijd vaak een betere keuze.
+  4. Als de bal ondanks alle drie bovenstaande correct opgetrokken nog
+     steeds uit beeld valt, check dan **Zoom/Aim smoothing**
+     (`fov_alpha`/`cluster_alpha`) - via een echte trace bevestigd dat de
+     *standaard* smoothing-snelheden (~3s tijdconstante) vaak te traag
+     zijn om de bredere/verplaatste doelwaarde te bereiken voordat een
+     korte uitbraak alweer voorbij is, ook al werd de doelwaarde zelf
+     wel correct berekend. Trek beide op naar ~0,05-0,08.
 
 ## Extra parameters (nog niet beschikbaar in de GUI)
 
 Een aantal velden van `FieldPannerConfig` heeft vandaag geen instelling
 in het Export-dialoogvenster en is alleen te wijzigen via een
 configuratiebestand / CLI-vlag die rechtstreeks `reco-autocam`
-aanspreekt: `min_cluster`, `edge_push`, `fov_alpha`,
+aanspreekt: `min_cluster`, `edge_push`,
 `pitch_near`/`pitch_far`/`distance_bias_max`, `edge_bias_max`,
-`cluster_alpha`, `max_velocity_rad_per_sec`, `velocity_alpha`,
+`max_velocity_rad_per_sec`, `velocity_alpha`,
 `pitch_bias`, `ball_presence_decay`/`ball_presence_attack`,
 `velocity_fov_bias_max`, `ball_frame_margin_deg`,
 `lead_gain`/`lead_alpha`,

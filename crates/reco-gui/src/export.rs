@@ -81,6 +81,12 @@ pub struct AutocamUiConfig {
     pub fov_tight: f32,
     pub fov_wide: f32,
     pub fov_default: f32,
+    /// Zoom-target smoothing rate (EMA alpha per frame). See
+    /// `reco_autocam::panners::FieldPannerConfig::fov_alpha`.
+    pub fov_alpha: f32,
+    /// Cluster-position smoothing rate (EMA alpha per frame). See
+    /// `reco_autocam::panners::FieldPannerConfig::cluster_alpha`.
+    pub cluster_alpha: f32,
 }
 
 /// Telemetry sink that forwards snapshots to the Slint UI thread.
@@ -236,6 +242,8 @@ pub fn run_export(
                 "fov_tight": autocam.fov_tight,
                 "fov_wide": autocam.fov_wide,
                 "fov_default": autocam.fov_default,
+                "fov_alpha": autocam.fov_alpha,
+                "cluster_alpha": autocam.cluster_alpha,
             }
         }
     })
@@ -358,6 +366,8 @@ pub fn run_export(
                     fov_tight: autocam.fov_tight,
                     fov_wide: autocam.fov_wide,
                     fov_default: autocam.fov_default,
+                    fov_alpha: autocam.fov_alpha,
+                    cluster_alpha: autocam.cluster_alpha,
                 },
             );
         }
@@ -395,6 +405,8 @@ pub fn run_export(
                 fov_tight: ac.fov_tight,
                 fov_wide: ac.fov_wide,
                 fov_default: ac.fov_default,
+                fov_alpha: ac.fov_alpha,
+                cluster_alpha: ac.cluster_alpha,
                 // Preset is the base; the visible knobs above overlay it
                 // (they mirror the preset until the user tweaks them).
                 ..reco_autocam::panners::FieldPannerConfig::from_preset_name(&ac.preset)

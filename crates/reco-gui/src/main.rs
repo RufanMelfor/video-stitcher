@@ -4295,6 +4295,8 @@ fn main() -> anyhow::Result<()> {
                     fov_tight: app.get_export_fov_tight(),
                     fov_wide: app.get_export_fov_wide(),
                     fov_default: app.get_export_fov_default(),
+                    fov_alpha: app.get_export_fov_alpha(),
+                    cluster_alpha: app.get_export_cluster_alpha(),
                 });
             }
         }
@@ -4887,6 +4889,8 @@ fn main() -> anyhow::Result<()> {
             app.set_export_fov_tight(cfg.fov_tight);
             app.set_export_fov_wide(cfg.fov_wide);
             app.set_export_fov_default(cfg.fov_default);
+            app.set_export_fov_alpha(cfg.fov_alpha);
+            app.set_export_cluster_alpha(cfg.cluster_alpha);
         }
         #[cfg(not(feature = "autocam"))]
         let _ = (&app_weak, &name);
@@ -4978,6 +4982,8 @@ fn main() -> anyhow::Result<()> {
             fov_tight: app.get_export_fov_tight(),
             fov_wide: app.get_export_fov_wide(),
             fov_default: app.get_export_fov_default(),
+            fov_alpha: app.get_export_fov_alpha(),
+            cluster_alpha: app.get_export_cluster_alpha(),
         };
         let replay_enabled = app.get_export_replay_enabled();
         let events_enabled = app.get_export_events_enabled();
@@ -5912,6 +5918,8 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                     app.set_export_fov_tight(ac.fov_tight);
                     app.set_export_fov_wide(ac.fov_wide);
                     app.set_export_fov_default(ac.fov_default);
+                    app.set_export_fov_alpha(ac.fov_alpha);
+                    app.set_export_cluster_alpha(ac.cluster_alpha);
                     log::info!("Restored AI Tracking defaults from calibration");
                 }
                 // Lookahead VRAM risk thresholds for the export slider. The

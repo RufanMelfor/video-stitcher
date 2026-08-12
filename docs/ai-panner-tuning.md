@@ -14,9 +14,10 @@ from scratch. These are also saved per-calibration once you hit **Save
 calibration** in the Export dialog - see
 [`Calibration::autocam_defaults`](../crates/reco-core/src/calibration.rs).
 
-Model: current best checkpoint - `yolo26n_v2` in production use as of
-this writing; `yolo26n_v3`/`yolo26s_v3` trained and ONNX-exported but
-not yet app-tested, see `YOLO26_Training.md`.
+Model: `yolo26n_v2` is the production checkpoint as of this writing, but
+`yolo26s_v3` (round 3, ONNX-exported) tested dramatically better in a
+real in-app run on the same clip - raw ball detections 19.7% -> 48.7% of
+frames. Not yet promoted to "the" default - see `YOLO26_Training.md`.
 
 ```
 Tracking mode:                      field
@@ -39,6 +40,8 @@ Ball reach:                         1.0 rad         (default 0.5)
 FOV Tight:                          20deg           (preset default, not separately tuned)
 FOV Default:                        34deg           (preset default, not separately tuned)
 FOV Wide:                           65-70deg        (action preset default 48deg)
+Zoom smoothing (fov_alpha):         0.05-0.08       (default 0.01)
+Aim smoothing (cluster_alpha):      0.05-0.08       (default 0.012)
 ```
 
 Why each of these, briefly: **Cluster mode -> trimmed_mean** fixes the
@@ -47,7 +50,11 @@ alongside `trimmed_mean`, tested together. **Ball weight 0.35** - `1.0`
 caused visible wobble regardless of model quality. **Ball reach** lets
 the panner pull toward a genuinely isolated ball instead of ignoring it.
 **FOV Wide** - without raising this, the ball-reach widen logic clamps
-before it can actually open the shot up.
+before it can actually open the shot up. **Zoom/Aim smoothing** - even
+with Ball reach and FOV Wide raised, the *default* smoothing rates are
+often too slow to actually reach the wider/repositioned target before a
+brief breakaway is over (see below) - raise these if the camera visibly
+"gives up" following a fast ball event partway through.
 
 The three ball-related settings gate each other, in this order: **Ball
 anchor range -> Ball reach -> FOV Wide**. Ball anchor range decides
@@ -175,6 +182,24 @@ presets' 48-58° ceiling, so the shot never actually opens up enough to
 hold both the ball-carrier and the main group, even with **Ball reach**
 raised - see the corner-breakaway bullet below.
 
+**Zoom smoothing / Aim smoothing** (`fov_alpha` / `cluster_alpha`) - how
+fast the panner's *smoothed* zoom and aim catch up to their computed
+targets each frame, as an exponential-moving-average rate (not a delay
+or a cap). This is a completely separate lever from Lookahead: Lookahead
+controls how much future/past gets averaged into the target in the first
+place; these control how fast the presented value chases that target
+once computed. The defaults (`fov_alpha: 0.01`, `cluster_alpha: 0.012`)
+have a roughly **3-second time constant at 30fps** - confirmed via a
+real trace: on a corner-breakaway clip, FOV climbed only from 38.7° to
+39.9° (target was well past 65°+) over the ~20 frames the ball stayed
+trackable, and aim pitch barely moved at all while the ball's pitch
+shifted by 0.24 rad in the same window. The ball had already left frame
+before the smoothing caught up. Raise both if the camera "gives up" on a
+fast breakaway partway through despite Ball reach/FOV Wide being high
+enough; raise too far and the wobble those two settings were tuned to
+avoid can come back, since a snappier camera also more eagerly chases a
+noisy detection.
+
 **Dead-zone vs. frame margin - two different things, easy to conflate.**
 Dead-zone is a *reaction threshold*: how far the target must move before
 the camera moves at all (see above). It has nothing to do with how close
@@ -246,14 +271,20 @@ Source: `FieldPannerConfig::{broadcast, action, frame_all}` in
   and accepts occasionally chasing a false positive. If ball plays like
   this matter more than staying with the crowd, switching **Tracking
   mode -> ball** for that match is often a better fit.
+  4. If the ball still leaves frame despite all three above being raised
+     correctly, check **Zoom/Aim smoothing** (`fov_alpha`/`cluster_alpha`)
+     - confirmed via a real trace that the *default* smoothing rates
+     (~3s time constant) are often too slow to reach the wider/repositioned
+     target before a brief breakaway is already over, even though the
+     target itself computed correctly. Raise both to ~0.05-0.08.
 
 ## Extra parameters (not yet exposed in the GUI)
 
 A few `FieldPannerConfig` fields have no Export-dialog control today and
 can currently only be changed via a config file / CLI flag consuming
-`reco-autocam` directly: `min_cluster`, `edge_push`, `fov_alpha`,
+`reco-autocam` directly: `min_cluster`, `edge_push`,
 `pitch_near`/`pitch_far`/`distance_bias_max`, `edge_bias_max`,
-`cluster_alpha`, `max_velocity_rad_per_sec`, `velocity_alpha`,
+`max_velocity_rad_per_sec`, `velocity_alpha`,
 `pitch_bias`, `ball_presence_decay`/`ball_presence_attack`,
 `velocity_fov_bias_max`, `ball_frame_margin_deg`,
 `lead_gain`/`lead_alpha`,

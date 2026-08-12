@@ -1028,6 +1028,8 @@ export component RecoApp inherits Window {
     in-out property <float> export-fov-tight: 22.0;
     in-out property <float> export-fov-wide: 58.0;
     in-out property <float> export-fov-default: 40.0;
+    in-out property <float> export-fov-alpha: 0.01;
+    in-out property <float> export-cluster-alpha: 0.012;
     in-out property <bool> export-replay-enabled: false;
     in-out property <bool> export-events-enabled: false;
 
@@ -4783,6 +4785,31 @@ export component RecoApp inherits Window {
                                     maximum: 90.0;
                                     value <=> root.export-fov-wide;
                                     decimals: 0;
+                                }
+                            }
+
+                            Tip {
+                                tip: "How fast the panner's smoothed values (not the raw target) catch up each frame - an exponential-moving-average rate, not a delay. Low = calm but laggy; a brief, fast-moving ball can leave frame before the camera/zoom ever catches up, even with Ball reach and FOV Wide raised. High = snappier but can reintroduce the wobble those settings were tuned to avoid - raise gradually.";
+                                Text { text: "Smoothing speed"; color: #ccc; font-size: 12px; }
+                            }
+                            HorizontalBox {
+                                spacing: 10px;
+                                padding: 0;
+                                LabeledSlider {
+                                    label: "Zoom (FOV)";
+                                    tip: "How fast the dynamic zoom catches up to its computed target FOV. Default 0.01 has a ~3s time constant at 30fps - often too slow to reach a wide enough shot before a brief breakaway is over.";
+                                    minimum: 0.005;
+                                    maximum: 0.3;
+                                    value <=> root.export-fov-alpha;
+                                    decimals: 3;
+                                }
+                                LabeledSlider {
+                                    label: "Aim (cluster)";
+                                    tip: "How fast the aim point catches up to the player cluster centroid. Default 0.012, same slow-time-constant caveat as Zoom.";
+                                    minimum: 0.005;
+                                    maximum: 0.3;
+                                    value <=> root.export-cluster-alpha;
+                                    decimals: 3;
                                 }
                             }
                         }
