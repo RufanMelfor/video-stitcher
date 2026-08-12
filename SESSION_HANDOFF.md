@@ -12,6 +12,28 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
+**6 new hard-frame review tasks pushed to LS project 8 ("Finetuned
+yolo26n (rough v1)", now 234 tasks).** Follow-on from testing v3/v4/v5:
+found the exact `t=123.7-125.1s` window (03 OJC match, right camera -
+user confirmed absolute match time, ~124s) where yolo26n produces zero
+raw detections at all, confirmed via `detections_raw` events - a genuine
+model recall gap, not a pipeline issue (see the Ball anchor range
+section below for how the pipeline-side issue was separately ruled
+out/fixed). Extracted 6 raw frames across that window, resized to
+1024x1024 (matching the mlpipe-branch export convention), ran soccana
+as the auxiliary predictor - it found the ball in all 6 (0.43-0.78 conf)
+where yolo26n found nothing. Visually verified soccana's boxes actually
+land on the ball (not blindly trusted - my own first-pass linear
+interpolation between the bracketing detections was visually checked
+and found inaccurate, so switched to running soccana properly instead).
+Pushed via the same REST import+predictions pattern as 2026-08-11's 28
+hard frames (multipart `/api/projects/8/import`, since its response
+lacks a `task_ids` key the new task is found by polling
+`task_number`/paging, then `POST /api/predictions/`) - tasks 1936-1941,
+each verified `total_predictions==1`, no orphans this time.
+**Credentials used transiently only, not saved anywhere** - see
+password manager if you need to re-run this.
+
 **AI Tracking settings now persist in the calibration JSON, merged into
 `main` (`9d8f778e`).** User asked to stop re-entering the same panner
 settings after every build/session. New `Calibration::autocam_defaults`
