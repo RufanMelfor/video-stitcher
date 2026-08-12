@@ -12,71 +12,34 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
-**6 new hard-frame review tasks pushed to LS project 8 ("Finetuned
-yolo26n (rough v1)", now 234 tasks) - final version, after two
-corrections.** Follow-on from testing v3/v4/v5: found the exact
-`t=123.7-125.1s` window (03 OJC match, right camera - user confirmed
-absolute match time, ~124s) where yolo26n produces zero raw detections
-at all, confirmed via `detections_raw` events - a genuine model recall
-gap, not a pipeline issue (see the Ball anchor range section below for
-how the pipeline-side issue was separately ruled out/fixed).
+**6 hard-frame LS tasks: pushed, then reverted same session - LS
+project 8 back to 228, local copies deleted too.** Found the exact
+`t=123.7-125.1s` window of 03 OJC (right camera, user-confirmed ~124s
+match time) where yolo26n produces zero raw detections at all - a
+genuine model recall gap, not a pipeline issue (see the Ball anchor
+range section below for the pipeline-side issue that was separately
+ruled out/fixed). Extracted 6 frames there, soccana found the ball in
+all 6 where yolo26n found nothing. **User then said they'd already
+reviewed similar frames the day before (2026-08-11) - asked to delete
+these 6 again as redundant.** Done: LS tasks removed via `DELETE
+/api/tasks/<id>/`, project 8 back to 228; the matching local copies
+also removed from
+`D:\VOETBAL_VIDEO\RECO\training\finetuned_n_preds\ls_flat\images\`.
+**No further action needed on these 6 specifically** - the underlying
+`t=123.7-125.1s` recall gap is still real and documented (see
+[[project_yolo26n_training_pipeline]]) if it turns out worth targeting
+again later, just not via these exact frames.
 
-- Extracted 6 raw frames across that window, ran soccana as the
-  auxiliary predictor - it found the ball in all 6 (0.43-0.78 conf)
-  where yolo26n found nothing. Visually verified soccana's boxes
-  actually land on the ball (own first-pass linear-interpolation guess
-  at the ball's position was checked and found inaccurate - don't trust
-  interpolation between two bracketing detections, always run/verify an
-  actual detector).
-- **First push** used the mlpipe-branch's 1024x1024 *stretch* convention
-  - user reported predictions weren't rendering at all (see the
-    `model_version` fix below), then separately flagged the image
-    quality as poor and "0 person, 1 ball" as suspicious.
-  - `model_version` fix: this LS instance's projects all have
-    `model_version` set to the literal string `"undefined"` (a JS
-    artifact) - a prediction only renders in the labeling UI if its own
-    `model_version` matches. Pushing a descriptive value (e.g.
-    date-stamped) silently breaks visibility even though the API
-    returns success - **always set `model_version: "undefined"`
-    explicitly for any future push to this instance**, don't invent a
-    traceability string. See [[project_yolo26n_training_pipeline]] for
-    the full writeup.
-  - "0 person" was just scope - that first push only queried/kept
-    soccana's `ball` class, discarding persons entirely, not a
-    detection failure.
-- **Second push** tried a non-stretched 1024x1024 *crop* centered on the
-  ball instead (fixed the distortion) - but this was also wrong:
-  `reco-detect`'s actual live inference always **letterboxes the whole,
-  uncropped camera frame** to the model's square input
-  (`crates/reco-detect/src/detectors/cpu.rs` + cuda/metal variants all
-  say so in their doc comments) - it never crops or stretches. A
-  zoomed-in training crop would teach the model a ball scale/context
-  that doesn't match real deployment, and doesn't match how this
-  project's existing 228 tasks were built either (confirmed: they're
-  full native 3840x2880, no resize at all).
-- **Final version**: full native-resolution frame (matching both
-  `reco-detect`'s real inference behavior and this project's own
-  existing convention), soccana re-run on the *full* frame (confidence
-  back down to the original 0.43-0.78 range - the earlier "quality"
-  bump on the crop was from zooming a small object, not from removing
-  distortion), person+referee boxes included (conf>=0.20), one best-conf
-  box per ball. Pushed via the same REST import+predictions pattern as
-  2026-08-11's 28 hard frames (multipart `/api/projects/8/import`, since
-  its response lacks a `task_ids` key the new task is found by polling
-  `task_number`/paging, then `POST /api/predictions/` with
-  `model_version: "undefined"`) - tasks 1936-1941 (reused after deleting
-  the two earlier wrong versions), each verified `total_predictions==1`.
-- **Local training copies also placed**: the same 6 full-res frames
-  copied into `D:\VOETBAL_VIDEO\RECO\training\finetuned_n_preds\ls_flat\images\`
-  (same flat directory the existing 200 images live in, same filenames
-  as uploaded to LS) so `prepare_yolo_train_split_from_ls_export.py`
-  picks them up automatically via filename-matching against LS's YOLO
-  export once round-3 training runs - **not yet verified this actually
-  works** (assumes LS's YOLO export preserves the original uploaded
-  filename as the label stem, based on 2026-08-10's precedent, not
-  re-confirmed this session).
-- **Credentials used transiently only, not saved anywhere** - see
-  password manager if you need to re-run this.
+Real, reusable lessons from getting the image format wrong twice before
+the revert (kept in [[project_yolo26n_training_pipeline]] for next
+time): (1) this LS instance requires `model_version: "undefined"`
+(literal string) on every pushed prediction or it silently doesn't
+render in the UI - don't use a descriptive/traceability value; (2)
+`reco-detect`'s real inference always **letterboxes the whole,
+uncropped frame** (confirmed in `crates/reco-detect/src/detectors/*.rs`
+doc comments) - never crop or stretch training/review images, always
+use full native resolution, matching this project's own existing 228
+tasks.
 
 **AI Tracking settings now persist in the calibration JSON, merged into
 `main` (`9d8f778e`).** User asked to stop re-entering the same panner
