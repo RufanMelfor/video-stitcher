@@ -4270,6 +4270,34 @@ fn main() -> anyhow::Result<()> {
     // check passes) and `confirm-save-calibration` (user already said
     // "yes, overwrite the default" in the warning modal).
     fn do_save_calibration(state_ref: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<RecoApp>) {
+        // Snapshot the Export dialog's AI Tracking sliders into the
+        // calibration before serializing, so re-opening this calibration
+        // restores them instead of resetting to hardcoded literals. Unlike
+        // the topology/lens/blend sliders, these aren't part of the live
+        // renderer, so they're only synced here rather than on every edit.
+        if let Some(app) = app_weak.upgrade() {
+            let mut s = state_ref.borrow_mut();
+            if let Some(cal) = s.calibration.as_mut() {
+                cal.autocam_defaults = Some(reco_core::calibration::AutocamDefaults {
+                    tracking_mode: app.get_export_tracking_mode().to_string(),
+                    detection_interval: app.get_export_detection_interval() as u32,
+                    player_anchor_rad: app.get_export_player_anchor_rad(),
+                    lookahead_secs: app.get_export_lookahead_secs() as f64,
+                    lookahead_reduced_bit_depth: app.get_export_lookahead_reduced_bit_depth(),
+                    preset: app.get_export_panner_preset().to_string(),
+                    framing: app.get_export_framing().to_string(),
+                    lock_pitch: app.get_export_lock_pitch(),
+                    cluster_mode: app.get_export_cluster_mode().to_string(),
+                    cluster_bandwidth_rad: app.get_export_cluster_bandwidth(),
+                    dead_zone_rad: app.get_export_dead_zone(),
+                    ball_weight: app.get_export_ball_weight(),
+                    ball_max_dist_from_cluster: app.get_export_ball_max_dist_from_cluster(),
+                    fov_tight: app.get_export_fov_tight(),
+                    fov_wide: app.get_export_fov_wide(),
+                    fov_default: app.get_export_fov_default(),
+                });
+            }
+        }
         let save_result = state_ref.borrow().save_calibration();
         match save_result {
             Err(e) => {
@@ -5858,6 +5886,34 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
 
             if let Some(app) = app_weak.upgrade() {
                 app.set_files_loaded(true);
+                // Restore the Export dialog's AI Tracking sliders from the
+                // calibration, if it was saved with defaults (see
+                // `do_save_calibration`). Applied before the VRAM lookahead
+                // check below so a restored lookahead value is still
+                // subject to that same safety clamp.
+                if let Some(ac) = s
+                    .calibration
+                    .as_ref()
+                    .and_then(|c| c.autocam_defaults.as_ref())
+                {
+                    app.set_export_tracking_mode(ac.tracking_mode.clone().into());
+                    app.set_export_detection_interval(ac.detection_interval as i32);
+                    app.set_export_player_anchor_rad(ac.player_anchor_rad);
+                    app.set_export_lookahead_secs(ac.lookahead_secs as f32);
+                    app.set_export_lookahead_reduced_bit_depth(ac.lookahead_reduced_bit_depth);
+                    app.set_export_panner_preset(ac.preset.clone().into());
+                    app.set_export_framing(ac.framing.clone().into());
+                    app.set_export_lock_pitch(ac.lock_pitch);
+                    app.set_export_cluster_mode(ac.cluster_mode.clone().into());
+                    app.set_export_cluster_bandwidth(ac.cluster_bandwidth_rad);
+                    app.set_export_dead_zone(ac.dead_zone_rad);
+                    app.set_export_ball_weight(ac.ball_weight);
+                    app.set_export_ball_max_dist_from_cluster(ac.ball_max_dist_from_cluster);
+                    app.set_export_fov_tight(ac.fov_tight);
+                    app.set_export_fov_wide(ac.fov_wide);
+                    app.set_export_fov_default(ac.fov_default);
+                    log::info!("Restored AI Tracking defaults from calibration");
+                }
                 // Lookahead VRAM risk thresholds for the export slider. The
                 // pool stores source-resolution frames (re-rendered into the
                 // export), so the ceiling scales with source resolution, not
