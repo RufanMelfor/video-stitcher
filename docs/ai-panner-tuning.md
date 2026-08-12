@@ -49,6 +49,14 @@ the others won't fully fix a missed breakaway - see the "Camera won't
 follow the ball into a corner" bullet further down for the full
 reasoning and how each was verified (not just recommended by guess).
 
+**Every settings table above is also written into the events JSONL.**
+When "Record pipeline events" (`--events` on the CLI) is on *and* AI
+tracking is enabled, the very first line of the output file is a
+`{"kind":"run_config", ...}` record with every field from the tables
+above - so a trace file is self-describing without cross-referencing
+the export command or GUI state separately. See
+[`PipelineEvent::RunConfig`](../crates/reco-core/src/detect/pipeline_event.rs).
+
 ## Top-level controls
 
 **Tracking mode** - `field` (default): follows the player cluster + ball

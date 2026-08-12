@@ -19,8 +19,9 @@
 //!
 //! # Event vocabulary
 //!
-//! One variant per natural pipeline stage:
+//! One variant per natural pipeline stage, plus a one-time run header:
 //!
+//! 0. [`RunConfig`](crate::detect::pipeline_event::PipelineEvent::RunConfig) - AI/panner settings snapshot, written once before frame 0.
 //! 1. [`FrameStart`](crate::detect::pipeline_event::PipelineEvent::FrameStart) - the frame loop picked up a new frame.
 //! 2. [`DetectionsRaw`](crate::detect::pipeline_event::PipelineEvent::DetectionsRaw) - detector produced mapped detections.
 //! 3. [`WorldState`](crate::detect::pipeline_event::PipelineEvent::WorldState) - trackers produced the per-frame world.
@@ -39,6 +40,16 @@ use crate::geometry::ViewportPosition;
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PipelineEvent {
+    /// One-time snapshot of the AI tracking / panner settings this run
+    /// used, written as the very first line of the events JSONL (before
+    /// any `frame_start`) so a trace file is self-describing without
+    /// cross-referencing the export command or GUI state separately.
+    /// Only emitted when AI tracking is actually enabled - see
+    /// `docs/ai-panner-tuning.md` for what each field controls.
+    RunConfig {
+        config: crate::calibration::AutocamDefaults,
+    },
+
     /// Frame loop picked up a new frame. Fires once per frame before
     /// any detection or pose work.
     FrameStart {
@@ -140,8 +151,13 @@ impl From<&crate::telemetry::FrameTiming> for FrameTimingMicros {
 impl PipelineEvent {
     /// Frame index the event belongs to. Handy for sample-rate
     /// gating in `BackpressuredSink`.
+    ///
+    /// `RunConfig` isn't tied to a frame - returns `0` so it always
+    /// survives `BackpressuredSink`'s sample-rate gate (any `n` divides
+    /// 0), same as a real frame 0 event would.
     pub fn frame_index(&self) -> u64 {
         match self {
+            PipelineEvent::RunConfig { .. } => 0,
             PipelineEvent::FrameStart { frame_index, .. }
             | PipelineEvent::DetectionsRaw { frame_index, .. }
             | PipelineEvent::WorldState { frame_index, .. }
@@ -443,5 +459,38 @@ mod tests {
         assert!(json.contains(r#""kind":"frame_start""#));
         assert!(json.contains(r#""frame_index":7"#));
         assert!(json.contains(r#""timestamp_ms":1234.5"#));
+    }
+
+    #[test]
+    fn run_config_serializes_to_tagged_json_and_sorts_first() {
+        // StitchJob::run() relies on frame_index() == 0 to survive the
+        // BackpressuredSink sample-rate gate and land before frame 0's
+        // own events. Lock both the serialization shape and that
+        // invariant here.
+        let ev = PipelineEvent::RunConfig {
+            config: crate::calibration::AutocamDefaults {
+                tracking_mode: "field".into(),
+                detection_interval: 3,
+                player_anchor_rad: 0.35,
+                lookahead_secs: 0.5,
+                lookahead_reduced_bit_depth: false,
+                preset: "action".into(),
+                framing: "action".into(),
+                lock_pitch: false,
+                cluster_mode: "trimmed_mean".into(),
+                cluster_bandwidth_rad: 0.30,
+                dead_zone_rad: 0.05,
+                ball_weight: 0.35,
+                ball_max_dist_from_cluster: 1.0,
+                fov_tight: 20.0,
+                fov_wide: 70.0,
+                fov_default: 34.0,
+            },
+        };
+        assert_eq!(ev.frame_index(), 0);
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains(r#""kind":"run_config""#));
+        assert!(json.contains(r#""tracking_mode":"field""#));
+        assert!(json.contains(r#""ball_max_dist_from_cluster":1.0"#));
     }
 }
