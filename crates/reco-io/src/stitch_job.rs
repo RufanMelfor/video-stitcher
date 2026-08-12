@@ -93,6 +93,12 @@ pub struct StitchJob {
     /// filter decision, and pan decision for offline analysis.
     events_path: Option<std::path::PathBuf>,
 
+    /// AI/panner settings snapshot, written as the first line of the
+    /// events JSONL (only meaningful together with `events_path`; only
+    /// set this when AI tracking is actually enabled - see
+    /// [`Self::ai_run_config`]).
+    ai_run_config: Option<reco_core::calibration::AutocamDefaults>,
+
     /// Free-form text embedded in the output container's "comment"
     /// metadata tag. See [`Self::metadata_comment`].
     metadata_comment: Option<String>,
@@ -277,6 +283,7 @@ impl StitchJob {
             lookahead_secs: 0.0,
             lookahead_reduced_bit_depth: false,
             events_path: None,
+            ai_run_config: None,
             metadata_comment: None,
         }
     }
@@ -550,6 +557,16 @@ impl StitchJob {
         self
     }
 
+    /// AI/panner settings to write as the events JSONL's first line
+    /// (a [`PipelineEvent::RunConfig`](reco_core::detect::pipeline_event::PipelineEvent::RunConfig)),
+    /// so the trace file is self-describing. Only takes effect together
+    /// with [`Self::events`]; caller should only set this when AI
+    /// tracking is actually enabled for the run.
+    pub fn ai_run_config(mut self, config: reco_core::calibration::AutocamDefaults) -> Self {
+        self.ai_run_config = Some(config);
+        self
+    }
+
     #[cfg(feature = "stacked-output")]
     pub fn with_replay_scale(mut self, width: u32, height: u32) -> Self {
         if let Some(ref mut cfg) = self.replay_recording {
@@ -745,11 +762,18 @@ impl StitchJob {
         // Start decode threads now that hooks (ORT/DML init) have completed.
         source.start_decoding();
 
-        // Attach JSONL event sink if requested.
+        // Attach JSONL event sink if requested. The AI run-config (if
+        // any) is emitted directly here, before the sink is handed to
+        // the session, so it's always the first line - the render loop
+        // (and its frame_start events) hasn't started yet at this point.
         if let Some(ref events_path) = self.events_path {
             match crate::jsonl_sink::JsonlSink::create(events_path) {
-                Ok(sink) => {
+                Ok(mut sink) => {
                     log::info!("Pipeline events -> {}", events_path.display());
+                    if let Some(config) = self.ai_run_config.take() {
+                        use reco_core::detect::pipeline_event::{PipelineEvent, PipelineEventSink};
+                        sink.emit(PipelineEvent::RunConfig { config });
+                    }
                     session.set_event_sink(Box::new(sink));
                 }
                 Err(e) => {
