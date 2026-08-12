@@ -51,6 +51,15 @@ volledig op - zie de bullet "Camera volgt de bal niet de hoek in"
 verderop voor de volledige onderbouwing en hoe elk is geverifieerd (niet
 alleen aanbevolen op basis van een gok).
 
+**Elke instellingentabel hierboven wordt ook weggeschreven naar de
+events-JSONL.** Als "Record pipeline events" (`--events` op de CLI) aan
+staat *en* AI tracking is ingeschakeld, is de allereerste regel van het
+uitvoerbestand een `{"kind":"run_config", ...}` record met elk veld uit
+bovenstaande tabellen - zodat een trace-bestand zelfbeschrijvend is
+zonder terug te hoeven zoeken naar het export-commando of de
+GUI-instellingen. Zie
+[`PipelineEvent::RunConfig`](../crates/reco-core/src/detect/pipeline_event.rs).
+
 ## Instellingen op hoofdniveau
 
 **Tracking mode** - `field` (standaard): volgt de groep spelers + de bal
