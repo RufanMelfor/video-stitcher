@@ -20,9 +20,10 @@ default; push to 10-15 only if you need the compute back.
 
 **Style preset** - a one-shot action that overwrites every slider below
 (framing, cluster mode, lock-pitch, cluster bandwidth, dead-zone, ball
-weight, FOV) with a tuned bundle. You can still tweak any slider
-afterward; picking a different preset later re-overwrites everything.
-See [Presets](#presets) below for the exact values each one sets.
+weight, ball reach, FOV) with a tuned bundle. You can still tweak any
+slider afterward; picking a different preset later re-overwrites
+everything. See [Presets](#presets) below for the exact values each one
+sets.
 
 **Framing** - independent of the preset buttons, this is the actual
 algorithm switch: `action` aims at the (optionally confidence-weighted)
@@ -56,6 +57,15 @@ mean before trimming kicks in.
 near the cluster and decays once it isn't), so it only tugs the camera
 while the ball is actually present and close to play. Forced to `1.0` in
 Ball tracking mode.
+
+**Ball reach** (radians, `ball_max_dist_from_cluster`) - how far the ball
+may be from the player cluster centroid and still blend into the aim
+(Action framing only). Beyond this radius the ball is treated as
+off-the-action - a stray detection or the far goal - and ignored, so it
+can't drag the camera off the play. `0.5 rad` is the default. Raise it if
+the camera won't follow a real, isolated ball (e.g. into a corner, on a
+long ball or a breakaway); lower it to keep the camera glued to the
+crowd even when the ball briefly separates.
 
 **Cluster bandwidth** (radians) - neighborhood radius used by `density`
 mode to decide which players belong to "the" cluster. Wider pulls a
@@ -97,6 +107,7 @@ viewport edge) - see [Extra parameters](#extra-parameters-not-yet-exposed-in-the
 | dead_zone_rad | 0.20 | 0.20 | **0.12** | 0.20 |
 | fov_tight / default / wide | 22 / 40 / 58 | 22 / 40 / 58 | **20 / 34 / 48** | 22 / 40 / **70** |
 | ball_weight | 0.50 | **0.20** | **0.35** | **0.0** |
+| ball_max_dist_from_cluster | 0.50 | 0.50 | 0.50 | 0.50 |
 | edge_push | 0.15 | 0.15 | **0.20** | 0.15 |
 | lookahead_reactivity | 2.5 | 2.5 | **3.0** | 2.5 |
 | frame_all_margin_deg | 8.0 | 8.0 | 8.0 | **10.0** |
@@ -126,6 +137,14 @@ Source: `FieldPannerConfig::{broadcast, action, frame_all}` in
   adjust the FOV Tight/Wide bounds directly - they're bounds, not
   targets, so widening/narrowing them changes the *range* the dynamic
   zoom is allowed to explore.
+- **Camera won't follow the ball into a corner / on a breakaway**: raise
+  `ball reach` (`ball_max_dist_from_cluster`) above its 0.5 rad default.
+  This is Action framing's designed trade-off - a genuine, isolated ball
+  far from the main group is rejected by design so a stray detection or
+  the far goal can't drag the camera off the play; raising the gate trusts
+  the detector more and accepts occasionally chasing a false positive. If
+  ball plays like this matter more than staying with the crowd, switching
+  **Tracking mode -> ball** for that match is often a better fit.
 
 ## Extra parameters (not yet exposed in the GUI)
 
@@ -136,6 +155,6 @@ can currently only be changed via a config file / CLI flag consuming
 `cluster_alpha`, `max_velocity_rad_per_sec`, `velocity_alpha`,
 `pitch_bias`, `ball_presence_decay`/`ball_presence_attack`,
 `velocity_fov_bias_max`, `ball_frame_margin_deg`,
-`ball_max_dist_from_cluster`, `lead_gain`/`lead_alpha`,
+`lead_gain`/`lead_alpha`,
 `keep_fraction` (trimmed-mean only). See the field-level doc comments in
 `crates/reco-autocam/src/panners/field.rs` for what each does.
