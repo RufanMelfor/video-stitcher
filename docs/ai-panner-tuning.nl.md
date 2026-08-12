@@ -15,31 +15,40 @@ opgeslagen zodra je op **Save calibration** klikt in het
 Export-dialoogvenster - zie
 [`Calibration::autocam_defaults`](../crates/reco-core/src/calibration.rs).
 
-**Model & hoofdniveau**
+Model: huidige beste checkpoint - `yolo26n_v2` in productie op moment
+van schrijven; `yolo26n_v3`/`yolo26s_v3` getraind en ONNX-geëxporteerd
+maar nog niet in de app getest, zie `YOLO26_Training.md`.
 
-| Instelling | Waarde |
-|---|---|
-| Model | huidige beste checkpoint - `yolo26n_v2` in productie op moment van schrijven; `yolo26n_v3`/`yolo26s_v3` getraind en ONNX-geëxporteerd maar nog niet in de app getest, zie `YOLO26_Training.md` |
-| Tracking mode | `field` |
-| Detect every N frames | `3` |
-| Ball anchor range | `0,3-0,5 rad` (standaard `0,20`) |
-| Style preset | `action` (als basis, daarna hieronder overschrijven) |
-| Framing | `action` |
-| Pitch - Lock (alleen horizontaal) | uit |
-| Lookahead (soepelheid) | `0,5s` |
-| Reduce lookahead memory (8-bit) | uit (alleen bij een VRAM-error) |
+```
+Tracking mode:                      field
+Detect every N frames:              3
+Ball anchor range:                  0,3-0,5 rad     (standaard 0,20)
+Style preset:                       action
 
-**Advanced panner**
+Framing:                            action
+Pitch - Lock (alleen horizontaal):  uit
+Lookahead:                          0,5s
+Reduce lookahead memory (8-bit):    uit             (alleen bij een VRAM-error)
 
-| Instelling | Waarde | Waarom |
-|---|---|---|
-| Cluster mode | `trimmed_mean` | fixt de freeze van meerdere seconden bij balloze fases |
-| Dead-zone | `0,05-0,08 rad` | nodig samen met `trimmed_mean`, samen getest |
-| Ball weight | `0,35` | `1,0` gaf zichtbare wobble, ongeacht modelkwaliteit |
-| Ball reach | `1,0 rad` (standaard `0,5`) | laat de panner richting een echt geïsoleerde bal trekken i.p.v. 'm te negeren |
-| FOV Wide | `65-70°` (standaard van de `action` preset is `48°`) | zonder dit clamped de bal-reach-verbredingslogica voordat het beeld echt breed genoeg kan worden |
-| FOV Tight / Default | laat op preset-waarde (`20°` / `34°`) | niet apart getuned |
-| Cluster bandwidth | laat op preset-waarde | niet apart getuned |
+Advanced panner
+----------------
+Cluster mode:                       trimmed_mean
+Ball weight:                        0,35
+Dead-zone:                          0,05-0,08 rad
+Cluster bandwidth:                  0,3 rad         (preset-standaard, niet apart getuned)
+Ball reach:                         1,0 rad         (standaard 0,5)
+FOV Tight:                          20deg           (preset-standaard, niet apart getuned)
+FOV Default:                        34deg           (preset-standaard, niet apart getuned)
+FOV Wide:                           65-70deg        (standaard van de action preset is 48deg)
+```
+
+Waarom elk van deze, kort: **Cluster mode -> trimmed_mean** fixt de
+freeze van meerdere seconden bij balloze fases. **Dead-zone** is nodig
+samen met `trimmed_mean`, samen getest. **Ball weight 0,35** - `1,0` gaf
+zichtbare wobble, ongeacht modelkwaliteit. **Ball reach** laat de panner
+richting een echt geïsoleerde bal trekken i.p.v. 'm te negeren. **FOV
+Wide** - zonder dit op te trekken clamped de bal-reach-verbredingslogica
+voordat het beeld echt breed genoeg kan worden.
 
 De drie bal-gerelateerde instellingen filteren voor elkaar, in deze
 volgorde: **Ball anchor range → Ball reach → FOV Wide**. Ball anchor
