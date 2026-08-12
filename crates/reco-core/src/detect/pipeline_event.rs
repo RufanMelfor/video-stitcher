@@ -494,6 +494,8 @@ mod tests {
                 fov_tight: 20.0,
                 fov_wide: 70.0,
                 fov_default: 34.0,
+                fov_alpha: 0.05,
+                cluster_alpha: 0.05,
             },
         };
         assert_eq!(ev.frame_index(), 0);
@@ -502,6 +504,8 @@ mod tests {
         assert!(json.contains(r#""model_path":"yolo26n_v2_3class_1280_b4_e300.onnx""#));
         assert!(json.contains(r#""tracking_mode":"field""#));
         assert!(json.contains(r#""ball_max_dist_from_cluster":1.0"#));
+        assert!(json.contains(r#""fov_alpha":0.05"#));
+        assert!(json.contains(r#""cluster_alpha":0.05"#));
         // model_path must serialize before config's fields - "which
         // checkpoint" is the first thing worth knowing reading this back.
         assert!(json.find("model_path").unwrap() < json.find("tracking_mode").unwrap());
