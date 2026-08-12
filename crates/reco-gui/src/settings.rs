@@ -13,6 +13,7 @@
 
 use std::path::PathBuf;
 
+use reco_core::calibration::AutocamDefaults;
 use reco_io::settings::RecentFiles;
 use serde::{Deserialize, Serialize};
 
@@ -106,6 +107,18 @@ pub struct GuiSettings {
     /// Same as `last_left_segments`, for the right camera video.
     #[serde(default)]
     pub last_right_segments: Vec<PathBuf>,
+
+    /// Last-used AI Tracking / panner tuning, independent of any
+    /// calibration. `Calibration::autocam_defaults` (see reco-core) is
+    /// still the per-match/per-rig source of truth and takes priority
+    /// once a calibration with its own defaults is loaded - this field
+    /// only exists so the Export dialog's sliders don't reset to
+    /// hardcoded literals on every app restart when the user hasn't
+    /// explicitly clicked Save calibration. Updated on every slider
+    /// edit (see `main.rs`'s `autocam-settings-changed` handler), not
+    /// just on save.
+    #[serde(default)]
+    pub autocam_defaults: Option<AutocamDefaults>,
 }
 
 fn default_dark_mode() -> bool {
@@ -147,6 +160,7 @@ impl Default for GuiSettings {
             dark_mode: true,
             last_left_segments: Vec::new(),
             last_right_segments: Vec::new(),
+            autocam_defaults: None,
         }
     }
 }
@@ -270,6 +284,15 @@ impl GuiSettings {
     pub fn restore_right_input(&self) -> Option<reco_io::stitch_job::InputPath> {
         Self::restore_input(&self.last_right_segments, self.last_right())
     }
+
+    /// Persist the current AI Tracking / panner tuning as the app-level
+    /// last-used default and save immediately. Called on every Export
+    /// dialog slider edit - see `main.rs`'s `autocam-settings-changed`
+    /// handler.
+    pub fn set_autocam_defaults(&mut self, ac: AutocamDefaults) {
+        self.autocam_defaults = Some(ac);
+        self.save();
+    }
 }
 
 #[cfg(test)]
@@ -382,5 +405,51 @@ mod tests {
         let mut s = GuiSettings::default();
         s.default_calibration_path = Some(paths[0].clone());
         assert_eq!(s.default_calibration(), Some(paths[0].clone()));
+    }
+
+    #[test]
+    fn autocam_defaults_absent_until_set() {
+        let s = GuiSettings::default();
+        assert!(s.autocam_defaults.is_none());
+    }
+
+    #[test]
+    fn set_autocam_defaults_roundtrips_through_json() {
+        let mut s = GuiSettings::default();
+        let ac = AutocamDefaults {
+            tracking_mode: "field".into(),
+            detection_interval: 3,
+            player_anchor_rad: 0.35,
+            lookahead_secs: 0.5,
+            lookahead_reduced_bit_depth: false,
+            preset: "action".into(),
+            framing: "action".into(),
+            lock_pitch: false,
+            cluster_mode: "trimmed_mean".into(),
+            cluster_bandwidth_rad: 0.3,
+            dead_zone_rad: 0.08,
+            ball_weight: 0.35,
+            ball_max_dist_from_cluster: 1.0,
+            fov_tight: 20.0,
+            fov_wide: 65.0,
+            fov_default: 34.0,
+            fov_alpha: 0.06,
+            cluster_alpha: 0.05,
+        };
+        s.autocam_defaults = Some(ac);
+        let json = serde_json::to_string(&s).unwrap();
+        let restored: GuiSettings = serde_json::from_str(&json).unwrap();
+        let restored_ac = restored.autocam_defaults.expect("should roundtrip");
+        assert!((restored_ac.fov_alpha - 0.06).abs() < 1e-6);
+        assert!((restored_ac.cluster_alpha - 0.05).abs() < 1e-6);
+    }
+
+    #[test]
+    fn missing_autocam_defaults_field_falls_back_to_none() {
+        // Older settings files (pre-persistence-feature) won't have this
+        // field at all - must not fail to deserialize.
+        let json = r#"{ "default_codec": "hevc" }"#;
+        let s: GuiSettings = serde_json::from_str(json).unwrap();
+        assert!(s.autocam_defaults.is_none());
     }
 }
