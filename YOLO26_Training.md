@@ -721,3 +721,77 @@ only for its own paragraph's context.
 - Nudge on reviewing the 28 pending LS project-8 tasks if not done yet.
 - Once both are settled, round-3 yolo26n training with the expanded,
   corrected project-8 data is the natural next step.
+
+## Round 3: yolo26n vs yolo26s on the expanded 228-task dataset, plus a
+val-split false-alarm (2026-08-12, TGR_PC)
+
+`ball_max_dist_from_cluster` question resolved same session (now a GUI
+slider, "Ball anchor range" + "Ball reach" + "FOV Wide" - see
+`SESSION_HANDOFF.md` and `docs/ai-panner-tuning.md` for that thread, not
+repeated here). LS project 8's 28 pending tasks confirmed fully
+corrected (228/228). Round 3 training run:
+
+1. **Data prep**: `prepare_yolo_train_split_from_ls_export.py` against a
+   fresh LS project-8 YOLO export (`GET /api/projects/8/export?
+   exportType=YOLO`) - **228 images now, not 200**. Real gotcha: the 28
+   hard-frame images (added via the REST import API on 2026-08-11) were
+   only ever local to that session's scratchpad, not present in this
+   machine's `finetuned_n_preds/ls_flat/images/` flat directory the prep
+   script matches against. Had to re-download all 28 from LS
+   (`GET {LS_URL}{task.data.image}`) before the split script could find
+   them. **Also a real filename-stem gotcha**: LS's YOLO export uses the
+   *exact* uploaded filename as the label stem - for the 200 originally
+   local-files-served images that's the clean name
+   (`left_frame_0000000` etc.), but for the 28 REST-uploaded hard frames
+   it's the *hash-prefixed* upload name (`5d95c9ee-right_winA_001` etc.)
+   - stripping the hash prefix (as done on first attempt) breaks the
+   match silently (0 labels found for those 28). Fixed by keeping the
+   uploaded filename exactly as LS reports it. Result: **194 train / 34
+   val** (deterministic split, same convention as before).
+2. **`yolo26n_v3_3class_1280_b4_e300`**: fresh from stock `yolo26n.pt`,
+   same hyperparams as `v2` (imgsz=1280, batch=4). Early-stopped at 185
+   epochs (best @ 85), 36 min.
+3. **`yolo26s_v3_3class_1280_b4_e300`**: same data/hyperparams, fresh
+   from stock `yolo26s.pt`, run alongside `v3` for a direct n-vs-s
+   comparison on identical data (the earlier yolo26s comparison,
+   `rough_v7`, predates the referee-class fix and the 28 hard frames, so
+   wasn't a fair comparison point anymore). Ran the full 300 epochs (no
+   early stop this time), 66 min.
+4. Both exported to ONNX immediately (`nms=True` requested, ultralytics
+   force-disables it for this end2end architecture same as always,
+   output shape already `[1,300,6]` regardless) - verified via
+   `onnx.load` metadata: both `1x3x1280x1280` in, `1x300x6` out,
+   `{0:person,1:ball,2:referee}` names, on both checkpoints.
+
+**First look was alarming** - `v3`'s ball mAP50 (0.512) looked far
+below `v2`'s reported 0.694, and `yolo26s_v3` showed the same drop
+(0.526) despite yolo26s otherwise clearly outperforming yolo26n on this
+data (all mAP50 0.759 vs 0.721, mAP50-95 0.573 vs 0.474 - consistent
+with the original forum-based decision to prefer Small). Both new
+models also showed ball precision jumping to a perfect 1.000 with
+recall dropping to ~0.49, vs v2's 0.861 P / 0.583 R - looked like a real
+regression, and one affecting both architectures identically, which
+argued against it being architecture-specific.
+
+**Root-caused, not real**: re-ran `yolo val` with `v2`'s checkpoint
+against `v3`'s val set (round3's 34 images) instead of `v2`'s own
+original 30-image val slice. **`v2` scores ball mAP50 0.524 on this
+val set - essentially identical to `v3` (0.512) and `yolo26s_v3`
+(0.526)**, and `v2`'s recall on this set (0.438) is actually *lower*
+than either new model's (0.485/0.496). The apparent "regression" was
+entirely a val-split artifact: the round3 val set (34 images, only 16
+ball instances) is simply harder for ball detection than the old
+200-set's val slice was, for every model tested including the one
+previously reported as 0.694. (The round3 val set is drawn entirely
+from the original 200-image pool, not the 28 hard frames - confirmed
+via directory listing, 0 `win*`-named files in `images/val/`.) **No
+regression - v3/yolo26s_v3 are at least as good as v2, likely slightly
+better on recall**, on a genuinely harder/more honest val sample.
+
+**Checkpoints**:
+`D:\VOETBAL_VIDEO\RECO\training\finetuned_yolo26n_roughv1_train_round3\runs\{yolo26n_v3_3class_1280_b4_e300,yolo26s_v3_3class_1280_b4_e300}\weights\{best.pt,best.onnx}`.
+
+**Not yet done**: neither new checkpoint tested in the real `reco` app
+yet (mAP numbers only so far, matching this project's own standing
+caution not to trust mAP alone) - that's the natural next step before
+picking one to actually ship.

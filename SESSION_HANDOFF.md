@@ -12,6 +12,40 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
+**Round-3 yolo26n training done + a yolo26s comparison run alongside
+it, both ONNX-exported, neither tested in the real app yet.** LS
+project 8's 228 corrected tasks (200 original + 28 hard frames) used
+for the first time as a training set. Full detail in the
+`YOLO26_Training.md` "Round 3" section (2026-08-12) - condensed here:
+
+- `yolo26n_v3_3class_1280_b4_e300` and `yolo26s_v3_3class_1280_b4_e300`,
+  same data (194 train/34 val) and hyperparams (imgsz=1280, batch=4),
+  fresh from stock weights. Both ONNX-exported and metadata-verified
+  (`1x3x1280x1280` in, `1x300x6` out, `{0:person,1:ball,2:referee}`).
+  Checkpoints:
+  `D:\VOETBAL_VIDEO\RECO\training\finetuned_yolo26n_roughv1_train_round3\runs\{yolo26n_v3,yolo26s_v3}_3class_1280_b4_e300\weights\`.
+- yolo26s clearly wins the direct comparison (all mAP50 0.759 vs 0.721,
+  mAP50-95 0.573 vs 0.474) - consistent with the original forum-based
+  preference for Small over Nano.
+- **Real scare, resolved**: both new models' ball mAP50 (~0.51-0.53)
+  looked like a big regression vs `v2`'s reported 0.694 - but re-running
+  `v2` against the *same* round3 val set (instead of its own original
+  val slice) also gives it only 0.524. **Not a regression** - the
+  round3 val set (34 images/16 ball instances) is just a harder sample
+  than the old one, for every model tested. `v3`/`yolo26s_v3` are at
+  least as good as `v2`, slightly better on recall, on the more honest
+  sample.
+- **Not yet done**: real-app test for either new checkpoint (mAP alone
+  isn't trusted in this project - matches every prior round's own
+  practice) before picking one to actually ship over `v2`.
+- Also fixed two real pipeline gaps while building the round3 dataset:
+  the 28 hard-frame images from 2026-08-11 only existed in that
+  session's scratchpad, not on disk here - re-downloaded from LS; and
+  LS's YOLO export uses REST-uploaded images' *hash-prefixed* filename
+  as the label stem (not the clean name) - stripping the hash silently
+  breaks the match. Both now documented in `YOLO26_Training.md` for
+  next time.
+
 **6 hard-frame LS tasks: pushed, then reverted same session - LS
 project 8 back to 228, local copies deleted too.** Found the exact
 `t=123.7-125.1s` window of 03 OJC (right camera, user-confirmed ~124s
