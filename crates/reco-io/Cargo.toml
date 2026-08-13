@@ -50,3 +50,6 @@ tempfile = "3"
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }
+# dump_detection_frames example only - draws detection boxes on decoded
+# frames for visual debugging of missed/small detections.
+image = { version = "0.25", default-features = false, features = ["png"] }

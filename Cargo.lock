@@ -5584,6 +5584,7 @@ dependencies = [
  "ffmpeg-next",
  "gstreamer",
  "gstreamer-app",
+ "image",
  "libc",
  "log",
  "reco-core",
