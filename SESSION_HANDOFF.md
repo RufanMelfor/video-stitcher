@@ -1,4 +1,4 @@
-# Session handoff - 2026-08-12 (TGR_PC)
+# Session handoff - 2026-08-13 (TGR_PC, continues 2026-08-12)
 
 Continuation note for resuming work on a different machine/session -
 git-tracked so it travels with `git pull`/`push` between the user's two
@@ -11,6 +11,78 @@ feedback_no_credentials_in_tracked_files.md. Reference "see password
 manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
+
+**TensorRT now installed and working end-to-end on this PC, plus a
+real crash bug found+fixed - merged into `main` (`a140731b`,
+`ecf5ad9c`).** User asked why the Export dialog showed "AI: DirectML
+(CPU path...)" and wanted TensorRT since they believed it was already
+installed.
+- Root causes found, in order: (1) reco-gui/reco-cli default features
+  don't include `tensorrt` - needs `--features tensorrt` explicitly;
+  (2) the zip the user had was the **TensorRT-OSS GitHub source repo**
+  (parsers/plugins/samples, zero DLLs) - not the real NVIDIA SDK
+  binary distribution, an easy mix-up; (3) cuDNN was also missing -
+  NVIDIA's download page only offered arm64 for Windows at this
+  version, real fix was the `nvidia-cudnn-cu13` PyPI wheel (has a
+  win_amd64 build) via `pip install --target`.
+- Installed permanently: TensorRT 10.16.1 +
+  `nvidia-cudnn-cu13`/`nvidia-cublas` under `D:\SOFTWARE\`, added to
+  the persistent User PATH via PowerShell
+  `[Environment]::SetEnvironmentVariable(...,'User')` (not `setx` -
+  the existing PATH is long enough that `setx` risked truncating it).
+- **Second, more serious bug found+fixed**: first `--features
+  tensorrt` reco-gui build crashed every export with "AI tracking
+  failed: DML EP can only be used with CPU EPs" - reco-gui's Cargo.toml
+  unconditionally forces `directml` on Windows regardless of other
+  features, so this was the first binary ever combining TensorRT +
+  DirectML in one ORT session (ORT hard-rejects that combination).
+  Fixed in `reco-detect/src/ort_session.rs`: DirectML is now only
+  queued when neither `tensorrt` nor `cuda` is compiled in. Verified
+  by reproducing with `reco-cli --features tensorrt,directml` (crashed
+  before, clean after) and confirming a full 899-frame export with
+  real AI tracking completes end-to-end on TensorRT.
+- **Confirmed this bug also exists in upstream `v0.5.4`** (identical
+  code, identical forced-directml Cargo.toml) - opened
+  [PR #467](https://github.com/reco-project/video-stitcher/pull/467)
+  against `reco-project/video-stitcher`, cherry-picked cleanly onto
+  `origin/main`, tested there too.
+- **IMPORTANT for future sessions on this machine**: always add
+  `--features tensorrt` when rebuilding reco-gui/reco-cli for this
+  user, and make sure the three PATH entries are exported in the build
+  shell (`FFMPEG_DIR`-style, see env_build_requirements.md) - a plain
+  `cargo build` still works but silently regresses to DirectML with no
+  warning. See [[project_tensorrt_sdk_setup]].
+
+**New debug tool: `dump_detection_frames` - merged into `main`
+(`a9b30bfe`).** User said the AI "still isn't great" after the
+ball_weight fix; asked me to investigate where/why the model misses
+the ball. Manual `ffmpeg -ss` frame extraction was too imprecise
+(keyframe-seek, kept landing on the wrong frame). Built
+`crates/reco-io/examples/dump_detection_frames.rs`: given the source
+videos + `events.jsonl` + calibration + the original start-time/sync-
+offset, decodes the *exact* detector-input frame sequentially (same
+technique as `reco-calibrate/examples/dump_undistorted.rs`, not a
+lossy seek) and draws detection boxes + the field ROI polygon on top.
+`--clean` skips all overlay drawing for Label-Studio-ready frame
+exports (full native res).
+- Found: a high-confidence ball detection right before a tracking
+  interruption was visually **merged with a player's body** during a
+  close dribble; a separate low-confidence "last detection" before a
+  179-frame gap turned out to be a **false positive on a player's
+  shoe**, not the ball.
+- **User's own catch, confirmed via the new ROI overlay**: a real ball
+  sighting sat visibly outside the field ROI polygon on one frame -
+  `RoiFilteredDetector` drops out-of-ROI detections *before*
+  `detections_raw`, so this failure mode is invisible without drawing
+  the ROI too. **User decided not to widen the ROI** - it's
+  intentionally tight to keep out a kid playing with their own ball
+  outside the actual pitch.
+- **Next step (user's, not yet done by me)**: dumped 30 clean frames
+  (690-719, right camera only) to session scratchpad
+  (`ls_review_frames/frame690_Right.png`...`frame719_Right.png`, not
+  yet copied anywhere permanent) for the user to review themselves in
+  the "Finetuned yolo26n (rough v1)" Label Studio project - a new
+  hard-frame training batch. See [[project_dump_detection_frames_tool]].
 
 **Ball weight raised 0.35 -> 0.5, validated via real CLI A/B renders I
 ran myself - merged into `main` (`9cf3fede`). Also found+fixed a real
