@@ -795,3 +795,85 @@ better on recall**, on a genuinely harder/more honest val sample.
 yet (mAP numbers only so far, matching this project's own standing
 caution not to trust mAP alone) - that's the natural next step before
 picking one to actually ship.
+
+## Round 4: yolo26s on the 258-task set (+winC hard frames), plus a copy_paste/rect experiment (2026-08-13)
+
+Follow-on from the "camera still isn't great" AI review: built a new
+`dump_detection_frames` debug tool (`crates/reco-io/examples/`) to
+visually inspect exactly what the detector saw at specific missed
+frames, found a genuine 179-frame raw-detection gap window (frames
+690-719 of a 30s test export), pushed 30 hard frames from that window
+("winC" batch) to LS project 8, user reviewed/corrected all 30.
+
+**Data prep**: fresh `GET /api/projects/8/export?exportType=YOLO`
+(258 tasks), `prepare_yolo_train_split_from_ls_export.py` -> 219 train /
+39 val (all 30 winC frames landed in train; val set drawn entirely from
+the original 228-pool, same population round3's val came from).
+
+**Real gotcha hit and fixed**: first training attempt (`workers=8`,
+default) crashed with `OSError: [WinError 1455] Het wisselbestand is te
+klein` (paging file too small) loading a CUDA DLL in a dataloader
+worker - `reco-gui.exe` was open using ~3.9GB RAM at the time, leaving
+only ~7.8GB free of 32GB total; 8 concurrent worker processes each
+loading their own torch/CUDA DLLs exhausted it. Fixed with
+`workers=2` - retried clean, actually *faster* (41 min vs round3's 66)
+since this workload is GPU-bound at batch=4, not dataloader-bound.
+
+**`yolo26s_v4_3class_1280_b4_e300`**: fresh from stock weights, same
+hyperparams as round3. Early-stopped at 169 epochs (best @ 69).
+
+```
+              Precision  Recall  mAP50  mAP50-95
+all               0.784   0.770  0.710     0.510
+person            0.945   0.867  0.919     0.619
+ball              0.985   0.444  0.465     0.321
+referee           0.422   1.000  0.745     0.589
+```
+
+Checkpoint: `finetuned_yolo26n_roughv1_train_round4/runs/yolo26s_v4_3class_1280_b4_e300/weights/{best.pt,best.onnx}`
+(ONNX verified: `1x3x1280x1280` in, `1x300x6` out, correct class names).
+
+**Ball precision near-perfect, recall low** (0.985 / 0.444, on only 18
+val instances) - when the model says ball it's almost always right, but
+misses over half. Asked how to improve recall; answered prioritized
+(more hard-frame data > augmentation tuning > runtime confidence
+threshold - the last one rejected: the shoe false-positive found later
+was already above the current 0.1 threshold, so lowering it would add
+false positives, not find more real balls).
+
+**Quick experiment, requested before collecting more data**:
+`yolo26s_v4_copypaste_rect` - same data/hyperparams +
+`copy_paste=0.3 rect=True`. 199 epochs (best @ 99), 42 min.
+
+```
+              Precision  Recall  mAP50  mAP50-95
+ball              1.000   0.435  0.478     0.334
+```
+
+**Honest result: no meaningful recall improvement** (0.444 -> 0.435,
+within noise for n=18) - a small mAP uptick (box-quality), not more
+balls actually found. Confirms data quantity/diversity is the real
+bottleneck at this dataset size (~18-141 ball instances depending on
+split), not these particular augmentation knobs at these particular
+values.
+
+**Sanity check with an important caveat**: ran the new model on the 30
+winC images and diffed against the LS-corrected ground truth - 30/30
+matched (IoU 0.82-0.97). This is **not evidence of generalization** -
+these exact images were in the training set, so it only confirms the
+labels/pipeline were used correctly, not that the model improved on
+genuinely unseen ball situations.
+
+**Self-correction worth recording**: an earlier claim (this same
+investigation, before round-4 training existed) that a specific ball
+detection was "visually merged with a player's body" turned out to be
+wrong on re-inspection with fresh evidence - the ball was actually
+isolated elsewhere in the frame; the original screenshot pointed at the
+wrong pixel location. Re-tested properly with the round-4 model on a
+freshly-decoded (not reused) frame before concluding anything. General
+practice going forward: when revisiting a specific visual claim,
+regenerate the evidence, don't reuse an old screenshot from memory.
+
+**Not yet done**: neither round-4 checkpoint tested in the real `reco`
+app; no rigorous genuinely-unseen-frame recall test yet (would need a
+proper held-out clip, not single spot-checks).

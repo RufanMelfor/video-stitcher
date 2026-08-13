@@ -12,6 +12,37 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
+**YOLO26 round 4 done: yolo26s on the 258-task set (+winC hard
+frames), plus a copy_paste/rect experiment - full detail in
+`YOLO26_Training.md`'s "Round 4" section, condensed here.** Ball
+recall is still low (0.985 precision / 0.444 recall, mAP50 0.465) - a
+quick `copy_paste=0.3 rect=True` experiment (user-requested, before
+collecting more data) did NOT move recall (0.435, within noise) - only
+a small mAP uptick. **Conclusion: data quantity/diversity is the real
+bottleneck, not training config** - the next real lever is more
+labeled hard-frame data, not more hyperparameter tuning.
+- Checkpoints: `finetuned_yolo26n_roughv1_train_round4/runs/{yolo26s_v4_3class_1280_b4_e300,yolo26s_v4_copypaste_rect}/weights/{best.pt,best.onnx}`,
+  both ONNX-verified.
+- **Real gotcha hit+fixed**: first training attempt crashed
+  (`OSError: [WinError 1455]`, paging file too small) with the default
+  `workers=8` - `reco-gui.exe` was open using ~3.9GB RAM at the time.
+  Fixed with `workers=2`, retried clean, actually faster (41 min vs
+  round3's 66). Didn't close `reco-gui.exe` unasked.
+- **Self-correction, important**: an earlier claim in this same
+  investigation ("the ball visually merges with a player during a
+  dribble", from a specific frame-665 screenshot) was **wrong** -
+  user pushed back ("dat weg smelten heb ik niet echt gezien"),
+  re-tested with fresh evidence (not the old screenshot) and the round-4
+  model, and the ball was actually isolated elsewhere in frame - I'd
+  pointed at the wrong pixel location. Corrected in memory. **Lesson
+  applied going forward**: when a user disputes a specific visual
+  claim, regenerate the evidence fresh, don't defend from memory.
+- **Not yet done**: neither round-4 checkpoint tested in the real
+  `reco` app; no rigorous unseen-frame recall test (single spot-checks
+  aren't a real sample).
+- See [[project_yolo26n_training_pipeline]] and
+  [[project_dump_detection_frames_tool]] for full detail.
+
 **TensorRT now installed and working end-to-end on this PC, plus a
 real crash bug found+fixed - merged into `main` (`a140731b`,
 `ecf5ad9c`).** User asked why the Export dialog showed "AI: DirectML
