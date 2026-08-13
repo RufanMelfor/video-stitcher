@@ -425,8 +425,12 @@ pub fn setup_autocam(
 
     // wgpu preprocessing path: when GPU detection backends failed but we
     // have wgpu texture views from D3D11VA staging. Uses the compute shader
-    // preprocessor (NV12 → float32 CHW) + CpuYoloDetector with DirectML EP.
-    // Works on any DX12 GPU including Pascal, AMD, and Intel.
+    // preprocessor (NV12 → float32 CHW) + CpuYoloDetector, whose own ORT
+    // session tries TensorRT/CUDA/DirectML/CPU in that order (see
+    // `reco_detect::ort_session::create_ort_session`) - NOT DirectML-only
+    // despite the name suggesting a CPU-preprocessed frame goes only to
+    // DirectML from here. Works on any DX12 GPU including Pascal, AMD, and
+    // Intel as the floor case.
     #[cfg(feature = "ort")]
     if !detection_active
         && use_zero_copy
@@ -454,7 +458,19 @@ pub fn setup_autocam(
             };
         target.set_detector(detector);
         detection_active = true;
-        log::info!("Autocam: wgpu preprocessing + DirectML tracking enabled (model: {model_path})");
+        // Report the actual best-available EP rather than hardcoding a
+        // name - this path previously always logged "DirectML" even when
+        // the ORT session above picked TensorRT (misleading: the two log
+        // lines from `create_ort_session` show that decision but this one
+        // used to overwrite it with a stale claim). Re-probing here is
+        // cheap (~1-50ms) and reuses the exact same provider-priority
+        // logic `ai_capability_summary` shows in the Export dialog, so
+        // the two never disagree.
+        let provider = reco_detect::probe_execution_providers();
+        log::info!(
+            "Autocam: wgpu preprocessing + {} tracking enabled (model: {model_path})",
+            provider.best_provider()
+        );
     }
 
     // ORT CPU fallback for .onnx files.
