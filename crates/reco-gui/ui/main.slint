@@ -927,6 +927,12 @@ export component RecoApp inherits Window {
     in-out property <float> audio-window-frames: 5.0;
     in-out property <float> audio-waveform-height-px: 300.0;
     in-out property <string> calibration-step: "";
+    // Set once the background update-check thread finds a newer GitHub
+    // release; drives the toolbar's "Update available" button instead of
+    // auto-opening a browser tab (see `open-update-page` below).
+    in-out property <bool> update-available: false;
+    in-out property <string> update-tag: "";
+    callback open-update-page();
     in-out property <bool> has-both-videos: left-path != "" && right-path != "";
     in-out property <bool> has-roi: false;
     in-out property <[float]> roi-points-x: [];
@@ -1566,6 +1572,19 @@ export component RecoApp inherits Window {
                 FlatButton { text: "Debug"; clicked => { root.open-debug-window(); } }
                 FlatButton { text: "?"; clicked => { root.shortcuts-dialog-open = true; } }
                 FlatButton { text: "⚙"; clicked => { root.open-prefs-dialog(); } }
+
+                // Sits between the FOV badge (centered over the preview,
+                // to this button's left) and Export (to its right) - same
+                // 42px toolbar band as both, so it reads as part of the
+                // same row instead of a popup/toast. Only ever appears
+                // once the background version check actually finds a
+                // newer release; clicking opens the download page - no
+                // more auto-opening a browser tab unasked (see
+                // `open-update-page` / `update-available`'s doc comment).
+                if root.update-available: FlatButton {
+                    text: "Update available (" + root.update-tag + ")";
+                    clicked => { root.open-update-page(); }
+                }
 
                 FlatButton {
                     text: "Export…";
