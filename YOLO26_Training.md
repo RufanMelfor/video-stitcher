@@ -8,7 +8,7 @@ to check "where does the ball-detection model stand right now."
 **SCOPE CHANGE (2026-08-10, later same day)**: user decided **yolo26n,
 not yolo26s, is now the active target** ("voor nu gaan we alleen
 yolo26n trainen en niet yolo26s"), still with referee as a real 3rd
-class. The yolo26s round history below (`rough_v2` through `rough_v7`)
+class. The yolo26s round history below (`yolo26s_rough_v2` through `rough_v7`)
 is paused, not abandoned - keep it as the reference for what worked
 (imgsz, batch, epoch findings all transfer directly to yolo26n) but
 don't resume yolo26s rounds without the user asking again. Plan: user
@@ -83,7 +83,7 @@ Base checkpoint for every round below is `train_roi2_s`'s `rough_v1`
 raw pre-label images - not in this log's scope, see
 `project_yolo26n_training_pipeline` memory for that earlier history).
 
-All rounds from `rough_v2` onward use LS project 8 ("Finetuned yolo26n
+All rounds from `yolo26s_rough_v2` onward use LS project 8 ("Finetuned yolo26n
 (rough v1)", 200 tasks, **fully corrected** - `num_tasks_with_annotations
 = finished_task_number = 200`) as the data source, split 170 train / 30
 val (deterministic last-15%, same stem-sort convention as
@@ -91,13 +91,13 @@ val (deterministic last-15%, same stem-sort convention as
 
 | run | imgsz | batch | epochs | ball mAP50 | ball P | ball R | all mAP50 | mAP50-95 | wall time |
 |---|---|---|---|---|---|---|---|---|---|
-| `rough_v2` | 640 | 16 (default) | 30 | 0.528 | 0.847 | 0.500 | 0.726 | 0.386 | 3.4 min |
-| `rough_v3_1280` | 1280 | 1 (AutoBatch fallback) | 30 | 0.683 | 0.981 | 0.583 | 0.817 | 0.508 | 16 min |
-| `rough_v4_1280_b4` | 1280 | 4 (explicit) | 30 | 0.677 | 0.982 | 0.667 | 0.818 | 0.555 | 6.8 min |
-| `rough_v5_1280_b4_e150` | 1280 | 4 | 150 | 0.717 | 0.988 | 0.667 | 0.831 | 0.573 | 32.6 min |
-| `rough_v6_1280_b4_e300` | 1280 | 4 | 300 | 0.728 | **1.000** | 0.655 | 0.838 | 0.581 | 64 min |
+| `yolo26s_rough_v2` | 640 | 16 (default) | 30 | 0.528 | 0.847 | 0.500 | 0.726 | 0.386 | 3.4 min |
+| `yolo26s_rough_v3_1280` | 1280 | 1 (AutoBatch fallback) | 30 | 0.683 | 0.981 | 0.583 | 0.817 | 0.508 | 16 min |
+| `yolo26s_rough_v4_1280_b4` | 1280 | 4 (explicit) | 30 | 0.677 | 0.982 | 0.667 | 0.818 | 0.555 | 6.8 min |
+| `yolo26s_rough_v5_1280_b4_e150` | 1280 | 4 | 150 | 0.717 | 0.988 | 0.667 | 0.831 | 0.573 | 32.6 min |
+| `yolo26s_rough_v6_1280_b4_e300` | 1280 | 4 | 300 | 0.728 | **1.000** | 0.655 | 0.838 | 0.581 | 64 min |
 
-| `rough_v7_3class_1280_b4_e150` | 1280 | 4 | 150 | 0.693 | 0.980 | 0.583 | 0.756 | 0.535 | 32 min |
+| `yolo26s_rough_v7_3class_1280_b4_e150` | 1280 | 4 | 150 | 0.693 | 0.980 | 0.583 | 0.756 | 0.535 | 32 min |
 
 ## yolo26n rounds (active target, 2026-08-11 onward)
 
@@ -113,7 +113,7 @@ the old 2-class `rough_v1`).
 | `yolo26n_v2_3class_1280_b4_e300` | 1280 | 4 | 300 (early-stopped at 181, best @ 81) | 0.694 | 0.861 | 0.583 | 0.710 | 0.484 | 28 min |
 
 Checkpoints:
-`D:\VOETBAL_VIDEO\RECO\training\finetuned_yolo26n_roughv1_train_3class\runs\<run name>\weights\best.pt`.
+`D:\VOETBAL_VIDEO\RECO\training\rough_3class\runs\<run name>\weights\best.pt`.
 
 `yolo26n_v1_3class_1280_b4_e150` per-class: person mAP50 0.895 (P 0.876,
 R 0.842), ball mAP50 0.649 (P 0.999, R 0.500), referee mAP50 0.665 (P
@@ -145,7 +145,7 @@ either, echoing rough_v4->v6's "epoch-scaling exhausted, need more
 ball-labeled data" conclusion, just reached sooner.
 
 All checkpoints under
-`D:\VOETBAL_VIDEO\RECO\training\finetuned_yolo26n_roughv1_train\runs\<run name>\weights\best.pt`
+`D:\VOETBAL_VIDEO\RECO\training\rough_v2_v6\runs\<run name>\weights\best.pt`
 (`rough_v7` under the `_3class` variant of that path - see its own row's
 setup note below).
 
@@ -171,7 +171,7 @@ size. At the `imgsz=640` every prior round (incl. the original
 `rough_v1`) used, that shrinks to **~3x3px** - barely a signal for the
 network. Person boxes (30-80px) survive that downscale fine; the ball
 doesn't. Bumping to `imgsz=1280` (~6x6px) was the single biggest jump
-in the whole table (`rough_v2` -> `rough_v4`: ball mAP50 0.528 -> 0.677,
+in the whole table (`yolo26s_rough_v2` -> `yolo26s_rough_v4_1280_b4`: ball mAP50 0.528 -> 0.677,
 precision 0.847 -> 0.982).
 
 Gradient accumulation was a dead end to chase separately - ultralytics
@@ -789,7 +789,7 @@ regression - v3/yolo26s_v3 are at least as good as v2, likely slightly
 better on recall**, on a genuinely harder/more honest val sample.
 
 **Checkpoints**:
-`D:\VOETBAL_VIDEO\RECO\training\finetuned_yolo26n_roughv1_train_round3\runs\{yolo26n_v3_3class_1280_b4_e300,yolo26s_v3_3class_1280_b4_e300}\weights\{best.pt,best.onnx}`.
+`D:\VOETBAL_VIDEO\RECO\training\round3\runs\{yolo26n_v3_3class_1280_b4_e300,yolo26s_v3_3class_1280_b4_e300}\weights\{best.pt,best.onnx}`.
 
 **Not yet done**: neither new checkpoint tested in the real `reco` app
 yet (mAP numbers only so far, matching this project's own standing
@@ -830,7 +830,7 @@ ball              0.985   0.444  0.465     0.321
 referee           0.422   1.000  0.745     0.589
 ```
 
-Checkpoint: `finetuned_yolo26n_roughv1_train_round4/runs/yolo26s_v4_3class_1280_b4_e300/weights/{best.pt,best.onnx}`
+Checkpoint: `round4/runs/yolo26s_v4_3class_1280_b4_e300/weights/{best.pt,best.onnx}`
 (ONNX verified: `1x3x1280x1280` in, `1x300x6` out, correct class names).
 
 **Ball precision near-perfect, recall low** (0.985 / 0.444, on only 18
@@ -874,6 +874,114 @@ freshly-decoded (not reused) frame before concluding anything. General
 practice going forward: when revisiting a specific visual claim,
 regenerate the evidence, don't reuse an old screenshot from memory.
 
-**Not yet done**: neither round-4 checkpoint tested in the real `reco`
-app; no rigorous genuinely-unseen-frame recall test yet (would need a
-proper held-out clip, not single spot-checks).
+**Real-app test, 2026-08-14**: full 899-frame CLI render of
+`yolo26s_v4_3class_1280_b4_e300` against the same 100-130s 03 OJC clip
+used throughout the ball_weight/FOV-Wide/Ball-reach A/B work, current
+full recommended panner settings, `--features tensorrt`. Ran clean,
+no crashes. Overall raw-ball rate 49.1% (441/899), flat vs this round's
+own 48.7% LS-val-set finding - confirms "no real gain" from a second,
+independent angle. Frames 720-898 (the documented zero-recall gap from
+all 3 ball_weight A/B renders) is still exactly 0/179 at round-4 too -
+genuinely untracked the whole stretch, unchanged. One brighter spot:
+frames 690-719 hit 24/30 = 80% raw-detection, though confidence stays
+modest (mean 0.46). See [[project_yolo26n_training_pipeline]] for the
+frame-704 localization-error follow-up (round-4 detects the ball there
+but the box lands ~20px off the LS-corrected ground truth at low
+confidence 0.55 - a real but modest miss, not the dramatic "on bare
+grass" a lone unreferenced crop first suggested).
+
+## imgsz=1536 experiment - stopped, inconclusive/negative on ball metrics (2026-08-14)
+
+Prompted by the frame-704 localization-error finding above: does more
+resolution reduce that kind of box-precision miss? Resumed from
+`yolo26s.pt` fresh, same 258-task dataset/hyperparams as
+`yolo26s_v4_3class_1280_b4_e300` except `imgsz=1280 -> 1536` (still
+divisible by 32, batch=4 still fits - ~8.2-8.4GB of the 3060 Ti's 8GB
+card, close to the ceiling but no OOM). Real gotcha before starting:
+`reco-gui.exe` was open using ~6GB RAM (only ~4GB free, even tighter
+than the round-4 `workers=8` paging-file crash) - user closed it first,
+freed to ~15.9GB, ran with `workers=2` as usual.
+
+Ran to epoch 187 (stopped manually - `patience=100` never triggered on
+its own; the internal fitness Ultralytics tracks for patience isn't
+just the `mAP50-95` column, so it kept training well past where a naive
+epoch-28+100 estimate predicted it would stop). **Best checkpoint the
+whole run ever produced was epoch 28** - no improvement in the
+following 159 epochs:
+
+```
+              Precision  Recall  mAP50  mAP50-95
+ball  1280 (round-4, e169)  0.985   0.444  0.465   0.321
+ball  1536 (this run, e28)  0.782   0.398  0.403   0.292
+all   1280 (round-4, e169)  0.784   0.770  0.710   0.510
+all   1536 (this run, e28)  0.652   0.763  0.716   0.527
+```
+
+**Honest conclusion: worse on the metric that matters (ball), better
+only on the aggregate "all" number** (which is diluted by person/
+referee). This is not a fair apples-to-apples comparison though -
+round-4 trained to its own patience-triggered stop at epoch 169 (best
+@69); this run's best came from epoch 28, far earlier in relative
+training progress, before we know whether it would have kept improving.
+**Not repeated/extended further this session** - stopped by user
+request after ~6 hours of wall-clock time (started 08:14, stopped
+14:23) with no improvement since epoch 28, judged not worth the
+GPU-time cost to let it fully self-terminate. Checkpoint kept at
+`round4/runs/yolo26s_v4_imgsz1536/weights/{best.pt,last.pt}`
+in case it's worth revisiting (e.g. resuming overnight next time,
+per the user's own suggestion, rather than babysitting it turn by
+turn during a live session).
+
+**Real-app test of this checkpoint, 2026-08-14 (same clip/settings as
+round-4's own real-app test above)**:
+
+```
+                          round-4 (1280,e169)  imgsz1536 (e28)
+overall raw-ball rate     49.1% (441/899)      37.0% (333/899)
+frames 720-898 (the
+known zero-recall gap)    0/179                15/179
+frames 690-719            24/30 (80%)          21/30 (70%)
+mean ball confidence      0.46                 0.39
+```
+
+**Mixed, not a clean win or loss.** Overall recall is worse. But frames
+720-898 - zero raw ball detections in *every* prior test on this clip
+(`yolo26s_v3`, `yolo26s_v4_3class_1280_b4_e300`, all 3 `ball_weight`
+A/B renders) - has a nonzero hit rate for the first time. Frame 704
+specifically: confidence rose 0.55 -> 0.82, but the box landed at
+virtually the *same* pixel location as round-4's (still ~20px off the
+LS-corrected ground truth) - the original localization complaint this
+experiment was chasing did not improve, only confidence in the same
+slightly-wrong spot did.
+
+**Real gotcha hit + fixed along the way**: first attempt at this test
+returned 0 detections *of any class*, not just ball - looked like total
+model failure. Root cause: a genuine **ONNX Runtime TensorRT-EP engine
+cache bug**, not reco-detect's own code. `%LOCALAPPDATA%\reco\trt-cache\`
+is a single shared cache keyed by a graph hash that apparently doesn't
+fully distinguish two structurally-identical graphs (same 384 nodes,
+same op sequence - this and the 1280 checkpoint share the exact same
+architecture) differing only in their baked-in input shape (`1x3x1280x1280`
+vs `1x3x1536x1536`) - confirmed via direct `onnx.load` inspection that
+the two ONNX files genuinely declare different input shapes, yet
+TensorRT tried to reuse the 1280 model's cached engine (built the day
+before) for the 1536 model's inference call, failing at
+`IExecutionContext::setInputShape()`. **Fix**: delete the stale
+`.engine`/`.timing` files in that cache dir and re-run - TensorRT
+rebuilds a fresh, correctly-shaped engine (cold build took ~5 min this
+time vs the usual <1 min warm run). **Going forward: always clear
+`trt-cache` before testing a model with a different `imgsz`/input shape
+than whatever was last cached**, even on the same `reco.exe` build -
+this is not specific to any one model pair, likely bites any two
+same-architecture models with different declared input dims.
+
+**Not yet done**: no rigorous genuinely-unseen-frame recall test yet
+(would need a proper held-out clip, not single spot-checks). The
+left/right 2880x2880-crop dataset-augmentation idea (SAHI-style tiling,
+research-only, not built - see chat log 2026-08-14) is still the more
+promising next lever than pushing `imgsz` further - it recovers the
+~25% letterbox-padding waste any square input has on this 4:3 source
+without the same VRAM/BatchNorm risk profile as a much larger `imgsz`,
+and the 720-898 partial-fix signal above suggests *some* form of
+better-resolved small-object training data does help that specific gap,
+worth chasing further via a cleaner lever than raw `imgsz`.

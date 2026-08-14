@@ -21,7 +21,7 @@ collecting more data) did NOT move recall (0.435, within noise) - only
 a small mAP uptick. **Conclusion: data quantity/diversity is the real
 bottleneck, not training config** - the next real lever is more
 labeled hard-frame data, not more hyperparameter tuning.
-- Checkpoints: `finetuned_yolo26n_roughv1_train_round4/runs/{yolo26s_v4_3class_1280_b4_e300,yolo26s_v4_copypaste_rect}/weights/{best.pt,best.onnx}`,
+- Checkpoints: `round4/runs/{yolo26s_v4_3class_1280_b4_e300,yolo26s_v4_copypaste_rect}/weights/{best.pt,best.onnx}`,
   both ONNX-verified.
 - **Real gotcha hit+fixed**: first training attempt crashed
   (`OSError: [WinError 1455]`, paging file too small) with the default
@@ -37,9 +37,87 @@ labeled hard-frame data, not more hyperparameter tuning.
   pointed at the wrong pixel location. Corrected in memory. **Lesson
   applied going forward**: when a user disputes a specific visual
   claim, regenerate the evidence fresh, don't defend from memory.
-- **Not yet done**: neither round-4 checkpoint tested in the real
-  `reco` app; no rigorous unseen-frame recall test (single spot-checks
-  aren't a real sample).
+- **Round-4 now tested in the real `reco` app (2026-08-14), confirms
+  the LS-validation-set conclusion on real footage.** Full 899-frame
+  CLI render of `yolo26s_v4_3class_1280_b4_e300` against the same
+  100-130s 03 OJC clip used for every prior ball_weight/FOV-Wide/Ball-
+  reach A/B test, current full recommended settings applied
+  (`--player-anchor-rad 0.4 --panner-preset action --panner-config`
+  with `cluster_mode trimmed_mean, ball_weight 0.5, dead_zone_rad 0.07,
+  ball_max_dist_from_cluster 1.0, fov_wide 68` `--fov-alpha 0.06
+  --cluster-alpha 0.06 --lookahead 0.5 --lookahead-reduced-bit-depth`),
+  built with `--features tensorrt`. Ran clean end-to-end, no crashes -
+  the checkpoint itself is not the problem, recall is.
+  - Overall raw-ball-detection rate: 441/899 frames (49.1%) - flat vs
+    `yolo26s_v3`'s documented 48.7% on the same clip, no real gain.
+  - **Frames 720-898** (`yolo26s_v3`'s documented zero-raw-detection
+    gap across all 3 prior A/B renders): still **0/179 frames** with a
+    raw ball detection at round-4 too. `world_state.ball` confirms:
+    158/179 frames have no `ball` entry at all, 20 `Coasting`, 1
+    `Lost` - genuinely untracked the whole stretch, unchanged from v3.
+  - One brighter spot: frames 690-719 (the window dumped for LS
+    review) hit 24/30 = 80% raw-detection at round-4 - but confidence
+    is modest clip-wide (mean 0.46, range 0.10-0.92).
+  - Confirms this session's earlier conclusion on the LS val set from a
+    second, independent angle (real match footage, not just mAP): data
+    quantity/diversity is the bottleneck, not training config. The
+    720-898 gap is the clearest concrete target for the next hard-frame
+    batch.
+  - Test artifacts kept (not deleted, per
+    [[feedback_keep_test_artifacts]]): `round4_test_100-130.mp4` +
+    `.events.jsonl` in this session's scratchpad - not yet copied
+    anywhere permanent.
+  - **Still not done**: no rigorous unseen-frame recall test across
+    multiple clips (this is one clip, one 30s window - a real full-clip
+    test, not a spot-check, but still a single sample).
+  - **Follow-up: frame-704 localization miss found + a stopped
+    imgsz=1536 experiment (2026-08-14).** Physically re-viewed the
+    690-719 dump with round-4's own predictions drawn (per
+    [[feedback_no_credentials_in_tracked_files]], see password manager
+    for the LS token used transiently). Frame 704's ball box (conf 0.55)
+    landed ~20px off the LS-corrected ground truth - real but modest,
+    less dramatic than an unreferenced crop first suggested. **Real
+    process mistake, caught by the user**: re-pushed this same frame to
+    LS as a "new" task without noticing it was already there as
+    `winC_014` (task 1951, annotated 2026-08-13) - the winC batch *is*
+    this tool's frame690-719 dump, just under an opaque renamed
+    filename with no `frame_index` in it. Deleted the duplicate task
+    immediately; **lesson for any future LS push: always keep
+    `frameNNN_<Camera>` (or the source frame_index) in the filename**,
+    never rename to an opaque batch name first.
+    Tried `imgsz=1280 -> 1536` to see if more resolution tightens ball
+    box precision (same data/hyperparams otherwise). Ran to epoch 187,
+    manually stopped - best checkpoint stayed at epoch 28 the whole run
+    (159 epochs with no improvement), and that checkpoint's ball metrics
+    were *worse* than round-4's (mAP50-95 0.292 vs 0.321, recall 0.398
+    vs 0.444) - only the diluted "all" number was better. Not a fair
+    comparison (round-4 trained to its own patience-stop at epoch
+    169/best@69, this run's best is from a much earlier relative point)
+    - genuinely unresolved, not repeated further this session. Checkpoint
+    kept at `.../yolo26s_v4_imgsz1536/weights/` in case worth resuming
+    later, ideally overnight/unattended per the user's own suggestion.
+    **Follow-up, same day: real-app tested anyway (ONNX-exported,
+    `imgsz=1536`).** Mixed result vs round-4 on the same clip: overall
+    raw-ball rate worse (37.0% vs 49.1%), but frames 720-898 - zero raw
+    detections in *every* prior test ever run on this clip - got a
+    nonzero hit rate for the first time (15/179). Frame 704 specifically:
+    confidence rose 0.55->0.82 but the box landed at virtually the same
+    (still ~20px off) location - the original localization complaint
+    didn't improve, only confidence in the same slightly-wrong spot did.
+    **Real gotcha hit+fixed**: first attempt returned 0 detections of
+    any class, silently (no crash) - root cause was a stale TensorRT
+    engine-cache collision (`%LOCALAPPDATA%\reco\trt-cache\` reused
+    round-4's cached 1280-shaped engine for this 1536-shaped model,
+    shape mismatch silently no-op'd inference). Fixed by clearing the
+    cache dir and re-running. **Lesson for every future session: always
+    clear `trt-cache` before testing a model with a different imgsz than
+    whatever was last cached** - see [[project_tensorrt_sdk_setup]].
+    **Next candidate lever, research-only, not built**: splitting each
+    3840x2880 frame into overlapping left/right 2880x2880 square crops
+    (SAHI-style tiling) as training-data augmentation - zero letterbox
+    waste, more effective ball resolution, without imgsz's VRAM/
+    BatchNorm risk. See [[project_yolo26n_training_pipeline]] for full
+    detail.
 - See [[project_yolo26n_training_pipeline]] and
   [[project_dump_detection_frames_tool]] for full detail.
 
@@ -304,7 +382,7 @@ for the first time as a training set. Full detail in the
   fresh from stock weights. Both ONNX-exported and metadata-verified
   (`1x3x1280x1280` in, `1x300x6` out, `{0:person,1:ball,2:referee}`).
   Checkpoints:
-  `D:\VOETBAL_VIDEO\RECO\training\finetuned_yolo26n_roughv1_train_round3\runs\{yolo26n_v3,yolo26s_v3}_3class_1280_b4_e300\weights\`.
+  `D:\VOETBAL_VIDEO\RECO\training\round3\runs\{yolo26n_v3,yolo26s_v3}_3class_1280_b4_e300\weights\`.
 - yolo26s clearly wins the direct comparison (all mAP50 0.759 vs 0.721,
   mAP50-95 0.573 vs 0.474) - consistent with the original forum-based
   preference for Small over Nano.
