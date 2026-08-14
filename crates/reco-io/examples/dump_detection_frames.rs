@@ -270,12 +270,19 @@ fn main() {
             if !clean && let Some(roi) = roi {
                 // Straight raw-space edges between the calibration's few
                 // stored vertices do not trace the boundary the GUI
-                // showed while it was drawn (see `densify_roi_polygon`'s
-                // doc comment) - densify through rectified space first
-                // when the lens is available, falling back to the raw
-                // vertices as-is otherwise (still better than nothing).
+                // showed while it was drawn (see
+                // `reco_core::lens::densify_polygon`'s doc comment) -
+                // densify through rectified space first when the lens is
+                // available, falling back to the raw vertices as-is
+                // otherwise (still better than nothing). Same function
+                // `RoiFilteredDetector`'s callers now use in production,
+                // not a separate copy - see `FieldRoi::densified`.
                 let drawn = match lens {
-                    Some(l) => densify_roi_polygon(roi, l),
+                    Some(l) => reco_core::lens::densify_polygon(
+                        roi,
+                        l,
+                        reco_core::lens::ROI_DENSIFY_SAMPLES_PER_EDGE,
+                    ),
                     None => roi.to_vec(),
                 };
                 draw_polygon(&mut img, &drawn, image::Rgba([255, 230, 0, 255]));
@@ -395,70 +402,6 @@ fn load_lenses(
         serde_json::from_value(lenses.get(i)?.clone()).ok()
     };
     (parse(0), parse(1))
-}
-
-/// Turn the calibration's sparse raw-distorted-space ROI vertices into a
-/// much denser point list that actually traces the field boundary the
-/// user drew, instead of just straight-lining between the stored
-/// vertices.
-///
-/// The GUI's ROI editor (`reco-gui/src/main.rs`'s
-/// `rectified_norm_to_raw_norm`/`raw_norm_to_rectified_norm`) shows a
-/// *rectified* (undistorted) preview while the user clicks points -
-/// each click is converted to raw-distorted space for storage, correctly.
-/// But only the *points* go through that conversion, not the *edges*:
-/// a real-world-straight sideline the user traced as a straight line on
-/// the rectified preview becomes a **curve** once both endpoints are
-/// independently mapped into the fisheye-distorted raw frame (KB4
-/// distortion is strongly non-linear, especially toward the frame
-/// edges) - so a straight line drawn between the two *stored* raw-space
-/// points measurably drifts from that curve, worse the longer the edge
-/// and the more peripheral/distorted the region. `RoiFilteredDetector`
-/// (`reco-autocam/src/roi_filter.rs`) has this exact same
-/// straight-raw-edge behavior in its point-in-polygon test - this isn't
-/// only a debug-drawing cosmetic issue, a real detection near such an
-/// edge can be filtered against the wrong boundary in production too.
-///
-/// Fix (this function only - does not touch the calibration or the
-/// production filter): convert each edge's two endpoints to rectified
-/// pixel space, linearly interpolate `SAMPLES_PER_EDGE` intermediate
-/// points *there* (where the true boundary really is straight), then
-/// convert each interpolated point back to raw-distorted space. Many
-/// short raw-space segments approximate the true curve closely, the
-/// same way any polyline approximates a curve better with more points.
-/// Falls back to the two raw endpoints unconverted for an edge if
-/// `distorted_to_undistorted` fails to converge for either one (only
-/// happens at the lens's extreme corners) - same graceful degradation
-/// [`raw_norm_to_rectified_norm`] uses.
-fn densify_roi_polygon(points: &[[f64; 2]], lens: &reco_core::calibration::Lens) -> Vec<[f64; 2]> {
-    const SAMPLES_PER_EDGE: usize = 24;
-    let (w, h) = (lens.width, lens.height);
-    let to_rect = |p: &[f64; 2]| -> Option<(f64, f64)> {
-        reco_core::lens::distorted_to_undistorted(p[0] * w as f64, p[1] * h as f64, w, h, lens)
-    };
-    let to_raw = |(x, y): (f64, f64)| -> [f64; 2] {
-        let (rx, ry) = reco_core::lens::undistorted_to_distorted(x, y, w, h, lens);
-        [rx / w as f64, ry / h as f64]
-    };
-
-    let mut out = Vec::with_capacity(points.len() * SAMPLES_PER_EDGE);
-    for i in 0..points.len() {
-        let a = &points[i];
-        let b = &points[(i + 1) % points.len()];
-        out.push(*a);
-        if let (Some(ra), Some(rb)) = (to_rect(a), to_rect(b)) {
-            for s in 1..SAMPLES_PER_EDGE {
-                let t = s as f64 / SAMPLES_PER_EDGE as f64;
-                let rx = ra.0 + (rb.0 - ra.0) * t;
-                let ry = ra.1 + (rb.1 - ra.1) * t;
-                out.push(to_raw((rx, ry)));
-            }
-        }
-        // else: no intermediate points for this edge, same as before -
-        // the straight raw-space line between `a` and `b` is still drawn
-        // by the caller's closing segment on the next iteration.
-    }
-    out
 }
 
 /// Probe a video's frame rate without a full decoder setup (just enough

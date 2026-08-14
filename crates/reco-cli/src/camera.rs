@@ -132,7 +132,14 @@ pub fn run_camera(
         );
         cal.topology.blend_width = b;
     }
-    let field_roi = cal.field_roi.clone();
+    // Densified so RoiFilteredDetector's point-in-polygon test follows
+    // the true (curved, in raw-distorted space) field boundary instead
+    // of straight-lining between the calibration's few stored vertices -
+    // see `FieldRoi::densified`'s doc comment.
+    let field_roi = cal
+        .field_roi
+        .as_ref()
+        .map(|roi| roi.densified(&cal.lenses[0], &cal.lenses[1]));
 
     let viewport = reco_core::render::viewport::ViewportConfig {
         width,

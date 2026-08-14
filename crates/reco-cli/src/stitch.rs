@@ -110,8 +110,15 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
     // only consumed under the autocam feature; a leading underscore
     // silences the unused-var lint on `--no-default-features` builds.
     let cal = reco_core::calibration::Calibration::from_file(Path::new(args.calibration))?;
+    // Densified so RoiFilteredDetector's point-in-polygon test follows
+    // the true (curved, in raw-distorted space) field boundary instead
+    // of straight-lining between the calibration's few stored vertices -
+    // see `FieldRoi::densified`'s doc comment.
     #[cfg_attr(not(feature = "autocam"), allow(unused_variables))]
-    let field_roi = cal.field_roi.clone();
+    let field_roi = cal
+        .field_roi
+        .as_ref()
+        .map(|roi| roi.densified(&cal.lenses[0], &cal.lenses[1]));
 
     // Accept `a.mp4;b.mp4;c.mp4` to chain segments via the concat demuxer
     // (mirrors the GUI's multi-segment selection). A single path stays Single.

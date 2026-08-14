@@ -329,6 +329,80 @@ pub fn distorted_to_undistorted(
     Some((out_fx * x + out_cx, out_fy * y + out_cy))
 }
 
+/// Number of interpolated points added per polygon edge by
+/// [`densify_polygon`]. 24 was chosen empirically (visually indistinguishable
+/// from the true curve on a 3840px-wide frame in manual review); cheap
+/// either way since this only runs once per calibration load, not per
+/// frame.
+pub const ROI_DENSIFY_SAMPLES_PER_EDGE: usize = 24;
+
+/// Replace a polygon's raw-distorted-space vertices with a much denser
+/// point list that actually traces the boundary a human drew, instead of
+/// straight-lining between the stored vertices.
+///
+/// Background: [`FieldRoi`](crate::calibration::FieldRoi) points are
+/// authored by clicking a *rectified* (undistorted) preview
+/// (`reco-gui`'s lens-preview ROI editor) and converted to this raw,
+/// KB4-distorted space one point at a time on save - correctly. But
+/// only the *points* go through that conversion, not the *edges*: a
+/// real-world-straight line traced on the rectified preview becomes a
+/// **curve** once both endpoints are independently mapped into the
+/// fisheye-distorted frame (KB4 distortion is strongly non-linear,
+/// worse toward the frame edges). A straight line drawn between the two
+/// *stored* raw-space points therefore drifts from that curve - worse
+/// the longer the edge and the more peripheral the region - which
+/// matters anywhere a polygon edge (not just its vertices) is tested or
+/// drawn, e.g. `reco-autocam`'s `RoiFilteredDetector` point-in-polygon
+/// filter.
+///
+/// Fix: convert each edge's two endpoints to rectified pixel space,
+/// linearly interpolate `samples_per_edge` points *there* (where the
+/// true boundary really is straight), then convert each interpolated
+/// point back to raw-distorted space. Many short raw-space segments
+/// approximate the true curve closely - the same way any polyline
+/// approximates a curve better with more points. Falls back to the two
+/// raw endpoints unconverted for an edge if [`distorted_to_undistorted`]
+/// fails to converge for either one (only happens at the lens's extreme
+/// corners) - same graceful degradation the GUI editor's own
+/// rectified/raw conversion uses.
+///
+/// A polygon with fewer than 3 points is returned unchanged (matches
+/// `RoiFilteredDetector`'s own "< 3 points = no filter" convention -
+/// nothing meaningful to densify).
+pub fn densify_polygon(points: &[[f64; 2]], lens: &Lens, samples_per_edge: usize) -> Vec<[f64; 2]> {
+    if points.len() < 3 || samples_per_edge == 0 {
+        return points.to_vec();
+    }
+    let (w, h) = (lens.width, lens.height);
+    let to_rect = |p: &[f64; 2]| -> Option<(f64, f64)> {
+        distorted_to_undistorted(p[0] * w as f64, p[1] * h as f64, w, h, lens)
+    };
+    let to_raw = |(x, y): (f64, f64)| -> [f64; 2] {
+        let (rx, ry) = undistorted_to_distorted(x, y, w, h, lens);
+        [rx / w as f64, ry / h as f64]
+    };
+
+    let mut out = Vec::with_capacity(points.len() * samples_per_edge);
+    for i in 0..points.len() {
+        let a = &points[i];
+        let b = &points[(i + 1) % points.len()];
+        out.push(*a);
+        if let (Some(ra), Some(rb)) = (to_rect(a), to_rect(b)) {
+            for s in 1..samples_per_edge {
+                let t = s as f64 / samples_per_edge as f64;
+                let rx = ra.0 + (rb.0 - ra.0) * t;
+                let ry = ra.1 + (rb.1 - ra.1) * t;
+                out.push(to_raw((rx, ry)));
+            }
+        }
+        // else: no intermediate points for this edge - the straight
+        // raw-space line between `a` and `b` is still drawn/tested by
+        // the caller's next segment, same as before this function
+        // existed for that (rare, corner-only) case.
+    }
+    out
+}
+
 /// Bilinear interpolation sample from a grayscale image.
 #[inline]
 fn bilinear_sample(data: &[u8], w: u32, h: u32, x: f64, y: f64) -> u8 {
@@ -445,6 +519,113 @@ mod tests {
         assert!(
             result.is_none_or(|(bx, by)| (bx - 384.0).abs() < 0.5 && (by - 288.0).abs() < 0.5),
             "should either converge to the true point or report failure, not return garbage: {result:?}"
+        );
+    }
+
+    /// Real DJI Action 4 KB4 coefficients (same rig used throughout the
+    /// 2026-08-14 ROI-curve investigation this function came from).
+    fn real_lens() -> Lens {
+        Lens::fisheye(
+            3840,
+            2880,
+            1457.07373046875,
+            1457.07373046875,
+            1920.0,
+            1440.0,
+            [
+                0.15513110160827637,
+                0.1371408998966217,
+                -0.0938614010810852,
+                0.0041704000905156136,
+            ],
+        )
+    }
+
+    #[test]
+    fn densify_polygon_leaves_degenerate_polygons_unchanged() {
+        let lens = real_lens();
+        assert_eq!(densify_polygon(&[], &lens, 24), Vec::<[f64; 2]>::new());
+        let two_points = [[0.1, 0.1], [0.9, 0.9]];
+        assert_eq!(densify_polygon(&two_points, &lens, 24), two_points);
+    }
+
+    #[test]
+    fn densify_polygon_zero_samples_is_a_noop() {
+        let lens = real_lens();
+        let roi = [[0.08, 0.88], [0.78, 0.55], [0.46, 0.35], [0.18, 0.28]];
+        assert_eq!(densify_polygon(&roi, &lens, 0), roi);
+    }
+
+    #[test]
+    fn densify_polygon_preserves_original_vertices_and_adds_points() {
+        // Real right-camera field_roi from this session's investigation.
+        let lens = real_lens();
+        let roi = [
+            [0.08074434580395302, 0.8814848621397865],
+            [0.7810263211539794, 0.5462294111248123],
+            [0.4587386016478849, 0.34751962730335345],
+            [0.181468201609194, 0.27665550831596947],
+        ];
+        let dense = densify_polygon(&roi, &lens, 24);
+
+        // Every original vertex still appears exactly (each edge starts
+        // with its own `a` unmodified).
+        for v in &roi {
+            assert!(
+                dense.contains(v),
+                "original vertex {v:?} missing from densified output"
+            );
+        }
+        // Strictly more points than the input - the whole point of this
+        // function - and every point stays inside the normalized frame.
+        assert!(
+            dense.len() > roi.len(),
+            "expected densification to add points, got {} from {} inputs",
+            dense.len(),
+            roi.len()
+        );
+        for p in &dense {
+            assert!((0.0..=1.0).contains(&p[0]) && (0.0..=1.0).contains(&p[1]));
+        }
+    }
+
+    #[test]
+    fn densify_polygon_deviates_from_the_straight_raw_edge() {
+        // The actual point of this function: on a long edge of a real
+        // calibration, at least one densified midpoint should land
+        // measurably off the straight line between the two raw-space
+        // endpoints - confirming it's really tracing a curve, not just
+        // relabeling the same straight segment with extra points.
+        //
+        // Three points, not two: `densify_polygon` treats anything under
+        // 3 points as "not a real polygon" and returns it unchanged (see
+        // its own doc comment) - a 3rd point (frame center, well inside
+        // the always-converges region) keeps this a valid polygon while
+        // still letting the assertion focus on edge 0 (`a` -> `b`)
+        // specifically, since edges are appended to the output in order.
+        let lens = real_lens();
+        let a = [0.08074434580395302, 0.8814848621397865];
+        let b = [0.181468201609194, 0.27665550831596947]; // long edge, this calibration's worst case
+        let samples_per_edge = 24;
+        let dense = densify_polygon(&[a, b, [0.5, 0.5]], &lens, samples_per_edge);
+
+        let edge0_points = &dense[..samples_per_edge.min(dense.len())];
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        let max_deviation = edge0_points
+            .iter()
+            .map(|p| {
+                // Perpendicular distance from `p` to the straight line a-b,
+                // in normalized units.
+                ((p[0] - a[0]) * dy - (p[1] - a[1]) * dx).abs() / len
+            })
+            .fold(0.0_f64, f64::max);
+
+        assert!(
+            max_deviation > 0.01,
+            "expected a real curve, but max deviation from the straight edge was only \
+             {max_deviation} (edge 0 densified to {} points: {edge0_points:?})",
+            edge0_points.len()
         );
     }
 
