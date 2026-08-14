@@ -154,8 +154,15 @@ pub fn run_export(
     let codec: Codec = codec_str.parse().unwrap_or_default();
     let quality: Quality = quality_str.parse().unwrap_or_default();
 
+    // Densified so RoiFilteredDetector's point-in-polygon test follows
+    // the true (curved, in raw-distorted space) field boundary instead
+    // of straight-lining between the calibration's few stored vertices -
+    // see `FieldRoi::densified`'s doc comment.
     #[cfg(feature = "autocam")]
-    let field_roi = cal.field_roi.clone();
+    let field_roi = cal
+        .field_roi
+        .as_ref()
+        .map(|roi| roi.densified(&cal.lenses[0], &cal.lenses[1]));
 
     let post_status = |text: String| {
         let weak = app_weak.clone();

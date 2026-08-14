@@ -477,6 +477,29 @@ pub struct FieldRoi {
     pub right: Vec<[f64; 2]>,
 }
 
+impl FieldRoi {
+    /// Return a copy with both polygons densified through rectified
+    /// space so their edges trace the true (curved, in raw-distorted
+    /// space) field boundary instead of straight-lining between the few
+    /// stored vertices. See [`crate::lens::densify_polygon`]'s doc
+    /// comment for why the stored vertices alone aren't enough. Cheap
+    /// to call once per calibration load (not meant to run per frame).
+    pub fn densified(&self, left_lens: &Lens, right_lens: &Lens) -> FieldRoi {
+        FieldRoi {
+            left: crate::lens::densify_polygon(
+                &self.left,
+                left_lens,
+                crate::lens::ROI_DENSIFY_SAMPLES_PER_EDGE,
+            ),
+            right: crate::lens::densify_polygon(
+                &self.right,
+                right_lens,
+                crate::lens::ROI_DENSIFY_SAMPLES_PER_EDGE,
+            ),
+        }
+    }
+}
+
 /// Goal-mouth geometry for goal-scored detection: one polygon per camera,
 /// same raw-distorted-frame-normalized `[0,1]` space and per-camera
 /// left/right convention as `FieldRoi` - a goal is edited in the same
@@ -1131,6 +1154,60 @@ mod tests {
         let roi = back.field_roi.as_ref().unwrap();
         assert_eq!(roi.left.len(), 3);
         assert!((roi.right[1][1] - 0.68).abs() < 1e-6);
+    }
+
+    #[test]
+    fn field_roi_densified_expands_both_sides_independently() {
+        let lens = Lens::fisheye(
+            3840,
+            2880,
+            1457.07373046875,
+            1457.07373046875,
+            1920.0,
+            1440.0,
+            [
+                0.15513110160827637,
+                0.1371408998966217,
+                -0.0938614010810852,
+                0.0041704000905156136,
+            ],
+        );
+        let roi = FieldRoi {
+            left: vec![[0.49, 0.90], [0.33, 0.73], [0.42, 0.58]],
+            right: vec![[0.63, 0.85], [0.78, 0.68], [0.55, 0.60]],
+        };
+        let dense = roi.densified(&lens, &lens);
+        assert!(dense.left.len() > roi.left.len());
+        assert!(dense.right.len() > roi.right.len());
+        // Original vertices are preserved on both sides, not just one.
+        for v in &roi.left {
+            assert!(dense.left.contains(v));
+        }
+        for v in &roi.right {
+            assert!(dense.right.contains(v));
+        }
+    }
+
+    #[test]
+    fn field_roi_densified_leaves_a_too_short_polygon_unchanged() {
+        let lens = Lens::fisheye(
+            3840,
+            2880,
+            1457.0,
+            1457.0,
+            1920.0,
+            1440.0,
+            [0.1, 0.0, 0.0, 0.0],
+        );
+        // < 3 points matches RoiFilteredDetector's own "no filter" case -
+        // densifying an already-meaningless polygon should stay a no-op.
+        let roi = FieldRoi {
+            left: vec![[0.1, 0.1], [0.9, 0.9]],
+            right: vec![],
+        };
+        let dense = roi.densified(&lens, &lens);
+        assert_eq!(dense.left, roi.left);
+        assert_eq!(dense.right, roi.right);
     }
 
     #[test]
