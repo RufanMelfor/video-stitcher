@@ -12,6 +12,64 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
+**Overnight, 2026-08-14/15: imgsz=1920 full training run delegated
+end-to-end while the user slept - a real, if modest, win over round-4.**
+User spoke with the forum engineer (source of the original yolo26s
+call) who trains at 1280 and 1920; feasibility-tested (8ep, `batch=1`,
+15% data - only ~3.76GB VRAM), then a full run (`batch=2`, 258 tasks)
+stopped naturally at epoch 225 (best@125, `patience=100`), 2.55h. Real-
+app test on the standard 100-130s clip: overall raw-ball 51.1% (best of
+every checkpoint ever tested, vs round-4's 49.1%), the persistent
+720-898 dead-zone (always exactly 0/179 before, across every prior
+round) now 18/179. **Not a clean win**: an intermediate 8-epoch
+checkpoint scored *higher* on two curated review windows than the
+fully-converged final - unexplained, not chased. **Frame-704
+localization still doesn't improve** - same ~25px y-offset across all
+4 checkpoints tested this session despite very different training,
+looks systematic, worth its own investigation later. Also delegated:
+ONNX export + a fresh frames-3705-3715 re-dump (labels + the fixed ROI
+overlay, see below) for physical review. Checkpoint:
+`round4/runs/yolo26s_v4_imgsz1920/weights/{best.pt,best.onnx}`. Full
+detail in `YOLO26_Training.md`'s "imgsz=1920 experiment" section and
+[[project_yolo26n_training_pipeline]]. **Not yet promoted to
+production default** - user hasn't reviewed the overnight results yet
+as of this note.
+
+**Same session, earlier: found + fixed a real production bug in the
+field-ROI filter, both merged+pushed to `main`.** User spotted (from a
+`dump_detection_frames` overlay) that the ROI outline didn't sit on the
+true sideline. Root cause: the GUI's ROI editor correctly converts
+*points* from its rectified preview to raw-distorted storage space, but
+not the *edges* between them - a straight line on the rectified preview
+becomes a curve in the fisheye-distorted raw frame, so straight-lining
+between the stored vertices drifts from the true boundary. This wasn't
+just a debug-drawing issue - `RoiFilteredDetector`'s real point-in-
+polygon filter had the exact same straight-edge approximation. Fixed by
+moving a new `reco_core::lens::densify_polygon()` (+
+`FieldRoi::densified()`) into `reco-core` so both the debug tool and
+the production filter share one implementation; wired at the 3 call
+sites that build `AutocamConfig` from a loaded `Calibration`. New unit
+tests (caught one real bug in my own first test's assumptions along the
+way - fixed, not hidden). `cargo test` green across reco-core/
+reco-autocam/reco-io/reco-gui. Both debug+release `reco-gui.exe`
+rebuilt. See [[project_roi_inapp_editor]] for full detail.
+
+**Also same session: reco-gui's auto-opened update-browser replaced
+with a toolbar button, merged+pushed to `main`, and an upstream PR
+opened.** User found it annoying that every startup with a newer
+release auto-opened a browser tab (even on debug builds). Now the
+check result just sets `update-available`/`update-tag`; a new toolbar
+button (visible only when true) opens the release page on click
+instead. Turned out an upstream issue already existed for this
+(#466, filed by a different contributor, scoped to debug builds only) -
+our fix resolves it more completely (all builds, not just debug).
+Opened **PR #468** against `reco-project/video-stitcher` referencing
+`Closes #466`, built fresh off current `origin/main` in a throwaway
+worktree (adapted to upstream's plain `Button` component and toolbar
+layout, which lacks the fork-only FOV badge/`FlatButton` restyle).
+Not yet reviewed/merged upstream. See
+[[project_update_toolbar_button]].
+
 **YOLO26 round 4 done: yolo26s on the 258-task set (+winC hard
 frames), plus a copy_paste/rect experiment - full detail in
 `YOLO26_Training.md`'s "Round 4" section, condensed here.** Ball

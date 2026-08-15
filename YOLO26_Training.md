@@ -985,3 +985,82 @@ without the same VRAM/BatchNorm risk profile as a much larger `imgsz`,
 and the 720-898 partial-fix signal above suggests *some* form of
 better-resolved small-object training data does help that specific gap,
 worth chasing further via a cleaner lever than raw `imgsz`.
+
+## imgsz=1920 experiment - a real win over round-4, delegated overnight (2026-08-14/15)
+
+Prompted by a real engineer's own recommendation (contacted via the
+forum, the same one behind the original yolo26s-over-yolo26n call) -
+trains at both 1280 and 1920 as two separate models, no combined
+technique. Feasibility smoke-tested first (8 epochs, 15% data
+fraction, `batch=1`): only ~3.76GB VRAM even with `reco-gui.exe` open.
+**Real gotcha hit + fixed along the way**: `round4/data.yaml`'s (and
+`round3`/`rough_v2_v6`/`rough_3class`'s) internal `path:` field still
+pointed at the pre-rename folder name from the earlier training-folder
+cleanup - missed at the time. Fixed all 4. **Lesson: after renaming a
+training folder, check `data.yaml`'s own internal `path:` field, not
+just the folder name.**
+
+An 8-epoch run on the *full* 258-task dataset (still `batch=1`) already
+beat round-4's own epoch-8 on mAP50-95 (0.443 vs 0.380) - different,
+better early trajectory than the inconclusive imgsz=1536 experiment
+ever showed, and its real-app test (see below) hit 100% raw-ball on the
+690-719 window and 51/179 (28.5%) on the previously-always-0 720-898
+gap. Justified a full run.
+
+**Full run, delegated end-to-end overnight** (training -> ONNX export
+-> real-app test -> frame re-dump for review, all done unattended while
+the user slept): `batch=2`, `reco-gui.exe` closed, stable ~7.48GB/8GB
+VRAM the whole run. Stopped naturally at **epoch 225** (best @
+**epoch 125**, `patience=100`), 2.55 hours.
+
+Val-set:
+```
+              Precision  Recall  mAP50  mAP50-95
+all (1920)     0.731      0.789  0.736   0.557    (round-4 1280: 0.784/0.770/0.710/0.510)
+ball (1920)    0.920      0.444  0.474   0.344    (round-4 1280: 0.985/0.444/0.465/0.321)
+```
+Ball recall on the val set is exactly unchanged (0.444); mAP50-95
+improved meaningfully (box quality), not recall, on this 18-instance
+slice.
+
+**Real-app test** (same clip/settings as every prior round;
+`trt-cache` cleared first even though the shape matched the already-
+cached 8-epoch engine - the cache key's sensitivity to different
+*weights* at identical shape was untested, and a silent wrong-weights
+reuse would be worse than a crash):
+
+```
+                       round-4(1280,e169)  1920(8ep)  1920(FINAL,e225)
+overall raw-ball rate   49.1%               42.7%      51.1%   <- best of all checkpoints tested
+frames 720-898 gap      0/179               51/179     18/179 (10.1%)
+frames 690-719          80%                 100%       80%
+mean confidence         0.46                0.41       0.48   <- best
+frame 704 confidence    0.55                0.96       0.94
+```
+
+**Genuine improvement over round-4** on the primary metric (overall
+recall + confidence), and the persistent 720-898 dead zone - exactly
+0/179 in every prior test this project has ever run, across
+`yolo26s_v3`, round-4, and the imgsz=1536 experiment - is no longer
+zero. **Not a clean sweep**: the intermediate 8-epoch checkpoint scored
+*higher* than the fully-converged final model on both curated review
+windows - an unexplained early-training artifact, not chased further.
+
+**Frame 704 localization still doesn't improve**: confidence 0.94
+(high), but position is still ~25px off the LS-corrected ground truth
+in the y-direction - the *same* offset direction/magnitude across all
+four checkpoints tested this session (round-4, 1536, 1920-8ep,
+1920-final) despite radically different training runs. Looks
+systematic (a real detector/preprocessing quirk) rather than random
+per-model noise - worth investigating on its own if it keeps recurring,
+not chased further here.
+
+Checkpoint: `round4/runs/yolo26s_v4_imgsz1920/weights/{best.pt,best.onnx}`
+(ONNX verified: `1x3x1920x1920` in, `1x300x6` out, correct names).
+Frames 3705-3715 (right camera) re-dumped with this model for physical
+review - labels + the fixed curve-aware ROI overlay (see the ROI
+section elsewhere in this repo's memory) both visible.
+
+**This is now the best-tested checkpoint of the whole project** on the
+real-app metric - not a solved recall problem, but a real step forward.
+Not yet promoted to "the" production default.
