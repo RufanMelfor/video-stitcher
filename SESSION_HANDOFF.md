@@ -12,6 +12,76 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
+**2026-08-15: full independent ball-label QA audit on round4's 258-task
+set - found + fixed 6 real mislabels, a genuine recurring pattern (not
+isolated as the same-day root-cause note below originally concluded).**
+Follow-on from the frame-704/`winC_014` root-cause work below: user
+rightly pushed back on "isolated, not a pattern" right after that fix,
+insisting more frames likely carried the same kind of miss. Re-
+investigated properly with methods that avoid the earlier pass's real
+blind spot (checking a model's own predictions against labels it was
+*trained on* means it can silently "agree" with a bad label it
+memorized - agreement there isn't independent evidence):
+1. Cross-checked all 214 ball instances against `soccana.pt` (different
+   model lineage, never trained on this data) at imgsz=1920 (default
+   imgsz=640 first attempt was itself worthless - shrinks an 18px ball to
+   ~3px, produced 65% nonsense "disagreement"). Found 1 new confirmed
+   mislabel (`right_frame_0029400`, a white field-marking dot labeled as
+   ball).
+2. Full official `model.val()` run of `yolo26s_v4_imgsz1920` against a
+   **freshly re-pulled** LS project 8 export (not the possibly-stale
+   local `round4` copy) - confirmed 258/258 tasks matched with zero drift
+   beyond the 1 known fix; ball val-metrics nudged up slightly purely
+   from the corrected count (R 0.444->0.471, mAP50 0.474->0.500).
+3. Full 258-set audit using the production checkpoint itself (caveat:
+   trained-on-same-data agreement isn't independent evidence, but
+   confident *disagreement* despite training pressure to conform is still
+   meaningful) - found 5 more confident disagreements, then a full visual
+   contact-sheet scan of all 213 ball-label crops (not just the
+   automated flags) caught 2 of those the nearest-neighbor method missed
+   entirely (no competing detection nearby to flag against - a real
+   coverage gap in the automated approach).
+
+**Root cause, confirmed with hard pixel-coordinate evidence, not
+guessed**: a single painted field marking (a flat white oval, no ball
+seam pattern) sits at a fixed on-screen position for the static camera -
+4 of 6 confirmed mislabels (all `right_frame_*`, from the original
+200-frame auto-labeled batch, never the later winA/winB/winC hard-frame
+batches) cluster within 7px of the exact same pixel coordinate (~731,1517
+in the 3840x2880 right-camera frame). The original AI auto-labeler
+evidently had a recurring false positive there; at 258-task review volume
+a technically-round, already-pre-labeled small box doesn't visually stand
+out as wrong without deliberately zooming in - not a diligence gap in the
+user's review, a genuinely subtle recurring miss.
+
+**Fixed both copies for all 6** (`right_frame_0029400`,
+`left_frame_0023400`, `right_frame_0006000`, `right_frame_0020700`,
+`right_frame_0021000`, `right_frame_0029700`): local
+`round4/labels/{train,val}/*.txt` (deleted the spurious ball line, kept
+the real second ball's line where one existed), and the LS project 8
+source annotations - user did the LS-side deletions themselves via the LS
+UI after being given the exact task-id/region-id list (kept it in their
+own review flow rather than an API-side edit bypassing it), verified
+after the fact via a fresh API re-pull that all 6 offending boxes are
+gone and every real ball box is untouched.
+
+**Revises the root-cause note directly below**
+([[project_yolo26n_training_pipeline]]'s "winC_014 confirmed as an
+isolated miss, not a pattern" section) - that conclusion was too
+optimistic, since it only ever checked a same-family model's own
+confident disagreements, which is blind to exactly this failure mode.
+**Corrected picture: not zero-pattern, but a small (6/214 = ~2.8%), fully
+explained, fully fixed, single-cause pattern** - no evidence of any other
+kind of systematic label error after this pass (person/referee not
+separately audited, but score well above ball in the metrics, so lower
+priority).
+
+**Not yet done**: no retrain triggered by this - same reasoning as
+`winC_014` below, doesn't retroactively change any existing checkpoint,
+worth folding into whenever the next real training round happens (more
+hard-frame data is still the bigger lever, per the round-4 conclusion).
+See [[project_yolo26n_training_pipeline]].
+
 **2026-08-15: export-speed fix #2 (overlap AI detection with render/
 encode) - thoroughly researched and designed, deliberately NOT started,
 zero code changed.** User asked to continue optimizing export speed
