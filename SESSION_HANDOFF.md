@@ -12,6 +12,52 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
+**2026-08-15: found + fixed a real export-throughput bug (D3D11VA
+start-time doesn't seek), merged+pushed to `main`.** User asked to
+watch the GPU during an export test, suspecting it wasn't fully
+utilized (~13fps observed). Live nvidia-smi/WMI monitoring during a
+real export showed nothing actually saturated (GPU SM ~58% avg, CPU
+only ~1.4/24 cores) - not a raw compute limit. A `--features profiling`
+perfetto trace (300 frames, 2560x1440, same settings/model as the
+user's real export) found two distinct causes:
+1. **`--start-time`/the GUI export in-point doesn't seek - it decodes
+   and discards every frame from the start of the source up to the
+   target.** Isolated cleanly with two 5-frame runs differing only in
+   start time: `start-time 0` = 5.2s, `start-time 100` = 33.2s. That
+   ~28s is invisible in the app's own "Processed X frames" counter
+   (which only starts once real output begins) - it just looks like
+   "takes a while to start", worse the further into a long recording
+   the export begins. **Fixed** (Windows D3D11VA path): decode threads
+   now do a real keyframe seek (`VideoDecoder::seek_to_secs`, which the
+   CPU decode path already used) instead of brute-force decoding
+   through the pre-roll. Verified: same 5-frame/start-100 test dropped
+   to 8.9s; first-frame output confirmed pixel-identical to the old
+   path at the same timestamp (correct seek target, not just faster).
+   Also fixed a small unrelated pre-existing bug found via
+   `clippy --all-targets` (`cuda_nv12_frames` cfg'd for
+   `any(linux,windows)` but only ever called from Linux - dead code on
+   Windows). **Scope: Windows D3D11VA only** - Linux CUDA zero-copy and
+   macOS Metal zero-copy have the identical brute-force pattern and
+   would benefit from the same fix, not done here (can't verify on
+   either platform from this machine). See
+   [[project_d3d11_start_time_seek_fix]].
+2. **Once past startup, AI detection dominates frame time, not
+   decode/stitch/encode** - the render/encode pipeline itself is fast
+   and already well-overlapped (~4-5ms/frame, encoder async, 0
+   backpressure stalls), but TensorRT detection (readback + preprocess
+   + inference) ran ~87% of the "active" per-frame time in the same
+   trace, blocking the main frame loop rather than overlapping with
+   render/encode on its own thread. This explains the earlier
+   nvidia-smi/CPU findings (nothing saturated - the process bounces
+   between waiting on TensorRT and doing GPU render work). **Not yet
+   fixed** - real architecture change (detection needs its own
+   overlapped thread), bigger and riskier than fix #1, not started
+   this session.
+   Confirmed TensorRT genuinely active throughout (found a fresh
+   matching `.engine` cache file) - ruled out the known silent-DirectML-
+   fallback bug as an explanation here.
+   Both debug+release `reco-gui.exe` rebuilt with fix #1.
+
 **2026-08-15: "Ball coast time" tunable built, merged+pushed to
 `main`, both debug+release `reco-gui.exe` rebuilt.** User exported a
 test video with the new imgsz=1920 checkpoint (see below), confirmed
