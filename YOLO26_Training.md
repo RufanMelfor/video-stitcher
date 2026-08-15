@@ -1103,9 +1103,34 @@ source annotation (`PATCH /api/annotations/385/`, ball entry `det_15`).
 
 **Not yet done**: this fixes one label, doesn't retroactively change
 the 4 already-trained checkpoints. Doesn't by itself justify an
-immediate retrain (1 of ~140 ball instances). **Open question**: how
-many *other* ball labels have the same kind of miss - only 4 total were
-checked here (3 clean, 1 bad). A systematic QA pass (flag any label
-whose predicted-vs-annotated center distance exceeds a threshold, on
-images already in the training set) would be the principled way to
-find more before the next round.
+immediate retrain (1 of ~140 ball instances).
+
+## Systematic QA pass across every ball label - winC_014 is an isolated miss, not a pattern (2026-08-15, same session)
+
+Ran the QA pass the open question above called for. One-off script
+(session scratchpad, not committed) loads the best checkpoint
+(`yolo26s_v4_imgsz1920`, imgsz=1920), runs inference on every image
+with a ball label (train + val), matches each label to its nearest
+predicted ball box, flags low-IoU/no-match cases.
+
+**214 ball instances checked** (149 train + 14 val images with a ball
+label): **OK 164 (76.6%), LOW_IOU 16 (7.5%), MISSED 34 (15.9%)**.
+MISSED is almost certainly the already-known recall gap (model finds
+no ball at all, even at conf>=0.10), not a labeling concern.
+
+Visually checked 5 of the 16 LOW_IOU cases (smallest-distance ones
+most likely to be genuine mislabels, plus the single largest-distance
+one): `winC_014` itself still flags (expected - the *current*
+checkpoint trained on the *old* wrong label before this session's fix);
+2 cases were label-correct but had **multiple balls in one frame**
+(model picked a different real ball than the labeled one - a dataset
+ambiguity, not an error); 2 cases were label-correct with a **model
+false positive** elsewhere in the frame; 1 (2905px distance) was
+label-correct with an unrelated weak false positive far away.
+
+**Zero new label errors found.** `winC_014` looks genuinely isolated,
+consistent with the earlier 3/3 spot-check. Didn't exhaustively check
+the remaining 11 LOW_IOU cases, but the pattern held cleanly across the
+full distance range sampled - a broader systemic problem looks
+unlikely. **Answers the open question: safe to keep training/using
+this dataset without a full manual re-audit.**

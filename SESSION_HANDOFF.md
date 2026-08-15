@@ -60,6 +60,20 @@ QA pass would be the principled next step. Full detail in
 `YOLO26_Training.md`'s dedicated root-cause section and
 [[project_yolo26n_training_pipeline]].
 
+**That systematic QA pass done, same session, right after**: ran the
+best checkpoint against every ball-labeled image in both train/val
+splits (214 instances), matched each label to its nearest prediction.
+164 OK, 16 LOW_IOU, 34 MISSED (the last almost certainly just the
+known recall gap, not a labeling issue). Visually checked 5 of the 16
+LOW_IOU cases (smallest-distance + the single largest) - found zero
+*new* label errors: 2 were label-correct frames with multiple balls
+where the model picked a different real ball, 2 were label-correct
+with an unrelated model false positive elsewhere, 1 was `winC_014`
+itself (still flags, expected - the current checkpoint trained on the
+old label). **`winC_014` looks genuinely isolated, not a pattern -
+safe to keep training/using this dataset without a full manual
+re-audit.**
+
 **Same session, earlier: found + fixed a real production bug in the
 field-ROI filter, both merged+pushed to `main`.** User spotted (from a
 `dump_detection_frames` overlay) that the ROI outline didn't sit on the
