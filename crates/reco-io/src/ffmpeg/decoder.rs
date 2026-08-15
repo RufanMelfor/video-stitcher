@@ -579,12 +579,36 @@ impl VideoDecoder {
 
     /// Frame rate as an FFmpeg rational (numerator/denominator).
     ///
-    /// Falls back to 30fps if the decoder cannot determine the frame rate.
+    /// Probes the container stream first (`r_frame_rate`, then
+    /// `avg_frame_rate`): the codec context only knows the rate when the
+    /// bitstream carries VUI timing, which camera-original HEVC often
+    /// omits. Falls back to 30fps with an error log if all three are unset.
     pub fn frame_rate(&self) -> ffmpeg::Rational {
-        self.decoder.frame_rate().unwrap_or_else(|| {
-            log::warn!("Could not determine frame rate, defaulting to 30fps");
-            ffmpeg::Rational(30, 1)
-        })
+        let stream = self.input.stream(self.video_stream_index);
+        let codec_rate = self.decoder.frame_rate();
+        let picked = pick_frame_rate(
+            stream.as_ref().map(|s| s.rate()),
+            stream.as_ref().map(|s| s.avg_frame_rate()),
+            codec_rate,
+        );
+        match picked {
+            Some(rate) => {
+                if !codec_rate.as_ref().is_some_and(is_plausible_rate) {
+                    log::debug!(
+                        "Bitstream carries no timing info (no VUI); using container frame rate {}/{}",
+                        rate.0,
+                        rate.1
+                    );
+                }
+                rate
+            }
+            None => {
+                log::error!(
+                    "Could not determine frame rate, defaulting to 30fps; exported timing may be wrong"
+                );
+                ffmpeg::Rational(30, 1)
+            }
+        }
     }
 
     /// Frame rate as frames per second.
@@ -1274,5 +1298,86 @@ fn extract_plane_into(buf: &mut Vec<u8>, data: &[u8], stride: usize, width: usiz
             let start = row * stride;
             buf.extend_from_slice(&data[start..start + width]);
         }
+    }
+}
+
+/// Upper bound for a believable source frame rate. High-speed phone modes
+/// reach 960fps; a 90000/1 rational is a demuxer surfacing its 90kHz time
+/// base as `r_frame_rate`, not a camera.
+const MAX_SANE_FPS: f64 = 1000.0;
+
+/// FFmpeg reports "unset" as 0/0 or 0/1; anything non-positive or above
+/// [`MAX_SANE_FPS`] is a placeholder or time-base artifact, not a rate.
+fn is_plausible_rate(r: &ffmpeg::Rational) -> bool {
+    r.0 > 0 && r.1 > 0 && (r.0 as f64 / r.1 as f64) <= MAX_SANE_FPS
+}
+
+/// Pick the frame rate, nominal first, mirroring FFmpeg's own
+/// `av_guess_frame_rate`: container `r_frame_rate` (for MP4 the demuxer
+/// derives it from packet durations and snaps to the standard-rate table,
+/// so it reads 30000/1001 where a raw measured average would read
+/// 13455000/448949), then `avg_frame_rate`, then the codec context (needs
+/// bitstream VUI timing). The `avg < 70 && r > 210` guard is ported from
+/// av_guess_frame_rate: an r that high with a sane avg is a field or
+/// telecine rate, not a picture rate.
+fn pick_frame_rate(
+    stream_r: Option<ffmpeg::Rational>,
+    stream_avg: Option<ffmpeg::Rational>,
+    codec: Option<ffmpeg::Rational>,
+) -> Option<ffmpeg::Rational> {
+    let as_fps = |r: &ffmpeg::Rational| r.0 as f64 / r.1 as f64;
+    let r = stream_r.filter(is_plausible_rate);
+    let avg = stream_avg.filter(is_plausible_rate);
+    match (r, avg) {
+        (Some(r), Some(avg)) if as_fps(&avg) < 70.0 && as_fps(&r) > 210.0 => Some(avg),
+        (Some(r), _) => Some(r),
+        (None, Some(avg)) => Some(avg),
+        (None, None) => codec.filter(is_plausible_rate),
+    }
+}
+
+#[cfg(test)]
+mod frame_rate_tests {
+    use super::pick_frame_rate;
+    use ffmpeg_next as ffmpeg;
+
+    const R60: ffmpeg::Rational = ffmpeg::Rational(60, 1);
+    const R30: ffmpeg::Rational = ffmpeg::Rational(30, 1);
+    const NTSC: ffmpeg::Rational = ffmpeg::Rational(30000, 1001);
+    const UNSET: ffmpeg::Rational = ffmpeg::Rational(0, 0);
+
+    #[test]
+    fn prefers_nominal_r_frame_rate() {
+        assert_eq!(
+            pick_frame_rate(Some(NTSC), Some(R60), Some(R30)),
+            Some(NTSC)
+        );
+    }
+
+    #[test]
+    fn falls_back_to_avg_frame_rate_when_r_unset() {
+        assert_eq!(pick_frame_rate(Some(UNSET), Some(R60), None), Some(R60));
+    }
+
+    #[test]
+    fn telecine_guard_prefers_sane_avg_over_field_rate() {
+        let field = ffmpeg::Rational(240, 1);
+        assert_eq!(pick_frame_rate(Some(field), Some(NTSC), None), Some(NTSC));
+        let r120 = ffmpeg::Rational(120, 1);
+        assert_eq!(pick_frame_rate(Some(r120), Some(R60), None), Some(r120));
+    }
+
+    #[test]
+    fn falls_back_to_codec_context_last() {
+        assert_eq!(
+            pick_frame_rate(Some(UNSET), Some(ffmpeg::Rational(0, 1)), Some(NTSC)),
+            Some(NTSC)
+        );
+    }
+
+    #[test]
+    fn none_when_everything_is_unset() {
+        assert_eq!(pick_frame_rate(Some(UNSET), Some(UNSET), None), None);
+        assert_eq!(pick_frame_rate(None, None, None), None);
     }
 }
