@@ -75,7 +75,13 @@ fn cpu_frames<'a>(
 }
 
 /// Per-camera CUDA NV12 frames from the shared-texture slot pointers.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+///
+/// Only called from the Linux CUDA zero-copy path
+/// (`detect_and_update_director_gpu`, `detect_and_track_only`'s
+/// `StereoFrame::GpuResident` arm) - Windows uses the D3D11VA/wgpu path
+/// (`wgpu_nv12_frames`) instead, so this must stay Linux-only or it's
+/// dead code there.
+#[cfg(target_os = "linux")]
 pub(super) fn cuda_nv12_frames(
     left_buf: &crate::interop::zero_copy::GpuBufInfo,
     right_buf: &crate::interop::zero_copy::GpuBufInfo,
