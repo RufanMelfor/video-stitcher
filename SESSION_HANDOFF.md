@@ -1,4 +1,4 @@
-# Session handoff - 2026-08-13 (TGR_PC, continues 2026-08-12)
+# Session handoff - 2026-08-15 (TGR_PC, continues 2026-08-12)
 
 Continuation note for resuming work on a different machine/session -
 git-tracked so it travels with `git pull`/`push` between the user's two
@@ -11,6 +11,37 @@ feedback_no_credentials_in_tracked_files.md. Reference "see password
 manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
+
+**2026-08-15: "Ball coast time" tunable built, merged+pushed to
+`main`, both debug+release `reco-gui.exe` rebuilt.** User exported a
+test video with the new imgsz=1920 checkpoint (see below), confirmed
+it's a real improvement, but flagged a UX gap: when the ball crosses
+the field ROI line the tracker loses it immediately (the ROI filter
+drops the detection before the tracker ever sees it - looks identical
+to "no detection this frame"), so the camera never follows a player
+stepping over the line to retrieve it. Diagnosed that `BallTracker`
+already had exactly the right mechanism for this - a `Coaster`
+frame-countdown holding an already-tracked ball's last position for a
+brief gap - just hardcoded at `DEFAULT_COAST_FRAMES = 20` (0.67s
+@30fps) and not exposed. Exposed it as `ball_coast_secs` end-to-end:
+`AutocamConfig` field/builder, both `BallTracker` construction sites,
+`reco-cli --ball-coast-secs` flag + run_config JSON, `AutocamDefaults`
+(calibration-persisted, serde default preserves old-file behavior),
+new reco-gui "Ball coast time" slider (0.2-5.0s) wired through the
+usual snapshot/apply/export sites, plus new parameter docs + a
+troubleshooting bullet in both `docs/ai-panner-tuning.md` and the NL
+translation (explicitly distinguished from the existing
+ball-anchor-range/ball-reach/FOV-wide breakaway checklist - ROI
+filtering and panner gating are different failure modes with different
+fixes). Raising it only affects an already-tracked ball, so it doesn't
+make the panner more likely to trigger on e.g. kids playing with a
+ball just outside the pitch. `cargo test/fmt/clippy` clean across
+reco-core/reco-autocam/reco-cli/reco-gui; `--ball-coast-secs 2.5`
+confirmed threading through into the events.jsonl run_config record on
+a real export. **Not yet visually validated against a real
+ROI-crossing clip** - functional wiring only, the doc recommends
+`1.5-2.5s` as an untested starting point pending real footage. See
+[[project_ball_coast_time_slider]].
 
 **Overnight, 2026-08-14/15: imgsz=1920 full training run delegated
 end-to-end while the user slept - a real, if modest, win over round-4.**
