@@ -85,6 +85,9 @@ pub struct StitchArgs<'a> {
     /// Ball tracker's player-anchor gate override (radians). See
     /// `reco_autocam::AutocamConfig::player_anchor_max_rad`.
     pub player_anchor_rad: Option<f32>,
+    /// Ball tracker's coast-budget override (seconds). See
+    /// `reco_autocam::AutocamConfig::ball_coast_secs`.
+    pub ball_coast_secs: Option<f32>,
     /// Zoom-target smoothing rate override. See
     /// `reco_autocam::panners::FieldPannerConfig::fov_alpha`.
     pub fov_alpha: Option<f32>,
@@ -163,6 +166,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                 "panner_preset": args.panner_preset,
                 "panner_config_path": args.panner_config_path,
                 "player_anchor_rad": args.player_anchor_rad,
+                "ball_coast_secs": args.ball_coast_secs,
             }
         }
     })
@@ -330,6 +334,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         let mode_str = args.tracking_mode.to_owned();
         let allow_fallback = args.allow_no_tracking;
         let player_anchor_rad = args.player_anchor_rad;
+        let ball_coast_secs = args.ball_coast_secs;
         let tracking_failed = Arc::clone(&tracking_failed);
         // Resolve FieldPanner tuning up front so a bad preset/file fails
         // before rendering. Preset is the base; --panner-config overlays.
@@ -404,6 +409,9 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                     detection_interval: interval as u32,
                     player_anchor_rad: player_anchor_rad
                         .unwrap_or(reco_autocam::trackers::ball::DEFAULT_PLAYER_ANCHOR_RAD),
+                    ball_coast_secs: ball_coast_secs.unwrap_or(
+                        reco_autocam::trackers::ball::DEFAULT_COAST_FRAMES as f32 / 30.0,
+                    ),
                     lookahead_secs: args.lookahead,
                     lookahead_reduced_bit_depth: args.lookahead_reduced_bit_depth,
                     preset: args.panner_preset.unwrap_or("").to_string(),
@@ -453,6 +461,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                 autocam_config.field_panner_config = Some(cfg.clone());
             }
             autocam_config.player_anchor_max_rad = player_anchor_rad;
+            autocam_config.ball_coast_secs = ball_coast_secs;
             let autocam_config = if let Some(roi) = field_roi {
                 autocam_config.with_field_roi(roi)
             } else {

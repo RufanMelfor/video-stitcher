@@ -342,6 +342,22 @@ enum Commands {
         #[arg(long = "player-anchor-rad")]
         player_anchor_rad: Option<f32>,
 
+        /// How long (seconds) the ball tracker keeps coasting (holding
+        /// its last known position) with no accepted detection before
+        /// declaring the track lost. A ball leaving the field ROI looks
+        /// identical to the tracker as "no detection this frame" -
+        /// `RoiFilteredDetector` drops it before the tracker ever sees
+        /// it - so a ball already being tracked keeps coasting through a
+        /// brief ROI exit (e.g. a throw-in) same as any other detection
+        /// gap. A ball never tracked in the first place (e.g. a kid's
+        /// ball just outside the pitch) never starts a coast countdown,
+        /// so raising this doesn't reopen that false-positive case.
+        /// Default: ~0.67s (20 frames at 30fps), the ball tracker's own
+        /// built-in default - usually too short for a real out-of-bounds
+        /// retrieval.
+        #[arg(long = "ball-coast-secs")]
+        ball_coast_secs: Option<f32>,
+
         /// Zoom-target smoothing rate (EMA alpha per frame, `(0,1]`) -
         /// how fast the dynamic FOV catches up to its computed target.
         /// Default 0.01 has a ~3s time constant at 30fps, often too slow
@@ -925,6 +941,7 @@ fn main() -> anyhow::Result<()> {
             panner_config,
             panner_preset,
             player_anchor_rad,
+            ball_coast_secs,
             fov_alpha,
             cluster_alpha,
         } => stitch::run_stitch(
@@ -965,6 +982,7 @@ fn main() -> anyhow::Result<()> {
                 panner_config_path: panner_config.as_deref(),
                 panner_preset: panner_preset.as_deref(),
                 player_anchor_rad,
+                ball_coast_secs,
                 fov_alpha,
                 cluster_alpha,
             },

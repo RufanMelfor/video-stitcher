@@ -132,6 +132,23 @@ pub struct AutocamConfig {
     /// keeps the tracker's own default
     /// ([`trackers::ball::DEFAULT_PLAYER_ANCHOR_RAD`], ~0.20 rad / 11deg).
     pub player_anchor_max_rad: Option<f32>,
+    /// Override for [`trackers::ball::BallTracker`]'s coast budget, in
+    /// seconds (converted to frames at the source's actual fps). A ball
+    /// crossing outside the field ROI looks identical to the tracker as
+    /// "no detection this frame" (`RoiFilteredDetector` drops it before
+    /// the tracker ever sees it) - so a ball that was already being
+    /// tracked keeps coasting (holding its last known position) through
+    /// a brief ROI exit, same as any other detection gap, for up to this
+    /// budget before the track is declared lost. A ball never tracked in
+    /// the first place (e.g. a kid's ball just outside the pitch) never
+    /// starts a coast countdown at all - `Coaster::accept_fresh` is only
+    /// ever called for detections the ROI filter actually let through -
+    /// so raising this doesn't reopen that false-positive case. `None`
+    /// keeps the tracker's own default
+    /// ([`trackers::ball::DEFAULT_COAST_FRAMES`], 20 frames - about
+    /// 0.67s at 30fps, usually too short for a real throw-in/out-of-
+    /// bounds retrieval).
+    pub ball_coast_secs: Option<f32>,
 }
 
 impl AutocamConfig {
@@ -146,6 +163,7 @@ impl AutocamConfig {
             field_panner_config: None,
             confidence_threshold: None,
             player_anchor_max_rad: None,
+            ball_coast_secs: None,
         }
     }
 
@@ -180,6 +198,13 @@ impl AutocamConfig {
     /// [`AutocamConfig::player_anchor_max_rad`] for what this controls.
     pub fn with_player_anchor_rad(mut self, rad: f32) -> Self {
         self.player_anchor_max_rad = Some(rad);
+        self
+    }
+
+    /// Override the ball tracker's coast budget (seconds). See
+    /// [`AutocamConfig::ball_coast_secs`] for what this controls.
+    pub fn with_ball_coast_secs(mut self, secs: f32) -> Self {
+        self.ball_coast_secs = Some(secs);
         self
     }
 }
@@ -540,6 +565,12 @@ pub fn setup_autocam(
                         config
                             .player_anchor_max_rad
                             .unwrap_or(crate::trackers::ball::DEFAULT_PLAYER_ANCHOR_RAD),
+                    )
+                    .with_max_coast_frames(
+                        config
+                            .ball_coast_secs
+                            .map(|secs| (secs * fps).round() as u32)
+                            .unwrap_or(crate::trackers::ball::DEFAULT_COAST_FRAMES),
                     );
                 target.set_ball_tracker(Box::new(ball_tracker));
 
@@ -589,6 +620,12 @@ pub fn setup_autocam(
                         config
                             .player_anchor_max_rad
                             .unwrap_or(crate::trackers::ball::DEFAULT_PLAYER_ANCHOR_RAD),
+                    )
+                    .with_max_coast_frames(
+                        config
+                            .ball_coast_secs
+                            .map(|secs| (secs * fps).round() as u32)
+                            .unwrap_or(crate::trackers::ball::DEFAULT_COAST_FRAMES),
                     );
                 // No player provider - ball-only mode, even if the model
                 // has a player class (the user asked to track the ball).
