@@ -1006,6 +1006,10 @@ export component RecoApp inherits Window {
     in-out property <string> export-tracking-mode: "field";
     in-out property <int> export-detection-interval: 3;
     in-out property <float> export-player-anchor-rad: 0.20;
+    // ~20 frames at 30fps - reco_autocam::trackers::ball::DEFAULT_COAST_FRAMES's
+    // own equivalent (kept as the slider's own literal default, same
+    // convention as export-player-anchor-rad above).
+    in-out property <float> export-ball-coast-secs: 0.67;
     in-out property <bool> export-autocam-enabled: false;
     // Panner tuning (mapped onto FieldPannerConfig in export.rs). Defaults
     // mirror the validated football defaults; lookahead defaults on because
@@ -1050,6 +1054,7 @@ export component RecoApp inherits Window {
     changed export-tracking-mode => { root.autocam-settings-changed(); }
     changed export-detection-interval => { root.autocam-settings-changed(); }
     changed export-player-anchor-rad => { root.autocam-settings-changed(); }
+    changed export-ball-coast-secs => { root.autocam-settings-changed(); }
     changed export-panner-preset => { root.autocam-settings-changed(); }
     changed export-lookahead-secs => { root.autocam-settings-changed(); }
     changed export-lookahead-reduced-bit-depth => { root.autocam-settings-changed(); }
@@ -4657,6 +4662,16 @@ export component RecoApp inherits Window {
                             maximum: 0.8;
                             value <=> root.export-player-anchor-rad;
                             suffix: " rad";
+                            decimals: 2;
+                        }
+
+                        LabeledSlider {
+                            label: "Ball coast time";
+                            tip: "A ball leaving the field ROI looks identical to the tracker as \"no detection this frame\" - the ROI filter drops it before the tracker ever sees it. A ball already being tracked keeps holding its last known position for up to this long before the track is declared lost, same as any other brief detection gap - long enough to bridge a throw-in or a ball briefly rolling out of bounds and being brought back. A ball never tracked in the first place (e.g. a kid's ball just outside the pitch) never starts this countdown, so raising it doesn't make the panner more likely to trigger on that.";
+                            minimum: 0.2;
+                            maximum: 5.0;
+                            value <=> root.export-ball-coast-secs;
+                            suffix: " s";
                             decimals: 2;
                         }
 

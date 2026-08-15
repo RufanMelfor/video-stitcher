@@ -481,6 +481,7 @@ mod tests {
                 tracking_mode: "field".into(),
                 detection_interval: 3,
                 player_anchor_rad: 0.35,
+                ball_coast_secs: 1.5,
                 lookahead_secs: 0.5,
                 lookahead_reduced_bit_depth: false,
                 preset: "action".into(),

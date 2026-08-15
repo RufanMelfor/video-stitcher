@@ -602,6 +602,15 @@ pub struct AutocamDefaults {
     /// centroid. Same slow-default caveat as `fov_alpha`.
     #[serde(default = "default_cluster_alpha")]
     pub cluster_alpha: f32,
+    /// Ball tracker's coast budget (seconds) - see
+    /// `reco_autocam::AutocamConfig::ball_coast_secs`. Governs how long
+    /// the tracker holds the last known ball position (e.g. through a
+    /// brief field-ROI exit, like a throw-in) before declaring the track
+    /// lost. Defaults to the ball tracker's own built-in budget (20
+    /// frames at 30fps) when absent from older saved data, not `0.0`
+    /// (which would mean "never coast").
+    #[serde(default = "default_ball_coast_secs")]
+    pub ball_coast_secs: f32,
 }
 
 /// `FieldPannerConfig::default().fov_alpha` - kept in sync manually
@@ -614,6 +623,14 @@ fn default_fov_alpha() -> f32 {
 /// `FieldPannerConfig::default().cluster_alpha` - see [`default_fov_alpha`].
 fn default_cluster_alpha() -> f32 {
     0.012
+}
+
+fn default_ball_coast_secs() -> f32 {
+    // 20 frames at 30fps - reco_autocam::trackers::ball::DEFAULT_COAST_FRAMES's
+    // own equivalent. reco-core can't depend on reco-autocam (wrong
+    // direction in the crate graph), so this is a literal mirror - keep
+    // in sync if that constant ever changes.
+    20.0 / 30.0
 }
 
 /// The calibration document: canonical, serializable source of truth.
@@ -1240,6 +1257,7 @@ mod tests {
             tracking_mode: "field".into(),
             detection_interval: 3,
             player_anchor_rad: 0.35,
+            ball_coast_secs: 1.5,
             lookahead_secs: 0.5,
             lookahead_reduced_bit_depth: true,
             preset: "action".into(),

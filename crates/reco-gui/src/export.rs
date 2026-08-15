@@ -50,6 +50,11 @@ pub struct AutocamUiConfig {
     /// before the panner ever sees it. See
     /// `reco_autocam::AutocamConfig::player_anchor_max_rad`.
     pub player_anchor_rad: f32,
+    /// Ball tracker's coast budget (seconds) - how long it holds the
+    /// last known ball position through a detection gap (including a
+    /// brief field-ROI exit) before declaring the track lost. See
+    /// `reco_autocam::AutocamConfig::ball_coast_secs`.
+    pub ball_coast_secs: f32,
     /// Lookahead buffer depth in seconds (0 = off).
     pub lookahead_secs: f64,
     /// Downconvert the lookahead pool to 8-bit NV12 even for 10-bit
@@ -236,6 +241,7 @@ pub fn run_export(
                 "tracking_mode": &autocam.tracking_mode,
                 "detection_interval": autocam.detection_interval,
                 "player_anchor_rad": autocam.player_anchor_rad,
+                "ball_coast_secs": autocam.ball_coast_secs,
                 "lookahead_secs": autocam.lookahead_secs,
                 "lookahead_reduced_bit_depth": autocam.lookahead_reduced_bit_depth,
                 "preset": &autocam.preset,
@@ -360,6 +366,7 @@ pub fn run_export(
                     tracking_mode: autocam.tracking_mode.clone(),
                     detection_interval: autocam.detection_interval,
                     player_anchor_rad: autocam.player_anchor_rad,
+                    ball_coast_secs: autocam.ball_coast_secs,
                     lookahead_secs: autocam.lookahead_secs,
                     lookahead_reduced_bit_depth: autocam.lookahead_reduced_bit_depth,
                     preset: autocam.preset.clone(),
@@ -424,7 +431,8 @@ pub fn run_export(
                 .with_tracking_mode(mode)
                 .with_detection_interval(ac.detection_interval as u64)
                 .with_10bit(is_10bit)
-                .with_player_anchor_rad(ac.player_anchor_rad);
+                .with_player_anchor_rad(ac.player_anchor_rad)
+                .with_ball_coast_secs(ac.ball_coast_secs);
             autocam_config.field_panner_config = Some(panner_cfg);
             // Ball-only models need a higher floor than the 0.10 field
             // default (matches the CLI's ball-mode override).

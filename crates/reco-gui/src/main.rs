@@ -2132,6 +2132,7 @@ fn snapshot_autocam_defaults(app: &RecoApp) -> reco_core::calibration::AutocamDe
         tracking_mode: app.get_export_tracking_mode().to_string(),
         detection_interval: app.get_export_detection_interval() as u32,
         player_anchor_rad: app.get_export_player_anchor_rad(),
+        ball_coast_secs: app.get_export_ball_coast_secs(),
         lookahead_secs: app.get_export_lookahead_secs() as f64,
         lookahead_reduced_bit_depth: app.get_export_lookahead_reduced_bit_depth(),
         preset: app.get_export_panner_preset().to_string(),
@@ -2159,6 +2160,7 @@ fn apply_autocam_defaults(app: &RecoApp, ac: &reco_core::calibration::AutocamDef
     app.set_export_tracking_mode(ac.tracking_mode.clone().into());
     app.set_export_detection_interval(ac.detection_interval as i32);
     app.set_export_player_anchor_rad(ac.player_anchor_rad);
+    app.set_export_ball_coast_secs(ac.ball_coast_secs);
     app.set_export_lookahead_secs(ac.lookahead_secs as f32);
     app.set_export_lookahead_reduced_bit_depth(ac.lookahead_reduced_bit_depth);
     app.set_export_panner_preset(ac.preset.clone().into());
@@ -5045,6 +5047,7 @@ fn main() -> anyhow::Result<()> {
             tracking_mode: app.get_export_tracking_mode().to_string(),
             detection_interval: app.get_export_detection_interval() as u32,
             player_anchor_rad: app.get_export_player_anchor_rad(),
+            ball_coast_secs: app.get_export_ball_coast_secs(),
             lookahead_secs: app.get_export_lookahead_secs() as f64,
             lookahead_reduced_bit_depth: app.get_export_lookahead_reduced_bit_depth(),
             preset: app.get_export_panner_preset().to_string(),

@@ -39,6 +39,7 @@ lastige gevallen.
 Tracking mode:                      field
 Detect every N frames:              3
 Ball anchor range:                  0,3-0,5 rad     (standaard 0,20)
+Ball coast time:                    0,67s           (standaard; nieuw, nog niet in de praktijk gevalideerd - zie notitie hieronder)
 Style preset:                       action
 
 Framing:                            action
@@ -160,6 +161,37 @@ tracker aan het coasten was / de bal kwijtraakte, omdat de detectie
 buiten deze poort viel. Verbreed 'm (0,3-0,5+) als de panner een bal die
 echt ver van de groep is nooit lijkt op te pikken; houd 'm smal als het
 model valse positieven geeft op rommel op de achtergrond.
+
+**Ball coast time** (seconden, `ball_coast_secs`) - hoe lang een bal die
+al gevolgd wordt zijn laatst bekende positie vasthoudt nadat detecties
+stoppen, voordat de track als kwijt wordt beschouwd. Gemeld door de
+gebruiker op 2026-08-14: een bal die buiten de gekalibreerde
+veld-ROI-polygon rolt of geschoten wordt (zie
+[ROI-filtering](../crates/reco-autocam/src/roi_filter.rs)) ziet er voor
+de tracker precies zo uit als "geen detectie dit frame" - het
+ROI-filter gooit 'm weg voordat de tracker 'm ooit ziet, net als wanneer
+het model 'm gewoon gemist had. Zonder deze instelling gaat de track
+bijna direct van `Coasting` naar `Lost`, waardoor de camera een speler
+die over de lijn stapt om de bal te halen nooit volgt. Dit is geen
+nieuwe trackinglogica: [`BallTracker`](../crates/reco-autocam/src/trackers/ball.rs)
+gebruikte al een vast coast-budget
+([`DEFAULT_COAST_FRAMES = 20`](../crates/reco-autocam/src/trackers/ball.rs),
+via de herbruikbare [`Coaster`](../crates/reco-autocam/src/trackers/filters/coaster.rs)
+frame-aftel-helper) om elke korte detectie-onderbreking te overbruggen,
+ongeacht de oorzaak - het was alleen nog niet instelbaar of zichtbaar in
+de UI. Optrekken verlengt alleen hoelang een *al gevolgde* bal wordt
+vastgehouden; een bal die nooit gevolgd werd (bv. kinderen die naast het
+veld met een bal aan het opwarmen zijn) start deze aftelling nooit, dus
+optrekken maakt de panner niet gevoeliger voor dat geval. Standaard is
+`0,67s` (het bestaande budget van 20 frames bij 30fps). Functioneel
+end-to-end geverifieerd op 2026-08-14 (de waarde komt correct terecht in
+het events-JSONL run_config-record via `--ball-coast-secs`); nog niet
+visueel gevalideerd tegen een echte ROI-overgangsclip zoals de andere
+instellingen op deze pagina - probeer `1,5-2,5s` als startpunt (lang
+genoeg voor een inworp of een korte bal-buiten-de-lijn-actie, kort genoeg
+om niet eindeloos een verouderde positie te blijven volgen) en bevestig
+via `--events` dat de `state` van de bal `Coasting` blijft in plaats van
+naar `Lost` te springen tijdens de overgang.
 
 **Style preset** - een eenmalige actie die elke slider hieronder
 overschrijft (framing, cluster mode, lock-pitch, cluster bandwidth,
@@ -365,6 +397,16 @@ Bron: `FieldPannerConfig::{broadcast, action, frame_all}` in
      algehele camerabeweging (+30-33% gemiddeld verschil per frame bij 0,5
      t.o.v. 0,35 in dezelfde test) - reëel, maar ruim onder de zichtbare
      wobble die `1,0` veroorzaakt.
+- **Camera raakt de bal kwijt zodra die de veld-ROI-lijn oversteekt**
+  (bv. een speler die over de zijlijn stapt om de bal te halen, of een
+  inworp) **en volgt de terughaal-actie nooit**: dit heeft een andere
+  oorzaak dan de hoek-uitbraak-checklist hierboven - de bal wordt
+  weggefilterd door de ROI-polygon, niet afgewezen door een
+  panner-poort. Trek **Ball coast time** op (zie hierboven) zodat een al
+  gevolgde bal zijn laatste positie lang genoeg vasthoudt om de
+  onderbreking te overbruggen. Helpt niet bij een bal die nooit gevolgd
+  werd (bv. een tweede bal net naast het veld) - dat is het ROI-filter
+  dat doet wat het hoort te doen, geen coast-time-probleem.
 
 ## Extra parameters (nog niet beschikbaar in de GUI)
 
