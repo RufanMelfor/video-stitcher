@@ -12,6 +12,141 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
+**2026-08-15: export-speed fix #2 (overlap AI detection with render/
+encode) - thoroughly researched and designed, deliberately NOT started,
+zero code changed.** User asked to continue optimizing export speed
+after fix #1 (D3D11 seek, below) landed. Same profiling trace that
+found fix #1 also found this: AI detection (readback+preprocess+
+inference) consumes ~87% of "active" per-frame time, running
+synchronously and blocking the frame loop, while decode/stitch/encode
+together take ~4-5ms/frame and are already well-overlapped (async
+encoder, 0 backpressure stalls). Went through a full plan-mode research
+pass (2 parallel Explore agents + extensive direct reading) before
+touching any code - this session's own earlier v0.5.4-sync experience
+made clear that skipping this step on architecturally risky work is
+how things go sideways. **User decided (end of session) to pick this
+up fresh next session rather than push through now** - documenting the
+complete findings here so the next session doesn't have to re-derive
+any of this.
+
+**Confirmed via direct code reading (file:line references), not
+guessed:**
+- The lookahead buffer (`session/run_loop.rs`'s `run_buffered`,
+  `session/frame_buffer.rs`) already decouples *when* detection runs
+  from *when* a frame renders (pre-detects N frames ahead so the panner
+  sees future WorldStates) - but NOT *which thread* pays for it.
+  `produce_one` (`run_loop.rs:382-420`) calls
+  `detect_and_track_only` (`detection_dispatch.rs:216`) and blocks on
+  it before the frame enters the buffer - same thread that later
+  renders+encodes. No threading exists anywhere in the current loop.
+- A **directly reusable precedent already exists in this exact
+  codebase**: `async_encode.rs`'s `AsyncEncodeThread` - dedicated
+  thread + bounded `mpsc::sync_channel` + buffer-pool return channel +
+  non-blocking submit with backpressure stats. This is the template to
+  follow, not a new pattern to invent.
+- **Everything needed to run detection async is already `Send`-safe,
+  verified directly in source, zero changes needed there**:
+  `ort::session::Session` is `unsafe impl Send + Sync` (ort 2.0.0-rc.12
+  vendored source, citing ORT's own C API contract); `TrtGpuDetector`
+  is `Send` and re-asserts its CUDA context per-call via
+  `cuda_ensure_context()` rather than pinning to a creation thread;
+  `GpuContext`/wgpu `Device`/`Queue` are plain `Clone` with no interior
+  mutability (`WgpuPreprocessingDetector` already holds its own cloned
+  device/queue - direct precedent); `UnifiedDetector: Send` and
+  `Tracker: Send` are already trait bounds; tracker/panner state has no
+  interior-mutability tricks.
+- **The one real constraint**: GPU-resident detection *borrows* texture
+  views straight out of a 2-slot-per-camera decode/staging ring
+  (Windows `D3d11StagingPool` `n_slots=4`; Linux `gpu_shared_views`,
+  same effective size) that's explicitly documented (and, on Linux,
+  backpressure-enforced) as unsafe to reuse until detection has
+  *finished reading* it - today guaranteed only because detection is
+  synchronous. Moving the *whole* detect call (GPU readback+preprocess
+  +inference) async would need new owned-copy or GPU-pool-slot
+  machinery to avoid a real race - genuinely new, unverified-by-
+  compilation wgpu texture code, higher risk.
+
+**Scope decision, made explicit with the user mid-implementation**:
+of the ~127ms/detection-call cost, roughly ~58ms is GPU readback+
+preprocess (NV12 → CHW tensor, existing compute shader +
+`device.poll(wait_indefinitely)` blocking readback,
+`wgpu_preprocess.rs:337-349`) and ~69ms is the actual ORT/TensorRT
+`session.run()` inference (`reco-detect/src/detectors/cpu.rs:322`,
+`yolo_inference` span, 2 calls/detection = one per camera). **Chose the
+safer partial fix: move only the inference call async, leave
+preprocessing synchronous** (unchanged, already-tested code, zero new
+GPU plumbing) - real ~54% reduction in blocking time instead of the
+theoretical ~87% full-async ceiling, but no new wgpu texture-readback
+code that can't be incrementally compile-tested. The GPU-pool-slot
+approach for the fuller ~87% win (modeled on `VramPool::acquire`/
+`release`) remains a valid future refinement, just bigger/riskier -
+not pursued this pass.
+
+**The clean split point, already present in the code, no new
+abstraction needed to find it**: `WgpuPreprocessingDetector::detect()`
+(`crates/reco-autocam/src/wgpu_detector.rs:50-81`) already separates
+these two steps internally - `self.preprocessor.preprocess(...)`
+(GPU work, stays sync) produces an owned `tensor: Vec<f32>`, then
+`self.inner.detect(camera, &DetectorFrame::PreprocessedChw{data:
+&tensor, ...})` (the actual ORT inference, `self.inner` is the raw
+`CpuYoloDetector`) - this inner call is exactly what should move to
+the async thread. `Vec<f32>` is trivially `Send`, no GPU concerns at
+all on the async side.
+
+**The wrinkle found right before stopping, not yet resolved**: the ROI
+filter (`RoiFilteredDetector`, `crates/reco-autocam/src/roi_filter.rs:159-176`)
+wraps the *outside* of `WgpuPreprocessingDetector` and applies
+`filter_by_roi(...)` to the `Vec<Detection>` *after* `detect()`
+returns. Naively extracting just `WgpuPreprocessingDetector.inner` to
+the async thread would bypass the ROI filter entirely (wrong -
+detections outside the field would stop being filtered). Needs a small
+`UnifiedDetector` trait extension before implementation continues:
+```rust
+enum DetectSplit {
+    Done(Vec<Detection>),      // default: existing synchronous behavior, zero risk to every other detector
+    Pending(/* owned tensor + enough to finish + re-apply any wrapper's post-processing */),
+}
+trait UnifiedDetector: Send {
+    fn detect(&mut self, camera, frame) -> Result<Vec<Detection>, DetectorError>; // unchanged
+    fn detect_split(&mut self, camera, frame) -> Result<DetectSplit, DetectorError> {
+        Ok(DetectSplit::Done(self.detect(camera, frame)?))  // default = today's behavior
+    }
+}
+```
+`WgpuPreprocessingDetector` overrides `detect_split` to return
+`Pending` with the owned tensor; `RoiFilteredDetector::detect_split`
+delegates to `self.inner.detect_split(...)` and, when it gets back a
+`Pending`, needs to carry its own ROI-filter step through to whenever
+the async thread's inference result comes back (e.g. the `Pending`
+payload could carry a boxed closure/continuation, or `DetectSplit`
+could be structured so the caller applies a stack of pending
+post-processing steps in order - not yet designed, this is where to
+pick up).
+
+**Rest of the plan (should still hold, wasn't invalidated by the ROI
+wrinkle)**: new `crates/reco-core/src/async_detect.rs` (`AsyncDetectThread`,
+modeled on `async_encode.rs`) submitting `(produce_index, owned tensor
++ metadata)` jobs and receiving `(produce_index, Vec<Detection>)`
+results in strict FIFO order (single worker thread preserves ordering
+for free, which the tracker contract requires -
+`detect/tracker.rs:139-151` - exactly-once-per-frame, in order).
+`run_loop.rs`'s `produce_one` submits without blocking; `run_panner_once`
+becomes the resolution point (blocks on the result channel only if the
+detect thread hasn't caught up yet - in steady state, with N frames of
+lookahead buffer between produce and this point, it usually won't
+need to). `FrameBuffer`/`BufferedFrame`'s `world_state` field needs a
+pending-or-ready wrapper; `future_world_states()` needs a defined
+fallback for not-yet-resolved entries (reuse the previous resolved
+WorldState, matching the existing stale-detection-reuse pattern).
+Scope: `run_buffered` (export path) only - the immediate/live-preview
+path (`process_frame_any`) is unaffected, out of scope.
+
+**Full context, all file:line references, the two research agents'
+complete raw findings**: this transcript's own history has the full
+detail (this session, after the v0.5.4 sync section below) - re-derive
+from there if this summary isn't enough, rather than re-running the
+same research agents from scratch.
+
 **2026-08-15: v0.5.4 upstream sync finally done - long-deferred, turned
 out to be a fundamentally different task than expected, merged+pushed
 to `main`.** User asked to execute the sync (91+ fork-only commits / 23
