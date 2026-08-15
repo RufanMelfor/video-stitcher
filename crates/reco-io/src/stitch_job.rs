@@ -166,6 +166,24 @@ impl InputPath {
     }
 }
 
+/// Frames to skip from the start of the audio source so it stays aligned
+/// with `sync_offset`-corrected video.
+///
+/// `sync_offset` skips frames from whichever camera started first so both
+/// video streams line up (positive: skip N right frames; negative: skip N
+/// left frames - see [`FfmpegFileSource::open_with_offset`](crate::adapters::FfmpegFileSource::open_with_offset)).
+/// The audio track is sourced from only one camera's file (`AudioMode`), so
+/// it only needs the same skip applied when it comes from the camera that
+/// started first - the other camera's audio already begins at the aligned
+/// point.
+fn audio_sync_skip_frames(audio: &AudioMode, sync_offset: i64) -> u64 {
+    match audio {
+        AudioMode::CopyFrom(0) if sync_offset < 0 => sync_offset.unsigned_abs(),
+        AudioMode::CopyFrom(1) if sync_offset > 0 => sync_offset as u64,
+        AudioMode::CopyFrom(_) | AudioMode::Disabled => 0,
+    }
+}
+
 impl From<&str> for InputPath {
     fn from(s: &str) -> Self {
         Self::Single(PathBuf::from(s))
@@ -792,6 +810,27 @@ impl StitchJob {
             }
         }
 
+        // All inputs must share one frame rate: the session clock, trim
+        // math, and encoder run on the first input's rate, so a mismatched
+        // camera silently drifts out of sync over a match (upstream #315).
+        // 0.5 fps tolerance absorbs probe rounding (30000/1001 vs 30/1)
+        // without letting 25-vs-30 or 30-vs-60 setups through.
+        if info.fps > 0.0
+            && let Ok((n, d)) =
+                crate::adapters::FfmpegFileSource::frame_rate(self.right.first_path())
+            && d != 0
+        {
+            let right_fps = n as f64 / d as f64;
+            if (right_fps - info.fps).abs() > 0.5 {
+                return Err(StitchError::Other(format!(
+                    "frame rate mismatch: right input is {right_fps:.2} fps but the left \
+                     input is {:.2} fps; record all cameras at the same frame rate (mixed \
+                     rates are not supported yet)",
+                    info.fps,
+                )));
+            }
+        }
+
         // Create encoder with optional audio passthrough.
         let fps_rational = info.fps_rational.unwrap_or_else(|| {
             log::warn!("FPS not available from source metadata, defaulting to 30fps");
@@ -823,6 +862,20 @@ impl StitchJob {
             AudioMode::Disabled => None,
         };
 
+        // The audio track comes from a single camera's file, so if that
+        // camera is the one sync_offset skipped frames from (see
+        // audio_sync_skip_frames' doc comment), its audio needs the same
+        // skip converted to seconds - otherwise sound and picture start
+        // out of alignment by the sync correction itself.
+        let audio_sync_skip = audio_sync_skip_frames(&self.audio, effective_sync);
+        let audio_start_time = start_secs + audio_sync_skip as f64 / fps;
+        if audio_sync_skip > 0 {
+            log::info!(
+                "Audio sync: skipping {audio_sync_skip} frames ({:.3}s) from the selected audio source",
+                audio_sync_skip as f64 / fps,
+            );
+        }
+
         let enc_config = crate::ffmpeg::encoder::EncoderConfig {
             encoder_name: self.encoder_name.clone(),
             codec: self.codec.into(),
@@ -830,7 +883,7 @@ impl StitchJob {
             quality: self.quality_value,
             preset: self.preset.clone(),
             audio_source,
-            audio_start_time: start_secs,
+            audio_start_time,
             container: self.format.into(),
             gop_size: None,
             stream_url: None,
@@ -1152,5 +1205,15 @@ mod tests {
         );
         // first_path stays the first segment; all_paths must not drop the rest.
         assert_eq!(chained.first_path(), std::path::Path::new("a.mp4"));
+    }
+
+    #[test]
+    fn audio_sync_skips_only_the_audio_source_whose_video_was_skipped() {
+        assert_eq!(audio_sync_skip_frames(&AudioMode::CopyFrom(0), -15), 15);
+        assert_eq!(audio_sync_skip_frames(&AudioMode::CopyFrom(1), -15), 0);
+        assert_eq!(audio_sync_skip_frames(&AudioMode::CopyFrom(0), 15), 0);
+        assert_eq!(audio_sync_skip_frames(&AudioMode::CopyFrom(1), 15), 15);
+        assert_eq!(audio_sync_skip_frames(&AudioMode::CopyFrom(0), 0), 0);
+        assert_eq!(audio_sync_skip_frames(&AudioMode::Disabled, -15), 0);
     }
 }
