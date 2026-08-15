@@ -38,10 +38,10 @@ make the panner more likely to trigger on e.g. kids playing with a
 ball just outside the pitch. `cargo test/fmt/clippy` clean across
 reco-core/reco-autocam/reco-cli/reco-gui; `--ball-coast-secs 2.5`
 confirmed threading through into the events.jsonl run_config record on
-a real export. **Not yet visually validated against a real
-ROI-crossing clip** - functional wiring only, the doc recommends
-`1.5-2.5s` as an untested starting point pending real footage. See
-[[project_ball_coast_time_slider]].
+a real export. **User-confirmed on real footage same day**:
+"ball_coast: 2,5s lijkt aardig te werken" (works nicely) - docs (EN+NL)
+and the settings table updated to recommend `2.5s` as the starting
+value. See [[project_ball_coast_time_slider]].
 
 **Overnight, 2026-08-14/15: imgsz=1920 full training run delegated
 end-to-end while the user slept - a real, if modest, win over round-4.**

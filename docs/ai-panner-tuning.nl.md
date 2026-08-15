@@ -39,7 +39,7 @@ lastige gevallen.
 Tracking mode:                      field
 Detect every N frames:              3
 Ball anchor range:                  0,3-0,5 rad     (standaard 0,20)
-Ball coast time:                    0,67s           (standaard; nieuw, nog niet in de praktijk gevalideerd - zie notitie hieronder)
+Ball coast time:                    2,5s            (standaard 0,67s) - zie notitie hieronder
 Style preset:                       action
 
 Framing:                            action
@@ -185,13 +185,14 @@ veld met een bal aan het opwarmen zijn) start deze aftelling nooit, dus
 optrekken maakt de panner niet gevoeliger voor dat geval. Standaard is
 `0,67s` (het bestaande budget van 20 frames bij 30fps). Functioneel
 end-to-end geverifieerd op 2026-08-14 (de waarde komt correct terecht in
-het events-JSONL run_config-record via `--ball-coast-secs`); nog niet
-visueel gevalideerd tegen een echte ROI-overgangsclip zoals de andere
-instellingen op deze pagina - probeer `1,5-2,5s` als startpunt (lang
-genoeg voor een inworp of een korte bal-buiten-de-lijn-actie, kort genoeg
-om niet eindeloos een verouderde positie te blijven volgen) en bevestig
-via `--events` dat de `state` van de bal `Coasting` blijft in plaats van
-naar `Lost` te springen tijdens de overgang.
+het events-JSONL run_config-record via `--ball-coast-secs`); door de
+gebruiker bevestigd op echte beelden op 2026-08-15 dat `2,5s` "aardig
+werkt" voor het ROI-overgangsscenario - een informele bevestiging op de
+eigen wedstrijdbeelden van de gebruiker, geen gecontroleerde A/B-render
+zoals de andere instellingen op deze pagina, maar wel een echt resultaat
+in plaats van een gok. Begin bij `2,5s`; bevestig via `--events` dat de
+`state` van de bal `Coasting` blijft in plaats van naar `Lost` te
+springen tijdens de overgang als je verder wilt tunen.
 
 **Style preset** - een eenmalige actie die elke slider hieronder
 overschrijft (framing, cluster mode, lock-pitch, cluster bandwidth,
@@ -402,11 +403,11 @@ Bron: `FieldPannerConfig::{broadcast, action, frame_all}` in
   inworp) **en volgt de terughaal-actie nooit**: dit heeft een andere
   oorzaak dan de hoek-uitbraak-checklist hierboven - de bal wordt
   weggefilterd door de ROI-polygon, niet afgewezen door een
-  panner-poort. Trek **Ball coast time** op (zie hierboven) zodat een al
-  gevolgde bal zijn laatste positie lang genoeg vasthoudt om de
-  onderbreking te overbruggen. Helpt niet bij een bal die nooit gevolgd
-  werd (bv. een tweede bal net naast het veld) - dat is het ROI-filter
-  dat doet wat het hoort te doen, geen coast-time-probleem.
+  panner-poort. Trek **Ball coast time** op naar `2,5s` (zie hierboven)
+  zodat een al gevolgde bal zijn laatste positie lang genoeg vasthoudt om
+  de onderbreking te overbruggen. Helpt niet bij een bal die nooit
+  gevolgd werd (bv. een tweede bal net naast het veld) - dat is het
+  ROI-filter dat doet wat het hoort te doen, geen coast-time-probleem.
 
 ## Extra parameters (nog niet beschikbaar in de GUI)
 
