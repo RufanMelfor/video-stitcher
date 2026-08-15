@@ -12,6 +12,73 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
+**2026-08-15: v0.5.4 upstream sync finally done - long-deferred, turned
+out to be a fundamentally different task than expected, merged+pushed
+to `main`.** User asked to execute the sync (91+ fork-only commits / 23
+behind `origin/main`), with two explicit constraints: don't lose any
+built features, and prefer upstream's base since future updates need
+to keep applying. Backed up first: tag `pre-v054-sync-backup-2026-08-15`
++ a full offline bundle at `D:\VOETBAL_VIDEO\RECO\backups\repo-backup-pre-v054-sync-2026-08-15.bundle`
+(507MB, verified). A trial `git merge origin/main` produced 28
+conflicts - investigating the biggest one (`calibration.rs`) uncovered
+the real story: **upstream's current `main` is not ahead of us on the
+calibration/render architecture, it regressed.** A "v0.5.3" merge
+upstream (`c2705c2c`) combined the post-refactor state (our
+`Calibration`/`Topology`/`Framing`/`Executor` model, which our fork
+already adopted from upstream via `6ff32c37`) with a 20-commit bugfix
+chain branched off an older pre-refactor point, and the resolution
+discarded the newer architecture entirely - confirmed directly, zero
+occurrences of `color_match_enabled`/`multiband_blend_enabled`/
+`seam_offset`/`ground_tilt_x`/`Executor` anywhere in `origin/main`'s
+reco-core today. Taking upstream's side would have broken compilation
+in 8+ places and deleted every seam/color-match/tilt feature this fork
+has built - rejected as a real downgrade, not a catch-up.
+
+**Second, nastier discovery**: git's 3-way merge was silently
+corrupting "unconflicted" regions in files affected by this
+divergence - found 6+ separate cases (wrong type names, dropped
+`[features]` blocks, phantom function calls to things that don't
+exist on our side) in files git never even flagged as conflicted. Not
+safe to trust *any* file the merge touched without a full diff against
+real `main`, marked-conflict or not. Abandoned that merge entirely;
+rebuilt the sync as a clean, minimal, hand-verified patch set applied
+directly onto an untouched copy of `main` instead (11 files, no merge
+commit lineage risk).
+
+**What actually landed**: the 23 real upstream-only commits (merge-base
+`ab553d35` to `origin/main` tip) mostly turned out to already be in our
+history under different hashes (DirectML EP enable, Slint wgpu-backend
+default, reco-obs Windows build.rs fixes, VRAM budget calc, CUDA
+context-before-free drop fixes, audio-across-chained-segments,
+recent-files video-input wiring, libcamera error logging - all
+independently ported at some earlier point). Six were genuinely new
+and got manually ported: frame-rate-mismatch fail-loud (`reco-io`),
+stream-first fps probe fixing camera-original-HEVC-without-VUI-timing
+silently defaulting to 30fps (exactly this session's own DJI Action 4
+footage), encoder output stream fps-stamping, audio-passthrough now
+respecting `sync_offset` (previously audio and video could start
+misaligned by the sync correction itself), GUI export status/seek math
+using real probed fps, and reco-detect's ORT-dylib-probe-before-ort
+fix (prevents a real self-deadlock when load-dynamic + missing
+runtime). Two lower-priority fixes (telemetry bug-report truncation,
+replay-recording fps) identified but deliberately not ported -
+low-risk, deferred.
+
+**Verified**: `cargo build/test/clippy(-D warnings)/fmt` clean across
+all 7 affected crates (241 tests passing, same 2 pre-existing CUDA
+failures as always). Real end-to-end stitch against a real calibration
+file + real DJI footage confirms calibration loading, audio
+passthrough, and D3D11VA decode all still work. Both debug+release
+`reco-gui.exe` rebuilt from the new `main`.
+
+**Not done, deliberately**: no attempt to revert
+`Calibration`/`Topology`/`Executor` naming to match upstream's
+regressed shape - would touch ~40 files/92+ references for zero
+functional gain and a second painful calibration-file-format
+migration. If upstream ever fixes their own regression, worth
+re-evaluating the "keep upstream's base" question then, not before.
+See [[project_v054_upstream_sync]].
+
 **2026-08-15: found + fixed a real export-throughput bug (D3D11VA
 start-time doesn't seek), merged+pushed to `main`.** User asked to
 watch the GPU during an export test, suspecting it wasn't fully
