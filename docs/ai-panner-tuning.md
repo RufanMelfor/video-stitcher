@@ -36,7 +36,7 @@ notes for known hard cases.
 Tracking mode:                      field
 Detect every N frames:              3
 Ball anchor range:                  0.3-0.5 rad     (default 0.20)
-Ball coast time:                    0.67s           (default; new, not yet field-validated - see note below)
+Ball coast time:                    2.5s            (default 0.67s) - see note below
 Style preset:                       action
 
 Framing:                            action
@@ -173,13 +173,13 @@ outside the pitch) never starts this countdown, so raising it doesn't
 make the panner more likely to trigger on that case. Default is `0.67s`
 (the pre-existing 20-frame budget at 30fps). Functionally verified
 end-to-end 2026-08-14 (the value threads through correctly into the
-events JSONL run_config record via `--ball-coast-secs`); not yet
-visually validated against a real ROI-crossing clip the way the other
-settings on this page are - try `1.5-2.5s` as a starting point (long
-enough for a throw-in or a short ball-out-of-bounds retrieval, short
-enough not to keep chasing a stale position indefinitely) and confirm
+events JSONL run_config record via `--ball-coast-secs`); user-confirmed
+on real footage 2026-08-15 that `2.5s` "works nicely" for the
+ROI-crossing scenario - informal confirmation on the user's own match
+footage, not a controlled A/B render like the other settings on this
+page, but a real result rather than a guess. Start at `2.5s`; confirm
 via `--events` that the ball's `state` stays `Coasting` rather than
-flipping to `Lost` during the crossing.
+flipping to `Lost` during the crossing if you need to tune further.
 
 **Style preset** - a one-shot action that overwrites every slider below
 (framing, cluster mode, lock-pitch, cluster bandwidth, dead-zone, ball
@@ -372,11 +372,11 @@ Source: `FieldPannerConfig::{broadcast, action, frame_all}` in
   throw-in) **and never follows the retrieval**: this is a different
   cause from the corner-breakaway checklist above - the ball is being
   filtered out by the ROI polygon, not rejected by a panner gate. Raise
-  **Ball coast time** (see above) so an already-tracked ball holds its
-  last position long enough to bridge the gap. Doesn't help a ball that
-  was never tracked to begin with (e.g. a second ball just outside the
-  pitch) - that's the ROI filter working as intended, not a coast-time
-  problem.
+  **Ball coast time** to `2.5s` (see above) so an already-tracked ball
+  holds its last position long enough to bridge the gap. Doesn't help a
+  ball that was never tracked to begin with (e.g. a second ball just
+  outside the pitch) - that's the ROI filter working as intended, not a
+  coast-time problem.
 
 ## Extra parameters (not yet exposed in the GUI)
 
