@@ -1046,14 +1046,11 @@ zero. **Not a clean sweep**: the intermediate 8-epoch checkpoint scored
 *higher* than the fully-converged final model on both curated review
 windows - an unexplained early-training artifact, not chased further.
 
-**Frame 704 localization still doesn't improve**: confidence 0.94
-(high), but position is still ~25px off the LS-corrected ground truth
-in the y-direction - the *same* offset direction/magnitude across all
-four checkpoints tested this session (round-4, 1536, 1920-8ep,
-1920-final) despite radically different training runs. Looks
-systematic (a real detector/preprocessing quirk) rather than random
-per-model noise - worth investigating on its own if it keeps recurring,
-not chased further here.
+**Frame 704 localization "doesn't improve" - root-caused, see below**:
+confidence rose across every checkpoint (0.55 -> 0.94), but position
+stayed ~25px off in the same direction regardless of training run. Not
+a detector quirk - a single mislabeled training example, see the
+dedicated section right after this one.
 
 Checkpoint: `round4/runs/yolo26s_v4_imgsz1920/weights/{best.pt,best.onnx}`
 (ONNX verified: `1x3x1920x1920` in, `1x300x6` out, correct names).
@@ -1064,3 +1061,51 @@ section elsewhere in this repo's memory) both visible.
 **This is now the best-tested checkpoint of the whole project** on the
 real-app metric - not a solved recall problem, but a real step forward.
 Not yet promoted to "the" production default.
+
+## Root cause of the "frame-704 offset": one mislabeled training example, not a model/pipeline bug (2026-08-15)
+
+User declined to keep training until this was explained - correctly,
+since a real pipeline bug would invalidate every result above.
+Investigated properly:
+
+1. Compared *every* detection in frame 704 against its nearest ground-
+   truth box (LS task 1951/`winC_014`, the same frame) - person/referee
+   matched almost perfectly (<1-11px, normal noise); only the ball was
+   off by 23px, far outside that band. Rules out a general coordinate/
+   letterbox bug, which would hit every class uniformly.
+2. Checked 3 other ball labels elsewhere in the training set
+   (`winC_030`, `winC_029`, `winC_012`) against their own images - all
+   3 sat correctly on their visible ball. Not a systemic labeling-
+   convention problem across the dataset.
+3. Zoomed into frame 704 at high magnification with a pixel-grid
+   overlay: neither the model's prediction nor the LS "ground truth"
+   actually touched the visible ball - both sat ~23-28px above it. The
+   LS annotation's `origin` field read `"prediction-changed"` with the
+   *same confidence score (0.55)* as the original AI pre-label - a
+   human had technically touched the box (enough to flip the origin
+   flag) without ever moving it onto the real ball. One understandable
+   miss among dozens of boxes in a busy frame.
+
+**`winC_014` (= frame 704) has one bad ball label, and it's in the
+training set every checkpoint this session was trained on** - so all 4
+(round-4, 1536, 1920-8ep, 1920-final) partially learned/reproduced this
+one wrong position on this one specific (in-training-set) frame. That's
+why the "offset" looked consistent across 4 very different runs - they
+were graded against the same flawed answer key on an image they'd all
+memorized a piece of. Not a fair generalization test, same lesson as
+the "30/30 winC self-check isn't evidence of generalization" note in
+the Round 4 section above.
+
+**Fixed both copies**: `round4/labels/train/4abed4f2-winC_014.txt` line
+16 (`1 0.466927 0.648611 0.015625 0.017361`, center moved ~28px down in
+y, box widened slightly to actually enclose the ball) and the LS
+source annotation (`PATCH /api/annotations/385/`, ball entry `det_15`).
+
+**Not yet done**: this fixes one label, doesn't retroactively change
+the 4 already-trained checkpoints. Doesn't by itself justify an
+immediate retrain (1 of ~140 ball instances). **Open question**: how
+many *other* ball labels have the same kind of miss - only 4 total were
+checked here (3 clean, 1 bad). A systematic QA pass (flag any label
+whose predicted-vs-annotated center distance exceeds a threshold, on
+images already in the training set) would be the principled way to
+find more before the next round.

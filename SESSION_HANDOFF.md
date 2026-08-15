@@ -35,6 +35,31 @@ detail in `YOLO26_Training.md`'s "imgsz=1920 experiment" section and
 production default** - user hasn't reviewed the overnight results yet
 as of this note.
 
+**Immediate follow-up, root-caused and fixed**: user (rightly) refused
+to keep training until the "frame-704 offset looks systematic across
+all 4 checkpoints" observation above was explained. Investigated
+properly rather than guessing - turned out to be **one mislabeled
+training example** (`winC_014` = frame 704), not a pipeline/model bug:
+every other detection in that frame matched its ground truth almost
+perfectly (rules out a general coordinate bug), 3 other ball labels
+checked elsewhere in the dataset were all correct (rules out a
+systemic labeling problem), and a pixel-grid zoom showed neither the
+model nor the LS "ground truth" annotation actually touched the real
+ball - the human reviewer had technically touched the box
+(`origin: "prediction-changed"`) without ever moving it, same
+confidence score as the original AI pre-label. All 4 checkpoints
+tested this session were trained on this same image with this same bad
+label, which is why the offset looked consistent - never a fair
+generalization test to begin with. **Fixed both copies** (local
+training label file + the LS source annotation via a transient token,
+not saved to any file). Doesn't retroactively fix the 4 already-trained
+checkpoints or by itself justify an immediate retrain. **Open
+question, not yet done**: how many other ball labels have the same
+kind of miss - only 4 spot-checked (3 clean, 1 bad); a real systematic
+QA pass would be the principled next step. Full detail in
+`YOLO26_Training.md`'s dedicated root-cause section and
+[[project_yolo26n_training_pipeline]].
+
 **Same session, earlier: found + fixed a real production bug in the
 field-ROI filter, both merged+pushed to `main`.** User spotted (from a
 `dump_detection_frames` overlay) that the ROI outline didn't sit on the
