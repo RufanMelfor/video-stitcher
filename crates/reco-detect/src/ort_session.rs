@@ -213,6 +213,16 @@ pub fn create_ort_session(
             .with_timing_cache(true)
             .with_timing_cache_path(&trt_cache_str)
             .with_builder_optimization_level(3)
+            // TRIED 2026-08-16: `.with_cuda_graph(true)` here to cut
+            // per-call kernel-launch overhead. REVERTED - crashed the
+            // async detect thread mid-export ("expected `typeinfo_ptr`
+            // to not be null" in ort's value/mod.rs) after ~150-200
+            // frames, silently degrading tracking to stale detections
+            // for the rest of the run instead of a clean failure. Not
+            // safely usable with this ort-rs/TensorRT combination as
+            // configured - would need deeper investigation (IoBinding
+            // with pinned buffers instead of a fresh Vec<f32> per call
+            // is the likely real fix) before trying again.
             .build()])
         {
             Ok(b) => {
