@@ -103,23 +103,42 @@ code toggled):
    active (ruled out a silent-DirectML-fallback explanation).
 2. Added dual-worker mode (`AsyncDetectThread::new_dual`, one thread
    per camera instead of one shared) so Left/Right inference can
-   overlap - **measured a modest ~5-6% further speedup** (24.7s ->
+   overlap - CLI A/B measured a modest ~5-6% further speedup (24.7s ->
    23.3s), not the near-halving hoped for: two concurrent TensorRT
    contexts on this consumer GPU (no MPS) don't truly run in
    parallel, they contend and each call gets slower (40.1ms -> 77.3ms
-   avg), eating most of the theoretical gain. Needs a third loaded
-   detector instance - real extra VRAM. Wired as `--async-detect-dual`
-   / a second GUI checkbox, left in as an opt-in choice rather than
-   pulled since it's real (if small) and fully tested.
+   avg), eating most of the theoretical gain. Wired as
+   `--async-detect-dual` / a second GUI checkbox, handed to the user
+   to test themselves in the real GUI.
+   **User's own GUI test found no win at all**: single-worker 72.0%
+   GPU/6784MiB/~138s vs dual-worker 66.4% GPU (lower!)/7339MiB
+   (+555MiB confirmed)/~136s (same). User decided to revert it
+   ("andere strategie bedenken") - reverted clean, commit `f945d4eb`.
+   Lesson: should have checked in before building the full GUI wiring
+   for a change whose own CLI measurement was already a weak ~5-6%
+   signal - over-invested before the user weighed in.
 
-Both on `feat/async-detect-thread` (commits `0868ead4`, `978f62ae`),
-same branch, still not merged. Both debug+release reco-gui rebuilt
-again with the new checkbox - test paths:
+Poll-wait fix (`0868ead4`) kept, dual-worker (`978f62ae`) reverted
+(`f945d4eb`) - all on `feat/async-detect-thread`, still not merged.
+Both debug+release reco-gui rebuilt again, back to just the
+single-worker async-detect checkbox - test paths:
 
 ```
 D:\VOETBAL_VIDEO\RECO\worktree-async-detect\target\debug\reco-gui.exe
 D:\VOETBAL_VIDEO\RECO\worktree-async-detect\target\release\reco-gui.exe
 ```
+
+**Next ideas raised, none started yet** - user asked for a different
+strategy: (a) `--detection-interval > 1` (skip frames, zero new code,
+already exists); (b) batch Left+Right into one TensorRT call instead
+of two sequential ones (`best_batch2.onnx` already exported at
+`D:\VOETBAL_VIDEO\RECO\training\round4\runs\yolo26s_tiled1920_full\weights\`
+from an earlier experiment; doesn't have dual-worker's concurrent-
+context contention problem, but an earlier *different* batching
+experiment - SAHI tiles of one camera, not two distinct cameras -
+found batching slower, so needs its own real measurement, not
+assumed); (c) TensorRT CUDA graphs (`trt_cuda_graph_enable`, currently
+off) to cut kernel-launch overhead - new code, uncertain payoff.
 
 **Not done**: not merged to `main`, only the Windows D3D11VA path gets
 real async behavior (every other residency still runs synchronously,
