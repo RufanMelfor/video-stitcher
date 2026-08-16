@@ -90,6 +90,37 @@ end-to-end GUI export, not just a synthetic benchmark - same direction
 and order of magnitude, slightly lower speedup here (expected, real
 GUI overhead vs a controlled CLI run).
 
+**Same day, follow-on: user asked to push GPU utilization further.**
+Profiled the shipped async-detect build for real (not guesswork) -
+found `yolo_inference` at ~90% of wall-clock, already well-overlapped.
+Two more attempts, each measured via a true A/B (same clip/command,
+code toggled):
+
+1. Fixed `wgpu_preprocess.rs`'s blocking readback wait to target our
+   own GPU submission index instead of "whatever's most recent" -
+   **measured no real effect** (28.33s vs 28.51s, noise). Kept anyway,
+   strictly more correct. Also confirmed TensorRT+FP16 genuinely
+   active (ruled out a silent-DirectML-fallback explanation).
+2. Added dual-worker mode (`AsyncDetectThread::new_dual`, one thread
+   per camera instead of one shared) so Left/Right inference can
+   overlap - **measured a modest ~5-6% further speedup** (24.7s ->
+   23.3s), not the near-halving hoped for: two concurrent TensorRT
+   contexts on this consumer GPU (no MPS) don't truly run in
+   parallel, they contend and each call gets slower (40.1ms -> 77.3ms
+   avg), eating most of the theoretical gain. Needs a third loaded
+   detector instance - real extra VRAM. Wired as `--async-detect-dual`
+   / a second GUI checkbox, left in as an opt-in choice rather than
+   pulled since it's real (if small) and fully tested.
+
+Both on `feat/async-detect-thread` (commits `0868ead4`, `978f62ae`),
+same branch, still not merged. Both debug+release reco-gui rebuilt
+again with the new checkbox - test paths:
+
+```
+D:\VOETBAL_VIDEO\RECO\worktree-async-detect\target\debug\reco-gui.exe
+D:\VOETBAL_VIDEO\RECO\worktree-async-detect\target\release\reco-gui.exe
+```
+
 **Not done**: not merged to `main`, only the Windows D3D11VA path gets
 real async behavior (every other residency still runs synchronously,
 unaffected). Whether to merge/promote out of "EXPERIMENTAL" is the
