@@ -72,6 +72,17 @@ pub struct AutocamUiConfig {
     /// session (measured ~400MB / ~8% on the reference machine, for a
     /// ~1.4x export speedup). Off by default.
     pub async_detect: bool,
+    /// EXPERIMENTAL: like `async_detect`, but runs Left/Right camera
+    /// inference on two dedicated worker threads instead of one, so
+    /// they can overlap instead of running back-to-back. No effect
+    /// unless `async_detect` is also set. Builds a THIRD detector
+    /// instance (extra VRAM on top of `async_detect`'s own extra
+    /// instance). Measured only a modest ~5-6% further speedup on the
+    /// reference machine (a consumer GPU without MPS doesn't truly run
+    /// two TensorRT contexts' kernels concurrently - each call gets
+    /// slower, eating most of the theoretical parallelism gain). Off
+    /// by default.
+    pub async_detect_dual: bool,
     /// Preset name used as the config base; visible knobs overlay it.
     pub preset: String,
     /// `"action"` or `"frame_all"`.
@@ -464,7 +475,34 @@ pub fn run_export(
             // thread. See `AutocamUiConfig::async_detect`'s doc comment
             // for the measured cost/benefit.
             #[cfg(feature = "ort")]
-            if matches!(result, Ok(true)) && ac.async_detect && ac.lookahead_secs > 0.0 {
+            if matches!(result, Ok(true))
+                && ac.async_detect
+                && ac.async_detect_dual
+                && ac.lookahead_secs > 0.0
+            {
+                let conf = autocam_config.confidence_threshold.unwrap_or(0.10);
+                match (
+                    reco_autocam::CpuYoloDetector::with_config(&ac.model_path, conf, Vec::new()),
+                    reco_autocam::CpuYoloDetector::with_config(&ac.model_path, conf, Vec::new()),
+                ) {
+                    (Ok(left), Ok(right)) => {
+                        let queue_depth =
+                            ((ac.lookahead_secs * info.fps).ceil() as usize).max(2);
+                        session.enable_async_detect_dual(
+                            Box::new(left),
+                            Box::new(right),
+                            queue_depth,
+                        );
+                        log::info!(
+                            "Export: EXPERIMENTAL async detect thread active, dual (queue depth {queue_depth})"
+                        );
+                    }
+                    (Err(e), _) | (_, Err(e)) => log::warn!(
+                        "Async AI detection (dual): could not load both detector instances \
+                         ({e}), continuing with synchronous detection"
+                    ),
+                }
+            } else if matches!(result, Ok(true)) && ac.async_detect && ac.lookahead_secs > 0.0 {
                 match reco_autocam::CpuYoloDetector::with_config(
                     &ac.model_path,
                     autocam_config.confidence_threshold.unwrap_or(0.10),
