@@ -1,4 +1,48 @@
-# Session handoff - 2026-08-15 (TGR_PC, continues 2026-08-12)
+# Session handoff - 2026-08-16 (TGR_PC, continues 2026-08-15)
+
+**2026-08-16: async detect thread - built, tested, measured end-to-end,
+real 1.42x export speedup.** Picks up the design from the entry below
+("export-speed fix #2") that was deliberately left unstarted on
+2026-08-15. User asked to build it this time, wanted it kept revertible
+- everything lives on an isolated worktree
+(`D:\VOETBAL_VIDEO\RECO\worktree-async-detect`) / branch
+(`feat/async-detect-thread`, 3 commits), `main` never touched.
+
+**What it does**: moves only the ORT `session.run()` inference call to
+a dedicated worker thread (GPU texture readback/preprocess stays
+synchronous - textures aren't safe to hand to another thread). New
+`UnifiedDetector::detect_split()` trait method (default = today's sync
+behavior, zero risk to any backend that doesn't override it),
+`AsyncDetectThread` (new, modeled on `async_encode.rs`), and solved the
+"ROI wrinkle" that stopped the original design - `RoiFilteredDetector`
+composes its own filtering onto the deferred result's `finish` closure
+instead of silently skipping it, explicitly regression-tested. Session
+wiring: `BufferedFrame.world_state` is now ready-or-pending, resolved
+lazily right before a frame is actually consumed
+(`run_panner_once`), with a stale-reuse fallback for the panner's
+lookahead peek - same pattern already used elsewhere for stale
+detections. New `reco-cli --async-detect` EXPERIMENTAL flag builds a
+second, separate detector instance for the worker thread.
+
+**Real measured result** (300-frame test, 03 OJC clip, RTX 3060 Ti,
+TensorRT, same model/settings otherwise):
+
+```
+baseline:        28.8s (10.4fps avg)
+--async-detect:  20.3s (14.8fps avg)   1.42x faster
+```
+
+Functional correctness verified bit-for-bit identical - both runs
+produce exactly 242/300 raw-ball-detection frames (80.7%), mean
+confidence 0.574. Doubles the detector's VRAM/session footprint (two
+loaded model instances) - a real cost, not measured in absolute terms
+on this machine yet.
+
+**Not done**: not merged to `main`, no `reco-gui` UI for it, only the
+Windows D3D11VA path gets real async behavior (every other residency
+still runs synchronously, unaffected). Whether to merge/promote out of
+"EXPERIMENTAL" is the user's call, not decided this session. See
+[[project_async_detect_thread_design]].
 
 Continuation note for resuming work on a different machine/session -
 git-tracked so it travels with `git pull`/`push` between the user's two
