@@ -1,12 +1,13 @@
 # Session handoff - 2026-08-16 (TGR_PC, continues 2026-08-15)
 
 **2026-08-16: async detect thread - built, tested, measured end-to-end,
-real 1.42x export speedup.** Picks up the design from the entry below
-("export-speed fix #2") that was deliberately left unstarted on
-2026-08-15. User asked to build it this time, wanted it kept revertible
-- everything lives on an isolated worktree
-(`D:\VOETBAL_VIDEO\RECO\worktree-async-detect`) / branch
-(`feat/async-detect-thread`, 3 commits), `main` never touched.
+real 1.42x export speedup, VRAM cost measured, reco-gui checkbox added.**
+Picks up the design from the entry below ("export-speed fix #2") that
+was deliberately left unstarted on 2026-08-15. User asked to build it
+this time, wanted it kept revertible - everything lives on an isolated
+worktree (`D:\VOETBAL_VIDEO\RECO\worktree-async-detect`) / branch
+(`feat/async-detect-thread`, 5 commits: foundation, session wiring, CLI
+flag, VRAM measurement docs, GUI checkbox), `main` never touched.
 
 **What it does**: moves only the ORT `session.run()` inference call to
 a dedicated worker thread (GPU texture readback/preprocess stays
@@ -34,15 +35,46 @@ baseline:        28.8s (10.4fps avg)
 
 Functional correctness verified bit-for-bit identical - both runs
 produce exactly 242/300 raw-ball-detection frames (80.7%), mean
-confidence 0.574. Doubles the detector's VRAM/session footprint (two
-loaded model instances) - a real cost, not measured in absolute terms
-on this machine yet.
+confidence 0.574.
 
-**Not done**: not merged to `main`, no `reco-gui` UI for it, only the
-Windows D3D11VA path gets real async behavior (every other residency
-still runs synchronously, unaffected). Whether to merge/promote out of
-"EXPERIMENTAL" is the user's call, not decided this session. See
-[[project_async_detect_thread_design]].
+**VRAM cost, measured** (`nvidia-smi` polled every 0.5s, same test,
+steady-state average not raw peak - baseline had a misleading transient
+startup spike above its own steady state):
+
+```
+baseline steady-state:       5226 MiB
+--async-detect steady-state: 5622 MiB   (+395 MiB, +7.6%)
+```
+
+Real but modest - not the "doubles the whole session" risk originally
+flagged, because only the detector's own footprint (TensorRT
+engine+workspace) duplicates, not the much larger shared lookahead
+VramPool.
+
+**reco-gui checkbox added**: Export dialog, "Async AI detection
+(experimental, faster export)" right below "Reduce lookahead memory
+(8-bit)". Mirrors `--async-detect` 1:1. Deliberately NOT persisted in
+AutocamDefaults (calibration or app-level) - always resets to off on
+restart, unlike every other AI Tracking slider, so the experimental
+flag can't silently stay on via a saved calibration. `check`/`clippy
+-D warnings`/`fmt` all clean, committed (`fdffb740`). Both debug and
+release `reco-gui.exe` built **in the worktree's own `target/`** (not
+the main checkout's usual build output):
+
+```
+D:\VOETBAL_VIDEO\RECO\worktree-async-detect\target\debug\reco-gui.exe
+D:\VOETBAL_VIDEO\RECO\worktree-async-detect\target\release\reco-gui.exe
+```
+
+To test: load a calibration, AI Tracking on with a model + lookahead >
+0, tick the checkbox in Export, run an export and compare against one
+with it unticked.
+
+**Not done**: not merged to `main`, only the Windows D3D11VA path gets
+real async behavior (every other residency still runs synchronously,
+unaffected). User has not yet tested the GUI checkbox themselves.
+Whether to merge/promote out of "EXPERIMENTAL" is the user's call, not
+decided this session. See [[project_async_detect_thread_design]].
 
 Continuation note for resuming work on a different machine/session -
 git-tracked so it travels with `git pull`/`push` between the user's two
