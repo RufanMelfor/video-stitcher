@@ -1028,6 +1028,15 @@ export component RecoApp inherits Window {
     // the buffered frames feed both AI tracking and the stitch render.
     // Off by default.
     in-out property <bool> export-lookahead-reduced-bit-depth: false;
+    // EXPERIMENTAL: run the detector's inference call on a dedicated
+    // background thread instead of blocking the decode/stitch/encode
+    // loop (see reco-core's `async_detect` module). Only affects the
+    // buffered/export loop (lookahead > 0). Builds a second, separate
+    // detector instance - a real but modest VRAM cost (~400MB / ~8% on
+    // the reference machine's 8GB card, not a doubling of the whole
+    // session), for a measured ~1.4x export speedup. Off by default -
+    // still experimental, not yet the recommended setting.
+    in-out property <bool> export-async-detect: false;
     in-out property <string> export-framing: "action";
     in-out property <bool> export-lock-pitch: false;
     in-out property <string> export-cluster-mode: "density";
@@ -1058,6 +1067,7 @@ export component RecoApp inherits Window {
     changed export-panner-preset => { root.autocam-settings-changed(); }
     changed export-lookahead-secs => { root.autocam-settings-changed(); }
     changed export-lookahead-reduced-bit-depth => { root.autocam-settings-changed(); }
+    changed export-async-detect => { root.autocam-settings-changed(); }
     changed export-framing => { root.autocam-settings-changed(); }
     changed export-lock-pitch => { root.autocam-settings-changed(); }
     changed export-cluster-mode => { root.autocam-settings-changed(); }
@@ -4748,6 +4758,14 @@ export component RecoApp inherits Window {
                             CheckBox {
                                 text: "Reduce lookahead memory (8-bit)";
                                 checked <=> root.export-lookahead-reduced-bit-depth;
+                            }
+                        }
+
+                        Tip {
+                            tip: "EXPERIMENTAL: runs AI detection's inference call on a background thread instead of blocking the export loop - AI detection is typically the single biggest export-speed bottleneck. Measured ~1.4x faster export on the reference test (no change to detection results, purely a timing change). Costs a real but modest extra ~400MB VRAM (a second loaded model instance), not a doubling of the whole session. Only affects the buffered/export loop (needs Lookahead > 0) - still experimental, off by default.";
+                            CheckBox {
+                                text: "Async AI detection (experimental, faster export)";
+                                checked <=> root.export-async-detect;
                             }
                         }
 
