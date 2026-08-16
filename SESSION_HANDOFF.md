@@ -128,17 +128,38 @@ D:\VOETBAL_VIDEO\RECO\worktree-async-detect\target\debug\reco-gui.exe
 D:\VOETBAL_VIDEO\RECO\worktree-async-detect\target\release\reco-gui.exe
 ```
 
-**Next ideas raised, none started yet** - user asked for a different
-strategy: (a) `--detection-interval > 1` (skip frames, zero new code,
-already exists); (b) batch Left+Right into one TensorRT call instead
-of two sequential ones (`best_batch2.onnx` already exported at
+**Next ideas raised** - user asked for a different strategy: (a)
+`--detection-interval > 1` - turned out to already be in daily use,
+same thing as the GUI's existing "Detect every N frames" slider
+(default 3), nothing to build; (b) batch Left+Right into one TensorRT
+call instead of two sequential ones (`best_batch2.onnx` already
+exported at
 `D:\VOETBAL_VIDEO\RECO\training\round4\runs\yolo26s_tiled1920_full\weights\`
-from an earlier experiment; doesn't have dual-worker's concurrent-
-context contention problem, but an earlier *different* batching
-experiment - SAHI tiles of one camera, not two distinct cameras -
-found batching slower, so needs its own real measurement, not
-assumed); (c) TensorRT CUDA graphs (`trt_cuda_graph_enable`, currently
-off) to cut kernel-launch overhead - new code, uncertain payoff.
+from an earlier experiment) - **not tried yet**, the only untried idea
+left; (c) TensorRT CUDA graphs - **tried, CRASHED**.
+
+**(c) CUDA graphs: `.with_cuda_graph(true)` on the TensorRT EP builder
+crashed the async detect thread mid-export** (`expected typeinfo_ptr
+to not be null` in ort-rs's value/mod.rs, ~150-200 frames into a
+300-frame run). Worse than just "no speedup" - the thread died and the
+export **silently kept running to completion** with frozen/stale
+detections for the rest of the clip instead of erroring loudly. A real
+correctness risk. Reverted immediately (commit `04796401`), TensorRT
+engine cache restored from a pre-attempt backup, no second timing run
+attempted. Left a code comment on the likely real fix (IoBinding with
+pinned buffers instead of a fresh `Vec<f32>` per call) for whoever
+revisits this.
+
+**All three post-single-worker attempts this session were dead ends**
+(poll-wait fix: no effect: dual-worker: no real win, reverted by user
+choice; CUDA graphs: crashed, reverted). The shipped single-worker
+async-detect fix (1.22-1.42x, confirmed both CLI and GUI) remains the
+one solid win. Diminishing/negative returns on further easy levers for
+this model/GPU/EP combo - (b) batching L+R is the only untried idea
+left, worth trying next if the user wants to keep going, but the
+earlier SAHI-tile batching experiment's negative result (324ms vs
+213ms sequential, a *different* batching scenario) means it's not a
+safe bet either.
 
 **Not done**: not merged to `main`, only the Windows D3D11VA path gets
 real async behavior (every other residency still runs synchronously,
