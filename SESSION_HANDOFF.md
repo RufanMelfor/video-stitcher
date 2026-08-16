@@ -150,16 +150,28 @@ attempted. Left a code comment on the likely real fix (IoBinding with
 pinned buffers instead of a fresh `Vec<f32>` per call) for whoever
 revisits this.
 
-**All three post-single-worker attempts this session were dead ends**
-(poll-wait fix: no effect: dual-worker: no real win, reverted by user
-choice; CUDA graphs: crashed, reverted). The shipped single-worker
+**(b) batch L+R into one TensorRT call, measured via a standalone
+throwaway benchmark instead of building full integration first**
+(`crates/reco-detect/examples/bench_lr_batch.rs`, commit `d1df4e0c`) -
+pure inference-latency comparison, no video/pipeline involved. **1.06x
+- real but modest** (51.1ms sequential vs 48.3ms batched per produce
+index), no downside risk unlike the other two attempts, but requires a
+specially-exported fixed-batch=2 ONNX (`best_batch2.onnx`) rather than
+whatever a normal training run produces - real UX friction for a small
+win. **Session paused here on the user's call** ("we stoppen even
+hier") rather than building the `AsyncDetectThread`/CLI/GUI
+integration for it.
+
+**Summary of all four post-single-worker attempts this session**:
+poll-wait fix (no effect, kept, harmless); dual-worker (no real win,
+reverted after the user tested it themselves in the GUI); CUDA graphs
+(CRASHED the detect thread, reverted); batch L+R (modest 1.06x,
+measured but not integrated, paused). The shipped single-worker
 async-detect fix (1.22-1.42x, confirmed both CLI and GUI) remains the
-one solid win. Diminishing/negative returns on further easy levers for
-this model/GPU/EP combo - (b) batching L+R is the only untried idea
-left, worth trying next if the user wants to keep going, but the
-earlier SAHI-tile batching experiment's negative result (324ms vs
-213ms sequential, a *different* batching scenario) means it's not a
-safe bet either.
+one solid win from today. If picking this back up: batching is the
+only remaining real (if small) lever, blocked on deciding how to
+surface the "needs a batch2-exported model" requirement to a
+non-technical user.
 
 **Not done**: not merged to `main`, only the Windows D3D11VA path gets
 real async behavior (every other residency still runs synchronously,
