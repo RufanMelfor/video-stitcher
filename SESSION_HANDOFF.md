@@ -12,6 +12,133 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
+**Overnight, 2026-08-15/16: SAHI-style left/right tiled training -
+built, trained, exported, real-footage tested end-to-end while the user
+slept - a real, sizeable win, but the real-footage numbers need an
+honest asterisk (see below).** User asked to try the research idea noted
+in the 2026-08-14 entry (splitting each 3840x2880 frame into two
+overlapping square crops instead of one letterboxed square), explicitly
+wanted a small feasibility test first before committing to more, then
+delegated the whole rest of the sequence (full train -> ONNX -> real-
+footage test -> repo cleanup) before going to bed.
+
+**Dataset built and verified before training anything**: each round4
+image -> two overlapping 2880x2880 crops (left x=[0,2880], right
+x=[960,3840], 1920px overlap band) resized to 1920x1920 (2880 itself is
+too large to train at directly, per the user's own sizing call).
+Zero letterbox waste vs the old approach's ~25% wasted canvas on a
+straight 3840x2880->square fit - and critically, the *scale factor* is
+much gentler: old approach scales the whole frame 3840->1920 (0.5x, an
+~18px ball becomes ~9px); this approach only scales 2880->1920 (0.67x,
+same ball stays ~12px). Labels transformed (crop-offset + scale, box kept
+if its center falls in the tile, so overlap-band objects appear in both
+tiles) from 258 source images -> 516 tiles (438 train/78 val). **Verified
+correct before training** by drawing transformed boxes back onto a random
+sample of tiles - all tight and correctly placed, not assumed.
+
+**8-epoch feasibility smoke test, as the user asked for first**: fresh
+`yolo26s.pt`, imgsz=1920 (matches tile size exactly), batch=2/workers=2.
+Result far exceeded the non-tiled 1920 8-epoch smoke test from
+2026-08-14/15 at the same epoch count - ball P/R/mAP50/mAP50-95
+1.000/0.703/0.719/0.456 vs the old approach's 0.448/0.389/-/0.230.
+Verdict: clearly worth a full run.
+
+**Full training, patience=100 (same convention as every other round)**:
+early-stopped at epoch 159 (best @ epoch **59**). Held up after full
+convergence, not just an early-epoch artifact:
+
+```
+              old (round4 1920-final, non-tiled, post-labelfix)   new (tiled, best@59)
+ball P              0.921                                          0.987
+ball R               0.471                                          0.708
+ball mAP50           0.500                                          0.742
+ball mAP50-95         0.338                                          0.507
+```
+
+~50% relative improvement on recall and mAP50-95 on the LS held-out val
+split (same caveat as always - 17-24 ball instances, real but small
+sample). Checkpoint:
+`round4/runs/yolo26s_tiled1920_full/weights/{best.pt,best.onnx}`.
+
+**ONNX export**: `nms=True` forced off by ultralytics itself (YOLO26 is
+end2end/NMS-free, expected, zero-effect flag per every prior round's own
+finding) - verified metadata directly: `1x3x1920x1920` in, `1x300x6` out,
+names `{0:person,1:ball,2:referee}`, matches every prior checkpoint's
+convention.
+
+**Back-to-back real-footage test - a genuinely important methodology
+caveat found, not swept under the rug.** Extracted all 899 frames
+(t=100-130s, both cameras) fresh via `ffmpeg -ss 100 -c:v hevc_cuvid`
+sequential decode (the Rust `dump_detection_frames` tool wasn't
+rebuilt this run, `target/` had just been cleaned - see below), then ran
+both the old and new checkpoint's own `model.predict()` directly in
+Python on every frame (both cameras, tiled model gets both crops merged),
+identical methodology for both models, conf floor 0.10:
+
+```
+                          old (full-frame)   new (tiled)
+overall raw-ball rate      765/899 (85.1%)    860/899 (95.7%)
+frames 720-898 window       85/179 (47.5%)    140/179 (78.2%)
+frames 690-719 window       30/30 (100%)       30/30 (100%)
+mean confidence (hits)      0.64                0.55
+```
+
+New model detects more, in both the overall rate and the window
+historically labeled "hard" - **but the absolute numbers here do NOT
+match every previous round's documented numbers on this exact clip/
+window** (round4's own real-app test reported 49.1% overall / 0-18/179
+in frames 720-898, not 85%/47.5%). Investigated rather than just
+reporting the flattering framing: spot-checked frame 720 directly - the
+**old** model scores 0.92 confidence there in this test, nothing like the
+near-zero the historical "hard zone" would predict. **Conclusion: this
+re-extraction's frame indices don't line up with the historical
+frame-720-898 window** (ffmpeg's `-ss 100` sequential decode start point
+isn't guaranteed to land on the same real match instant as the Rust
+pipeline's own D3D11 seek+decode path used in every prior round) - this
+test is sampling different real seconds of the match, not the same
+"known-hard" stretch. **What this test IS still valid evidence for**:
+old vs new ran under byte-identical methodology (same frames, same conf
+floor, same code path) - the new model detecting the ball meaningfully
+more often across this fresh, arbitrary 30s window is a real, independent
+signal in the same direction as the controlled LS-metrics result above,
+just not a confirmation that the *specific* historical 720-898 gap is
+now 78% solved. **A real frame-index-accurate re-test (via the actual
+Rust decode pipeline, once dual-tile inference exists there - see below)
+is the next real validation step, not done tonight.**
+
+**Not done, deliberately, both genuinely bigger jobs**:
+- **No dual-tile inference wiring in `reco-detect`/`reco-autocam`** - this
+  checkpoint cannot be dropped into the live app as-is; it needs 2 forward
+  passes per camera per frame (left+right tile) merged with overlap-band
+  dedup, not the 1 pass every other checkpoint uses. Given last night's
+  own finding that AI detection already consumes ~87% of frame time
+  (see the async-detect-thread entry below), doubling per-camera
+  inference cost is a real, serious trade-off to weigh deliberately with
+  the user, not decide unsupervised overnight.
+- **No frame-accurate re-validation via the real Rust pipeline** - the
+  back-to-back test above is Python-side and has the frame-indexing
+  caveat spelled out above.
+
+**Repository cleanup** (`D:\VOETBAL_VIDEO\RECO\repository`): removed
+stray untracked clutter - `reco-trace.json` (20MB stale profiling
+trace), `yolo26n.pt`/`yolo26s.pt` (26MB, misplaced in the repo root, not
+part of the Rust project), `scripts/__pycache__/`. Ran `cargo clean` to
+reclaim `target/` disk space - **partially failed** (`target/debug`
+couldn't be removed, Windows file-lock, "os error 32" - some process
+still had a handle on it). Deliberately left untouched: `.cargo/`
+(checked - just `target-dir = "target"`, harmless but pointless to
+delete) and `.claude/` (Claude Code's own directory - never touch).
+**Consequence for next session**: the next `reco-gui.exe`/`reco.exe`
+build will be a full rebuild, not incremental - budget more time than
+usual. 1 commit (the label-QA audit log) is committed locally but not
+pushed, per the "push only when asked" default.
+
+**Next step, user's call**: decide whether the tiling win is worth the
+2x-inference-cost trade-off enough to build the dual-tile
+`reco-detect`/`reco-autocam` wiring, and/or get a frame-accurate
+real-pipeline re-test before fully trusting the back-to-back numbers
+above. See [[project_yolo26n_training_pipeline]].
+
 **2026-08-15: full independent ball-label QA audit on round4's 258-task
 set - found + fixed 6 real mislabels, a genuine recurring pattern (not
 isolated as the same-day root-cause note below originally concluded).**
