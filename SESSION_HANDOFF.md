@@ -12,6 +12,60 @@ manager" / `zerotier-cli listnetworks` instead.
 
 ## Immediate state / what to do next
 
+**2026-08-16: dual-tile inference cost, profiled for real (not
+estimated) - research concluded by the user, nothing merged.** Direct
+follow-on from the overnight tiled-training entry below. User asked for
+a real `--features profiling` measurement before deciding whether to
+build production tiled-inference support, explicitly wanted it
+revertible - built entirely on an isolated branch,
+`experiment/tiled-dual-inference-profiling` (2 commits, off `main`, not
+merged - revert is `git checkout main` or delete the branch; `main` was
+never touched).
+
+**Two variants measured, same 300-frame profiling run each time (03 OJC
+clip, RTX 3060 Ti, TensorRT), same `yolo26s_tiled1920_full` weights
+throughout so only the call pattern differs**:
+
+```
+                        baseline (1x)   sequential 2x calls   batched 1x(batch=2)
+detect/camera-frame     100.9ms         213.6ms (2.12x)       324.3ms (3.21x)
+throughput              9.1fps          4.1fps                2.8fps
+raw-ball-detection      80.7%           88.0%                 88.0% (identical)
+```
+
+**Sequential wins over batched** - counterintuitive, verified not a bug:
+functionally identical detection rate confirms the batching logic itself
+is correct (same weights, same math, just one combined ORT call instead
+of two) - the regression is a real TensorRT/GPU characteristic on this
+hardware (a fixed batch=2 engine apparently isn't as well-optimized as
+batch=1 for this model/GPU combo), not a code defect. Needed a separate
+`best_batch2.onnx` export (fixed batch=2 input shape - ORT rejects a
+mismatched batch axis) kept apart from the normal `best.onnx`.
+
+**Verification method worth remembering for next time**: confirmed which
+code path actually ran via trace **span counts** (`yolo_inference`
+occurrences), not log output or wall-clock alone - `--features
+profiling` builds silently drop ALL `log::*` calls (`init_profiling()`
+in `reco-cli/src/main.rs` never bridges the `log` facade, unlike the
+non-profiling `init_tracing()` path) - a real gap, not something this
+session broke, worth knowing before trusting log output in any future
+profiling session.
+
+**Bonus**: this doubled as the frame-accurate real-pipeline back-to-back
+test that the overnight entry below flagged as missing - these
+raw-ball-detection numbers (80.7%/88.0%) come from the real Rust decode+
+detect pipeline, not the ffmpeg-approximate Python re-test that had the
+frame-index-alignment caveat.
+
+**Conclusion, user's call, research closed**: the tiling win is real (on
+both the LS val split and now real frame-accurate footage), but costs
+~2.1x detection time at best (unbatched; batching made it worse here) -
+user decided not to pursue production wiring further this session. If
+picked up again later: the sequential variant
+(`TiledWgpuPreprocessingDetector`, `RECO_TILED_DETECT=1`) is the one
+worth building on, not the batched one. See
+[[project_yolo26n_training_pipeline]].
+
 **Overnight, 2026-08-15/16: SAHI-style left/right tiled training -
 built, trained, exported, real-footage tested end-to-end while the user
 slept - a real, sizeable win, but the real-footage numbers need an
