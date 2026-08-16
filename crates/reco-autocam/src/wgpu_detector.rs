@@ -5,7 +5,9 @@
 //! the `WgpuPreprocessor` compute shader before delegating to the
 //! inner detector with `DetectorFrame::PreprocessedChw`.
 
-use reco_core::detect::detector::{Detection, DetectorError, DetectorFrame, UnifiedDetector};
+use reco_core::detect::detector::{
+    DetectSplit, Detection, DetectorError, DetectorFrame, PendingDetection, UnifiedDetector,
+};
 use reco_core::geometry::CameraId;
 use reco_detect::wgpu_preprocess::WgpuPreprocessor;
 
@@ -82,5 +84,54 @@ impl UnifiedDetector for WgpuPreprocessingDetector {
 
     fn class_names(&self) -> Option<&[String]> {
         self.inner.class_names()
+    }
+
+    /// Async split: GPU readback + preprocess stays synchronous here
+    /// (the source textures are borrowed from a small reusable staging
+    /// ring, not safe to hand to another thread) and produces an owned
+    /// tensor; the actual inference call - the expensive part, and the
+    /// part that's pure CPU/GPU-inference-engine work with no shared
+    /// resource to protect - is deferred via [`DetectSplit::Pending`]
+    /// for an `AsyncDetectThread` to run.
+    fn detect_split(
+        &mut self,
+        camera: CameraId,
+        frame: &DetectorFrame<'_>,
+    ) -> Result<DetectSplit, DetectorError> {
+        match frame {
+            DetectorFrame::WgpuNv12 {
+                y_view,
+                uv_view,
+                width,
+                height,
+                rotation,
+            } => {
+                let tensor = self.preprocessor.preprocess(
+                    &self.device,
+                    &self.queue,
+                    y_view,
+                    uv_view,
+                    *rotation,
+                );
+                Ok(DetectSplit::Pending {
+                    job: PendingDetection {
+                        camera,
+                        tensor,
+                        input_size: self.preprocessor.input_size(),
+                        src_width: *width,
+                        src_height: *height,
+                    },
+                    // Nothing left for this wrapper to do once the
+                    // deferred inference call returns - the inner
+                    // detector's own postprocessing (coordinate
+                    // un-letterboxing, normalization) already happens
+                    // inside that deferred call.
+                    finish: Box::new(|dets| dets),
+                })
+            }
+            // Frame kinds this wrapper doesn't add async support for -
+            // fall back to the synchronous path unchanged.
+            other => Ok(DetectSplit::Done(self.inner.detect(camera, other)?)),
+        }
     }
 }
