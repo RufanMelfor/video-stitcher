@@ -256,6 +256,17 @@ enum Commands {
         #[arg(long)]
         lookahead_reduced_bit_depth: bool,
 
+        /// EXPERIMENTAL: run the detector's expensive inference call on
+        /// a dedicated background thread instead of blocking the
+        /// decode/stitch/encode loop (see reco-core's `async_detect`
+        /// module). Requires --model and --lookahead > 0 (only the
+        /// buffered/export loop uses this - a plain stitch or the
+        /// immediate/no-lookahead path is unaffected). Builds a second,
+        /// separate detector instance for the worker thread - doubles
+        /// the detector's own VRAM/session footprint.
+        #[arg(long)]
+        async_detect: bool,
+
         /// Tracking mode: "field" (ball + players, default), "ball"
         /// (ball only), "sweep" (no AI, debug pan). field is robust with
         /// COCO models; ball-only follows the weak COCO ball alone.
@@ -928,6 +939,7 @@ fn main() -> anyhow::Result<()> {
             detection_interval,
             lookahead,
             lookahead_reduced_bit_depth,
+            async_detect,
             tracking,
             quality_value,
             preset,
@@ -969,6 +981,7 @@ fn main() -> anyhow::Result<()> {
                 detection_interval,
                 lookahead,
                 lookahead_reduced_bit_depth,
+                async_detect,
                 tracking_mode: &tracking,
                 quality_value,
                 preset,
