@@ -398,6 +398,13 @@ pub struct PendingDetection {
     pub src_height: u32,
 }
 
+/// Post-processing to re-apply to an async-resolved raw detection
+/// result - see [`DetectSplit::Pending`]. `Send + 'static` because a
+/// caller may need to store it (e.g. keyed by produce index) until the
+/// result arrives; it still only ever runs on the thread that receives
+/// that result, never inside the worker itself.
+pub type FinishFn = Box<dyn FnOnce(Vec<Detection>) -> Vec<Detection> + Send>;
+
 /// Result of [`UnifiedDetector::detect_split`].
 pub enum DetectSplit {
     /// Synchronous result, ready now.
@@ -416,11 +423,7 @@ pub enum DetectSplit {
         /// The deferred work.
         job: PendingDetection,
         /// Post-processing to re-apply to the worker's raw result.
-        /// `Send + 'static` because a caller may need to store it
-        /// (e.g. keyed by produce index) until the result arrives;
-        /// it still only ever runs on the thread that receives that
-        /// result, never inside the worker itself.
-        finish: Box<dyn FnOnce(Vec<Detection>) -> Vec<Detection> + Send>,
+        finish: FinishFn,
     },
 }
 

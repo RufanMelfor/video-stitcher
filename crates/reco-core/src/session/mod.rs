@@ -182,6 +182,18 @@ pub struct StitchSession {
     /// Used by reco-cli's snapshot writer for periodic JPEG output.
     /// The callback receives `(nv12_data, width, height)`.
     pub(crate) nv12_tap: Option<Nv12TapFn>,
+    /// Async detect thread for the buffered/export produce loop (see
+    /// [`crate::async_detect`]). `None` = fully synchronous detection
+    /// on every path (today's behavior, unchanged) - this is opt-in via
+    /// [`enable_async_detect`](Self::enable_async_detect). The
+    /// immediate/live-preview path (`process_frame_any`) never reads
+    /// this field; only `run_buffered`'s produce/resolve loop does.
+    pub(crate) async_detect: Option<crate::async_detect::AsyncDetectThread>,
+    /// Post-processing closures for produce indices whose detection is
+    /// still in flight on `async_detect`, keyed by produce index.
+    /// Applied once that index's result comes back - see
+    /// `resolve_pending_world_state` in `detection_dispatch.rs`.
+    pub(crate) pending_finishers: std::collections::HashMap<u64, crate::detect::detector::FinishFn>,
 }
 
 impl StitchSession {
@@ -293,6 +305,8 @@ impl StitchSession {
             gpu_pixel_format: crate::render::renderer::GpuPixelFormat::Nv12,
             is_full_range: false,
             nv12_tap: None,
+            async_detect: None,
+            pending_finishers: std::collections::HashMap::new(),
         })
     }
 

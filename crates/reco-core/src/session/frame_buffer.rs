@@ -12,10 +12,42 @@ use crate::detect::director::MappedDetection;
 use crate::detect::tracker::WorldState;
 use crate::source::StereoFrame;
 
+/// A [`BufferedFrame`]'s detection/tracking state - either resolved
+/// (today's fully-synchronous behavior) or still in flight on an
+/// [`crate::async_detect::AsyncDetectThread`], resolved lazily right
+/// before the frame is actually consumed (see
+/// `run_loop::run_panner_once`'s resolution step, and
+/// `detection_dispatch::resolve_pending_world_state`).
+#[derive(Clone)]
+pub(crate) enum PendingWorldState {
+    /// Detection already ran synchronously (async disabled, or this
+    /// frame's detector call didn't split) - the value every session
+    /// produced before async detect existed.
+    Ready(WorldState),
+    /// Detection submitted to the async thread under this produce
+    /// index; not resolved yet.
+    Pending(u64),
+}
+
+impl PendingWorldState {
+    /// The resolved state if available, else `fallback` - used by
+    /// [`FrameBuffer::future_world_states`]'s lookahead peek, which
+    /// must not block waiting on results that aren't due to be
+    /// consumed yet. Matches the existing stale-detection-reuse
+    /// pattern already used elsewhere in the panner (last known state
+    /// stands in until a fresher one arrives).
+    fn resolved_or(&self, fallback: &WorldState) -> WorldState {
+        match self {
+            PendingWorldState::Ready(ws) => ws.clone(),
+            PendingWorldState::Pending(_) => fallback.clone(),
+        }
+    }
+}
+
 /// A single buffered frame: decoded pixels + detection metadata.
 pub(crate) struct BufferedFrame {
     pub frame: StereoFrame,
-    pub world_state: WorldState,
+    pub world_state: PendingWorldState,
     pub detections: Vec<MappedDetection>,
     pub elapsed_ms: f64,
     pub decode_time: std::time::Duration,
@@ -32,6 +64,12 @@ pub(crate) struct BufferedFrame {
 pub(crate) struct FrameBuffer {
     frames: VecDeque<BufferedFrame>,
     capacity: usize,
+    /// Most recently resolved `WorldState` - the lookahead fallback for
+    /// any frame still `Pending` when `future_world_states()` peeks at
+    /// it. Starts as `WorldState::default()` (no ball/players) before
+    /// the first frame ever resolves, matching how a session with no
+    /// detections yet already behaves.
+    last_resolved: WorldState,
 }
 
 impl FrameBuffer {
@@ -39,7 +77,18 @@ impl FrameBuffer {
         Self {
             frames: VecDeque::with_capacity(capacity),
             capacity,
+            last_resolved: WorldState::default(),
         }
+    }
+
+    /// Record a freshly resolved `WorldState` as the new lookahead
+    /// fallback. Call this whenever a `Pending` frame gets resolved
+    /// (see `run_panner_once`) - FIFO submission order guarantees
+    /// every frame still `Pending` in the buffer at that point is for
+    /// a produce index *after* the one just resolved, so this is
+    /// always the most current fallback available.
+    pub fn set_last_resolved(&mut self, ws: WorldState) {
+        self.last_resolved = ws;
     }
 
     pub fn len(&self) -> usize {
@@ -67,9 +116,15 @@ impl FrameBuffer {
 
     /// Collect future WorldStates from all frames currently in the
     /// buffer, ordered nearest-to-farthest. Used as the lookahead
-    /// window for `Panner::decide_with_lookahead`.
+    /// window for `Panner::decide_with_lookahead`. Entries still
+    /// `Pending` (async detect hasn't resolved them yet) fall back to
+    /// the last resolved `WorldState` rather than blocking - see
+    /// [`PendingWorldState::resolved_or`].
     pub fn future_world_states(&self) -> Vec<WorldState> {
-        self.frames.iter().map(|f| f.world_state.clone()).collect()
+        self.frames
+            .iter()
+            .map(|f| f.world_state.resolved_or(&self.last_resolved))
+            .collect()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -94,7 +149,7 @@ mod tests {
                     uv: vec![128; 2],
                 },
             }),
-            world_state: WorldState {
+            world_state: PendingWorldState::Ready(WorldState {
                 ball: Some(TrackedEntity {
                     id: 0,
                     class_id: 0,
@@ -106,7 +161,7 @@ mod tests {
                     origin: crate::geometry::CameraId::Left,
                 }),
                 players: vec![],
-            },
+            }),
             detections: vec![],
             elapsed_ms: 0.0,
             decode_time: std::time::Duration::from_millis(3),
@@ -115,7 +170,10 @@ mod tests {
     }
 
     fn ball_yaw(f: &BufferedFrame) -> f32 {
-        f.world_state.ball.as_ref().unwrap().yaw
+        let PendingWorldState::Ready(ws) = &f.world_state else {
+            panic!("test frames are always Ready");
+        };
+        ws.ball.as_ref().unwrap().yaw
     }
 
     #[test]
@@ -171,5 +229,72 @@ mod tests {
         let mut buf = FrameBuffer::new(1);
         buf.push(make_frame(0.0));
         buf.push(make_frame(0.0));
+    }
+
+    fn make_pending_frame(produce_index: u64) -> BufferedFrame {
+        let mut f = make_frame(0.0);
+        f.world_state = PendingWorldState::Pending(produce_index);
+        f
+    }
+
+    #[test]
+    fn pending_frame_falls_back_to_last_resolved_without_blocking() {
+        let mut buf = FrameBuffer::new(5);
+        // No frame has ever resolved yet - fallback is the default
+        // (empty) WorldState.
+        buf.push(make_pending_frame(0));
+        let futures = buf.future_world_states();
+        assert_eq!(futures.len(), 1);
+        assert!(futures[0].ball.is_none());
+    }
+
+    #[test]
+    fn pending_frame_uses_most_recent_resolved_fallback() {
+        let mut buf = FrameBuffer::new(5);
+        buf.push(make_pending_frame(0));
+        buf.set_last_resolved(WorldState {
+            ball: Some(TrackedEntity {
+                id: 7,
+                class_id: 0,
+                yaw: 0.42,
+                pitch: 0.0,
+                confidence: 0.5,
+                state: TrackState::Tracking,
+                age_frames: 3,
+                origin: crate::geometry::CameraId::Right,
+            }),
+            players: vec![],
+        });
+        let futures = buf.future_world_states();
+        assert!((futures[0].ball.as_ref().unwrap().yaw - 0.42).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ready_and_pending_frames_mix_correctly() {
+        let mut buf = FrameBuffer::new(5);
+        buf.push(make_frame(0.1)); // Ready
+        buf.push(make_pending_frame(1)); // Pending - falls back
+        buf.set_last_resolved(WorldState {
+            ball: Some(TrackedEntity {
+                id: 0,
+                class_id: 0,
+                yaw: 0.99,
+                pitch: 0.0,
+                confidence: 0.5,
+                state: TrackState::Tracking,
+                age_frames: 1,
+                origin: crate::geometry::CameraId::Left,
+            }),
+            players: vec![],
+        });
+        let futures = buf.future_world_states();
+        assert!(
+            (futures[0].ball.as_ref().unwrap().yaw - 0.1).abs() < 1e-6,
+            "Ready frame keeps its own value"
+        );
+        assert!(
+            (futures[1].ball.as_ref().unwrap().yaw - 0.99).abs() < 1e-6,
+            "Pending frame uses the fallback"
+        );
     }
 }
