@@ -267,15 +267,6 @@ enum Commands {
         #[arg(long)]
         async_detect: bool,
 
-        /// EXPERIMENTAL: like --async-detect, but runs Left/Right camera
-        /// inference on two dedicated worker threads instead of one, so
-        /// they can overlap instead of running back-to-back. Requires
-        /// --async-detect to also be set. Builds a THIRD detector
-        /// instance (one more than --async-detect alone) - extra VRAM
-        /// cost on top of an already-doubled footprint.
-        #[arg(long, requires = "async_detect")]
-        async_detect_dual: bool,
-
         /// Tracking mode: "field" (ball + players, default), "ball"
         /// (ball only), "sweep" (no AI, debug pan). field is robust with
         /// COCO models; ball-only follows the weak COCO ball alone.
@@ -949,7 +940,6 @@ fn main() -> anyhow::Result<()> {
             lookahead,
             lookahead_reduced_bit_depth,
             async_detect,
-            async_detect_dual,
             tracking,
             quality_value,
             preset,
@@ -992,7 +982,6 @@ fn main() -> anyhow::Result<()> {
                 lookahead,
                 lookahead_reduced_bit_depth,
                 async_detect,
-                async_detect_dual,
                 tracking_mode: &tracking,
                 quality_value,
                 preset,

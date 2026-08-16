@@ -5051,7 +5051,6 @@ fn main() -> anyhow::Result<()> {
             lookahead_secs: app.get_export_lookahead_secs() as f64,
             lookahead_reduced_bit_depth: app.get_export_lookahead_reduced_bit_depth(),
             async_detect: app.get_export_async_detect(),
-            async_detect_dual: app.get_export_async_detect_dual(),
             preset: app.get_export_panner_preset().to_string(),
             framing: app.get_export_framing().to_string(),
             lock_pitch: app.get_export_lock_pitch(),
