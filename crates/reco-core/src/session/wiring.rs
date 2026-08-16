@@ -80,6 +80,30 @@ impl StitchSession {
         ));
     }
 
+    /// Like [`enable_async_detect`](Self::enable_async_detect), but runs
+    /// Left and Right camera inference on two dedicated worker threads
+    /// (see [`crate::async_detect::AsyncDetectThread::new_dual`]) so
+    /// they can overlap instead of running back-to-back on one thread.
+    ///
+    /// `left_detector`/`right_detector` must each be **separate
+    /// instances**, distinct from `set_detector`'s own and from each
+    /// other - three loaded model instances total when combined with
+    /// the sync fallback path (one more than
+    /// [`enable_async_detect`](Self::enable_async_detect)'s two), each
+    /// accepting `DetectorFrame::PreprocessedChw` directly.
+    pub fn enable_async_detect_dual(
+        &mut self,
+        left_detector: Box<dyn crate::detect::detector::UnifiedDetector>,
+        right_detector: Box<dyn crate::detect::detector::UnifiedDetector>,
+        queue_depth: usize,
+    ) {
+        self.async_detect = Some(crate::async_detect::AsyncDetectThread::new_dual(
+            left_detector,
+            right_detector,
+            queue_depth,
+        ));
+    }
+
     /// Set the detection interval (run detection every N frames).
     ///
     /// Default is 1 (every frame). Higher values reduce detection CPU load

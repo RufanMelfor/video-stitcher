@@ -1037,6 +1037,14 @@ export component RecoApp inherits Window {
     // session), for a measured ~1.4x export speedup. Off by default -
     // still experimental, not yet the recommended setting.
     in-out property <bool> export-async-detect: false;
+    // EXPERIMENTAL: like export-async-detect, but runs Left/Right camera
+    // inference on two dedicated worker threads instead of one. No effect
+    // unless export-async-detect is also on. Builds a THIRD detector
+    // instance (extra VRAM on top of export-async-detect's own extra
+    // instance). Measured only a modest ~5-6% further speedup on the
+    // reference machine - a consumer GPU without MPS doesn't truly run
+    // two TensorRT contexts' kernels concurrently. Off by default.
+    in-out property <bool> export-async-detect-dual: false;
     in-out property <string> export-framing: "action";
     in-out property <bool> export-lock-pitch: false;
     in-out property <string> export-cluster-mode: "density";
@@ -1068,6 +1076,7 @@ export component RecoApp inherits Window {
     changed export-lookahead-secs => { root.autocam-settings-changed(); }
     changed export-lookahead-reduced-bit-depth => { root.autocam-settings-changed(); }
     changed export-async-detect => { root.autocam-settings-changed(); }
+    changed export-async-detect-dual => { root.autocam-settings-changed(); }
     changed export-framing => { root.autocam-settings-changed(); }
     changed export-lock-pitch => { root.autocam-settings-changed(); }
     changed export-cluster-mode => { root.autocam-settings-changed(); }
@@ -4766,6 +4775,14 @@ export component RecoApp inherits Window {
                             CheckBox {
                                 text: "Async AI detection (experimental, faster export)";
                                 checked <=> root.export-async-detect;
+                            }
+                        }
+
+                        if root.export-async-detect: Tip {
+                            tip: "EXPERIMENTAL: runs Left/Right camera inference on two dedicated background threads instead of one, so they can overlap. Needs Async AI detection above enabled too. Costs a THIRD loaded model instance (extra VRAM on top of Async AI detection's own). Measured only a modest ~5-6% further speedup on the reference test - a consumer GPU without datacenter-style MPS doesn't truly run two inference contexts concurrently, so most of the theoretical parallelism gets eaten by per-call contention. Off by default.";
+                            CheckBox {
+                                text: "Dual-worker: parallel L/R inference (experimental, small extra speedup)";
+                                checked <=> root.export-async-detect-dual;
                             }
                         }
 
