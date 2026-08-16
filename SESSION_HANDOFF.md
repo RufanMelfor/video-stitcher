@@ -1,5 +1,17 @@
 # Session handoff - 2026-08-16 (TGR_PC, continues 2026-08-15)
 
+**SESSION CLOSED 2026-08-16 evening, user said "we stoppen even hier"
+- pick up from here tomorrow.** Full GPU-optimization overview
+(all 9 live-export nvidia-smi runs + all 5 profiler A/B's, one table
+each, verdict chips per attempt) published as an artifact: see
+[[project_async_detect_thread_design]] for the URL and full write-up.
+One-line state: single-worker async-detect is the one shipped win
+(1.22-1.42x, has a reco-gui checkbox, commit history on
+`feat/async-detect-thread`); dual-worker and CUDA-graphs were tried
+and reverted; batch-L+R was measured (1.06x) but not integrated -
+pick that up first if resuming the optimization thread. Nothing
+merged to `main`.
+
 **2026-08-16: async detect thread - built, tested, measured end-to-end,
 real 1.42x export speedup, VRAM cost measured, reco-gui checkbox added.**
 Picks up the design from the entry below ("export-speed fix #2") that
