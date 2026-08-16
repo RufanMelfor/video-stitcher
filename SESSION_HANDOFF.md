@@ -70,11 +70,31 @@ To test: load a calibration, AI Tracking on with a model + lookahead >
 0, tick the checkbox in Export, run an export and compare against one
 with it unticked.
 
+**GUI checkbox validated by the user's own real exports, 2026-08-16
+(nvidia-smi polled live during each run).** First two attempts were
+apples-to-oranges (debug-vs-debug showed no gain; a release pair had
+mismatched clip lengths, 42s vs 130s) - flagged both times rather than
+reporting a misleading number, then re-measured with a matched release
+pair, same clip, only the checkbox differing:
+
+```
+                    async ON    async OFF
+active duration     ~134s       ~164s        1.22x faster
+GPU util (avg)      73.2%       56.8%
+VRAM                6907 MiB    6488 MiB     +419 MiB
+power (avg)         169W        152W
+```
+
+Confirms the earlier CLI-only 1.42x/+395MiB measurements in a real
+end-to-end GUI export, not just a synthetic benchmark - same direction
+and order of magnitude, slightly lower speedup here (expected, real
+GUI overhead vs a controlled CLI run).
+
 **Not done**: not merged to `main`, only the Windows D3D11VA path gets
 real async behavior (every other residency still runs synchronously,
-unaffected). User has not yet tested the GUI checkbox themselves.
-Whether to merge/promote out of "EXPERIMENTAL" is the user's call, not
-decided this session. See [[project_async_detect_thread_design]].
+unaffected). Whether to merge/promote out of "EXPERIMENTAL" is the
+user's call, not decided this session. See
+[[project_async_detect_thread_design]].
 
 Continuation note for resuming work on a different machine/session -
 git-tracked so it travels with `git pull`/`push` between the user's two
