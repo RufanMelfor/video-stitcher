@@ -232,6 +232,19 @@ impl super::StitchCore {
         self.last_detections = self.map_detections_to_panorama(out);
     }
 
+    /// Map already-detected raw [`Detection`]s to panorama coordinates
+    /// and cache them for the director - the second half of
+    /// [`run_detection_frames`](Self::run_detection_frames) without the
+    /// detector call itself. Used by the async-detect resolution path
+    /// (`crate::session::detection_dispatch::resolve_pending_world_state`),
+    /// which already has raw detections back from an
+    /// [`crate::async_detect::AsyncDetectThread`] and just needs the
+    /// same panorama-mapping + caching step `run_detection_frames`
+    /// does synchronously.
+    pub(crate) fn set_detections_from_raw(&mut self, raw: Vec<Detection>) {
+        self.last_detections = self.map_detections_to_panorama(raw);
+    }
+
     /// Run detection on a stereo YUV420P frame pair - wraps each
     /// camera's planes as [`RawFrame`] + [`DetectorFrame::Cpu`] and
     /// feeds [`Self::run_detection_frames`].
