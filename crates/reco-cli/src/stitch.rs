@@ -51,9 +51,6 @@ pub struct StitchArgs<'a> {
     pub lookahead_reduced_bit_depth: bool,
     /// EXPERIMENTAL: see `reco-cli`'s `--async-detect` flag help text.
     pub async_detect: bool,
-    /// EXPERIMENTAL: see `reco-cli`'s `--async-detect-dual` flag help
-    /// text. No effect unless `async_detect` is also set.
-    pub async_detect_dual: bool,
     pub tracking_mode: &'a str,
     pub quality_value: Option<u8>,
     pub preset: Option<String>,
@@ -341,7 +338,6 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         let player_anchor_rad = args.player_anchor_rad;
         let ball_coast_secs = args.ball_coast_secs;
         let async_detect = args.async_detect;
-        let async_detect_dual = args.async_detect_dual;
         let lookahead_secs = args.lookahead;
         let tracking_failed = Arc::clone(&tracking_failed);
         // Resolve FieldPanner tuning up front so a bad preset/file fails
@@ -492,39 +488,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                     // otherwise, so skip it rather than pay the extra
                     // detector-construction cost for nothing.
                     #[cfg(feature = "ort")]
-                    if async_detect && lookahead_secs > 0.0 && async_detect_dual {
-                        let conf = autocam_config.confidence_threshold.unwrap_or(0.10);
-                        match (
-                            reco_autocam::CpuYoloDetector::with_config(
-                                &model_path,
-                                conf,
-                                Vec::new(),
-                            ),
-                            reco_autocam::CpuYoloDetector::with_config(
-                                &model_path,
-                                conf,
-                                Vec::new(),
-                            ),
-                        ) {
-                            (Ok(left), Ok(right)) => {
-                                let queue_depth =
-                                    ((lookahead_secs * info.fps).ceil() as usize).max(2);
-                                session.enable_async_detect_dual(
-                                    Box::new(left),
-                                    Box::new(right),
-                                    queue_depth,
-                                );
-                                println!(
-                                    "Autocam: EXPERIMENTAL async detect thread active, dual \
-                                     (queue depth {queue_depth})"
-                                );
-                            }
-                            (Err(e), _) | (_, Err(e)) => log::warn!(
-                                "--async-detect-dual: could not load both detector \
-                                 instances ({e}), continuing with synchronous detection"
-                            ),
-                        }
-                    } else if async_detect && lookahead_secs > 0.0 {
+                    if async_detect && lookahead_secs > 0.0 {
                         match reco_autocam::CpuYoloDetector::with_config(
                             &model_path,
                             autocam_config.confidence_threshold.unwrap_or(0.10),
@@ -548,7 +512,6 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                     }
                     #[cfg(not(feature = "ort"))]
                     if async_detect {
-                        let _ = async_detect_dual;
                         log::warn!(
                             "--async-detect requires --features ort; ignoring (synchronous \
                              detection unaffected)"
