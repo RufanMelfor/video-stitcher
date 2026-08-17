@@ -1,16 +1,105 @@
-# Session handoff - 2026-08-16 (TGR_PC, continues 2026-08-15)
+# Session handoff - 2026-08-17 (TGR_PC, continues 2026-08-16)
 
-**SESSION CLOSED 2026-08-16 evening, user said "we stoppen even hier"
-- pick up from here tomorrow.** Full GPU-optimization overview
-(all 9 live-export nvidia-smi runs + all 5 profiler A/B's, one table
-each, verdict chips per attempt) published as an artifact: see
-[[project_async_detect_thread_design]] for the URL and full write-up.
-One-line state: single-worker async-detect is the one shipped win
-(1.22-1.42x, has a reco-gui checkbox, commit history on
-`feat/async-detect-thread`); dual-worker and CUDA-graphs were tried
-and reverted; batch-L+R was measured (1.06x) but not integrated -
-pick that up first if resuming the optimization thread. Nothing
-merged to `main`.
+**SESSION CLOSED 2026-08-17, user said "ik ga afsluiten voor vandaag"
+- pick up from here next time.** Short session: built a new "Ai
+Learning" ball-rich frame batch for Label Studio (4 new source videos,
+LS project 24, 100 tasks/100 predictions) using the documented
+`yolo26s_v4_imgsz1920` checkpoint, not soccana and not the unvalidated
+tiled checkpoint - full detail in the dated section right below. The
+big GPU-optimization thread from 2026-08-16 (further below) is
+unchanged/still paused - nothing new there today.
+
+One-line state on that thread (unchanged from yesterday): single-worker
+async-detect is the one shipped win (1.22-1.42x, has a reco-gui
+checkbox, commit history on `feat/async-detect-thread`); dual-worker
+and CUDA-graphs were tried and reverted; batch-L+R was measured (1.06x)
+but not integrated - pick that up first if resuming the optimization
+thread. Nothing merged to `main`.
+
+## 2026-08-17: "Ai Learning" ball-rich frame batch exported to Label Studio, model-choice correction, re-hit a known LS API quirk
+
+User asked for a Label Studio pre-label export from 4 new raw videos in
+`D:\VOETBAL_VIDEO\Berghem Sport J011-1\Ai Learning` - 2 recordings
+(`0001` = 2026-05-30, `0005` = 2026-06-03), each with L+R cameras
+(3840x2880 HEVC, ~20.4 min each), max 25 frames/video, only frames
+with >=1 ball. Asked the user how to scope the LS project - **1
+combined project for all 4 videos** (chosen, same pattern as the
+earlier "01 Vierluik"/"02 RPC" per-source projects) vs. 2 separate
+projects vs. direct-into-project-8.
+
+**Model correction mid-session**: first pipeline run used `soccana.pt`
+(matching the old convention) but the user stopped it before upload and
+said to use **"de laatste ONNX"** instead. Found 2 undocumented-as-
+"latest" candidates on disk with no clear winner from the filename
+alone - asked the user which:
+- `round4/runs/yolo26s_v4_imgsz1920/weights/best.pt` (2026-08-15,
+  **documented, real-app-tested**, "best-tested checkpoint of the whole
+  project" per `YOLO26_Training.md` / [[project_yolo26n_training_pipeline]])
+- `round4/runs/yolo26s_tiled1920_full/weights/best.onnx` (2026-08-16,
+  newer by file timestamp, but **undocumented/unvalidated** - needs 2x
+  tiled L/R inference that isn't wired into `select_ball_rich_frames.py`
+  or any production `reco-detect` path yet)
+
+**User picked `yolo26s_v4_imgsz1920`.** Used the `.pt` weights (not
+`best.onnx`) for the actual local pre-labeling pass: this machine's
+`onnxruntime` only has `CPUExecutionProvider` (no `onnxruntime-gpu`
+installed), while `.pt` runs on GPU via torch/CUDA - identical trained
+weights, just a much faster backend for ~1600 candidate frames.
+`best.onnx` remains the file that would eventually ship to
+`reco-detect` itself; wasn't needed for this pass.
+
+**Pipeline** (`select_ball_rich_frames.py`'s `process_video()`,
+interval=3s, top_k=25, conf=0.15, imgsz=1920, camera tags
+`0001_left`/`0001_right`/`0005_left`/`0005_right`):
+
+```
+0001_left:  408/408 candidates had >=1 ball, kept 25
+0001_right: 250/408 candidates had >=1 ball, kept 25
+0005_left:  408/408 candidates had >=1 ball, kept 25
+0005_right: 399/408 candidates had >=1 ball, kept 25
+```
+
+Flattened via `package_yolo_for_labelstudio.py`'s convention (100
+images total), created **LS project 24**, title corrected afterward to
+`"Ai Learning - yolo26s_v4_imgsz1920 pre-labels"` (briefly carried a
+leftover "(soccana)" title from the original plan).
+
+**Real bug hit, and it was avoidable**: the fresh upload driver script
+assumed `POST /api/projects/<id>/import`'s response includes
+`task_ids` - it doesn't on this LS instance (only `task_count`/
+`file_upload_ids`). **This exact quirk was already documented** in
+[[project_yolo26n_training_pipeline]] from the 2026-08-09 and
+2026-08-12 batches ("this API's response omits `task_ids` on LS 1.23.0
+- match tasks back by filename via `GET /api/tasks` instead") - missed
+because the new script wasn't checked against that memory before being
+written. All 100 images were still correctly uploaded as tasks
+(`task_count:1` each, confirmed via `GET /api/tasks?project=24` ->
+`total=100`, zero duplicates) - just missing predictions. Fixed with a
+short follow-up script: fetched the real task list, matched each
+task's hash-prefixed `data.image` filename back to the flat label files
+(filenames unique in this batch, so suffix-matching is safe - no repeat
+of the earlier duplicate-filename orphan bug), posted predictions
+retroactively. No re-upload, no data loss. Final verified state: 100
+tasks / 100 predictions / 0 annotations, 0 unmatched.
+
+**Lesson, now hit 3 times (2026-08-09, 2026-08-12, 2026-08-17): always
+check [[project_yolo26n_training_pipeline]] for known LS-instance API
+quirks before writing a new upload/import driver script**, don't
+re-derive the response shape from scratch each session.
+
+Also explained the SAHI-style tiled-1920 training session to the user
+in English on request (pure recap, no new facts - already fully logged
+in the 2026-08-15/16 sections below and in `YOLO26_Training.md`);
+reconfirmed the tiled checkpoint is still not wired into any production
+path, which is why today's batch deliberately used the non-tiled,
+documented checkpoint instead.
+
+**Not yet done**: user's review/correction pass on LS project 24 (100
+tasks, currently all raw predictions). Dataset artifacts kept on disk
+at `D:\VOETBAL_VIDEO\RECO\training\ai_learning_dataset\` (per
+[[feedback_keep_test_artifacts]]). Nothing committed/pushed this
+session - only scratchpad Python driver scripts were touched, not part
+of the repo.
 
 **2026-08-16: async detect thread - built, tested, measured end-to-end,
 real 1.42x export speedup, VRAM cost measured, reco-gui checkbox added.**

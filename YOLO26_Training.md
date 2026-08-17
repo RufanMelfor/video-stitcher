@@ -1134,3 +1134,50 @@ the remaining 11 LOW_IOU cases, but the pattern held cleanly across the
 full distance range sampled - a broader systemic problem looks
 unlikely. **Answers the open question: safe to keep training/using
 this dataset without a full manual re-audit.**
+
+(Revised later the same day - see `SESSION_HANDOFF.md`'s "Full
+independent ball-label QA audit" entry / [[project_yolo26n_training_pipeline]]:
+a follow-up pass using an independent model lineage + a full visual
+contact-sheet scan found 6 real mislabels, all fixed. This QA pass's
+own blind spot was checking only a same-family model's agreement with
+labels it was trained on.)
+
+## Ai Learning batch (Berghem Sport J011-1) - 4 new source videos exported to Label Studio (2026-08-17)
+
+Not a training round - a new data-collection batch, logged here for
+provenance since it feeds the next round. 4 new raw videos in
+`D:\VOETBAL_VIDEO\Berghem Sport J011-1\Ai Learning`: 2 recordings
+(`0001` = 2026-05-30, `0005` = 2026-06-03), each L+R, 3840x2880 HEVC,
+~20.4 min. `select_ball_rich_frames.py` (interval=3s, top-k=25,
+conf=0.15), one camera tag per video (`0001_left`/`0001_right`/
+`0005_left`/`0005_right`):
+
+```
+0001_left:  408/408 candidates had >=1 ball, kept 25
+0001_right: 250/408 candidates had >=1 ball, kept 25
+0005_left:  408/408 candidates had >=1 ball, kept 25
+0005_right: 399/408 candidates had >=1 ball, kept 25
+```
+
+**Model: `yolo26s_v4_imgsz1920` (imgsz=1920), not `soccana.pt`.** User
+initially asked for the established soccana teacher-model convention,
+then corrected mid-session to "the latest ONNX" - of the two
+undocumented-as-"latest" candidates on disk, chose the documented,
+real-app-tested `round4/runs/yolo26s_v4_imgsz1920/weights/best.pt`
+over the newer-by-timestamp but unvalidated
+`yolo26s_tiled1920_full/weights/best.onnx` (needs tiled L/R inference
+not built into this script or any production path yet - see the
+"SAHI-style left/right tiled-1920 training" section above). Ran via
+the `.pt` weights on GPU/torch (this machine's `onnxruntime` has no
+GPU execution provider installed) - identical weights to `best.onnx`,
+just a faster local backend for the pre-labeling pass itself.
+
+Flattened (100 images) and pushed to **LS project 24, "Ai Learning -
+yolo26s_v4_imgsz1920 pre-labels"** - 100 tasks, 100 predictions, 0
+annotations yet (awaiting the user's review pass). Re-hit the known
+"import response has no `task_ids` on this LS instance" quirk (see
+[[project_yolo26n_training_pipeline]], first hit 2026-08-09) in a
+fresh driver script that didn't check for it first - no data lost
+(images uploaded fine, just needed a follow-up pass to attach
+predictions via `GET /api/tasks` filename-matching instead). Full
+narrative in `SESSION_HANDOFF.md`'s 2026-08-17 entry.
