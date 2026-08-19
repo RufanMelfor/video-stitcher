@@ -80,6 +80,8 @@ pub use wgpu;
 // pure value/trait modules (source, detect sans GPU frames, encoder,
 // telemetry).
 #[cfg(feature = "gpu")]
+pub mod async_detect;
+#[cfg(feature = "gpu")]
 pub(crate) mod async_encode;
 #[cfg(feature = "gpu")]
 pub mod bayer;

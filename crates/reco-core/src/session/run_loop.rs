@@ -206,11 +206,20 @@ impl StitchSession {
                     detections: oldest.detections.clone(),
                 },
             );
+            // `run_panner_once` always resolves a frame to `Ready`
+            // before pushing it into the pose queue - by the time it
+            // reaches rendering there is no `Pending` case left.
+            let super::frame_buffer::PendingWorldState::Ready(ref ws) = oldest.world_state else {
+                unreachable!(
+                    "BufferedFrame reached render_buffered_frame still Pending - \
+                     run_panner_once must resolve it first"
+                )
+            };
             sink.emit(crate::detect::pipeline_event::PipelineEvent::WorldState {
                 frame_index: self.frame_count,
                 timestamp_ms: oldest.elapsed_ms,
-                players: oldest.world_state.players.clone(),
-                ball: oldest.world_state.ball,
+                players: ws.players.clone(),
+                ball: ws.ball,
             });
             sink.emit(crate::detect::pipeline_event::PipelineEvent::PanDecision {
                 frame_index: self.frame_count,
@@ -399,7 +408,18 @@ impl StitchSession {
             let vram_slot = session.copy_to_vram_pool(&frame, *produce_count)?;
 
             let world_state = session.detect_and_track_only(&frame, elapsed, *produce_count)?;
-            let detections = session.core.last_detections().to_vec();
+            // `last_detections` only reflects *this* produce index when
+            // detection resolved synchronously - a `Pending` entry's
+            // real detections aren't known yet (still in flight on the
+            // async detect thread) and get filled in later by
+            // `run_panner_once`'s resolution step, right before this
+            // frame is actually consumed.
+            let detections = match world_state {
+                super::frame_buffer::PendingWorldState::Ready(_) => {
+                    session.core.last_detections().to_vec()
+                }
+                super::frame_buffer::PendingWorldState::Pending(_) => Vec::new(),
+            };
 
             // Detection has now read the decode slot; it is safe to hand
             // it back to the decode thread for reuse. Releasing earlier
@@ -462,15 +482,33 @@ impl StitchSession {
             crate::geometry::ViewportPosition,
         )>,
                                panner_frame_idx: &mut u64| {
-            if let Some(frame) = buffer.pop() {
+            if let Some(mut frame) = buffer.pop() {
+                // This is the resolution point for a still-`Pending`
+                // frame: it's about to be consumed by the panner, so
+                // its detections can no longer be deferred. FIFO
+                // submission order guarantees this is the async
+                // thread's next result - see
+                // `resolve_pending_world_state`'s doc comment.
+                let resolved = match frame.world_state {
+                    super::frame_buffer::PendingWorldState::Ready(ws) => ws,
+                    super::frame_buffer::PendingWorldState::Pending(produce_index) => {
+                        let (ws, detections) =
+                            session.resolve_pending_world_state(produce_index, frame.elapsed_ms);
+                        frame.detections = detections;
+                        ws
+                    }
+                };
+                buffer.set_last_resolved(resolved.clone());
+
                 let futures = buffer.future_world_states();
                 let pose = session.core.decide_pose_with_lookahead(
-                    &frame.world_state,
+                    &resolved,
                     &futures,
                     *panner_frame_idx,
                     frame.elapsed_ms,
                 );
                 *panner_frame_idx += 1;
+                frame.world_state = super::frame_buffer::PendingWorldState::Ready(resolved);
                 pose_queue.push_back((frame, pose));
                 true
             } else {

@@ -353,6 +353,78 @@ pub trait UnifiedDetector: Send {
     fn class_names(&self) -> Option<&[String]> {
         None
     }
+
+    /// Split entry point for backends whose heavy work (GPU readback +
+    /// inference) can be deferred to another thread. The default
+    /// implementation just runs [`detect`](Self::detect) synchronously
+    /// and wraps the result as [`DetectSplit::Done`] - zero behavior
+    /// change for every backend that doesn't override this.
+    ///
+    /// Overriding backends (today: `WgpuPreprocessingDetector`) do the
+    /// cheap/shared-resource part synchronously (e.g. GPU texture
+    /// readback into an owned tensor - textures aren't safe to hand to
+    /// another thread, they're borrowed from a small reusable ring) and
+    /// package the expensive, resource-independent part (pure-CPU/GPU
+    /// inference on an owned tensor) into [`DetectSplit::Pending`] for
+    /// a caller-owned [`crate::async_detect::AsyncDetectThread`] to
+    /// finish later.
+    fn detect_split(
+        &mut self,
+        camera: CameraId,
+        frame: &DetectorFrame<'_>,
+    ) -> Result<DetectSplit, DetectorError> {
+        Ok(DetectSplit::Done(self.detect(camera, frame)?))
+    }
+}
+
+/// Everything an [`crate::async_detect::AsyncDetectThread`] needs to
+/// finish a deferred [`UnifiedDetector::detect_split`] call: an owned,
+/// already-preprocessed tensor plus enough metadata to reconstruct the
+/// same [`DetectorFrame::PreprocessedChw`] the caller would have built
+/// for a synchronous [`UnifiedDetector::detect`] call.
+pub struct PendingDetection {
+    /// Which camera this job came from - carried through to the
+    /// resulting [`Detection::camera`] field.
+    pub camera: CameraId,
+    /// Owned CHW float32 tensor, `3 * input_size * input_size`
+    /// elements - safe to move across threads (unlike the GPU texture
+    /// views the frame originally referenced).
+    pub tensor: Vec<f32>,
+    /// Model input size (square dimension).
+    pub input_size: u32,
+    /// Original source frame width (for detection coordinate mapping).
+    pub src_width: u32,
+    /// Original source frame height (for detection coordinate mapping).
+    pub src_height: u32,
+}
+
+/// Post-processing to re-apply to an async-resolved raw detection
+/// result - see [`DetectSplit::Pending`]. `Send + 'static` because a
+/// caller may need to store it (e.g. keyed by produce index) until the
+/// result arrives; it still only ever runs on the thread that receives
+/// that result, never inside the worker itself.
+pub type FinishFn = Box<dyn FnOnce(Vec<Detection>) -> Vec<Detection> + Send>;
+
+/// Result of [`UnifiedDetector::detect_split`].
+pub enum DetectSplit {
+    /// Synchronous result, ready now.
+    Done(Vec<Detection>),
+    /// The heavy inference call hasn't run yet.
+    ///
+    /// `job` carries everything an `AsyncDetectThread` needs to finish
+    /// it off the calling thread. `finish` is the chain of post-
+    /// processing (e.g. ROI filtering) any wrapper detector needs
+    /// re-applied to the worker's raw result to reproduce exactly what
+    /// a synchronous `detect()` call through the same wrapper stack
+    /// would have returned - it never crosses a thread boundary itself
+    /// (only `job` does); the caller keeps it and applies it once the
+    /// worker's result comes back.
+    Pending {
+        /// The deferred work.
+        job: PendingDetection,
+        /// Post-processing to re-apply to the worker's raw result.
+        finish: FinishFn,
+    },
 }
 
 /// A GPU-resident NV12 frame described by CUDA device pointers.
