@@ -49,7 +49,7 @@ pub struct StitchArgs<'a> {
     pub detection_interval: u64,
     pub lookahead: f64,
     pub lookahead_reduced_bit_depth: bool,
-    /// EXPERIMENTAL: see `reco-cli`'s `--async-detect` flag help text.
+    /// See `reco-cli`'s `--async-detect` flag help text.
     pub async_detect: bool,
     pub tracking_mode: &'a str,
     pub quality_value: Option<u8>,
@@ -479,14 +479,16 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
             ) {
                 Ok(true) => {
                     println!("Autocam: tracking enabled (model: {model_path})");
-                    // EXPERIMENTAL: --async-detect. Builds a SEPARATE
-                    // detector instance (doubles the model's VRAM/
-                    // session footprint) moved onto a dedicated worker
-                    // thread - see reco-core's `async_detect` module.
-                    // Only affects the buffered/export loop
-                    // (lookahead > 0); harmless but pointless to enable
-                    // otherwise, so skip it rather than pay the extra
-                    // detector-construction cost for nothing.
+                    // --async-detect. Builds a SEPARATE detector
+                    // instance (a modest extra VRAM cost, not a
+                    // doubling of the whole session - see
+                    // `docs/async-detect-benchmark-v054.md`) moved onto
+                    // a dedicated worker thread - see reco-core's
+                    // `async_detect` module. Only affects the buffered/
+                    // export loop (lookahead > 0); harmless but
+                    // pointless to enable otherwise, so skip it rather
+                    // than pay the extra detector-construction cost for
+                    // nothing.
                     #[cfg(feature = "ort")]
                     if async_detect && lookahead_secs > 0.0 {
                         match reco_autocam::CpuYoloDetector::with_config(
@@ -500,7 +502,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                                 session
                                     .enable_async_detect(Box::new(inference_detector), queue_depth);
                                 println!(
-                                    "Autocam: EXPERIMENTAL async detect thread active \
+                                    "Autocam: async detect thread active \
                                      (queue depth {queue_depth})"
                                 );
                             }

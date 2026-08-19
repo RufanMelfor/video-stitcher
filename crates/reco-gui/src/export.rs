@@ -64,13 +64,15 @@ pub struct AutocamUiConfig {
     /// `reco_core::session::vram_pool::LookaheadBitDepth`). Off by
     /// default; no effect on already-8-bit sources.
     pub lookahead_reduced_bit_depth: bool,
-    /// EXPERIMENTAL: run the detector's inference call on a dedicated
-    /// background thread instead of blocking the export loop (see
+    /// Run the detector's inference call on a dedicated background
+    /// thread instead of blocking the export loop (see
     /// `reco_core::async_detect`). Only takes effect when
     /// `lookahead_secs > 0`. Builds a second, separate detector
     /// instance - a modest extra VRAM cost, not a doubling of the whole
     /// session (measured ~400MB / ~8% on the reference machine, for a
-    /// ~1.4x export speedup). Off by default.
+    /// measured ~1.2-1.4x export speedup - see
+    /// `docs/async-detect-benchmark-v054.md`). Off by default: opt in
+    /// on cards with VRAM headroom to spare.
     pub async_detect: bool,
     /// Preset name used as the config base; visible knobs overlay it.
     pub preset: String,
@@ -457,12 +459,12 @@ pub fn run_export(
                 info.fps as f32,
                 source.is_gpu_resident(),
             );
-            // EXPERIMENTAL: --async-detect equivalent. Only meaningful
-            // once tracking is confirmed active and the buffered/export
-            // loop is in play (lookahead > 0) - a second, separate
-            // detector instance moved onto reco-core's async worker
-            // thread. See `AutocamUiConfig::async_detect`'s doc comment
-            // for the measured cost/benefit.
+            // --async-detect equivalent. Only meaningful once tracking
+            // is confirmed active and the buffered/export loop is in
+            // play (lookahead > 0) - a second, separate detector
+            // instance moved onto reco-core's async worker thread. See
+            // `AutocamUiConfig::async_detect`'s doc comment for the
+            // measured cost/benefit.
             #[cfg(feature = "ort")]
             if matches!(result, Ok(true)) && ac.async_detect && ac.lookahead_secs > 0.0 {
                 match reco_autocam::CpuYoloDetector::with_config(
@@ -475,7 +477,7 @@ pub fn run_export(
                             ((ac.lookahead_secs * info.fps).ceil() as usize).max(2);
                         session.enable_async_detect(Box::new(inference_detector), queue_depth);
                         log::info!(
-                            "Export: EXPERIMENTAL async detect thread active (queue depth {queue_depth})"
+                            "Export: async detect thread active (queue depth {queue_depth})"
                         );
                     }
                     Err(e) => log::warn!(

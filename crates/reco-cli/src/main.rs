@@ -256,14 +256,19 @@ enum Commands {
         #[arg(long)]
         lookahead_reduced_bit_depth: bool,
 
-        /// EXPERIMENTAL: run the detector's expensive inference call on
-        /// a dedicated background thread instead of blocking the
-        /// decode/stitch/encode loop (see reco-core's `async_detect`
-        /// module). Requires --model and --lookahead > 0 (only the
-        /// buffered/export loop uses this - a plain stitch or the
-        /// immediate/no-lookahead path is unaffected). Builds a second,
-        /// separate detector instance for the worker thread - doubles
-        /// the detector's own VRAM/session footprint.
+        /// Run the detector's expensive inference call on a dedicated
+        /// background thread instead of blocking the decode/stitch/
+        /// encode loop (see reco-core's `async_detect` module).
+        /// Requires --model and --lookahead > 0 (only the buffered/
+        /// export loop uses this - a plain stitch or the immediate/
+        /// no-lookahead path is unaffected). Builds a second, separate
+        /// detector instance for the worker thread - a real but modest
+        /// extra VRAM cost (~400MB / ~8% measured on an 8GB card), not
+        /// a doubling of the whole session. Measured ~1.2-1.4x faster
+        /// export, no change to detection results (see
+        /// `docs/async-detect-benchmark-v054.md` for the full
+        /// methodology and numbers). Off by default: opt in on cards
+        /// with VRAM headroom to spare.
         #[arg(long)]
         async_detect: bool,
 
