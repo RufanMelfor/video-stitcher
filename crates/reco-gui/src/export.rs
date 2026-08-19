@@ -473,8 +473,7 @@ pub fn run_export(
                     Vec::new(),
                 ) {
                     Ok(inference_detector) => {
-                        let queue_depth =
-                            ((ac.lookahead_secs * info.fps).ceil() as usize).max(2);
+                        let queue_depth = ((ac.lookahead_secs * info.fps).ceil() as usize).max(2);
                         session.enable_async_detect(Box::new(inference_detector), queue_depth);
                         log::info!(
                             "Export: async detect thread active (queue depth {queue_depth})"
