@@ -49,6 +49,8 @@ pub struct StitchArgs<'a> {
     pub detection_interval: u64,
     pub lookahead: f64,
     pub lookahead_reduced_bit_depth: bool,
+    /// See `reco-cli`'s `--async-detect` flag help text.
+    pub async_detect: bool,
     pub tracking_mode: &'a str,
     pub quality_value: Option<u8>,
     pub preset: Option<String>,
@@ -335,6 +337,8 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         let allow_fallback = args.allow_no_tracking;
         let player_anchor_rad = args.player_anchor_rad;
         let ball_coast_secs = args.ball_coast_secs;
+        let async_detect = args.async_detect;
+        let lookahead_secs = args.lookahead;
         let tracking_failed = Arc::clone(&tracking_failed);
         // Resolve FieldPanner tuning up front so a bad preset/file fails
         // before rendering. Preset is the base; --panner-config overlays.
@@ -473,7 +477,49 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                 info.fps as f32,
                 source.is_gpu_resident(),
             ) {
-                Ok(true) => println!("Autocam: tracking enabled (model: {model_path})"),
+                Ok(true) => {
+                    println!("Autocam: tracking enabled (model: {model_path})");
+                    // --async-detect. Builds a SEPARATE detector
+                    // instance (a modest extra VRAM cost, not a
+                    // doubling of the whole session - see
+                    // `docs/async-detect-benchmark-v054.md`) moved onto
+                    // a dedicated worker thread - see reco-core's
+                    // `async_detect` module. Only affects the buffered/
+                    // export loop (lookahead > 0); harmless but
+                    // pointless to enable otherwise, so skip it rather
+                    // than pay the extra detector-construction cost for
+                    // nothing.
+                    #[cfg(feature = "ort")]
+                    if async_detect && lookahead_secs > 0.0 {
+                        match reco_autocam::CpuYoloDetector::with_config(
+                            &model_path,
+                            autocam_config.confidence_threshold.unwrap_or(0.10),
+                            Vec::new(),
+                        ) {
+                            Ok(inference_detector) => {
+                                let queue_depth =
+                                    ((lookahead_secs * info.fps).ceil() as usize).max(2);
+                                session
+                                    .enable_async_detect(Box::new(inference_detector), queue_depth);
+                                println!(
+                                    "Autocam: async detect thread active \
+                                     (queue depth {queue_depth})"
+                                );
+                            }
+                            Err(e) => log::warn!(
+                                "--async-detect: could not load a second detector instance \
+                                 ({e}), continuing with synchronous detection"
+                            ),
+                        }
+                    }
+                    #[cfg(not(feature = "ort"))]
+                    if async_detect {
+                        log::warn!(
+                            "--async-detect requires --features ort; ignoring (synchronous \
+                             detection unaffected)"
+                        );
+                    }
+                }
                 Ok(false) => {
                     let msg = "Tracking requested but detection cannot run in zero-copy mode. \
                                Build with --features tensorrt for GPU detection, \

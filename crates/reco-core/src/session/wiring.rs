@@ -50,6 +50,36 @@ impl StitchSession {
         self.core.set_detector(detector);
     }
 
+    /// Opt in to async detection for the buffered/export loop
+    /// ([`run`](Self::run) with lookahead enabled) - see
+    /// [`crate::async_detect`] for the design.
+    ///
+    /// `inference_detector` must be a **separate instance** from
+    /// whatever was passed to [`set_detector`](Self::set_detector) - it
+    /// is moved to a dedicated worker thread and must accept
+    /// [`DetectorFrame::PreprocessedChw`](crate::detect::detector::DetectorFrame::PreprocessedChw)
+    /// directly (e.g. a second, bare `CpuYoloDetector` instance with no
+    /// wgpu-preprocessing wrapper - the worker only ever receives
+    /// already-preprocessed tensors, never raw GPU texture views).
+    /// `set_detector`'s own detector continues to run the cheap,
+    /// texture-bound preprocessing step synchronously via
+    /// `detect_split`; only the expensive inference call moves to this
+    /// thread. `queue_depth` should track the session's lookahead depth.
+    ///
+    /// No effect on the immediate/live-preview path
+    /// (`process_frame_any`) - only `run_buffered`'s produce/resolve
+    /// loop reads this.
+    pub fn enable_async_detect(
+        &mut self,
+        inference_detector: Box<dyn crate::detect::detector::UnifiedDetector>,
+        queue_depth: usize,
+    ) {
+        self.async_detect = Some(crate::async_detect::AsyncDetectThread::new(
+            inference_detector,
+            queue_depth,
+        ));
+    }
+
     /// Set the detection interval (run detection every N frames).
     ///
     /// Default is 1 (every frame). Higher values reduce detection CPU load

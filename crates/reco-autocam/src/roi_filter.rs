@@ -24,7 +24,9 @@
 use std::collections::HashMap;
 
 use reco_core::calibration::FieldRoi;
-use reco_core::detect::detector::{Detection, DetectorError, DetectorFrame, UnifiedDetector};
+use reco_core::detect::detector::{
+    DetectSplit, Detection, DetectorError, DetectorFrame, UnifiedDetector,
+};
 use reco_core::geometry::CameraId;
 use reco_core::projection::point_in_polygon;
 
@@ -177,6 +179,41 @@ impl UnifiedDetector for RoiFilteredDetector {
 
     fn class_names(&self) -> Option<&[String]> {
         self.inner.class_names()
+    }
+
+    /// Delegates to the inner detector's split. When it's already
+    /// `Done`, filters immediately (identical to [`detect`](Self::detect)
+    /// today). When it's `Pending`, composes this wrapper's own ROI
+    /// filtering onto the inner `finish` closure so it still runs -
+    /// once, on the deferred result, on whichever thread resolves it -
+    /// instead of being silently skipped. `filter_by_roi` is pure and
+    /// already branches per-detection on `d.camera`, so applying it
+    /// once to a wrapper's already-finished result is exactly
+    /// equivalent to applying it inside `detect()` synchronously.
+    fn detect_split(
+        &mut self,
+        camera: CameraId,
+        frame: &DetectorFrame<'_>,
+    ) -> Result<DetectSplit, DetectorError> {
+        match self.inner.detect_split(camera, frame)? {
+            DetectSplit::Done(dets) => Ok(DetectSplit::Done(filter_by_roi(
+                dets,
+                &self.roi,
+                &self.class_anchors,
+                self.default_anchor,
+            ))),
+            DetectSplit::Pending { job, finish } => {
+                let roi = self.roi.clone();
+                let class_anchors = self.class_anchors.clone();
+                let default_anchor = self.default_anchor;
+                Ok(DetectSplit::Pending {
+                    job,
+                    finish: Box::new(move |dets| {
+                        filter_by_roi(finish(dets), &roi, &class_anchors, default_anchor)
+                    }),
+                })
+            }
+        }
     }
 }
 
@@ -332,5 +369,137 @@ mod tests {
         let mut anchors = HashMap::new();
         anchors.insert(7u16, RoiAnchor::Bottom);
         assert!(filter_by_roi(vec![det], &roi, &anchors, RoiAnchor::Center).is_empty());
+    }
+
+    // ── Async split: ROI filtering must survive a deferred result ──
+
+    /// Fake inner detector whose `detect_split` always returns `Pending`
+    /// with a job that just echoes back one fixed detection per call -
+    /// stands in for `WgpuPreprocessingDetector` without needing a real
+    /// wgpu device/texture.
+    struct FakePendingDetector {
+        det: Detection,
+    }
+
+    impl UnifiedDetector for FakePendingDetector {
+        fn name(&self) -> &'static str {
+            "fake-pending"
+        }
+
+        fn detect(
+            &mut self,
+            _camera: CameraId,
+            _frame: &DetectorFrame<'_>,
+        ) -> Result<Vec<Detection>, DetectorError> {
+            Ok(vec![self.det])
+        }
+
+        fn detect_split(
+            &mut self,
+            _camera: CameraId,
+            _frame: &DetectorFrame<'_>,
+        ) -> Result<DetectSplit, DetectorError> {
+            let det = self.det;
+            Ok(DetectSplit::Pending {
+                job: reco_core::detect::detector::PendingDetection {
+                    camera: det.camera,
+                    tensor: vec![],
+                    input_size: 1,
+                    src_width: 1,
+                    src_height: 1,
+                },
+                // Simulates the deferred call itself producing the
+                // detection (matching WgpuPreprocessingDetector's
+                // identity finish - the real work happens on the
+                // worker thread, not in this closure).
+                finish: Box::new(move |_ignored| vec![det]),
+            })
+        }
+    }
+
+    #[test]
+    fn detect_split_done_path_filters_immediately() {
+        // Inner detector without a detect_split override (default =
+        // Done via detect()) - RoiFilteredDetector must still filter.
+        struct SyncOnly(Detection);
+        impl UnifiedDetector for SyncOnly {
+            fn name(&self) -> &'static str {
+                "sync-only"
+            }
+            fn detect(
+                &mut self,
+                _camera: CameraId,
+                _frame: &DetectorFrame<'_>,
+            ) -> Result<Vec<Detection>, DetectorError> {
+                Ok(vec![self.0])
+            }
+        }
+
+        let outside = make_detection(CameraId::Left, 0.05, 0.05, 0.1, 0.2);
+        let mut roi_det = RoiFilteredDetector::new(Box::new(SyncOnly(outside)), small_roi());
+        let y = vec![0u8; 4];
+        let u = vec![128u8; 1];
+        let v = vec![128u8; 1];
+        let frame = DetectorFrame::Cpu(reco_core::detect::detector::RawFrame {
+            y: &y,
+            chroma: reco_core::detect::detector::ChromaFormat::Yuv420p { u: &u, v: &v },
+            width: 2,
+            height: 2,
+        });
+        match roi_det.detect_split(CameraId::Left, &frame).unwrap() {
+            DetectSplit::Done(dets) => {
+                assert!(dets.is_empty(), "outside-ROI detection must be dropped")
+            }
+            DetectSplit::Pending { .. } => panic!("expected Done from a detect_split-less inner"),
+        }
+    }
+
+    #[test]
+    fn detect_split_pending_path_still_filters_via_composed_finish() {
+        // The real regression this covers: a naive implementation could
+        // forward `Pending` straight through and skip ROI filtering
+        // entirely once the result resolves later. The composed
+        // `finish` closure must apply it.
+        let outside = make_detection(CameraId::Left, 0.05, 0.05, 0.1, 0.2);
+        let inside = make_detection(CameraId::Left, 0.5, 0.4, 0.1, 0.2);
+
+        let mut roi_det =
+            RoiFilteredDetector::new(Box::new(FakePendingDetector { det: outside }), small_roi());
+        let y = vec![0u8; 4];
+        let u = vec![128u8; 1];
+        let v = vec![128u8; 1];
+        let frame = DetectorFrame::Cpu(reco_core::detect::detector::RawFrame {
+            y: &y,
+            chroma: reco_core::detect::detector::ChromaFormat::Yuv420p { u: &u, v: &v },
+            width: 2,
+            height: 2,
+        });
+        let DetectSplit::Pending { finish, .. } =
+            roi_det.detect_split(CameraId::Left, &frame).unwrap()
+        else {
+            panic!("expected Pending");
+        };
+        // Simulate the async worker's raw (unfiltered) result coming
+        // back - `finish` must still drop the outside-ROI detection.
+        let resolved = finish(vec![outside]);
+        assert!(
+            resolved.is_empty(),
+            "composed finish must still apply ROI filtering to the deferred result"
+        );
+
+        // Same wrapper, an in-ROI detection: must survive.
+        let mut roi_det2 =
+            RoiFilteredDetector::new(Box::new(FakePendingDetector { det: inside }), small_roi());
+        let DetectSplit::Pending { finish, .. } =
+            roi_det2.detect_split(CameraId::Left, &frame).unwrap()
+        else {
+            panic!("expected Pending");
+        };
+        let resolved2 = finish(vec![inside]);
+        assert_eq!(
+            resolved2.len(),
+            1,
+            "in-ROI detection must survive the composed finish"
+        );
     }
 }

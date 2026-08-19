@@ -332,14 +332,25 @@ impl WgpuPreprocessor {
             0,
             self.tensor_bytes as u64,
         );
-        queue.submit(std::iter::once(encoder.finish()));
+        let submission_index = queue.submit(std::iter::once(encoder.finish()));
 
         let slice = self.staging_buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        // Wait for exactly *our* submission, not `wait_indefinitely()`'s
+        // "most recent submission at the time of the poll" - on a device
+        // shared with the render pipeline, an unrelated render/encode/
+        // decode command buffer submitted on another thread between our
+        // `submit()` above and this `poll()` call would otherwise also
+        // have to finish before we're unblocked, turning a ~1ms compute
+        // dispatch into a stall behind whatever else happened to be
+        // in flight. Measured average before this fix: 52.3ms/call.
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission_index),
+            timeout: None,
+        });
         rx.recv().unwrap().unwrap();
 
         let data = slice.get_mapped_range();

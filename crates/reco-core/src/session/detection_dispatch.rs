@@ -213,12 +213,22 @@ impl StitchSession {
     /// Run detection + trackers only (no panner). For the lookahead
     /// produce phase where we want the WorldState but don't want to
     /// advance the panner.
+    ///
+    /// Returns [`PendingWorldState::Pending`] instead of resolving the
+    /// tracker immediately when [`enable_async_detect`](Self::enable_async_detect)
+    /// is active and the detector actually deferred its inference call
+    /// (see [`Self::run_detection_frames_maybe_async`]) - the caller
+    /// resolves it later, right before the frame is consumed, via
+    /// [`Self::resolve_pending_world_state`].
     pub(crate) fn detect_and_track_only(
         &mut self,
         frame: &StereoFrame,
         elapsed: std::time::Duration,
         produce_index: u64,
-    ) -> Result<crate::detect::tracker::WorldState, SessionError> {
+    ) -> Result<super::frame_buffer::PendingWorldState, SessionError> {
+        use super::frame_buffer::PendingWorldState;
+
+        let mut went_async = false;
         if self.core.detection_due(produce_index) {
             match frame {
                 #[cfg(target_os = "linux")]
@@ -237,7 +247,13 @@ impl StitchSession {
                                 self.left_rotation,
                                 self.right_rotation,
                             );
-                            self.core.run_detection_frames(&frames);
+                            went_async = Self::run_detection_frames_maybe_async(
+                                &mut self.core,
+                                self.async_detect.as_ref(),
+                                &mut self.pending_finishers,
+                                &frames,
+                                produce_index,
+                            );
                         }
                     } else if let Some(ref views) = self.gpu_shared_views {
                         crate::profile_scope!("detect_wgpu_nv12");
@@ -254,7 +270,13 @@ impl StitchSession {
                             self.left_rotation,
                             self.right_rotation,
                         );
-                        self.core.run_detection_frames(&frames);
+                        went_async = Self::run_detection_frames_maybe_async(
+                            &mut self.core,
+                            self.async_detect.as_ref(),
+                            &mut self.pending_finishers,
+                            &frames,
+                            produce_index,
+                        );
                     }
                 }
                 #[cfg(target_os = "windows")]
@@ -274,7 +296,13 @@ impl StitchSession {
                             self.left_rotation,
                             self.right_rotation,
                         );
-                        self.core.run_detection_frames(&frames);
+                        went_async = Self::run_detection_frames_maybe_async(
+                            &mut self.core,
+                            self.async_detect.as_ref(),
+                            &mut self.pending_finishers,
+                            &frames,
+                            produce_index,
+                        );
                     }
                 }
                 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -299,9 +327,132 @@ impl StitchSession {
             }
         }
 
-        Ok(self
-            .core
-            .track_only(produce_index, elapsed.as_secs_f64() * 1000.0))
+        if went_async {
+            return Ok(PendingWorldState::Pending(produce_index));
+        }
+        Ok(PendingWorldState::Ready(
+            self.core
+                .track_only(produce_index, elapsed.as_secs_f64() * 1000.0),
+        ))
+    }
+
+    /// Try to run `frames` through the detector's [`DetectSplit`]-aware
+    /// entry point instead of the always-synchronous
+    /// [`StitchCore::run_detection_frames`]. Returns `true` when the
+    /// call was deferred to `self.async_detect` (caller must resolve
+    /// it later via [`Self::resolve_pending_world_state`] before the
+    /// tracker can see this produce index's detections), `false` when
+    /// it resolved synchronously and `self.core.last_detections` is
+    /// already up to date exactly like [`StitchCore::run_detection_frames`]
+    /// would have left it.
+    ///
+    /// Falls back to the plain synchronous path whenever async detect
+    /// isn't enabled at all - zero behavior change unless a caller
+    /// opted in via [`Self::enable_async_detect`].
+    ///
+    /// Takes explicit disjoint borrows (`core`/`async_detect`/
+    /// `pending_finishers`) instead of `&mut self` so callers already
+    /// holding a borrow of some *other* session field (e.g. the D3D11
+    /// staging pool, whose texture views `frames` borrows from) can
+    /// still call this - a plain `&mut self` method here would conflict
+    /// with that unrelated borrow even though the two never touch the
+    /// same fields.
+    fn run_detection_frames_maybe_async(
+        core: &mut crate::core::StitchCore,
+        async_detect: Option<&crate::async_detect::AsyncDetectThread>,
+        pending_finishers: &mut std::collections::HashMap<u64, crate::detect::detector::FinishFn>,
+        frames: &[(CameraId, DetectorFrame<'_>); 2],
+        produce_index: u64,
+    ) -> bool {
+        use crate::detect::detector::{DetectSplit, DetectorError, FinishFn};
+
+        let Some(async_detect) = async_detect else {
+            core.run_detection_frames(frames);
+            return false;
+        };
+        let Some(ref mut detector) = core.detector else {
+            return false;
+        };
+
+        let mut pending_jobs = Vec::new();
+        let mut done_dets = Vec::new();
+        let mut finish_fn: Option<FinishFn> = None;
+        for (camera, frame) in frames.iter() {
+            match detector.detect_split(*camera, frame) {
+                Ok(DetectSplit::Done(dets)) => done_dets.extend(dets),
+                Ok(DetectSplit::Pending { job, finish }) => {
+                    pending_jobs.push(job);
+                    finish_fn = Some(finish);
+                }
+                Err(DetectorError::UnsupportedFrameKind) => log::debug!(
+                    "StitchSession detector '{}' does not support this frame residency ({camera:?})",
+                    detector.name()
+                ),
+                Err(e) => log::warn!(
+                    "StitchSession detector '{}' {camera:?}: {e}",
+                    detector.name()
+                ),
+            }
+        }
+
+        let Some(mut finish) = finish_fn else {
+            // Every camera resolved synchronously (e.g. a frame kind
+            // this detector doesn't add async support for) - same
+            // outcome as the plain synchronous path.
+            core.set_detections_from_raw(done_dets);
+            return false;
+        };
+        if !done_dets.is_empty() {
+            // Rare mixed case (one camera split, the other didn't) -
+            // fold the already-available detections into what the
+            // composed finish ultimately produces so nothing is lost.
+            let extra = done_dets;
+            let prior = finish;
+            finish = Box::new(move |mut dets| {
+                dets.extend(extra);
+                prior(dets)
+            });
+        }
+        async_detect.submit(produce_index, pending_jobs);
+        pending_finishers.insert(produce_index, finish);
+        true
+    }
+
+    /// Resolve a produce index's still-[`Pending`](super::frame_buffer::PendingWorldState::Pending)
+    /// detection: block for the async worker's result (FIFO submission
+    /// order guarantees it's this exact index - see
+    /// [`crate::async_detect`]'s ordering guarantee), apply the
+    /// `finish` closure stashed by
+    /// [`Self::run_detection_frames_maybe_async`], map to panorama
+    /// coordinates, feed the tracker, and return the resulting
+    /// `WorldState` + panorama-mapped detections. Called from
+    /// `run_loop::run_panner_once` right before a frame is consumed -
+    /// never while it's still just sitting in the lookahead buffer.
+    pub(crate) fn resolve_pending_world_state(
+        &mut self,
+        produce_index: u64,
+        timestamp_ms: f64,
+    ) -> (
+        crate::detect::tracker::WorldState,
+        Vec<crate::detect::director::MappedDetection>,
+    ) {
+        let raw = match self.async_detect.as_ref().and_then(|a| a.recv()) {
+            Some(result) => {
+                debug_assert_eq!(
+                    result.produce_index, produce_index,
+                    "async detect result out of order - FIFO guarantee violated"
+                );
+                result.detections
+            }
+            None => Vec::new(), // worker unavailable/died - degrade to no detections
+        };
+        let finished = match self.pending_finishers.remove(&produce_index) {
+            Some(finish) => finish(raw),
+            None => raw,
+        };
+        self.core.set_detections_from_raw(finished);
+        let world_state = self.core.track_only(produce_index, timestamp_ms);
+        (world_state, self.core.last_detections().to_vec())
     }
 
     /// Allocate the NVMM detection surfaces for the Jetson zero-copy path.
