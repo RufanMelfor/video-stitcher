@@ -159,6 +159,7 @@ pub fn run_export(
     seam_offset: f32,
     start_secs: f32,
     end_secs: f32,
+    cut_ranges: Vec<reco_io::cut_range::CutRange>,
     autocam: AutocamUiConfig,
     app_weak: slint::Weak<RecoApp>,
     interrupted: &AtomicBool,
@@ -326,6 +327,18 @@ pub fn run_export(
     }
     if end_secs > 0.0 {
         job = job.end_time(end_secs as f64);
+    }
+    if !cut_ranges.is_empty() {
+        log::info!(
+            "Cut ranges: {} excluded ({})",
+            cut_ranges.len(),
+            cut_ranges
+                .iter()
+                .map(|r| format!("{:.1}-{:.1}s", r.start_secs, r.end_secs))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        job = job.cut_ranges(cut_ranges);
     }
 
     if replay_enabled {

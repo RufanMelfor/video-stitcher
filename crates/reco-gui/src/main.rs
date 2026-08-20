@@ -222,6 +222,14 @@ struct AppState {
     right_input: Option<reco_io::stitch_job::InputPath>,
     calibration_path: Option<PathBuf>,
     calibration: Option<Calibration>,
+    /// Time ranges excluded from the export (e.g. a halftime pause), in
+    /// source seconds - same space as `export-start-secs`/`-end-secs`.
+    /// Source of truth for the UI's `cut-ranges` property (see
+    /// `sync_cut_ranges`); mutated only via the `on_cut_range_*`
+    /// handlers, never read back from Slint. Session-only for now - not
+    /// yet persisted into the calibration file (deliberately deferred
+    /// to a follow-up).
+    cut_ranges: Vec<(f64, f64)>,
     playback: Playback,
     bridge: Option<PreviewBridge>,
     recording_tx: Option<std::sync::mpsc::SyncSender<RecordingFrame>>,
@@ -520,6 +528,7 @@ impl AppState {
             right_input: None,
             calibration_path: None,
             calibration: None,
+            cut_ranges: Vec::new(),
             playback: Playback::new(),
             bridge: None,
             recording_tx: None,
@@ -1670,6 +1679,23 @@ fn sync_recent_paths(settings: &settings::GuiSettings, app: &RecoApp) {
     app.set_recent_left_paths(to_model(settings.recent_left.entries()));
     app.set_recent_right_paths(to_model(settings.recent_right.entries()));
     app.set_recent_calibration_paths(to_model(settings.recent_calibration.entries()));
+}
+
+/// Push `state.cut_ranges` (the authoritative Rust-side list) into the
+/// Slint `cut-ranges` property. Called after every add/remove/update so
+/// the scrubber bands and the numeric list both reflect committed state -
+/// a drag in progress uses its own local preview and doesn't call this
+/// until release (see `CutRangeItem`'s doc comment in main.slint).
+fn sync_cut_ranges(state: &AppState, app: &RecoApp) {
+    let items: Vec<CutRangeItem> = state
+        .cut_ranges
+        .iter()
+        .map(|&(start, end)| CutRangeItem {
+            start_secs: start as f32,
+            end_secs: end as f32,
+        })
+        .collect();
+    app.set_cut_ranges(slint::ModelRc::new(slint::VecModel::from(items)));
 }
 
 /// Push the per-side segment filenames into the Slint left/right-segments
@@ -3120,6 +3146,88 @@ fn main() -> anyhow::Result<()> {
                 app.set_files_loaded(false);
                 sync_segments(&s, &app);
             }
+        }
+    });
+
+    // Cut ranges: exclude a sub-window from the export (e.g. a halftime
+    // pause). "Add" drops a new 2s marker at the playhead (or centered in
+    // the export window if the playhead sits outside it), clamped so it
+    // starts non-negative and never extends past export-end/clip
+    // duration - a degenerate zero-width range would otherwise be
+    // possible right at the very end of the clip.
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_cut_range_add(move || {
+        let mut s = state_ref.borrow_mut();
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let export_start = app.get_export_start_secs() as f64;
+        let export_end = if app.get_export_end_secs() > 0.0 {
+            app.get_export_end_secs() as f64
+        } else {
+            app.get_clip_duration_secs() as f64
+        };
+        let playhead_secs = if app.get_total_frames() > 0 {
+            app.get_current_frame() as f64 / app.get_total_frames() as f64
+                * app.get_clip_duration_secs() as f64
+        } else {
+            export_start
+        };
+        let default_width = 2.0_f64;
+        let start = playhead_secs.clamp(export_start, (export_end - 0.2).max(export_start));
+        let end = (start + default_width).min(export_end);
+        if end - start < 0.2 {
+            // Not enough room left in the export window for even a
+            // minimal range - nothing sensible to add.
+            return;
+        }
+        s.cut_ranges.push((start, end));
+        sync_cut_ranges(&s, &app);
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_cut_range_remove(move |idx| {
+        let mut s = state_ref.borrow_mut();
+        let idx = idx as usize;
+        if idx < s.cut_ranges.len() {
+            s.cut_ranges.remove(idx);
+            if let Some(app) = app_weak.upgrade() {
+                sync_cut_ranges(&s, &app);
+            }
+        }
+    });
+
+    // Commits a drag/edit's final (start, end) for one range. Clamps to
+    // the clip bounds and a minimum 0.2s width; does NOT reject overlap
+    // with a neighboring range here (StitchJob::run already validates
+    // that loudly at export time via cut_range::validate_cut_ranges) -
+    // live overlap-prevention while dragging two bands past each other
+    // would need more UI design than a first pass warrants.
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_cut_range_update(move |idx, start, end| {
+        let mut s = state_ref.borrow_mut();
+        let idx = idx as usize;
+        let Some(range) = s.cut_ranges.get_mut(idx) else {
+            return;
+        };
+        let clip_duration = app_weak
+            .upgrade()
+            .map(|app| app.get_clip_duration_secs() as f64)
+            .unwrap_or(f64::MAX);
+        let start = (start as f64).max(0.0);
+        let end = (end as f64).min(clip_duration);
+        if end - start < 0.2 {
+            // Reject a collapsed/inverted drag outright rather than
+            // clamping to some arbitrary minimum the user didn't ask
+            // for - the UI just snaps back to the last committed value.
+        } else {
+            *range = (start, end);
+        }
+        if let Some(app) = app_weak.upgrade() {
+            sync_cut_ranges(&s, &app);
         }
     });
 
@@ -5040,7 +5148,22 @@ fn main() -> anyhow::Result<()> {
         let seam_offset = app.get_seam_offset();
         let start_secs = app.get_export_start_secs();
         let end_secs = app.get_export_end_secs();
-        log::info!("Export range: start={start_secs:.1}s, end={end_secs:.1}s");
+        // Ranges are already clamped/validated on every add/edit (see
+        // on_cut_range_add/on_cut_range_update), so CutRange::new should
+        // never actually reject one here - filter_map is defense in
+        // depth, not the primary validation. StitchJob::run separately
+        // rejects overlaps (there's no live overlap-prevention in the
+        // UI - see on_cut_range_update's doc comment) with a clear error
+        // surfaced through the normal export-failure path.
+        let cut_ranges: Vec<reco_io::cut_range::CutRange> = s
+            .cut_ranges
+            .iter()
+            .filter_map(|&(start, end)| reco_io::cut_range::CutRange::new(start, end).ok())
+            .collect();
+        log::info!(
+            "Export range: start={start_secs:.1}s, end={end_secs:.1}s, {} cut range(s)",
+            cut_ranges.len()
+        );
         let autocam = crate::export::AutocamUiConfig {
             enabled: app.get_export_autocam_enabled(),
             model_path: app.get_export_model_path().to_string(),
@@ -5134,6 +5257,7 @@ fn main() -> anyhow::Result<()> {
                 seam_offset,
                 start_secs,
                 end_secs,
+                cut_ranges,
                 autocam,
                 app_weak_bg,
                 &interrupted,
