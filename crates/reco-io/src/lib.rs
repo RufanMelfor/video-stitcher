@@ -26,6 +26,9 @@ pub mod libcamera;
 pub mod v4l2;
 
 pub mod adapters;
+/// Excluding a mid-source time range from a stitch export (e.g. a
+/// halftime pause) - see [`cut_range::CutRange`].
+pub mod cut_range;
 /// Default shipping [`reco_core::detect::pipeline_event::PipelineEventSink`]:
 /// writes each event as one JSON line. Wrap in `BackpressuredSink`
 /// to keep serialization off the render thread.

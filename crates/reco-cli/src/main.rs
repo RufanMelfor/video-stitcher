@@ -159,6 +159,15 @@ enum Commands {
         #[arg(long)]
         max_frames: Option<u64>,
 
+        /// Exclude a time range from the export (e.g. a halftime
+        /// pause), as `START:END` in seconds relative to the source
+        /// (same space as --start-time/--end-time). Repeat for
+        /// multiple ranges; splices what remains back together with
+        /// no gap. Ranges must not overlap. Windows/CPU decode paths
+        /// only today - see `reco_io::cut_range`'s module doc.
+        #[arg(long = "cut-range", value_name = "START:END", value_parser = parse_cut_range)]
+        cut_range: Vec<reco_io::cut_range::CutRange>,
+
         /// Force a specific encoder (e.g., h264_nvenc, hevc_nvenc, libx264). Auto-detects by default.
         #[arg(long)]
         encoder: Option<String>,
@@ -862,6 +871,24 @@ fn parse_blend(s: &str) -> Result<f32, String> {
     }
 }
 
+/// Parse a `START:END` string (seconds) into a [`reco_io::cut_range::CutRange`].
+/// Used by `--cut-range`. Validation (finite, non-negative,
+/// end > start) happens in `CutRange::new`.
+fn parse_cut_range(s: &str) -> Result<reco_io::cut_range::CutRange, String> {
+    let (start, end) = s
+        .split_once(':')
+        .ok_or_else(|| format!("expected START:END (seconds), got {s:?}"))?;
+    let start: f64 = start
+        .trim()
+        .parse()
+        .map_err(|e| format!("invalid start time {start:?}: {e}"))?;
+    let end: f64 = end
+        .trim()
+        .parse()
+        .map_err(|e| format!("invalid end time {end:?}: {e}"))?;
+    reco_io::cut_range::CutRange::new(start, end)
+}
+
 /// Parse a `WIDTHxHEIGHT` string (e.g. `1280x720`, `854x480`) into
 /// `(u32, u32)`. Used by `--replay-scale`. Validates YUV420P
 /// alignment: width divisible by 4, height even.
@@ -930,6 +957,7 @@ fn main() -> anyhow::Result<()> {
             start_time,
             end_time,
             max_frames,
+            cut_range,
             encoder,
             codec,
             quality,
@@ -978,6 +1006,7 @@ fn main() -> anyhow::Result<()> {
                 start_time,
                 end_time,
                 max_frames,
+                cut_ranges: cut_range,
                 encoder_name: encoder,
                 codec: &codec,
                 quality: &quality,
