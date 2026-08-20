@@ -74,6 +74,16 @@ struct WindowsZeroCopyState {
     left: crate::stitch_job::InputPath,
     right: crate::stitch_job::InputPath,
     sync_offset: i64,
+    /// Created once and reused (via `new_ref()`) for every decode-pair
+    /// (re)spawn, including `seek_to_secs`'s mid-stream jumps. Reco-core's
+    /// D3D11 staging pool is created lazily from the first decoded
+    /// frame's device and stays pinned to it for the source's whole
+    /// lifetime - respawning with a *different* device (e.g. a fresh
+    /// `create_shared_hw_device()` call per seek) would decode real
+    /// frames the staging pool can no longer copy from, failing with
+    /// "source frame is on a different D3D11 device than the staging
+    /// pool". See `crate::ffmpeg::decoder::SharedHwDevice`'s doc comment.
+    hw_device: crate::ffmpeg::decoder::SharedHwDevice,
     decode: WindowsDecodeState,
     /// Holds the D3d11Frame pair from the most recent `next_frame()` call.
     ///
@@ -100,6 +110,7 @@ impl WindowsZeroCopyState {
                 &self.right,
                 self.sync_offset,
                 None,
+                self.hw_device.new_ref(),
             );
             self.decode = WindowsDecodeState::Running { pair_rx };
         }
@@ -124,6 +135,7 @@ impl WindowsZeroCopyState {
             &self.right,
             self.sync_offset,
             Some(secs),
+            self.hw_device.new_ref(),
         );
         self.decode = WindowsDecodeState::Running { pair_rx };
         self.live_frame_guard = None;
@@ -507,11 +519,20 @@ impl SmartFileSource {
     ) -> Result<Self, SourceError> {
         log::info!("SmartFileSource: D3D11VA zero-copy decode enabled");
 
+        // Created once here rather than lazily inside `ensure_running` so
+        // every decode-pair (re)spawn for this source's whole lifetime -
+        // including `seek_to_secs`'s mid-stream jumps past an excluded
+        // cut range - shares the same underlying device. See
+        // `WindowsZeroCopyState::hw_device`'s doc comment.
+        let hw_device = crate::ffmpeg::decoder::create_shared_hw_device()
+            .expect("D3D11VA hw device creation failed");
+
         Ok(Self {
             mode: SourceMode::D3d11ZeroCopy(Box::new(WindowsZeroCopyState {
                 left: left.clone(),
                 right: right.clone(),
                 sync_offset,
+                hw_device,
                 decode: WindowsDecodeState::Pending,
                 live_frame_guard: None,
             })),
