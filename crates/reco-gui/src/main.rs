@@ -3226,8 +3226,25 @@ fn main() -> anyhow::Result<()> {
         } else {
             *range = (start, end);
         }
-        if let Some(app) = app_weak.upgrade() {
-            sync_cut_ranges(&s, &app);
+        let committed = s.cut_ranges.get(idx).copied();
+        if let (Some(app), Some((start, end))) = (app_weak.upgrade(), committed) {
+            // Patch just this row's data in the EXISTING model rather than
+            // sync_cut_ranges's full ModelRc replace: `edited(v)` fires on
+            // every keystroke (see NumEdit's TextInput `edited` forwarding),
+            // and replacing the whole model tears down and recreates every
+            // row's widgets - including the TextInput the user is actively
+            // typing into - dropping keyboard focus after each character.
+            // `set_row_data` updates the row in place and keeps focus.
+            // Found by the user: only the first typed digit registered,
+            // every next one needed a re-click first.
+            slint::Model::set_row_data(
+                &app.get_cut_ranges(),
+                idx,
+                CutRangeItem {
+                    start_secs: start as f32,
+                    end_secs: end as f32,
+                },
+            );
         }
     });
 
@@ -5739,6 +5756,24 @@ fn main() -> anyhow::Result<()> {
     if !app.get_files_loaded() {
         app.set_files_panel_open(true);
     }
+
+    // First-paint kick: the scrubber row (and, going by the same
+    // symptom, potentially anything else in the transport bar) has been
+    // observed invisible immediately after launch, only appearing once
+    // some later, unrelated property change (e.g. "+ Add cut") forces a
+    // redraw - see the `request_redraw` nudge a few lines above this
+    // function for the same class of issue already known to affect this
+    // renderer ("BeforeRendering fires even if nothing marked the window
+    // dirty yet"). That nudge only runs while playing/seeking/dirty, so
+    // a freshly-opened, fully idle window never gets it. One explicit
+    // kick shortly after the event loop starts covers the idle-startup
+    // case the same way.
+    let app_weak = app.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_millis(150), move || {
+        if let Some(app) = app_weak.upgrade() {
+            app.window().request_redraw();
+        }
+    });
 
     // Closing the main window must also close the floating debug window
     // (a separate top-level window - see `on_open_debug_window` above).
