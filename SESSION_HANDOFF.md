@@ -1,3 +1,108 @@
+# Session handoff - 2026-08-20 (TGR_PC)
+
+**SESSION PAUSED 2026-08-20, user said "dit werkt, maar moet nog veel
+aan gebeuren. Dit gaan we later doen."** (works, but needs a lot more -
+picking this up later). Reviewed community PR #474 against
+`reco-project/video-stitcher` (external contributor `wendibus` / Björn
+Zelter): an HTML/CSS/JS scoreboard-overlay system - manifest-driven
+package discovery, a sandboxed Chrome/CDP renderer, a sport-neutral
+wgpu RGBA compositor after Autocam/before encode. This is exactly what
+[[project_overlay_features_scoreboard_logo]]'s 2026-08-14 research
+concluded reco-core needed; someone else built it first.
+
+**First correction from the user mid-session**: I initially built the
+PR's branch as-is (based on the v0.5.4 release point) and told the user
+to test that. User caught it - **wrong base, doesn't have async-detect
+or anything merged since.** Fixed by creating a fresh branch
+`scoreboard-on-main` (worktree `D:\CLAUDE\worktrees\scoreboard-on-main`)
+and rebasing the PR's 7 scoreboard-specific commits directly onto
+current `main` tip (not a merge - PR history predates the v0.5.4-sync
+hand-port, so `main` and the PR branch share no clean merge-base;
+`git rebase --onto main <fork-point>` replays just the scoreboard
+commits, keeps original wendibus/Zelter authorship).
+
+**Conflicts resolved by hand, not blind accept-theirs** (each verified
+against current architecture, not guessed):
+- `render/mod.rs`/`render/pipeline.rs`: new `overlay` module + composite
+  wrapper combined with `color_match` and the current
+  `render_to_target*` signatures (`color_correction`/
+  `multiband_blend_enabled`/`show_seam_line` args added to `main` after
+  the PR's fork point).
+- `session/mod.rs`: the PR's struct-field diff dragged in stale
+  `detection`/`ball_tracker`/`panner`/etc. fields as merge context -
+  those already moved into `StitchCore` in the post-refactor
+  architecture; kept only the genuinely new `overlay_source` field.
+- `main.rs`: dropped the PR's dead `MatchCalibration`/`IntentTranslator`/
+  old `detect::director::ViewportPosition` imports (pre-v0.5.4-sync
+  naming, see [[project_v054_upstream_sync]]), kept current
+  `Calibration`/`geometry::ViewportPosition`, added the new
+  `OverlayFrame`/`OverlayFrameSource` imports.
+- `main.slint`: two additive UI blocks (Audio Sync vs. Scoreboard
+  section) - kept both.
+- Cargo.toml/Cargo.lock: unioned workspace members, regenerated the
+  lock via `cargo build`.
+- One real post-rebase compile error: `PreviewBridge`'s field is
+  `engine` (`StitchCore`), not `renderer` - PR predates that rename.
+  Fixed and committed separately.
+
+`cargo test -p reco-scoreboard` all green (13 tests, including a real
+Chrome DOM/transparent-capture/live-editor-publish test) on the ported
+branch. Noticed but did NOT fix: `cargo clippy --all-targets` fails on
+`crates/reco-gui/src/settings.rs:398`/`406`
+(`field_reassign_with_default`) - pre-existing on `main` itself (from
+the ball-coast-secs commit), unrelated to this port.
+
+**Second ask: user's real product is football/soccer, not basketball**
+("mijn scoreboard moet niet basketball zijn maar voetbal"). The PR's
+`scoreboards/basketball/` is explicitly documented as a reference
+fixture only (`scoreboards/README.md`), and `scoreboards/AGENTS.md`
+already has a full "add football" walkthrough as its worked example -
+followed it directly. Added `scoreboards/football/` (manifest, HTML,
+CSS, JS, `assets/`), sport-neutral contract only (no Rust/Slint
+changes):
+- match clock counts up and carries across halves (not basketball's
+  per-quarter countdown); "Next half" advances the period and clears
+  added time only, never resets the clock or cards.
+- period label mapped from `game.period` (1st/2nd Half, Extra Time 1/2,
+  Penalties) instead of "Q2 / 4".
+- yellow/red card badges per team (hidden at zero) replace fouls; cards
+  accumulate for the whole match, unlike basketball's per-quarter
+  team-foul reset.
+- added-time badge (`+N'`) shown when `sport.addedTime > 0`.
+
+Added 2 new Rust tests mirroring the basketball coverage exactly
+(`bundled_football_is_discovered` in `discovery.rs`,
+`football_api_updates_dom_and_keeps_transparent_pixels` in
+`runtime.rs` - real Chrome, real DOM assertions, real editor-publish
+round trip). `cargo test -p reco-scoreboard` now 15/15 green. No Rust
+rebuild needed to pick up the package itself (filesystem-discovered at
+runtime) - just restarted the running debug `reco-gui.exe`.
+
+**Both debug+release `reco-gui.exe` built and verified running**, in
+the worktree's own `target/` (not the main checkout's usual build
+output):
+
+```
+D:\CLAUDE\worktrees\scoreboard-on-main\target\debug\reco-gui.exe
+D:\CLAUDE\worktrees\scoreboard-on-main\target\release\reco-gui.exe
+```
+
+User confirmed the football scoreboard renders and works, but said "a
+lot still needs to happen" without specifying what yet - **paused here
+on the user's call, nothing more decided this session.**
+
+**Not done**: no commit/push to any remote (all work is local commits
+on `scoreboard-on-main`, on top of `main`, in the dedicated worktree -
+`main` itself untouched). No merge/PR decision made about PR #474
+itself (still an open external PR upstream, untouched by any of this).
+The original `D:\CLAUDE\worktrees\pr-474-scoreboard` worktree still
+exists holding the PR's untouched original branch, purely as a
+reference to compare against - **not** the one to keep testing from,
+superseded by `scoreboard-on-main`. Next session: ask the user what
+specifically needs to change before picking this back up (design pass?
+more fields? GUI polish? something else) - no todo list exists yet
+beyond "much more to do."
+
 # Session handoff - 2026-08-17 (TGR_PC, continues 2026-08-16)
 
 **SESSION CLOSED 2026-08-17, user said "ik ga afsluiten voor vandaag"
