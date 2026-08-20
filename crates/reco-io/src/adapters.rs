@@ -564,6 +564,7 @@ pub fn create_encoder(
         preset,
         audio_source: None,
         audio_start_time: 0.0,
+        audio_cut_windows: Vec::new(),
         container: ffmpeg::encoder::Container::default(),
         gop_size: None,
         stream_url: None,

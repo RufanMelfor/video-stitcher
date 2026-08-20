@@ -905,6 +905,53 @@ impl StitchJob {
             );
         }
 
+        // Resolve cut ranges into the keep-windows they imply. Validated
+        // and sorted first so overlapping/invalid input fails loudly
+        // instead of producing a silently-wrong export. See
+        // `cut_range`'s module doc for the current decode-path scope.
+        // Computed before the encoder (below) so its audio passthrough
+        // can be given the same windows, shifted onto the audio file's
+        // own clock - see `audio_cut_windows` just below.
+        let sorted_cuts = crate::cut_range::validate_cut_ranges(self.cut_ranges.clone())
+            .map_err(|e| StitchError::Other(format!("cut_ranges: {e}")))?;
+        if !sorted_cuts.is_empty()
+            && !matches!(decode_mode.as_str(), "CPU upload" | "D3D11VA zero-copy")
+        {
+            return Err(StitchError::Other(format!(
+                "cut_ranges are only supported on the CPU or D3D11VA (Windows) decode paths \
+                 today; this source is using \"{decode_mode}\" - see reco_io::cut_range's \
+                 module doc"
+            )));
+        }
+        let keep_windows = crate::cut_range::keep_windows(start_secs, self.end_time, &sorted_cuts);
+        if !sorted_cuts.is_empty() {
+            let summary: Vec<String> = keep_windows
+                .iter()
+                .map(|(s, e)| match e {
+                    Some(e) => format!("{s:.2}-{e:.2}s"),
+                    None => format!("{s:.2}s-end"),
+                })
+                .collect();
+            log::info!(
+                "Cut ranges: {} excluded, {} keep window(s): {}",
+                sorted_cuts.len(),
+                keep_windows.len(),
+                summary.join(", "),
+            );
+        }
+
+        // Audio comes from a specific camera's file, which - same as
+        // `audio_start_time` above - may be offset from the video
+        // session's own timeline by the sync-offset correction. Shift
+        // every window by that same fixed amount so a cut range lands
+        // on the correct real position in the audio file, not the
+        // video session's nominal timeline.
+        let audio_offset_secs = audio_sync_skip as f64 / fps;
+        let audio_cut_windows: Vec<(f64, Option<f64>)> = keep_windows
+            .iter()
+            .map(|(s, e)| (s + audio_offset_secs, e.map(|e| e + audio_offset_secs)))
+            .collect();
+
         let enc_config = crate::ffmpeg::encoder::EncoderConfig {
             encoder_name: self.encoder_name.clone(),
             codec: self.codec.into(),
@@ -913,6 +960,7 @@ impl StitchJob {
             preset: self.preset.clone(),
             audio_source,
             audio_start_time,
+            audio_cut_windows,
             container: self.format.into(),
             gop_size: None,
             stream_url: None,
@@ -958,38 +1006,6 @@ impl StitchJob {
                 "start_time ({start_secs:.2}s = frame {skip_frames}) \
                  is past the end of the source ({total} frames)"
             )));
-        }
-
-        // Resolve cut ranges into the keep-windows they imply. Validated
-        // and sorted first so overlapping/invalid input fails loudly
-        // instead of producing a silently-wrong export. See
-        // `cut_range`'s module doc for the current decode-path scope.
-        let sorted_cuts = crate::cut_range::validate_cut_ranges(self.cut_ranges.clone())
-            .map_err(|e| StitchError::Other(format!("cut_ranges: {e}")))?;
-        if !sorted_cuts.is_empty()
-            && !matches!(decode_mode.as_str(), "CPU upload" | "D3D11VA zero-copy")
-        {
-            return Err(StitchError::Other(format!(
-                "cut_ranges are only supported on the CPU or D3D11VA (Windows) decode paths \
-                 today; this source is using \"{decode_mode}\" - see reco_io::cut_range's \
-                 module doc"
-            )));
-        }
-        let keep_windows = crate::cut_range::keep_windows(start_secs, self.end_time, &sorted_cuts);
-        if !sorted_cuts.is_empty() {
-            let summary: Vec<String> = keep_windows
-                .iter()
-                .map(|(s, e)| match e {
-                    Some(e) => format!("{s:.2}-{e:.2}s"),
-                    None => format!("{s:.2}s-end"),
-                })
-                .collect();
-            log::info!(
-                "Cut ranges: {} excluded, {} keep window(s): {}",
-                sorted_cuts.len(),
-                keep_windows.len(),
-                summary.join(", "),
-            );
         }
 
         // Skip frames to reach the first window's start position.
