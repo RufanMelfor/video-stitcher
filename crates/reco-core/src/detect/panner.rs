@@ -86,6 +86,21 @@ pub trait Panner: Send {
     fn debug_event(&self, _frame_index: u64) -> Option<PipelineEvent> {
         None
     }
+
+    /// Clear any smoothing/momentum state carried across frames after a
+    /// hard timeline discontinuity (e.g. a cut range excluded mid-export -
+    /// see `reco_io::cut_range`). Default no-op: stateless panners and
+    /// panners whose per-frame state is already safe to reuse across a
+    /// jump (nothing accumulates) don't need to override this.
+    ///
+    /// Implementors that track velocity, an exponential moving average,
+    /// or any other "last N frames" momentum should clear it here so the
+    /// first post-cut frame reacts to fresh data immediately instead of
+    /// smoothing across a gap that, from the panner's perspective, never
+    /// happened. The current output position may be left as-is - only
+    /// the *rate-of-change* state needs clearing, not the position
+    /// itself.
+    fn reset(&mut self) {}
 }
 
 /// Scalar inputs to [`dispatch`] bundled so the function stays under

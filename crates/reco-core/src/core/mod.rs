@@ -313,6 +313,25 @@ impl StitchCore {
         self.panner = None;
     }
 
+    /// Clear the attached panner's and trackers' cross-frame momentum
+    /// state after a hard timeline discontinuity (e.g. a cut range
+    /// excluded mid-export - see `reco_io::cut_range`), so the next
+    /// frame reacts to fresh data instead of smoothing/coasting across
+    /// a gap it has no way to know happened. No-op for any slot that
+    /// isn't attached, or whose implementation doesn't override
+    /// [`Panner::reset`]/[`Tracker::reset`] (both default to no-op).
+    pub fn reset_autocam_state(&mut self) {
+        if let Some(panner) = self.panner.as_mut() {
+            panner.reset();
+        }
+        if let Some(tracker) = self.ball_tracker.as_mut() {
+            tracker.reset();
+        }
+        if let Some(tracker) = self.player_tracker.as_mut() {
+            tracker.reset();
+        }
+    }
+
     /// Attach a pipeline event sink for structured observability.
     ///
     /// The sink receives the detect -> track -> pan event stream

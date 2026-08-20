@@ -112,6 +112,16 @@ impl Coaster {
     pub fn frames_coasting(&self) -> u32 {
         self.frames_coasting
     }
+
+    /// Force back to the pre-first-fresh state, discarding any
+    /// in-progress coast. Used when the caller knows time has jumped
+    /// (e.g. a cut range excluded mid-export) and an in-progress coast
+    /// would otherwise resume as if nothing happened - see
+    /// [`reco_core::detect::tracker::Tracker::reset`].
+    pub fn reset(&mut self) {
+        self.frames_coasting = 0;
+        self.ever_tracked = false;
+    }
 }
 
 #[cfg(test)]

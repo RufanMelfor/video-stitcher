@@ -1048,6 +1048,30 @@ impl Panner for FieldPanner {
             },
         )
     }
+
+    /// Clear velocity/EMA/lead momentum so the next `decide*` call
+    /// locks onto fresh data immediately instead of smoothing in from
+    /// wherever the pre-cut state left off.
+    ///
+    /// `yaw`/`pitch`/`current_fov` (the actual output position) are
+    /// deliberately left as-is - there's nothing wrong with the
+    /// camera's last rendered position, only the *rate-of-change*
+    /// state is stale. `ema_initialized = false` is what actually does
+    /// the unsticking: the next `ema_step` snaps straight to the raw
+    /// target instead of blending from `ema_yaw`/`ema_pitch` (see
+    /// `ema_step`'s doc comment). `frame_index` is left alone - it only
+    /// paces periodic debug logging, not panner behavior.
+    fn reset(&mut self) {
+        self.ema_initialized = false;
+        self.velocity_yaw = 0.0;
+        self.velocity_pitch = 0.0;
+        self.ball_presence = 0.0;
+        self.last_ball_yaw = 0.0;
+        self.last_ball_pitch = 0.0;
+        self.lead_yaw = 0.0;
+        self.lead_pitch = 0.0;
+        self.lookahead_active = false;
+    }
 }
 
 #[cfg(test)]
