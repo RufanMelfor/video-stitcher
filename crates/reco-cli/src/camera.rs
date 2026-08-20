@@ -592,7 +592,12 @@ pub fn run_camera(
                 });
 
             println!("Starting NVMM capture...");
-            frame_count = session.run(&mut source, frame_limit, interrupted, Some(on_progress))?;
+            frame_count = session.run(
+                &mut source,
+                frame_limit,
+                interrupted,
+                &mut Some(on_progress),
+            )?;
 
             source.stop();
             #[cfg(feature = "replay")]

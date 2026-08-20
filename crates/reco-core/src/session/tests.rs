@@ -316,7 +316,7 @@ fn basic_frame_loop() {
     let interrupted = AtomicBool::new(false);
 
     let processed = session
-        .run(&mut source, u64::MAX, &interrupted, None)
+        .run(&mut source, u64::MAX, &interrupted, &mut None)
         .expect("run");
 
     session.finish().expect("finish");
@@ -375,7 +375,7 @@ fn tracker_receives_detections() {
     let interrupted = AtomicBool::new(false);
 
     let processed = session
-        .run(&mut source, u64::MAX, &interrupted, None)
+        .run(&mut source, u64::MAX, &interrupted, &mut None)
         .expect("run");
 
     session.finish().expect("finish");
@@ -424,7 +424,7 @@ fn detection_interval_respected() {
     let interrupted = AtomicBool::new(false);
 
     let processed = session
-        .run(&mut source, u64::MAX, &interrupted, None)
+        .run(&mut source, u64::MAX, &interrupted, &mut None)
         .expect("run");
 
     session.finish().expect("finish");
@@ -456,7 +456,7 @@ fn nan_panner_does_not_crash() {
 
     // This should not panic. Coverage clamping handles NaN gracefully.
     let processed = session
-        .run(&mut source, u64::MAX, &interrupted, None)
+        .run(&mut source, u64::MAX, &interrupted, &mut None)
         .expect("run should succeed even with NaN panner output");
 
     session.finish().expect("finish");
@@ -556,7 +556,12 @@ fn push_and_pull_share_one_ai_brain() {
     }));
     let interrupted = AtomicBool::new(false);
     session
-        .run(&mut MockSource::new(FRAMES), u64::MAX, &interrupted, None)
+        .run(
+            &mut MockSource::new(FRAMES),
+            u64::MAX,
+            &interrupted,
+            &mut None,
+        )
         .expect("run");
 
     // Half (2): the session's detection wrote the ENGINE's cache
