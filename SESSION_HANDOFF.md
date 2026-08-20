@@ -1,3 +1,134 @@
+# Session handoff - 2026-08-20 (TGR_PC), continued: cut-range GUI hardening
+
+**Pushed to `github` (RufanMelfor/reco-video-stitcher-rig) main,
+`3aef5a20`.** Direct continuation of the cut-range feature (video+audio+
+CLI shipped earlier the same day, see the "Video cutout research"
+section further down / [[project_video_cutout_research]]) - user asked
+"kan ik dit ook in de GUI testen?", chose the full drag-timeline UI over
+a numeric-only stopgap, then found 4 real bugs testing it for real on
+their own footage. All 4 root-caused and fixed, verified on a real
+2-file DJI export (30fps sustained, no crash, memory returns to a
+stable baseline after export).
+
+## The 4 bugs, in the order found
+
+1. **Scrubber invisible on cold startup, only appeared after "+ Add
+   cut"** - first fix attempt (`638876c6`, a `track-width` local-property
+   change in the cut-range bands) was real but logically couldn't have
+   been the actual cause (cut-ranges is empty before any cut exists, so
+   that code path never even runs pre-Add-Cut). Real fix (`3aef5a20`):
+   one explicit `window().request_redraw()` kick 150ms after the event
+   loop starts, matching an existing documented gap in this renderer
+   ("BeforeRendering fires even if nothing marked the window dirty
+   yet" - previously only covered during playback/seeking, never at
+   idle cold-start). **Not yet hands-on verified by the user** in this
+   final build - only passively screenshotted in an earlier, since-
+   superseded build.
+
+2. **"VRAM pool exhausted" / "GetData timed out" crashing multi-window
+   (cut-range) exports** - two stacked bugs in `run_buffered`
+   (`638876c6`): a pop-before-check drain-loop bug (pre-existing,
+   predates cut-ranges, silently dropped one VRAM slot whenever
+   `frame_limit` not EOF stopped the steady-state loop) plus a missing
+   final drain of leftover buffered frames at window boundaries. Fixed
+   and verified via a 6-window CLI stress test (pool fully restored
+   every window).
+
+3. **A SEPARATE, more serious hang found after (2) shipped**: multi-
+   window cut-range exports with **Async Detect enabled** hung
+   indefinitely (20+ min, no error) at a window boundary - traced to
+   `AsyncDetectThread`/`pending_finishers` never being drained between
+   `run_buffered` calls. Each window restarts its produce-index counter
+   at 0; a leftover unresolved async-detect result from the previous
+   window gets handed to the new window's first `resolve_pending_
+   world_state` call instead (FIFO is the only correlation - the
+   ordering check is a `debug_assert!`, a no-op in release), which
+   permanently desyncs the FIFO stream until a later `recv()` blocks
+   forever waiting for a result that can never arrive. This is what a
+   real GUI export actually hit, reported as "GetData timed out (>1M
+   polls)" - that D3D11 timeout is a downstream symptom (frames stopped
+   flowing once the pipeline deadlocked), not the root cause. Fixed
+   (`739251ca`): drain exactly `pending_finishers.len()` stale results
+   at the end of every `run_buffered` call. **Verified twice**: (a) CLI
+   repro (2-file chained input, 2 cut ranges, `--async-detect`) hung
+   20+ min before the fix, completed cleanly (4196 frames/330s) after;
+   (b) the user's own real GUI export on their actual 2-part DJI
+   footage (`ScrubberTest_v5`) completed at a sustained ~30fps with
+   `frame_index` perfectly continuous across both cut boundaries
+   (checked directly in the `.events.jsonl` - zero gaps/duplicates).
+
+4. **Cut-range NumEdit fields could only take one keystroke before
+   needing a re-click** - `on_cut_range_update` (fired on every
+   keystroke, not just commit) called `sync_cut_ranges`, which always
+   replaces the whole `cut-ranges` `ModelRc`, tearing down and
+   recreating every row's widgets including the one being typed into.
+   Fixed (`3aef5a20`): patch just the edited row via `Model::
+   set_row_data` instead of replacing the model. **Not yet hands-on
+   verified by the user.**
+
+## A 5th, unrelated finding from the same session: silent TensorRT->DirectML fallback
+
+Every `cargo build` this session (until caught) omitted
+`--features tensorrt` - not a default feature
+(`crates/reco-gui/Cargo.toml`: `default = ["autocam", "ort"]`) - so
+detection silently ran on DirectML instead, no error/warning anywhere.
+This alone dropped real export speed from the user's normal ~30fps to
+17-22fps, independent of any cut-range bug. **User made this an
+explicit standing rule going forward**: every `reco-gui`/`reco-cli`
+build on this machine gets `--features tensorrt`, no exceptions - see
+[[feedback_always_tensorrt_build]]. Same underlying gotcha as
+[[project_tensorrt_sdk_setup]] from 2026-08-13, just re-triggered by a
+long unattended build streak. Also: **user asked to always be asked
+before running any build** ([[feedback_ask_before_building]]) - a
+`cargo run`/`build` fired without asking mid-investigation is what
+surfaced this whole rule.
+
+## Verification
+
+`cargo test -p reco-core` (194 passed, 2 pre-existing unrelated CUDA
+failures), `clippy -p reco-core -p reco-gui --features tensorrt --all-
+targets -- -D warnings` (clean apart from the pre-existing unrelated
+`reco-gui/src/settings.rs:398,406` `field_reassign_with_default`
+warning), `fmt --check` clean. Both debug+release `reco-gui.exe`
+rebuilt with `--features tensorrt` including all 4 fixes above -
+**this is the user's current working build**; passed to the user for
+their own hands-on retest (drag/type interactions - per
+[[feedback_synthetic_gui_automation_risk]], not something to simulate).
+User's own real export (2-part DJI chained input, 2 cut ranges, Async
+Detect + TensorRT + 8-bit-reduced lookahead) completed cleanly at
+~30fps; process memory monitored live throughout (PowerShell polling
+every 15s) - held steady ~3.7GB/9.3GB (working set/private) during the
+export with no growth, dropped to a stable ~3.2GB/6.6GB afterward and
+stayed flat for 5+ minutes - no leak.
+
+## Not done / next steps
+
+- Bugs 1 and 4 above (scrubber kick, NumEdit patch) are code-complete
+  and committed but **not yet hands-on retested by the user** in this
+  final build - ask for confirmation next session if not already given.
+- No `Calibration.cut_ranges` persistence yet (still session-only,
+  resets on calibration reload - flagged as a likely follow-up since
+  the feature's first CLI slice, never picked up).
+- No live overlap-prevention between two dragged/typed cut-range bands
+  in the GUI (export-time validation catches it with a clear error -
+  the user hit this once today, `cut_ranges: cut ranges overlap`,
+  understood it as working-as-intended, not a bug).
+- Upstream PR for the whole cut-range feature (CLI + audio + GUI) still
+  not opened - user explicitly wants one once "further along"
+  ([[project_upstream_pr_workflow]]'s pattern), not decided this
+  session to be far-enough-along yet.
+- The GetData-timeout investigation initially (incorrectly) suspected a
+  D3D11VA/concat-demuxer seek-into-second-chained-file bug before the
+  real async-detect cause was found - ruled out via 2 separate clean
+  CLI repros (single seek into file 2: fine; 2-window cut-range reseek
+  into file 2, no async-detect: fine) before isolating async-detect as
+  the actual variable. Worth remembering only as a methodology note (a
+  plausible-sounding first theory was wrong; kept narrowing variables
+  one at a time rather than trusting it) - not a real remaining
+  concern, chained-file seeking itself checked out clean.
+
+---
+
 # Session handoff - 2026-08-20 (TGR_PC)
 
 **SESSION PAUSED 2026-08-20, user said "dit werkt, maar moet nog veel
