@@ -399,20 +399,30 @@ fn spawn_d3d11_decode_thread_shared(
 /// before the pairing loop starts, instead of decoding and discarding
 /// every frame up to it - see `spawn_d3d11_decode_thread_shared`'s doc
 /// comment. `None` starts from the beginning as before.
+///
+/// `shared_device` is consumed by this call (each decode thread gets
+/// its own [`SharedHwDevice::new_ref`] of it). Callers that respawn the
+/// pair more than once in the lifetime of one `SmartFileSource` (e.g.
+/// [`WindowsZeroCopyState::seek_to_secs`] jumping past an excluded cut
+/// range) MUST pass a ref of the *same* originally-created device every
+/// time, not a freshly created one - see [`crate::ffmpeg::decoder::SharedHwDevice`]'s
+/// doc comment: `CopySubresourceRegion` requires the source texture and
+/// the destination staging pool to be on the same D3D11 device, and the
+/// staging pool is created once, tied to whichever device the first
+/// decoded frame arrived on. A second call passing a fresh device would
+/// silently produce frames the staging pool can't copy from anymore.
 #[cfg(target_os = "windows")]
 pub fn spawn_d3d11_decode_pair(
     left: &crate::stitch_job::InputPath,
     right: &crate::stitch_job::InputPath,
     sync_offset: i64,
     start_secs: Option<f64>,
+    shared_device: crate::ffmpeg::decoder::SharedHwDevice,
 ) -> std::sync::mpsc::Receiver<(
     crate::ffmpeg::decoder::D3d11Frame,
     crate::ffmpeg::decoder::D3d11Frame,
 )> {
     use crate::ffmpeg::decoder::D3d11Frame;
-
-    let shared_device = crate::ffmpeg::decoder::create_shared_hw_device()
-        .expect("D3D11VA hw device creation failed");
 
     let left_rx =
         spawn_d3d11_decode_thread_shared(left.clone(), "left", shared_device.new_ref(), start_secs);
