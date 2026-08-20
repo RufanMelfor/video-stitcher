@@ -342,6 +342,20 @@ impl Tracker for BallTracker {
     fn observe_world(&mut self, world: &reco_core::detect::tracker::WorldState) {
         self.set_players(&world.players);
     }
+
+    /// Clear the coaster and last-known position so the first
+    /// post-discontinuity frame starts from a clean "never tracked"
+    /// state instead of coasting a now-stale position (or nearest-to-
+    /// last-gating a fresh detection against a position from before
+    /// the jump). `current_players`/`age_frames` are reset too since
+    /// they're only meaningful relative to the same continuous frame
+    /// sequence.
+    fn reset(&mut self) {
+        self.coaster.reset();
+        self.last = None;
+        self.current_players.clear();
+        self.age_frames = 0;
+    }
 }
 
 #[cfg(test)]

@@ -181,6 +181,19 @@ pub trait Tracker: Send {
     /// class splitter in the session loop to route detections
     /// without cloning; trackers must also self-filter by class.
     fn class_id(&self) -> u16;
+
+    /// Clear coast/last-known state carried across frames after a hard
+    /// timeline discontinuity (e.g. a cut range excluded mid-export -
+    /// see `reco_io::cut_range`). Default no-op: stateless trackers
+    /// don't need to override this.
+    ///
+    /// Without this, a tracker mid-coast right before the cut (holding
+    /// a last-known position while waiting out its coast budget) would
+    /// treat the first post-cut frame as merely "one more frame without
+    /// a fresh detection" and keep serving that now-stale position,
+    /// since `update`'s `timestamp_ms` only needs to be monotonic, not
+    /// gap-aware.
+    fn reset(&mut self) {}
 }
 
 #[cfg(test)]
