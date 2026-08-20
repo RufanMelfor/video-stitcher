@@ -147,12 +147,18 @@ impl StitchSession {
         feature = "profiling",
         tracing::instrument(skip_all, name = "session_run")
     )]
+    /// `on_progress` is a mutable reference rather than an owned
+    /// `Option` so a caller running multiple windows against the same
+    /// session across several `run()` calls (e.g. a cut-range export
+    /// skipping excluded ranges between windows - see
+    /// `reco_io::cut_range`) can reuse one callback instead of losing
+    /// it after the first call.
     pub fn run(
         &mut self,
         source: &mut dyn FrameSource,
         frame_limit: u64,
         interrupted: &AtomicBool,
-        mut on_progress: Option<ProgressCallback>,
+        on_progress: &mut Option<ProgressCallback>,
     ) -> Result<u64, SessionError> {
         self.configure_from_source(source);
 
@@ -164,9 +170,9 @@ impl StitchSession {
                 self.lookahead_frames as f64 / fps,
                 fps,
             );
-            self.run_buffered(source, frame_limit, interrupted, &mut on_progress)
+            self.run_buffered(source, frame_limit, interrupted, on_progress)
         } else {
-            self.run_immediate(source, frame_limit, interrupted, &mut on_progress)
+            self.run_immediate(source, frame_limit, interrupted, on_progress)
         };
 
         // Drop GPU slot senders so decode threads can exit gracefully.
