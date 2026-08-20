@@ -629,6 +629,33 @@ impl StitchSession {
             }
         }
 
+        // Any produce index still in `pending_finishers` here had its
+        // async detection job submitted (`run_detection_frames_maybe_async`)
+        // but was discarded above before `resolve_pending_world_state` ever
+        // consumed its result - it was still sitting in `buffer`, never
+        // reached by the panner, when `frame_limit` cut this window off.
+        // `async_detect`/`pending_finishers` both persist on `self` across
+        // `run_buffered` calls (one call per keep-window with cut ranges -
+        // see `reco_io::cut_range`), and each new window restarts produce
+        // indices at 0, so a leftover unconsumed result sitting in the
+        // async channel here would be handed to the NEXT window's
+        // `resolve_pending_world_state` calls instead of its own - silently
+        // misattributed detections in a release build (the ordering check
+        // there is only a `debug_assert!`), and once enough of these draw
+        // down a FIFO budget that can never be topped back up, an outright
+        // permanent hang in a later `recv()` that no `submit()` will ever
+        // answer. Found via a real GUI export (Async Detect + multiple cut
+        // ranges) hanging indefinitely, reproduced via CLI - not assumed
+        // from reading the code. Draining exactly `pending_finishers.len()`
+        // stale results restores a clean, balanced FIFO state before the
+        // next window's fresh produce-index count of 0 begins.
+        if let Some(async_detect) = self.async_detect.as_ref() {
+            for _ in 0..self.pending_finishers.len() {
+                let _ = async_detect.recv();
+            }
+        }
+        self.pending_finishers.clear();
+
         self.skip_detection = false;
         Ok(self.frame_count)
     }
