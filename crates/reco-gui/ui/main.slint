@@ -3477,13 +3477,25 @@ export component RecoApp inherits Window {
                             // model/rebuild cycle on every mouse move.
                             property <float> preview-start: range.start-secs;
                             property <float> preview-end: range.end-secs;
+                            // Captured from `parent` (scrubber-track, our
+                            // direct parent) rather than a named
+                            // cross-reference to `scrubber-track` itself -
+                            // matches the export-range indicator's own
+                            // `parent.width` use just above. A named
+                            // self-reference from inside this `for` loop
+                            // left the whole scrubber unsized on the first
+                            // layout pass (only a later reactive update,
+                            // e.g. cut-ranges itself changing, forced the
+                            // relayout that made it appear) - found by the
+                            // user, not assumed.
+                            property <length> track-width: parent.width;
                             property <float> start-frac: root.clip-duration-secs > 0
                                 ? preview-start / root.clip-duration-secs : 0;
                             property <float> end-frac: root.clip-duration-secs > 0
                                 ? preview-end / root.clip-duration-secs : 0;
 
-                            x: scrubber-track.width * start-frac;
-                            width: max(4px, scrubber-track.width * (end-frac - start-frac));
+                            x: track-width * start-frac;
+                            width: max(4px, track-width * (end-frac - start-frac));
                             height: parent.height;
                             background: cut-body.has-hover ? #d9503aa0 : #cc4a3380;
                             border-width: 1px;
@@ -3494,9 +3506,9 @@ export component RecoApp inherits Window {
                             cut-body := TouchArea {
                                 mouse-cursor: self.pressed ? grabbing : grab;
                                 moved => {
-                                    if self.pressed && scrubber-track.width > 0px {
+                                    if self.pressed && track-width > 0px {
                                         preview-start = max(0,
-                                            range.start-secs + (self.mouse-x - self.pressed-x) / scrubber-track.width * root.clip-duration-secs);
+                                            range.start-secs + (self.mouse-x - self.pressed-x) / track-width * root.clip-duration-secs);
                                         preview-end = preview-start + (range.end-secs - range.start-secs);
                                     }
                                 }
@@ -3515,9 +3527,9 @@ export component RecoApp inherits Window {
                                 left-handle-touch := TouchArea {
                                     mouse-cursor: ew-resize;
                                     moved => {
-                                        if self.pressed && scrubber-track.width > 0px {
+                                        if self.pressed && track-width > 0px {
                                             preview-start = max(0, min(
-                                                range.start-secs + (self.mouse-x - self.pressed-x) / scrubber-track.width * root.clip-duration-secs,
+                                                range.start-secs + (self.mouse-x - self.pressed-x) / track-width * root.clip-duration-secs,
                                                 preview-end - 0.2));
                                         }
                                     }
@@ -3536,9 +3548,9 @@ export component RecoApp inherits Window {
                                 right-handle-touch := TouchArea {
                                     mouse-cursor: ew-resize;
                                     moved => {
-                                        if self.pressed && scrubber-track.width > 0px {
+                                        if self.pressed && track-width > 0px {
                                             preview-end = min(root.clip-duration-secs, max(
-                                                range.end-secs + (self.mouse-x - self.pressed-x) / scrubber-track.width * root.clip-duration-secs,
+                                                range.end-secs + (self.mouse-x - self.pressed-x) / track-width * root.clip-duration-secs,
                                                 preview-start + 0.2));
                                         }
                                     }
