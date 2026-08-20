@@ -441,6 +441,22 @@ pub struct EncoderConfig {
     /// (`--start-time`, GUI export start). Copied audio packets are
     /// rebased so the selected timestamp lands at output time zero.
     pub audio_start_time: f64,
+    /// `[start, end)` windows (source seconds, same space as
+    /// `audio_start_time`) to keep from `audio_source`'s first file,
+    /// splicing across the gaps with no pause - the audio counterpart of
+    /// `reco_io::cut_range::keep_windows`'s video-side windows. `end ==
+    /// None` on the last window means "read to the end" (or to whatever
+    /// the overall output duration requires), matching plain passthrough.
+    ///
+    /// Empty (the default) disables this entirely and falls back to a
+    /// single linear read from `audio_start_time` - unchanged behavior
+    /// for every caller that doesn't set cut ranges. Only honored when
+    /// `audio_source` has exactly one file: a chained (multi-file)
+    /// audio source combined with cut ranges isn't supported yet (see
+    /// `StitchJob::cut_ranges`'s doc comment) - falls back to plain
+    /// passthrough with a logged warning rather than silently
+    /// misbehaving.
+    pub audio_cut_windows: Vec<(f64, Option<f64>)>,
     /// Output container format. Defaults to plain MP4 to match the
     /// existing stitch-output behavior; opt in to fragmented MP4 or
     /// Matroska for streamable / write-while-read workflows (e.g.,
@@ -565,6 +581,32 @@ struct AudioPassthrough {
     pending_start: Option<i64>,
     /// True only while copying the first segment (start-time trim applies there).
     first_segment: bool,
+    /// Source-seconds boundary (same space as `start_time_secs`) where the
+    /// *currently active* window ends - a cut range starts here. `None`
+    /// means "no cut-range boundary in this window", i.e. read to EOF /
+    /// the overall output-duration limit as normal. See
+    /// `EncoderConfig::audio_cut_windows`'s doc comment; empty
+    /// `audio_cut_windows` leaves this permanently `None`, matching
+    /// plain passthrough exactly.
+    current_end_secs: Option<f64>,
+    /// Windows queued after the current one - each `(seek_secs,
+    /// end_secs)` is "seek to `seek_secs` in the SAME file, then read
+    /// until `end_secs`". Consumed one at a time as boundaries are hit;
+    /// empty once the last window is active.
+    remaining_windows: std::collections::VecDeque<(f64, Option<f64>)>,
+    /// Set right after a cut-range jump's `ictx.seek()` call, source
+    /// seconds. `avformat_seek_file` with no explicit stream (as used
+    /// here) snaps backward to the nearest seek point in whichever
+    /// stream ffmpeg picks internally - usually video's keyframe
+    /// spacing (roughly a GOP, potentially ~1s) rather than anything
+    /// audio-sample-accurate. Packets are discarded (same idea as the
+    /// `first_segment`/`start_time_secs` trim above) until one reaches
+    /// this real target, THEN `pending_start` rebases it - without this,
+    /// the rebase anchor would be whatever the seek happened to land on,
+    /// silently including up to ~1s of content that was supposed to be
+    /// excluded. Found via direct measurement while testing this
+    /// feature, not assumed - see the commit message.
+    pending_seek_target_secs: Option<f64>,
 }
 
 // SAFETY: VideoEncoder is only used from a single thread. The raw pointers
@@ -691,7 +733,12 @@ impl VideoEncoder {
 
                     // Set up audio passthrough before writing the header.
                     let audio = if let Some(ref audio_paths) = config.audio_source {
-                        Self::setup_audio_stream(&mut octx, audio_paths, config.audio_start_time)?
+                        Self::setup_audio_stream(
+                            &mut octx,
+                            audio_paths,
+                            config.audio_start_time,
+                            &config.audio_cut_windows,
+                        )?
                     } else {
                         None
                     };
@@ -924,12 +971,38 @@ impl VideoEncoder {
         octx: &mut format::context::Output,
         sources: &[PathBuf],
         start_time_secs: f64,
+        cut_windows: &[(f64, Option<f64>)],
     ) -> Result<Option<AudioPassthrough>, EncodeError> {
         let Some((source_path, rest)) = sources.split_first() else {
             return Ok(None);
         };
         let mut ictx = format::input(source_path)?;
         let start_time_secs = sanitize_audio_start_time(start_time_secs);
+
+        // The first window's own start was already reached by the seek
+        // below (both come from the same `start_secs` in `StitchJob`);
+        // only its END boundary (where the cut range starts) and any
+        // later windows are new state to track here. Chained (multi-file)
+        // audio + cut ranges isn't supported yet - falls back to plain
+        // passthrough with a loud warning rather than silently producing
+        // misaligned audio. See `EncoderConfig::audio_cut_windows`'s doc.
+        let (current_end_secs, remaining_windows) = if cut_windows.is_empty() {
+            (None, std::collections::VecDeque::new())
+        } else if !rest.is_empty() {
+            log::warn!(
+                "Cut ranges requested with a chained (multi-file) audio source \
+                 ({} segments) - not supported yet, audio will NOT exclude the cut \
+                 ranges (video still does, so audio will drift out of sync across \
+                 each cut). See EncoderConfig::audio_cut_windows's doc comment.",
+                sources.len(),
+            );
+            (None, std::collections::VecDeque::new())
+        } else {
+            let mut windows: std::collections::VecDeque<(f64, Option<f64>)> =
+                cut_windows.iter().copied().collect();
+            let first_end = windows.pop_front().and_then(|(_, end)| end);
+            (first_end, windows)
+        };
 
         let audio_stream = ictx.streams().best(ffmpeg::media::Type::Audio);
 
@@ -995,6 +1068,9 @@ impl VideoEncoder {
             next_offset: 0,
             pending_start: None,
             first_segment: true,
+            current_end_secs,
+            remaining_windows,
+            pending_seek_target_secs: None,
         }))
     }
 
@@ -1125,14 +1201,20 @@ impl VideoEncoder {
                     packet.set_stream(audio.output_stream_index);
                     packet.rescale_ts(audio.input_time_base, audio.output_time_base);
 
+                    // Raw position in the CURRENT window's own file-relative
+                    // timeline - i.e. before any segment_offset rebase, same
+                    // space as start_pts/current_end_secs. Used by both the
+                    // start-trim check below and the cut-range boundary
+                    // check right after it.
+                    let packet_start = match (packet.pts(), packet.dts()) {
+                        (Some(pts), Some(dts)) => Some(pts.min(dts)),
+                        (Some(pts), None) => Some(pts),
+                        (None, Some(dts)) => Some(dts),
+                        (None, None) => None,
+                    };
+
                     // The start-time trim applies to the first segment only.
                     if audio.first_segment && start_pts > 0 {
-                        let packet_start = match (packet.pts(), packet.dts()) {
-                            (Some(pts), Some(dts)) => Some(pts.min(dts)),
-                            (Some(pts), None) => Some(pts),
-                            (None, Some(dts)) => Some(dts),
-                            (None, None) => None,
-                        };
                         if packet_start.is_some_and(|ts| ts < start_pts) {
                             continue;
                         }
@@ -1142,6 +1224,68 @@ impl VideoEncoder {
                         if let Some(dts) = packet.dts() {
                             packet.set_dts(Some(dts - start_pts));
                         }
+                    }
+
+                    // Cut-range boundary: this packet has reached the end of
+                    // the currently active keep-window. Seek within the SAME
+                    // file to the next window's start instead of writing it,
+                    // and rebase the next real packet onto wherever output
+                    // audio currently ends (`pending_start`) - the same
+                    // gapless-splice mechanism `advance_segment` uses for a
+                    // new chained FILE, just applied to a new position in
+                    // the same one. See `EncoderConfig::audio_cut_windows`.
+                    if let Some(end_secs) = audio.current_end_secs {
+                        let end_pts = seconds_to_pts(end_secs, audio.output_time_base);
+                        if packet_start.is_some_and(|ts| ts >= end_pts) {
+                            let Some((seek_secs, next_end)) = audio.remaining_windows.pop_front()
+                            else {
+                                audio.exhausted = true;
+                                break;
+                            };
+                            let seek_ts =
+                                (seek_secs * f64::from(ffmpeg::ffi::AV_TIME_BASE)).round() as i64;
+                            match audio.ictx.seek(seek_ts, ..seek_ts) {
+                                Ok(()) => {
+                                    log::info!(
+                                        "Audio passthrough: cut range reached, seeking to \
+                                         {seek_secs:.3}s for the next keep window"
+                                    );
+                                    // Don't rebase off whatever packet the
+                                    // seek happens to land on - it can be
+                                    // up to ~1s before the real target
+                                    // (backward keyframe-snap in a stream
+                                    // other than audio). Discard until a
+                                    // packet actually reaches it instead
+                                    // (checked below, mirrors the
+                                    // first_segment trim above).
+                                    audio.pending_seek_target_secs = Some(seek_secs);
+                                    audio.current_end_secs = next_end;
+                                    audio.first_segment = false;
+                                    continue;
+                                }
+                                Err(e) => {
+                                    log::error!(
+                                        "Audio passthrough: seek to {seek_secs:.3}s failed ({e}) \
+                                         while jumping past a cut range - stopping audio here \
+                                         rather than risk misaligned content"
+                                    );
+                                    audio.exhausted = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Still discarding the gap between where a cut-range
+                    // jump's seek landed and its real target (see
+                    // `pending_seek_target_secs`'s doc comment).
+                    if let Some(target_secs) = audio.pending_seek_target_secs {
+                        let target_pts = seconds_to_pts(target_secs, audio.output_time_base);
+                        if packet_start.is_some_and(|ts| ts < target_pts) {
+                            continue;
+                        }
+                        audio.pending_seek_target_secs = None;
+                        audio.pending_start = Some(audio.next_offset);
                     }
 
                     // First packet of a continuation segment: rebase it so the
