@@ -619,6 +619,17 @@ export struct Toast {
     body: string,
 }
 
+// A time range excluded from the export (e.g. a halftime pause) - the
+// UI-side mirror of `reco_io::cut_range::CutRange`. Rust owns the
+// authoritative list (`AppState::cut_ranges`); the UI only ever reads
+// `root.cut-ranges` and requests changes via the `cut-range-*`
+// callbacks below - it never mutates the array in place, since a drag
+// in progress only updates a per-band local preview until release.
+export struct CutRangeItem {
+    start-secs: float,
+    end-secs: float,
+}
+
 /// A single dismissible toast card. Stacked vertically by `ToastStack`.
 ///
 /// Severity drives the left-border accent color:
@@ -1002,6 +1013,21 @@ export component RecoApp inherits Window {
     in-out property <float> export-start-secs: 0.0;
     in-out property <float> export-end-secs: 0.0;
     in-out property <float> clip-duration-secs: 0.0;
+    // Time ranges excluded from the export (e.g. a halftime pause) -
+    // see `CutRangeItem`. Rust is the source of truth; drag/edit/add/
+    // remove all go through the callbacks below rather than mutating
+    // this array from the UI.
+    in-out property <[CutRangeItem]> cut-ranges: [];
+    // Fired with the FINAL (start, end) once a drag on a cut-range
+    // band (body move, or either edge resize) releases. Also used by
+    // the numeric-field editors for direct entry. Rust validates
+    // (ordering, overlap with other ranges) and pushes back a
+    // corrected `cut-ranges` if the request wasn't clean.
+    callback cut-range-update(int, float, float);
+    // Appends a new cut range near the playhead (Rust picks a sensible
+    // default width, clamped to the export window).
+    callback cut-range-add();
+    callback cut-range-remove(int);
     in-out property <string> export-model-path: "";
     in-out property <string> export-tracking-mode: "field";
     in-out property <int> export-detection-interval: 3;
@@ -3410,7 +3436,7 @@ export component RecoApp inherits Window {
                         horizontal-alignment: right;
                     }
 
-                    Rectangle {
+                    scrubber-track := Rectangle {
                         horizontal-stretch: 1;
                         height: 20px;
 
@@ -3436,6 +3462,92 @@ export component RecoApp inherits Window {
                             enabled: root.files-loaded;
                             released(val) => {
                                 if root.total-frames > 0 { root.seek(val / root.total-frames); }
+                            }
+                        }
+
+                        // Cut-range bands (reddish, draggable) - drawn on top
+                        // of the slider so their handles/body stay grabbable;
+                        // this deliberately shadows click-to-seek under a
+                        // band, same trade-off ordinary video editors make
+                        // for in/out markers on the scrubber.
+                        for range[i] in root.cut-ranges: Rectangle {
+                            // Local live-drag preview - only committed to
+                            // Rust (root.cut-range-update) on release, so a
+                            // drag in progress never round-trips through the
+                            // model/rebuild cycle on every mouse move.
+                            property <float> preview-start: range.start-secs;
+                            property <float> preview-end: range.end-secs;
+                            property <float> start-frac: root.clip-duration-secs > 0
+                                ? preview-start / root.clip-duration-secs : 0;
+                            property <float> end-frac: root.clip-duration-secs > 0
+                                ? preview-end / root.clip-duration-secs : 0;
+
+                            x: scrubber-track.width * start-frac;
+                            width: max(4px, scrubber-track.width * (end-frac - start-frac));
+                            height: parent.height;
+                            background: cut-body.has-hover ? #d9503aa0 : #cc4a3380;
+                            border-width: 1px;
+                            border-color: #ffffff40;
+                            border-radius: 2px;
+                            clip: false;
+
+                            cut-body := TouchArea {
+                                mouse-cursor: self.pressed ? grabbing : grab;
+                                moved => {
+                                    if self.pressed && scrubber-track.width > 0px {
+                                        preview-start = max(0,
+                                            range.start-secs + (self.mouse-x - self.pressed-x) / scrubber-track.width * root.clip-duration-secs);
+                                        preview-end = preview-start + (range.end-secs - range.start-secs);
+                                    }
+                                }
+                                pointer-event(e) => {
+                                    if (e.kind == PointerEventKind.up) {
+                                        root.cut-range-update(i, preview-start, preview-end);
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                x: 0px;
+                                width: 5px;
+                                height: parent.height;
+                                background: #ffffff90;
+                                left-handle-touch := TouchArea {
+                                    mouse-cursor: ew-resize;
+                                    moved => {
+                                        if self.pressed && scrubber-track.width > 0px {
+                                            preview-start = max(0, min(
+                                                range.start-secs + (self.mouse-x - self.pressed-x) / scrubber-track.width * root.clip-duration-secs,
+                                                preview-end - 0.2));
+                                        }
+                                    }
+                                    pointer-event(e) => {
+                                        if (e.kind == PointerEventKind.up) {
+                                            root.cut-range-update(i, preview-start, preview-end);
+                                        }
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                x: parent.width - 5px;
+                                width: 5px;
+                                height: parent.height;
+                                background: #ffffff90;
+                                right-handle-touch := TouchArea {
+                                    mouse-cursor: ew-resize;
+                                    moved => {
+                                        if self.pressed && scrubber-track.width > 0px {
+                                            preview-end = min(root.clip-duration-secs, max(
+                                                range.end-secs + (self.mouse-x - self.pressed-x) / scrubber-track.width * root.clip-duration-secs,
+                                                preview-start + 0.2));
+                                        }
+                                    }
+                                    pointer-event(e) => {
+                                        if (e.kind == PointerEventKind.up) {
+                                            root.cut-range-update(i, preview-start, preview-end);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -4545,6 +4657,58 @@ export component RecoApp inherits Window {
                             : "Duration: " + round(range-dur * 10) / 10 + "s";
                         color: range-dur <= 0 ? #ff6666 : #888;
                         font-size: 11px;
+                    }
+
+                    // Cut ranges: exclude sub-windows from the export (e.g.
+                    // a halftime pause). Drag bands directly on the
+                    // scrubber above for a quick mark, or add/adjust/remove
+                    // precisely here - both drive the same
+                    // root.cut-range-* callbacks.
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Tip {
+                            tip: "Excludes a time range from the export, splicing what remains back together with no gap. Drag the reddish band on the scrubber above, or use \"+ Add cut\" and edit the numbers here.";
+                            Text { text: "Cut ranges"; color: #ccc; font-size: 12px; vertical-alignment: center; }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        FlatButton {
+                            text: "+ Add cut";
+                            clicked => { root.cut-range-add(); }
+                        }
+                    }
+
+                    for range[i] in root.cut-ranges: HorizontalBox {
+                        padding: 0;
+                        spacing: 6px;
+                        NumEdit {
+                            text: range.start-secs;
+                            width: 64px;
+                            edited(v) => { root.cut-range-update(i, v.to-float(), range.end-secs); }
+                            escaped => { self.text = range.start-secs; }
+                        }
+                        Text { text: "-"; color: #888; vertical-alignment: center; }
+                        NumEdit {
+                            text: range.end-secs;
+                            width: 64px;
+                            edited(v) => { root.cut-range-update(i, range.start-secs, v.to-float()); }
+                            escaped => { self.text = range.end-secs; }
+                        }
+                        Text {
+                            text: round((range.end-secs - range.start-secs) * 10) / 10 + "s";
+                            color: #666;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Rectangle {
+                            width: 20px;
+                            height: 20px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: 5px;
+                            background: cut-rm.has-hover ? #331516 : transparent;
+                            Text { text: "×"; color: cut-rm.has-hover ? #ff6b6b : #6a7077; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                            cut-rm := TouchArea { clicked => { root.cut-range-remove(i); } }
+                        }
                     }
 
                     Tip {
