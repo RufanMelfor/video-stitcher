@@ -41,6 +41,9 @@ pub struct StitchArgs<'a> {
     pub start_time: Option<f64>,
     pub end_time: Option<f64>,
     pub max_frames: Option<u64>,
+    /// Time ranges to exclude from the export (e.g. a halftime pause).
+    /// See `reco_io::cut_range` and `--cut-range`'s help text.
+    pub cut_ranges: Vec<reco_io::cut_range::CutRange>,
     pub encoder_name: Option<String>,
     pub codec: &'a str,
     pub quality: &'a str,
@@ -207,6 +210,9 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
     }
     if let Some(n) = args.max_frames {
         job = job.max_frames(n);
+    }
+    if !args.cut_ranges.is_empty() {
+        job = job.cut_ranges(args.cut_ranges.clone());
     }
     if args.sync_offset != 0 {
         job = job.sync_offset(args.sync_offset);

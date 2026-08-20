@@ -52,6 +52,9 @@ pub struct StitchJob {
     start_time: Option<f64>,
     end_time: Option<f64>,
     max_frames: Option<u64>,
+    /// Time ranges to exclude from the export (e.g. a halftime pause).
+    /// See [`Self::cut_ranges`].
+    cut_ranges: Vec<crate::cut_range::CutRange>,
     sync_offset: Option<i64>,
     /// Seam blend override. `None` (default) respects the calibration
     /// document's saved value - the single home for render params.
@@ -287,6 +290,7 @@ impl StitchJob {
             start_time: None,
             end_time: None,
             max_frames: None,
+            cut_ranges: Vec::new(),
             sync_offset: None,
             blend_width: None,
             blend_flip_direction: false,
@@ -414,6 +418,31 @@ impl StitchJob {
     /// but `max_frames` is 300, only 300 are produced.
     pub fn max_frames(mut self, n: u64) -> Self {
         self.max_frames = Some(n);
+        self
+    }
+
+    /// Exclude time ranges from the export (e.g. a halftime pause),
+    /// splicing what remains back together with no gap in the output
+    /// timeline. Ranges are relative to the source, same space as
+    /// [`Self::start_time`]/[`Self::end_time`] - not required to be
+    /// pre-sorted, but must not overlap each other.
+    ///
+    /// Video: the decoder seeks past each excluded range instead of
+    /// decoding and discarding it (Windows D3D11VA / CPU decode paths
+    /// only today - see [`crate::cut_range`]'s module doc). The
+    /// autocam panner/trackers are reset at each window boundary so
+    /// they react to fresh data instead of smoothing/coasting across a
+    /// gap. Audio: excluded ranges are skipped from the passthrough
+    /// track too, rebased so it stays gapless (single, non-chained
+    /// audio source only in this first version - a chained/multi-file
+    /// audio source combined with cut ranges falls back to plain
+    /// passthrough with a logged warning).
+    ///
+    /// [`Self::run`] returns an error if any range is invalid
+    /// (non-finite, negative, zero/negative duration) or if two ranges
+    /// overlap.
+    pub fn cut_ranges(mut self, ranges: Vec<crate::cut_range::CutRange>) -> Self {
+        self.cut_ranges = ranges;
         self
     }
 
@@ -909,7 +938,7 @@ impl StitchJob {
                     .map(String::from);
         }
 
-        // Resolve processing window (start_time / end_time / max_frames).
+        // Resolve processing window (start_time / end_time / max_frames / cut_ranges).
         let skip_frames = (start_secs * fps).round() as u64;
 
         if let Some(end) = self.end_time {
@@ -931,7 +960,39 @@ impl StitchJob {
             )));
         }
 
-        // Skip frames to reach start position.
+        // Resolve cut ranges into the keep-windows they imply. Validated
+        // and sorted first so overlapping/invalid input fails loudly
+        // instead of producing a silently-wrong export. See
+        // `cut_range`'s module doc for the current decode-path scope.
+        let sorted_cuts = crate::cut_range::validate_cut_ranges(self.cut_ranges.clone())
+            .map_err(|e| StitchError::Other(format!("cut_ranges: {e}")))?;
+        if !sorted_cuts.is_empty()
+            && !matches!(decode_mode.as_str(), "CPU upload" | "D3D11VA zero-copy")
+        {
+            return Err(StitchError::Other(format!(
+                "cut_ranges are only supported on the CPU or D3D11VA (Windows) decode paths \
+                 today; this source is using \"{decode_mode}\" - see reco_io::cut_range's \
+                 module doc"
+            )));
+        }
+        let keep_windows = crate::cut_range::keep_windows(start_secs, self.end_time, &sorted_cuts);
+        if !sorted_cuts.is_empty() {
+            let summary: Vec<String> = keep_windows
+                .iter()
+                .map(|(s, e)| match e {
+                    Some(e) => format!("{s:.2}-{e:.2}s"),
+                    None => format!("{s:.2}s-end"),
+                })
+                .collect();
+            log::info!(
+                "Cut ranges: {} excluded, {} keep window(s): {}",
+                sorted_cuts.len(),
+                keep_windows.len(),
+                summary.join(", "),
+            );
+        }
+
+        // Skip frames to reach the first window's start position.
         if skip_frames > 0 {
             log::info!("skipping {skip_frames} frames (start_time={start_secs:.2}s)");
             let skipped = source.skip_frames(skip_frames)?;
@@ -940,36 +1001,35 @@ impl StitchJob {
             }
         }
 
-        // Compute frame limit from end_time and max_frames.
-        let end_limit = self
-            .end_time
-            .map(|end| ((end - start_secs) * fps).round() as u64);
-        let frame_limit = match (end_limit, self.max_frames) {
-            (Some(el), Some(mf)) => {
-                let limit = el.min(mf);
-                if limit == mf {
-                    log::info!("frame limit: {limit} (from max_frames)");
-                } else {
-                    log::info!(
-                        "frame limit: {limit} (from end_time {:.2}s)",
-                        self.end_time.unwrap()
-                    );
-                }
-                limit
+        // Per-window cumulative frame counts, capped by the overall
+        // max_frames budget (matches the pre-cut-ranges behavior when
+        // there's exactly one window: `keep_windows` degenerates to
+        // `[(start_secs, end_time)]` when `cut_ranges` is empty).
+        let overall_cap = self.max_frames.unwrap_or(u64::MAX);
+        let mut cumulative = 0u64;
+        let mut window_limits: Vec<u64> = Vec::with_capacity(keep_windows.len());
+        for (win_start, win_end) in &keep_windows {
+            let window_frames = match win_end {
+                Some(end) => ((end - win_start) * fps).round().max(0.0) as u64,
+                None => u64::MAX - cumulative,
+            };
+            cumulative = cumulative.saturating_add(window_frames).min(overall_cap);
+            window_limits.push(cumulative);
+            if cumulative >= overall_cap {
+                break;
             }
-            (Some(el), None) => {
-                log::info!(
-                    "frame limit: {el} (from end_time {:.2}s)",
-                    self.end_time.unwrap()
-                );
-                el
+        }
+        let frame_limit = *window_limits.last().unwrap_or(&0);
+        log::info!(
+            "frame limit: {frame_limit}{}",
+            if self.max_frames.is_some() {
+                " (max_frames applied)"
+            } else if self.end_time.is_some() || !sorted_cuts.is_empty() {
+                " (from end_time/cut_ranges)"
+            } else {
+                ""
             }
-            (None, Some(mf)) => {
-                log::info!("frame limit: {mf} (from max_frames)");
-                mf
-            }
-            (None, None) => u64::MAX,
-        };
+        );
 
         // Optional replay recording: wrap the source with a
         // decorator that writes pre-stitch frames to a stacked-video
@@ -986,6 +1046,11 @@ impl StitchJob {
         let replay_cfg: Option<()> = None;
 
         let frame_count;
+        // Taken once and reused across every `session.run()` call below
+        // (one per keep-window when `cut_ranges` is non-empty) - see
+        // `StitchSession::run`'s doc comment on why `on_progress` is now
+        // a reference instead of an owned value consumed on first use.
+        let mut on_progress = self.on_progress.take();
         // Tracks a CPU-path replay decorator when that arm is
         // chosen; the finalizer below calls `finish()` after the
         // run. GPU path finalizes via
@@ -1060,11 +1125,14 @@ impl StitchJob {
                     scale_note,
                     cfg.path.display(),
                 );
-                frame_count = session.run(
+                frame_count = Self::run_windows(
+                    &mut session,
                     &mut source,
-                    frame_limit,
+                    fps,
+                    &keep_windows,
+                    &window_limits,
                     interrupted,
-                    self.on_progress.take(),
+                    &mut on_progress,
                 )?;
             } else {
                 if cfg.scale.is_some() {
@@ -1090,20 +1158,26 @@ impl StitchJob {
                     *cfg.encoder_config,
                 )
                 .map_err(|e| StitchError::Other(format!("replay recording open: {e}")))?;
-                frame_count = session.run(
+                frame_count = Self::run_windows(
+                    &mut session,
                     &mut replay,
-                    frame_limit,
+                    fps,
+                    &keep_windows,
+                    &window_limits,
                     interrupted,
-                    self.on_progress.take(),
+                    &mut on_progress,
                 )?;
                 replay_src = Some(replay);
             }
         } else {
-            frame_count = session.run(
+            frame_count = Self::run_windows(
+                &mut session,
                 &mut source,
-                frame_limit,
+                fps,
+                &keep_windows,
+                &window_limits,
                 interrupted,
-                self.on_progress.take(),
+                &mut on_progress,
             )?;
         }
         #[cfg(not(feature = "stacked-output"))]
@@ -1111,11 +1185,14 @@ impl StitchJob {
             // Without the stacked-output feature, replay recording
             // is unavailable and `replay_cfg` is always None.
             let _ = replay_cfg;
-            frame_count = session.run(
+            frame_count = Self::run_windows(
+                &mut session,
                 &mut source,
-                frame_limit,
+                fps,
+                &keep_windows,
+                &window_limits,
                 interrupted,
-                self.on_progress.take(),
+                &mut on_progress,
             )?;
         }
 
@@ -1178,6 +1255,65 @@ impl StitchJob {
             decode_mode,
             telemetry: Some(telemetry_snap),
         })
+    }
+
+    /// Run the session across each keep-window in turn, seeking past
+    /// excluded cut ranges between windows and resetting autocam
+    /// momentum state at each boundary (see `crate::cut_range`'s module
+    /// doc for why the reset is needed). Degenerates to a single
+    /// `session.run()` call - byte-for-byte the old behavior - when
+    /// `cut_ranges` is empty, since [`crate::cut_range::keep_windows`]
+    /// then returns exactly one window.
+    ///
+    /// `window_limits[i]` is the CUMULATIVE frame count the session
+    /// should have processed by the time window `i` finishes -
+    /// `StitchSession::frame_count` already accumulates across `run()`
+    /// calls (never reset between them), so passing it straight
+    /// through as each call's `frame_limit` is correct with no extra
+    /// bookkeeping here. May be shorter than `keep_windows` when the
+    /// overall `max_frames` cap is exhausted before the last window.
+    fn run_windows(
+        session: &mut StitchSession,
+        source: &mut dyn FrameSource,
+        fps: f64,
+        keep_windows: &[(f64, Option<f64>)],
+        window_limits: &[u64],
+        interrupted: &AtomicBool,
+        on_progress: &mut Option<ProgressCallback>,
+    ) -> Result<u64, StitchError> {
+        let mut frame_count = 0u64;
+        for (i, (win_start, _win_end)) in keep_windows.iter().enumerate() {
+            let Some(&limit) = window_limits.get(i) else {
+                break; // truncated by the max_frames cap
+            };
+            if limit <= frame_count {
+                break; // max_frames budget already exhausted
+            }
+            if i > 0 {
+                // Window 0's start position was already reached by the
+                // ordinary start_time skip above this function's call
+                // site; only later windows need an in-run seek.
+                let target_frame = (win_start * fps).round() as u64;
+                log::info!(
+                    "Cut range: seeking to {win_start:.2}s (frame {target_frame}) for the next keep window"
+                );
+                let seeked = source.skip_frames(target_frame)?;
+                if seeked < target_frame {
+                    log::warn!(
+                        "source ended while seeking past a cut range (frame {seeked}/{target_frame})"
+                    );
+                    break;
+                }
+                session.core_mut().reset_autocam_state();
+            }
+            frame_count = session.run(source, limit, interrupted, on_progress)?;
+            if frame_count < limit {
+                // Source exhausted or interrupted mid-window; later
+                // windows would only fail the same way.
+                break;
+            }
+        }
+        Ok(frame_count)
     }
 }
 
