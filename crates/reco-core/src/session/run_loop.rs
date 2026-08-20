@@ -575,10 +575,23 @@ impl StitchSession {
         }
 
         // ── Drain: render remaining pose queue entries ────────────
-        while let Some((oldest, raw_pose)) = pose_queue.pop_front() {
-            if self.frame_count >= frame_limit || interrupted.load(Ordering::Relaxed) {
+        // Checks the stop condition BEFORE popping, not after: the
+        // steady-state loop above always exits with frame_count
+        // already == frame_limit when frame_limit (not EOF) is what
+        // stopped it, so a `while let Some(..) = pose_queue.pop_front()`
+        // pattern-matched loop with the check inside the body would pop
+        // - and silently drop, VRAM slot and all - exactly one entry on
+        // its first iteration before ever checking anything. Found via
+        // the cut-range multi-window VRAM leak investigation (see
+        // run_buffered's final cleanup below), but this bug predates
+        // cut ranges - any single-window export whose own frame_limit
+        // (--end-time/--max-frames) cuts it off before EOF already lost
+        // one lookahead-buffered frame's slot here; it just never
+        // mattered before because the whole session ended right after.
+        while self.frame_count < frame_limit && !interrupted.load(Ordering::Relaxed) {
+            let Some((oldest, raw_pose)) = pose_queue.pop_front() else {
                 break;
-            }
+            };
             let smoothed_pose = centered_smooth(
                 raw_pose,
                 pose_queue.iter().take(post_smooth_half).map(|(_, p)| *p),
@@ -590,6 +603,30 @@ impl StitchSession {
             }
 
             self.render_buffered_frame(oldest, smoothed_pose, start, &ctx, on_progress)?;
+        }
+
+        // Anything still resident in `pose_queue` or `buffer` at this
+        // point was decoded/panner-processed ahead by the lookahead
+        // pipeline but never reached `frame_limit`'s cutoff (the loops
+        // above only stop early like this when `frame_limit` cuts the
+        // source off before EOF - at real end-of-source both are
+        // already empty by construction). Discard it without
+        // rendering, but still release its VRAM slot: a caller that
+        // reuses this session for another `run_buffered` call right
+        // after this one returns (one call per keep-window when
+        // excluding cut ranges - see `reco_io::cut_range`) would
+        // otherwise leak up to one lookahead window's worth of slots
+        // at every such boundary, eventually exhausting the pool.
+        // Found via a real GUI export hitting exactly that, not
+        // assumed correct from reading the code.
+        while let Some(frame) = pose_queue
+            .pop_front()
+            .map(|(f, _)| f)
+            .or_else(|| buffer.pop())
+        {
+            if let (Some(slot), Some(pool)) = (frame.vram_slot, self.vram_pool.as_mut()) {
+                pool.release(slot);
+            }
         }
 
         self.skip_detection = false;
