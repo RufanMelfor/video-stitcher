@@ -2556,6 +2556,7 @@ mod tests {
             field_roi: None,
             goal_geometry: None,
             autocam_defaults: None,
+            scoreboard: None,
         }
     }
 
@@ -2685,6 +2686,7 @@ mod tests {
             field_roi: None,
             goal_geometry: None,
             autocam_defaults: None,
+            scoreboard: None,
         };
         let viewport = ViewportConfig {
             fov_degrees: 75.0,
