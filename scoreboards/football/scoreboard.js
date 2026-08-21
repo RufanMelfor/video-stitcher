@@ -24,15 +24,33 @@
         board: document.querySelector(".scoreboard")
     };
 
-    // period -> broadcast label. Falls back to "Half N" for anything past
-    // extra time / penalties (e.g. a tournament with unusual rules).
-    const PERIOD_LABELS = {
-        1: "1st Half",
-        2: "2nd Half",
-        3: "Extra Time 1",
-        4: "Extra Time 2",
-        5: "Penalties"
-    };
+    // Broadcast label for a period, driven by sport.periodCount instead
+    // of hardcoding a 2-half match - youth football commonly plays
+    // quarters (periodCount 4) instead of halves, and a fixed "1st
+    // Half"/"2nd Half" map read wrong for those. Anything past the
+    // configured regular periods (extra time, penalties - rules vary too
+    // much by competition to model generically) falls back to a plain
+    // "Extra Period N".
+    function ordinal(n) {
+        const v = n % 100;
+        if (v >= 11 && v <= 13) return `${n}th`;
+        switch (n % 10) {
+            case 1: return `${n}st`;
+            case 2: return `${n}nd`;
+            case 3: return `${n}rd`;
+            default: return `${n}th`;
+        }
+    }
+
+    function periodLabel(period, periodCount) {
+        const p = Number(period) || 1;
+        const count = Number(periodCount) || 2;
+        if (p <= count) {
+            const noun = count === 2 ? "Half" : count === 4 ? "Quarter" : "Period";
+            return `${ordinal(p)} ${noun}`;
+        }
+        return `Extra Period ${p - count}`;
+    }
 
     const fallbackState = {
         version: 1,
@@ -154,7 +172,7 @@
         elements.competition.hidden = !state.game?.competition;
         text(elements.clock, state.game?.clock, "00:00");
         const period = state.game?.period ?? 1;
-        text(elements.period, PERIOD_LABELS[period] || `Half ${period}`, "1st Half");
+        text(elements.period, periodLabel(period, state.sport?.periodCount), "1st Half");
         const addedTime = Number(state.sport?.addedTime) || 0;
         elements.addedTimeWrap.hidden = addedTime <= 0;
         text(elements.addedTime, addedTime, "0");
