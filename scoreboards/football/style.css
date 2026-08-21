@@ -107,6 +107,17 @@ body {
     font-variant-numeric: tabular-nums;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
 }
+/* Without this, cardBadge()'s `wrap.hidden = true` (scoreboard.js) is a
+   no-op: the browser's own [hidden] { display: none } UA rule and this
+   file's .card-badge { display: inline-flex } rule above are tied on
+   specificity, and an author stylesheet wins that tie over the UA
+   default - so a "hidden" badge still rendered, showing a static "0" it
+   never got to update (cardBadge only writes textContent when shown).
+   Reported by the user testing an export with no card events logged at
+   all: both badges stayed visible showing 0/0 the whole time. A combined
+   class+attribute selector is more specific than either rule alone, so
+   it always wins regardless of cascade order. */
+.card-badge[hidden] { display: none; }
 .card-yellow { background: #f2c94c; color: #2a2000; }
 .card-red { background: #d0342c; color: #fff; }
 
