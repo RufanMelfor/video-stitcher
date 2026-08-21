@@ -184,6 +184,19 @@ fn run_worker(
         .enable_gpu(true)
         .ignore_certificate_errors(false)
         .window_size(Some(viewport))
+        // headless_chrome's default is 30s, but that timer isn't really
+        // about *our* connection health - it's a fixed idle window on
+        // browser-LEVEL events (new tab opened/closed), which our
+        // single-tab package never generates regardless of how long the
+        // session runs. Left at the default, it reliably logs a scary
+        // "Got a timeout while listening for browser events" error()
+        // roughly 30s into every session (live preview or export) even
+        // though the tab connection actually used for updates/captures
+        // is untouched - a red herring that looks exactly like a real
+        // connection failure. A generous ceiling here means it only ever
+        // fires for a genuinely abandoned browser process, not a normal
+        // multi-minute-or-longer scoreboard session.
+        .idle_browser_timeout(Duration::from_secs(6 * 60 * 60))
         .build()
         .map_err(|error| RuntimeError::BrowserLaunch(error.to_string()))?;
     let browser = Browser::new(options).map_err(RuntimeError::Browser)?;
