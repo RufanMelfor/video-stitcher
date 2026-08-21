@@ -3863,6 +3863,14 @@ fn main() -> anyhow::Result<()> {
                 let mut s = state_ref.borrow_mut();
                 s.scoreboard_sync_anchor = default_anchor;
                 s.scoreboard_import = Some(export);
+                // Same fix as on_changed_scoreboard_placement below: without
+                // this, the preview only redraws while playing/seeking (see
+                // vsync_render_tick's gate), so the banner wouldn't actually
+                // pick up the freshly loaded data until something unrelated
+                // happened to trigger a redraw - read as a long, confusing
+                // delay after Load, even though push_scoreboard_replay
+                // itself runs within ~150ms once a tick fires at all.
+                s.preview_dirty = true;
                 drop(s);
                 app.set_scoreboard_match_summary(summary.into());
                 app.set_scoreboard_sync_label(
@@ -3909,6 +3917,7 @@ fn main() -> anyhow::Result<()> {
             event_ts_ms: video_start_ms,
             video_seconds,
         });
+        s.preview_dirty = true;
         app.set_scoreboard_sync_label(
             format!("Synced: video_start = {video_seconds:.1}s into this video").into(),
         );
