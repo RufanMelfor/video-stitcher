@@ -22,6 +22,7 @@
 //! )?;
 //! ```
 
+use super::overlay::{OverlayFrame, RgbaOverlayCompositor};
 use super::renderer::{InputFormat, RenderError, Renderer};
 use super::scene::SceneGeometry;
 use super::viewport::{ResolvedViewport, ViewportConfig};
@@ -90,6 +91,10 @@ pub struct StitchPipeline {
     /// Periodic exposure/color-matching state (see [`super::color_match`]).
     /// `&self` render methods need interior mutability here.
     color_match: std::sync::Mutex<super::color_match::ColorMatchState>,
+    /// Format shared by the stitch and optional overlay render passes.
+    output_format: wgpu::TextureFormat,
+    /// Lazily created only when a consumer enables an overlay.
+    overlay: Option<RgbaOverlayCompositor>,
 }
 
 /// Pre-built bind groups for GPU-resident zero-copy sources.
@@ -173,6 +178,8 @@ impl StitchPipeline {
             input_width,
             input_height,
             color_match: std::sync::Mutex::new(super::color_match::ColorMatchState::default()),
+            output_format,
+            overlay: None,
         })
     }
 
@@ -250,7 +257,76 @@ impl StitchPipeline {
         }
         self.viewport.width = width;
         self.viewport.height = height;
+        let gpu = self.gpu.clone();
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.resize(&gpu, (width, height));
+        }
         Some((width, height))
+    }
+
+    /// Upload a new straight-alpha RGBA overlay surface.
+    ///
+    /// GPU resources are allocated lazily on the first call. Subsequent calls
+    /// update the cached texture; intervening video frames reuse it without an
+    /// additional upload.
+    pub fn set_overlay_frame(&mut self, frame: &OverlayFrame) -> Result<(), PipelineError> {
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay
+                .upload(&self.gpu, frame)
+                .map_err(|e| PipelineError::InvalidConfig {
+                    reason: e.to_string(),
+                })?;
+        } else {
+            self.overlay = Some(
+                RgbaOverlayCompositor::new(
+                    &self.gpu,
+                    self.output_format,
+                    (self.viewport.width, self.viewport.height),
+                    frame,
+                )
+                .map_err(|e| PipelineError::InvalidConfig {
+                    reason: e.to_string(),
+                })?,
+            );
+        }
+        Ok(())
+    }
+
+    /// Disable composition and release all overlay GPU resources.
+    pub fn clear_overlay(&mut self) {
+        self.overlay = None;
+    }
+
+    /// Whether an overlay texture is currently active.
+    pub fn has_overlay(&self) -> bool {
+        self.overlay.is_some()
+    }
+
+    fn composite_target_commands(
+        &self,
+        stitch_commands: wgpu::CommandBuffer,
+    ) -> wgpu::CommandBuffer {
+        let Some(overlay) = self.overlay.as_ref() else {
+            return stitch_commands;
+        };
+
+        // The extra submission exists only while the feature is enabled.
+        // Queue ordering guarantees the overlay pass loads the completed
+        // camera frame before NV12 conversion or RGBA readback begins.
+        self.gpu.queue().submit(std::iter::once(stitch_commands));
+        let target_view = self
+            .renderer
+            .render_target()
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        overlay.encode(&self.gpu, &target_view)
+    }
+
+    fn composite_view_if_enabled(&self, target_view: &wgpu::TextureView) {
+        if let Some(overlay) = self.overlay.as_ref() {
+            self.gpu
+                .queue()
+                .submit(std::iter::once(overlay.encode(&self.gpu, target_view)));
+        }
     }
 
     /// Set the vertical field of view in degrees.
@@ -828,6 +904,7 @@ impl StitchPipeline {
             self.show_seam_line,
             target_view,
         );
+        self.composite_view_if_enabled(target_view);
         Ok(())
     }
 
@@ -869,6 +946,7 @@ impl StitchPipeline {
             self.show_seam_line,
             target_view,
         );
+        self.composite_view_if_enabled(target_view);
         Ok(())
     }
 
@@ -903,16 +981,18 @@ impl StitchPipeline {
             },
         };
 
-        Ok(self.renderer.render_to_target(
-            &self.gpu,
-            &self.scene,
-            &self.calibration,
-            &viewport,
-            self.calibration.topology.blend_width,
-            color_correction,
-            self.calibration.topology.multiband_blend_enabled,
-            self.show_seam_line,
-        ))
+        Ok(
+            self.composite_target_commands(self.renderer.render_to_target(
+                &self.gpu,
+                &self.scene,
+                &self.calibration,
+                &viewport,
+                self.calibration.topology.blend_width,
+                color_correction,
+                self.calibration.topology.multiband_blend_enabled,
+                self.show_seam_line,
+            )),
+        )
     }
 
     /// Upload NV12 frames and render to the internal target.
@@ -945,16 +1025,18 @@ impl StitchPipeline {
             },
         };
 
-        Ok(self.renderer.render_to_target(
-            &self.gpu,
-            &self.scene,
-            &self.calibration,
-            &viewport,
-            self.calibration.topology.blend_width,
-            color_correction,
-            self.calibration.topology.multiband_blend_enabled,
-            self.show_seam_line,
-        ))
+        Ok(
+            self.composite_target_commands(self.renderer.render_to_target(
+                &self.gpu,
+                &self.scene,
+                &self.calibration,
+                &viewport,
+                self.calibration.topology.blend_width,
+                color_correction,
+                self.calibration.topology.multiband_blend_enabled,
+                self.show_seam_line,
+            )),
+        )
     }
 
     /// Upload packed BGRA/RGBA frames and render to the internal target.
@@ -990,16 +1072,18 @@ impl StitchPipeline {
             },
         };
 
-        Ok(self.renderer.render_to_target(
-            &self.gpu,
-            &self.scene,
-            &self.calibration,
-            &viewport,
-            self.calibration.topology.blend_width,
-            super::renderer::ColorCorrection::default(),
-            self.calibration.topology.multiband_blend_enabled,
-            self.show_seam_line,
-        ))
+        Ok(
+            self.composite_target_commands(self.renderer.render_to_target(
+                &self.gpu,
+                &self.scene,
+                &self.calibration,
+                &viewport,
+                self.calibration.topology.blend_width,
+                super::renderer::ColorCorrection::default(),
+                self.calibration.topology.multiband_blend_enabled,
+                self.show_seam_line,
+            )),
+        )
     }
 
     /// Render from GPU-resident RGBA textures (e.g. Bayer demosaic output).
@@ -1060,7 +1144,7 @@ impl StitchPipeline {
             },
         };
 
-        self.renderer.render_to_target(
+        self.composite_target_commands(self.renderer.render_to_target(
             &self.gpu,
             &self.scene,
             &self.calibration,
@@ -1069,7 +1153,7 @@ impl StitchPipeline {
             super::renderer::ColorCorrection::default(),
             self.calibration.topology.multiband_blend_enabled,
             self.show_seam_line,
-        )
+        ))
     }
 
     /// Enable 180-degree UV flip for the GPU zero-copy path.
