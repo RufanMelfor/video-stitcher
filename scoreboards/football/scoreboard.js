@@ -130,6 +130,20 @@
         if (shown && imgEl.src !== logo) imgEl.src = logo;
     }
 
+    // CSS var() only falls back to its second argument for a genuinely
+    // *unset* custom property - setting it to an empty string still
+    // counts as set, so a naive `setProperty(name, value || "")` would
+    // permanently break the property's own CSS fallback the first time
+    // `value` is missing. removeProperty() when unset is the only way to
+    // let var()'s own fallback do its job.
+    function setCustomVar(el, name, value) {
+        if (value === undefined || value === null || value === "") {
+            el.style.removeProperty(name);
+        } else {
+            el.style.setProperty(name, value);
+        }
+    }
+
     Reco.onUpdate((state) => {
         debugState = ensureStateShape(structuredClone(state));
         text(elements.homeName, state.home?.shortName || state.home?.name, "HOME");
@@ -152,7 +166,13 @@
         elements.board.style.setProperty("--home-secondary", state.home?.secondaryColor || "#ffffff");
         elements.board.style.setProperty("--away-color", state.away?.color || "#cf2027");
         elements.board.style.setProperty("--away-secondary", state.away?.secondaryColor || "#ffffff");
-        elements.board.style.setProperty("--scoreboard-font", state.custom?.fontFamily || "inherit");
+        setCustomVar(elements.board, "--scoreboard-font", state.custom?.fontFamily);
+        setCustomVar(
+            elements.board,
+            "--logo-size",
+            Number(state.custom?.logoSize) > 0 ? `${state.custom.logoSize}px` : null,
+        );
+        setCustomVar(elements.board, "--banner-color", state.custom?.bannerColor);
         setLogo(elements.homeLogo, state.home?.logo);
         setLogo(elements.awayLogo, state.away?.logo);
         syncEditorFields();
