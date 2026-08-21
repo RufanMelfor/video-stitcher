@@ -19,6 +19,7 @@ mod detect_preview;
 mod export;
 mod playback;
 mod preview;
+mod scoreboard_import;
 mod settings;
 mod sync_offset;
 mod telemetry_client;
@@ -238,6 +239,16 @@ struct AppState {
     scoreboard_frame: Option<OverlayFrame>,
     scoreboard_frame_dirty: bool,
     scoreboard_error: String,
+    /// Parsed Match Logger event log, loaded via the Scoreboard section's
+    /// Load button. Session-only for now (same deliberate-deferral
+    /// precedent as `cut_ranges` above) - not yet persisted into the
+    /// calibration file. Driving the scoreboard from this replaces the
+    /// live-manual editor path for as long as it's loaded.
+    scoreboard_import: Option<scoreboard_import::MatchLoggerExport>,
+    /// Video-seconds <-> match-wall-clock anchor for `scoreboard_import`.
+    /// Defaults to the log's `video_start` event at `video_seconds: 0.0`
+    /// when present; adjustable by scrubbing to the matching frame.
+    scoreboard_sync_anchor: Option<scoreboard_import::SyncAnchor>,
     recording_tx: Option<std::sync::mpsc::SyncSender<RecordingFrame>>,
     recording_thread: Option<std::thread::JoinHandle<()>>,
     recording_path: Option<PathBuf>,
@@ -555,6 +566,8 @@ impl AppState {
             scoreboard_frame: None,
             scoreboard_frame_dirty: false,
             scoreboard_error,
+            scoreboard_import: None,
+            scoreboard_sync_anchor: None,
             recording_tx: None,
             recording_thread: None,
             recording_path: None,
@@ -3706,6 +3719,90 @@ fn main() -> anyhow::Result<()> {
                 format!("Cannot copy scoreboard address: {error}").into(),
             );
         }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_load_scoreboard_events(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let dialog = rfd::FileDialog::new()
+            .set_title("Load Match Logger export")
+            .add_filter("Match Logger export", &["json"]);
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        match scoreboard_import::load(&path) {
+            Ok(export) => {
+                fn team_label(name: &str, fallback: &str) -> String {
+                    let trimmed = name.trim();
+                    if trimmed.is_empty() {
+                        fallback.to_string()
+                    } else {
+                        trimmed.to_string()
+                    }
+                }
+                let summary = format!(
+                    "{} vs {} - {} events",
+                    team_label(&export.home, "Home"),
+                    team_label(&export.away, "Away"),
+                    export.event_count()
+                );
+                let default_anchor = export.video_start_ms().map(|event_ts_ms| {
+                    scoreboard_import::SyncAnchor {
+                        event_ts_ms,
+                        video_seconds: 0.0,
+                    }
+                });
+                let mut s = state_ref.borrow_mut();
+                s.scoreboard_sync_anchor = default_anchor;
+                s.scoreboard_import = Some(export);
+                drop(s);
+                app.set_scoreboard_match_summary(summary.into());
+                app.set_scoreboard_sync_label(
+                    if default_anchor.is_some() {
+                        "Synced to video start - tap \"Set sync point\" if that's off".into()
+                    } else {
+                        "No video_start event in this export - tap \"Set sync point\" once scrubbed to the matching frame".into()
+                    },
+                );
+                app.set_scoreboard_error_text("".into());
+            }
+            Err(error) => {
+                app.set_scoreboard_error_text(error.to_string().into());
+            }
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_set_scoreboard_sync_point(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let mut s = state_ref.borrow_mut();
+        let Some(export) = s.scoreboard_import.as_ref() else {
+            return;
+        };
+        let Some(video_start_ms) = export.video_start_ms() else {
+            app.set_scoreboard_error_text(
+                "This export has no video_start event to sync to".into(),
+            );
+            return;
+        };
+        let video_seconds = if s.playback.fps() > 0.0 {
+            s.playback.frame_index() as f64 / s.playback.fps()
+        } else {
+            0.0
+        };
+        s.scoreboard_sync_anchor = Some(scoreboard_import::SyncAnchor {
+            event_ts_ms: video_start_ms,
+            video_seconds,
+        });
+        app.set_scoreboard_sync_label(
+            format!("Synced: video_start = {video_seconds:.1}s into this video").into(),
+        );
     });
 
     // ── Auto-calibration callback ──
