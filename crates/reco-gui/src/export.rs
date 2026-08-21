@@ -9,8 +9,38 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use reco_core::calibration::Calibration;
+use reco_core::render::overlay::{OverlayFrame, OverlayFrameSource};
 
 use crate::RecoApp;
+use crate::scoreboard_import::{MatchLoggerExport, SyncAnchor};
+
+/// Snapshot needed to drive a time-varying scoreboard through export - the
+/// parsed Match Logger event log plus its video<->wall-clock sync anchor.
+/// Cloned from `AppState` before spawning the worker thread, same reason
+/// as `AutocamUiConfig` above. Replaces `scoreboard_state`'s one frozen
+/// snapshot with a per-frame replay when present (see `run_export`).
+#[derive(Debug, Clone)]
+pub struct ScoreboardReplay {
+    pub export: MatchLoggerExport,
+    pub anchor: SyncAnchor,
+}
+
+/// Adapts a shared, running [`reco_scoreboard::ScoreboardRuntime`] to
+/// [`OverlayFrameSource`] so the encode session can pull frames from it
+/// (`try_frame`, needs `&mut self`) while the progress callback
+/// independently pushes replayed state into it (`update`, only needs
+/// `&self`) from the same underlying runtime - `update()`'s effect is a
+/// non-blocking channel send, so the two never actually contend.
+struct SharedScoreboardSource(Arc<Mutex<reco_scoreboard::ScoreboardRuntime>>);
+
+impl OverlayFrameSource for SharedScoreboardSource {
+    fn try_frame(&mut self) -> Result<Option<OverlayFrame>, String> {
+        self.0
+            .lock()
+            .map_err(|_| "scoreboard runtime lock poisoned".to_string())?
+            .try_frame()
+    }
+}
 
 /// Result published by the export thread.
 #[derive(Debug)]
@@ -163,6 +193,7 @@ pub fn run_export(
     autocam: AutocamUiConfig,
     scoreboard_package: Option<reco_scoreboard::ScoreboardPackage>,
     scoreboard_state: Option<serde_json::Value>,
+    scoreboard_replay: Option<ScoreboardReplay>,
     app_weak: slint::Weak<RecoApp>,
     interrupted: &AtomicBool,
     last_progress_at: Arc<Mutex<Option<Instant>>>,
@@ -288,8 +319,53 @@ pub fn run_export(
     .blend_flip_direction(blend_flip_direction)
     .multiband_blend_enabled(multiband_blend_enabled)
     .seam_offset(seam_offset)
-    .metadata_comment(metadata_comment)
-    .on_progress(move |p: &reco_core::session::types::FrameProgress| {
+    .metadata_comment(metadata_comment);
+
+    // Scoreboard runtime is started before `.on_progress` (not inline with
+    // `.on_session` below, as PR #474 originally had it) so a shared
+    // handle can also be captured into the progress callback - that's what
+    // lets a Match Logger replay actually change the on-screen score/
+    // clock/cards over the course of the export instead of freezing
+    // whatever `scoreboard_state` held at the moment export started.
+    let scoreboard_shared: Option<Arc<Mutex<reco_scoreboard::ScoreboardRuntime>>> =
+        match scoreboard_package {
+            Some(package) => {
+                match reco_scoreboard::ScoreboardRuntime::start_with_state(
+                    package,
+                    30,
+                    scoreboard_state,
+                ) {
+                    Ok(runtime) => Some(Arc::new(Mutex::new(runtime))),
+                    Err(error) => {
+                        log::error!("Scoreboard disabled for export: {error}");
+                        let weak = app_weak.clone();
+                        let message = error.to_string();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(app) = weak.upgrade() {
+                                app.set_scoreboard_error_text(message.into());
+                            }
+                        });
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+
+    // Real video-time fps for the replay below - distinct from the
+    // encode-throughput `fps` computed inside the progress closure for the
+    // ETA display (frames processed per wall-clock second), which is a
+    // different quantity despite the name collision.
+    let video_fps = fps;
+    let replay_runtime = scoreboard_shared.clone();
+    // Approximates true source position as `start_secs + frames/video_fps`,
+    // which is exact for a plain start/end trim but doesn't account for
+    // `cut_ranges` removing segments mid-export - acceptable drift for a
+    // scoreboard (seconds-scale granularity), not attempted here.
+    let replay_start_secs = start_secs as f64;
+    let mut last_replay_frames: Option<u64> = None;
+
+    job = job.on_progress(move |p: &reco_core::session::types::FrameProgress| {
         let frames = p.frames_completed;
         let elapsed = progress_start.elapsed().as_secs_f64();
         let fps = if elapsed > 0.0 {
@@ -298,6 +374,26 @@ pub fn run_export(
             0.0
         };
         *progress_last_at.lock().unwrap() = Some(Instant::now());
+
+        if let (Some(replay), Some(runtime)) = (scoreboard_replay.as_ref(), &replay_runtime) {
+            // Throttle to roughly 1/sec of *video* time, not every
+            // encoded frame - each push is a real JS eval in the headless
+            // browser.
+            let due = last_replay_frames
+                .is_none_or(|last| frames.saturating_sub(last) as f64 >= video_fps.max(1.0));
+            if due {
+                last_replay_frames = Some(frames);
+                let video_seconds = replay_start_secs + frames as f64 / video_fps.max(1.0);
+                let state = crate::scoreboard_import::state_at(
+                    &replay.export,
+                    &replay.anchor,
+                    video_seconds,
+                );
+                if let Ok(runtime) = runtime.lock() {
+                    let _ = runtime.update(&state);
+                }
+            }
+        }
 
         let weak = progress_weak.clone();
         let _ = slint::invoke_from_event_loop(move || {
@@ -320,24 +416,10 @@ pub fn run_export(
         });
     });
 
-    if let Some(package) = scoreboard_package {
-        match reco_scoreboard::ScoreboardRuntime::start_with_state(package, 30, scoreboard_state) {
-            Ok(runtime) => {
-                job = job.on_session(move |session, _source| {
-                    session.set_overlay_source(Box::new(runtime));
-                });
-            }
-            Err(error) => {
-                log::error!("Scoreboard disabled for export: {error}");
-                let weak = app_weak.clone();
-                let message = error.to_string();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(app) = weak.upgrade() {
-                        app.set_scoreboard_error_text(message.into());
-                    }
-                });
-            }
-        }
+    if let Some(shared) = scoreboard_shared {
+        job = job.on_session(move |session, _source| {
+            session.set_overlay_source(Box::new(SharedScoreboardSource(shared)));
+        });
     }
 
     if start_secs > 0.0 {

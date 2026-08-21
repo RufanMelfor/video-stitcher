@@ -249,6 +249,12 @@ struct AppState {
     /// Defaults to the log's `video_start` event at `video_seconds: 0.0`
     /// when present; adjustable by scrubbing to the matching frame.
     scoreboard_sync_anchor: Option<scoreboard_import::SyncAnchor>,
+    /// Wall-clock throttle for `push_scoreboard_replay` - the replayed
+    /// state is recomputed and pushed to the running package on a timer
+    /// rather than every render tick, since a scoreboard plausibly changes
+    /// at most a few times a second and each push is a real JS eval in the
+    /// headless browser.
+    scoreboard_replay_last_push: Option<std::time::Instant>,
     recording_tx: Option<std::sync::mpsc::SyncSender<RecordingFrame>>,
     recording_thread: Option<std::thread::JoinHandle<()>>,
     recording_path: Option<PathBuf>,
@@ -568,6 +574,7 @@ impl AppState {
             scoreboard_error,
             scoreboard_import: None,
             scoreboard_sync_anchor: None,
+            scoreboard_replay_last_push: None,
             recording_tx: None,
             recording_thread: None,
             recording_path: None,
@@ -717,6 +724,39 @@ impl AppState {
                 true
             }
         }
+    }
+
+    /// Recompute the replayed scoreboard state for the current preview
+    /// position and push it to the running package, throttled to avoid a
+    /// JS eval on every render tick (see `scoreboard_replay_last_push`).
+    /// A no-op unless both a Match Logger export and a sync anchor are
+    /// loaded - live-manual editing (no import loaded) is unaffected.
+    fn push_scoreboard_replay(&mut self) {
+        const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
+        let (Some(export), Some(anchor), Some(runtime)) = (
+            self.scoreboard_import.as_ref(),
+            self.scoreboard_sync_anchor.as_ref(),
+            self.scoreboard_runtime.as_ref(),
+        ) else {
+            return;
+        };
+        if let Some(last) = self.scoreboard_replay_last_push
+            && last.elapsed() < MIN_INTERVAL
+        {
+            return;
+        }
+        let fps = self.playback.fps();
+        let video_seconds = if fps > 0.0 {
+            self.playback.frame_index() as f64 / fps
+        } else {
+            0.0
+        };
+        let state = scoreboard_import::state_at(export, anchor, video_seconds);
+        if let Err(error) = runtime.update(&state) {
+            self.scoreboard_error = format!("Cannot update scoreboard: {error}");
+            log::error!("{}", self.scoreboard_error);
+        }
+        self.scoreboard_replay_last_push = Some(std::time::Instant::now());
     }
 
     fn reset_pipeline(&mut self) {
@@ -3786,9 +3826,7 @@ fn main() -> anyhow::Result<()> {
             return;
         };
         let Some(video_start_ms) = export.video_start_ms() else {
-            app.set_scoreboard_error_text(
-                "This export has no video_start event to sync to".into(),
-            );
+            app.set_scoreboard_error_text("This export has no video_start event to sync to".into());
             return;
         };
         let video_seconds = if s.playback.fps() > 0.0 {
@@ -5504,6 +5542,19 @@ fn main() -> anyhow::Result<()> {
             .scoreboard_runtime
             .as_ref()
             .and_then(reco_scoreboard::ScoreboardRuntime::current_editor_state);
+        // When a Match Logger export is loaded, it drives the scoreboard
+        // through the whole export instead of the one frozen snapshot
+        // above - see `crate::export::ScoreboardReplay`.
+        let scoreboard_replay = match (
+            s.scoreboard_import.as_ref(),
+            s.scoreboard_sync_anchor.as_ref(),
+        ) {
+            (Some(export), Some(anchor)) => Some(crate::export::ScoreboardReplay {
+                export: export.clone(),
+                anchor: *anchor,
+            }),
+            _ => None,
+        };
 
         // Persist the user's codec / quality / blend choices as the
         // defaults for next session. Model path is saved in the
@@ -5571,6 +5622,7 @@ fn main() -> anyhow::Result<()> {
                 autocam,
                 scoreboard_package,
                 scoreboard_state,
+                scoreboard_replay,
                 app_weak_bg,
                 &interrupted,
                 last_progress_at,
@@ -6102,6 +6154,7 @@ fn vsync_render_tick(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<RecoA
         return false;
     }
 
+    s.push_scoreboard_replay();
     if s.poll_scoreboard_overlay() {
         s.preview_dirty = true;
     }

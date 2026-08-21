@@ -104,7 +104,10 @@ pub enum ImportError {
     /// One event's `ts` field wasn't the fixed
     /// `YYYY-MM-DDTHH:mm:ss.sssZ` shape `Date.prototype.toISOString()`
     /// always produces.
-    BadTimestamp { index: usize, ts: String },
+    BadTimestamp {
+        index: usize,
+        ts: String,
+    },
 }
 
 impl fmt::Display for ImportError {
@@ -213,8 +216,7 @@ pub struct SyncAnchor {
 /// computed for contract completeness but currently has no effect: the
 /// football package's `scoreboard.js` does not read it.
 pub fn state_at(export: &MatchLoggerExport, sync: &SyncAnchor, video_seconds: f64) -> Value {
-    let wall_ms =
-        sync.event_ts_ms + ((video_seconds - sync.video_seconds) * 1000.0).round() as i64;
+    let wall_ms = sync.event_ts_ms + ((video_seconds - sync.video_seconds) * 1000.0).round() as i64;
 
     let mut home_score = 0u32;
     let mut away_score = 0u32;
@@ -342,16 +344,19 @@ pub fn state_at(export: &MatchLoggerExport, sync: &SyncAnchor, video_seconds: f6
 /// format.
 fn parse_iso8601_ms(s: &str) -> Option<i64> {
     let b = s.as_bytes();
-    if b.len() != 24 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':'
+    if b.len() != 24
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
         || b[16] != b':'
         || b[19] != b'.'
         || b[23] != b'Z'
     {
         return None;
     }
-    let digits = |range: std::ops::Range<usize>| -> Option<i64> {
-        s.get(range)?.parse::<i64>().ok()
-    };
+    let digits =
+        |range: std::ops::Range<usize>| -> Option<i64> { s.get(range)?.parse::<i64>().ok() };
     let year = digits(0..4)?;
     let month = digits(5..7)?;
     let day = digits(8..10)?;
@@ -368,7 +373,7 @@ fn parse_iso8601_ms(s: &str) -> Option<i64> {
     // valid for any year - no leap-year special-casing needed).
     let y = if month <= 2 { year - 1 } else { year };
     let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as i64; // [0, 399]
+    let yoe = y - era * 400; // [0, 399]
     let mp = (month + 9) % 12; // [0, 11], Mar=0 .. Feb=11
     let doy = (153 * mp + 2) / 5 + day - 1; // [0, 365]
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
@@ -488,7 +493,7 @@ mod tests {
         // that's 59:00 of *running* first-half clock behind it. Sample 5
         // minutes into the second half's running time.
         let sync = anchor();
-        let second_half_start_video_s = (15 * 3600 + 1 * 60 + 5 - 14 * 3600) as f64;
+        let second_half_start_video_s = (15 * 3600 + 60 + 5 - 14 * 3600) as f64;
         let state = state_at(&export, &sync, second_half_start_video_s + 5.0 * 60.0);
         assert_eq!(state["game"]["period"], 2);
         // 59:00 (first-half running time) + 5:00 (into the second half) = 64:00.
@@ -521,7 +526,7 @@ mod tests {
         let after = state_at(&export, &anchor(), 44.5 * 60.0);
         assert_eq!(after["sport"]["addedTime"], 2);
         // A new period resets the added-time counter.
-        let second_half_start_video_s = (15 * 3600 + 1 * 60 + 5 - 14 * 3600) as f64;
+        let second_half_start_video_s = (15 * 3600 + 60 + 5 - 14 * 3600) as f64;
         let into_second_half = state_at(&export, &anchor(), second_half_start_video_s + 1.0);
         assert_eq!(into_second_half["sport"]["addedTime"], 0);
     }
