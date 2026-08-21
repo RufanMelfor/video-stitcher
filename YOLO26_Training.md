@@ -1261,3 +1261,30 @@ verification only this session, training itself needs a separate
 go-ahead (it's a long GPU-bound run). Base checkpoint choice
 (continue from round 4's, or start fresh given the ~1.5x larger and
 more diverse pool) also not decided yet.
+
+### Extended the same set to SAHI-style tiled-1920 (same session)
+
+User reminder not to forget the tiled-1920 technique from 2026-08-15/16
+(see SESSION_HANDOFF.md's "SAHI-style left/right tiled training" entry
+- a real, measured ~50% relative win on ball recall/mAP50-95, but
+stayed a one-off scratchpad script, round4-only). Reused for the full
+402-image merged set this time - new `scripts/tile_yolo_dataset.py`
+(committed properly, not scratchpad), same crop geometry (two
+overlapping 2880x2880 crops per 3840x2880 source, left x=[0,2880]/
+right x=[960,3840], resized to 1920x1920).
+
+Verified before trusting it, same discipline as the merge itself:
+confirmed all four source projects are uniformly 3840x2880 first (the
+crop geometry is a fixed-pixel scheme, not aspect-adaptive - would
+silently misalign on a differently-sized source), then drew a sample
+of transformed boxes back onto their tiles and checked visually (kept
+at `training/merged_v1_tiled_1920_verify_samples/`) - tight and
+correct on both an already-verified round4 tile and a never-tiled
+ai_learning tile.
+
+`training/merged_v1_tiled_1920/`: 342/60 train/val source images ->
+684/120 tiles (804 total).
+
+Still needs a matching tiled-inference pipeline to use a checkpoint
+trained on this in any production path - not built yet, same caveat as
+the original round. Training itself also not started.
