@@ -3916,6 +3916,28 @@ fn main() -> anyhow::Result<()> {
         };
     });
 
+    let state_ref = Rc::clone(&state);
+    app.on_changed_scoreboard_logo_size(move |size| {
+        state_ref.borrow_mut().scoreboard_style.logo_size_px = Some(size);
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_changed_scoreboard_banner_color(move |preset_name| {
+        // Curated presets, matching the ComboBox in main.slint - a full
+        // color picker isn't otherwise used anywhere in reco-gui yet, so
+        // this stays consistent with the Font dropdown right above it
+        // rather than introducing a new kind of control for one field.
+        let hex = match preset_name.as_str() {
+            "Navy" => Some("#0b1a33"),
+            "Black" => Some("#0a0a0a"),
+            "Forest Green" => Some("#0e2e1a"),
+            "Maroon" => Some("#33101a"),
+            "Purple" => Some("#241333"),
+            _ => None,
+        };
+        state_ref.borrow_mut().scoreboard_style.banner_color = hex.map(str::to_string);
+    });
+
     // ── Auto-calibration callback ──
 
     let app_weak = app.as_weak();

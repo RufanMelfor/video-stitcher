@@ -335,10 +335,11 @@ pub fn state_at(export: &MatchLoggerExport, sync: &SyncAnchor, video_seconds: f6
 }
 
 /// GUI-only presentation fields for the "Edit Scoreboard" panel - team
-/// crest images and a font family. Kept out of [`state_at`] itself, which
-/// only knows about match/sport data derived from the event log; these
-/// aren't derived from anything, just carried through from whatever the
-/// panel currently holds.
+/// crest images, their display size, a font family, and the banner's
+/// background color. Kept out of [`state_at`] itself, which only knows
+/// about match/sport data derived from the event log; these aren't
+/// derived from anything, just carried through from whatever the panel
+/// currently holds.
 #[derive(Debug, Clone, Default)]
 pub struct ScoreboardStyle {
     /// `data:` URI, read from a local image file - never a remote URL, so
@@ -347,6 +348,10 @@ pub struct ScoreboardStyle {
     pub away_logo: Option<String>,
     /// CSS `font-family` value, e.g. `"Georgia, serif"`.
     pub font_family: Option<String>,
+    /// Logo display size in CSS pixels (both team logos share one size).
+    pub logo_size_px: Option<f32>,
+    /// CSS color value for the banner background, e.g. `"#123456"`.
+    pub banner_color: Option<String>,
 }
 
 /// Read an image file and encode it as a `data:` URI for
@@ -382,11 +387,24 @@ pub fn apply_style(mut state: Value, style: &ScoreboardStyle) -> Value {
     if let Some(logo) = style.away_logo.as_deref() {
         state["away"]["logo"] = json!(logo);
     }
+    // Built up as one object and assigned once (not nested indexing, since
+    // `state_at` never populates `custom` - indexing into a not-yet-
+    // existing nested object would panic on serde_json::Value) - each
+    // field was previously a separate single-shot `state["custom"] = ...`
+    // assignment, which meant setting the font silently wiped out an
+    // already-set logo size or banner color (and vice versa).
+    let mut custom = serde_json::Map::new();
     if let Some(font) = style.font_family.as_deref() {
-        // Single-shot assignment (not nested indexing) since `state_at`
-        // never populates `custom` - indexing into a not-yet-existing
-        // nested object would panic on serde_json::Value.
-        state["custom"] = json!({ "fontFamily": font });
+        custom.insert("fontFamily".into(), json!(font));
+    }
+    if let Some(size) = style.logo_size_px {
+        custom.insert("logoSize".into(), json!(size));
+    }
+    if let Some(color) = style.banner_color.as_deref() {
+        custom.insert("bannerColor".into(), json!(color));
+    }
+    if !custom.is_empty() {
+        state["custom"] = Value::Object(custom);
     }
     state
 }
@@ -485,11 +503,18 @@ mod tests {
                 home_logo: Some("data:image/png;base64,AAAA".into()),
                 away_logo: None,
                 font_family: Some("Georgia, serif".into()),
+                logo_size_px: Some(48.0),
+                banner_color: Some("#123456".into()),
             },
         );
         assert_eq!(styled["home"]["logo"], "data:image/png;base64,AAAA");
         assert!(styled["away"].get("logo").is_none());
+        // All three `custom` fields must coexist - regression check for a
+        // bug where each was a separate single-shot `state["custom"] = ..`
+        // assignment, so setting one silently wiped the others.
         assert_eq!(styled["custom"]["fontFamily"], "Georgia, serif");
+        assert_eq!(styled["custom"]["logoSize"], 48.0);
+        assert_eq!(styled["custom"]["bannerColor"], "#123456");
         // Untouched fields survive the merge.
         assert_eq!(styled["home"]["shortName"], base["home"]["shortName"]);
 

@@ -1137,6 +1137,11 @@ export component RecoApp inherits Window {
     in-out property <string> scoreboard-home-logo-path: "";
     in-out property <string> scoreboard-away-logo-path: "";
     in-out property <string> scoreboard-font-family: "";
+    in-out property <float> scoreboard-logo-size: 34.0;
+    // Display name of the chosen preset ("Default", "Navy", ...) -
+    // mapped to a hex color in Rust; kept here only so the ComboBox shows
+    // the right selection after a rebuild/reload.
+    in-out property <string> scoreboard-banner-color-name: "";
 
     // Export progress (also used by the main status bar).
     in-out property <bool> export-in-progress: false;
@@ -1531,6 +1536,8 @@ export component RecoApp inherits Window {
     callback changed-scoreboard-placement();
     callback pick-scoreboard-logo(string); // "home" | "away"
     callback changed-scoreboard-font(string);
+    callback changed-scoreboard-logo-size(float);
+    callback changed-scoreboard-banner-color(string); // preset name, e.g. "Navy"
 
     // File management: per-side segment lists and removal.
     in-out property <[string]> left-segments: [];
@@ -2152,6 +2159,30 @@ export component RecoApp inherits Window {
                                     }
                                 }
 
+                                if root.scoreboard-edit-mode: LabeledSlider {
+                                    label: "Logo size";
+                                    minimum: 20;
+                                    maximum: 80;
+                                    value <=> root.scoreboard-logo-size;
+                                    suffix: "px";
+                                    decimals: 0;
+                                    step: 1;
+                                    changed(v) => { root.changed-scoreboard-logo-size(v); }
+                                }
+
+                                if root.scoreboard-edit-mode: HorizontalLayout {
+                                    spacing: 4px;
+                                    Text { text: "Banner color"; color: #aaa; font-size: 11px; vertical-alignment: center; }
+                                    ComboBox {
+                                        model: ["Default", "Navy", "Black", "Forest Green", "Maroon", "Purple"];
+                                        current-value: root.scoreboard-banner-color-name == "" ? "Default" : root.scoreboard-banner-color-name;
+                                        selected(value) => {
+                                            root.scoreboard-banner-color-name = value;
+                                            root.changed-scoreboard-banner-color(value);
+                                        }
+                                    }
+                                }
+
                                 if root.scoreboard-error-text != "": Text {
                                     text: root.scoreboard-error-text;
                                     color: #e06060;
@@ -2270,24 +2301,16 @@ export component RecoApp inherits Window {
                         }
                     }
 
-                    // Scoreboard placement handle (drag target for the
-                    // scoreboard-edit-mode branch above). No fill, so the
-                    // actual composited overlay underneath stays the real
-                    // visual feedback - this is purely a draggable target
-                    // and rough size indicator, not a pixel-accurate
-                    // footprint (the compositor generically repositions/
-                    // rescales the whole package canvas; it doesn't know
-                    // where within it any given package draws content).
-                    if root.scoreboard-edit-mode: Rectangle {
-                        width: preview-box.width * 0.6 * root.scoreboard-scale;
-                        height: preview-box.height * 0.16 * root.scoreboard-scale;
-                        x: preview-box.width * (0.5 + root.scoreboard-offset-x) - self.width / 2;
-                        y: preview-box.height * (0.5 + root.scoreboard-offset-y) - self.height / 2;
-                        border-width: 2px;
-                        border-color: #e5b84b;
-                        border-radius: 6px;
-                        background: #e5b84b22;
-                    }
+                    // No drag-handle overlay here on purpose: an earlier
+                    // version drew a placeholder rectangle assuming the
+                    // banner sits centered within its package canvas, but
+                    // the football package anchors it to the BOTTOM of its
+                    // own 1920x1080 canvas (`.broadcast-safe-area`) - the
+                    // handle and the real (correctly positioned) banner
+                    // visibly disagreed. The drag math below is already
+                    // pixel-accurate against the real compositor output;
+                    // dragging the actual rendered scoreboard directly
+                    // needs no separate visual proxy.
 
                     // ROI polygon outline (visible in lens preview mode),
                     // drawn in the same normalized 0..1 space as the
@@ -2424,7 +2447,8 @@ export component RecoApp inherits Window {
                         // the line - a drag started elsewhere stays a normal
                         // pan/tilt even while Show seam line is on.
                         property <bool> seam-dragging: false;
-                        mouse-cursor: self.seam-dragging ? grabbing : (self.hovering-seam-line ? grab : default);
+                        mouse-cursor: root.scoreboard-edit-mode ? move
+                            : self.seam-dragging ? grabbing : (self.hovering-seam-line ? grab : default);
 
                         pointer-event(e) => {
                             if (e.kind == PointerEventKind.down) {
