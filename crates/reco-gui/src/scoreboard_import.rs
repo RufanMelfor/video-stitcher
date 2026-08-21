@@ -402,6 +402,12 @@ pub struct ScoreboardStyle {
     /// the sandboxed package renderer never makes a network fetch for it.
     pub home_logo: Option<String>,
     pub away_logo: Option<String>,
+    /// Source file each logo's `data:` URI was encoded from - kept
+    /// alongside it purely for persistence (see
+    /// `reco_core::calibration::ScoreboardSettings`) and the GUI's "which
+    /// file is this" indicator; not otherwise read by `apply_style`.
+    pub home_logo_path: Option<std::path::PathBuf>,
+    pub away_logo_path: Option<std::path::PathBuf>,
     /// CSS `font-family` value, e.g. `"Georgia, serif"`.
     pub font_family: Option<String>,
     /// Logo display size in CSS pixels (both team logos share one size).
@@ -557,7 +563,9 @@ mod tests {
             base.clone(),
             &ScoreboardStyle {
                 home_logo: Some("data:image/png;base64,AAAA".into()),
+                home_logo_path: None,
                 away_logo: None,
+                away_logo_path: None,
                 font_family: Some("Georgia, serif".into()),
                 logo_size_px: Some(48.0),
                 banner_color: Some("#123456".into()),
