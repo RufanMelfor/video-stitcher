@@ -11,6 +11,8 @@
         period: document.querySelector("#period"),
         addedTime: document.querySelector("#added-time"),
         addedTimeWrap: document.querySelector("#added-time-wrap"),
+        homeLogo: document.querySelector("#home-logo"),
+        awayLogo: document.querySelector("#away-logo"),
         homeYellow: document.querySelector("#home-yellow"),
         awayYellow: document.querySelector("#away-yellow"),
         homeYellowWrap: document.querySelector("#home-yellow-wrap"),
@@ -119,6 +121,15 @@
         if (shown) valueEl.textContent = count;
     }
 
+    // `logo` is a data: URI supplied by the host app (see reco-gui's
+    // "Edit Scoreboard" panel) - never a remote URL, so this never
+    // triggers a network fetch from inside the sandboxed renderer.
+    function setLogo(imgEl, logo) {
+        const shown = typeof logo === "string" && logo.length > 0;
+        imgEl.hidden = !shown;
+        if (shown && imgEl.src !== logo) imgEl.src = logo;
+    }
+
     Reco.onUpdate((state) => {
         debugState = ensureStateShape(structuredClone(state));
         text(elements.homeName, state.home?.shortName || state.home?.name, "HOME");
@@ -141,6 +152,9 @@
         elements.board.style.setProperty("--home-secondary", state.home?.secondaryColor || "#ffffff");
         elements.board.style.setProperty("--away-color", state.away?.color || "#cf2027");
         elements.board.style.setProperty("--away-secondary", state.away?.secondaryColor || "#ffffff");
+        elements.board.style.setProperty("--scoreboard-font", state.custom?.fontFamily || "inherit");
+        setLogo(elements.homeLogo, state.home?.logo);
+        setLogo(elements.awayLogo, state.away?.logo);
         syncEditorFields();
     });
 

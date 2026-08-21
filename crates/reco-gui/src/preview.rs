@@ -181,6 +181,15 @@ impl PreviewBridge {
         self.engine.pipeline_mut().clear_overlay();
     }
 
+    /// Reposition/resize the composited overlay - see
+    /// `reco_core::render::overlay::OverlayPlacement`.
+    pub fn set_overlay_placement(
+        &mut self,
+        placement: reco_core::render::overlay::OverlayPlacement,
+    ) {
+        self.engine.pipeline_mut().set_overlay_placement(placement);
+    }
+
     /// Current viewport dimensions.
     pub fn viewport_size(&self) -> (u32, u32) {
         (self.viewport_width, self.viewport_height)

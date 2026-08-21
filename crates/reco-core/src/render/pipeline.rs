@@ -95,6 +95,12 @@ pub struct StitchPipeline {
     output_format: wgpu::TextureFormat,
     /// Lazily created only when a consumer enables an overlay.
     overlay: Option<RgbaOverlayCompositor>,
+    /// Desired overlay position/size, applied to `overlay` immediately
+    /// when set and (re-)applied whenever a new compositor is created -
+    /// stored independently of `overlay` so a placement set before the
+    /// first overlay frame ever arrives isn't lost. Default reproduces
+    /// the original centered-letterbox behavior.
+    overlay_placement: super::overlay::OverlayPlacement,
 }
 
 /// Pre-built bind groups for GPU-resident zero-copy sources.
@@ -180,6 +186,7 @@ impl StitchPipeline {
             color_match: std::sync::Mutex::new(super::color_match::ColorMatchState::default()),
             output_format,
             overlay: None,
+            overlay_placement: super::overlay::OverlayPlacement::default(),
         })
     }
 
@@ -277,17 +284,17 @@ impl StitchPipeline {
                     reason: e.to_string(),
                 })?;
         } else {
-            self.overlay = Some(
-                RgbaOverlayCompositor::new(
-                    &self.gpu,
-                    self.output_format,
-                    (self.viewport.width, self.viewport.height),
-                    frame,
-                )
-                .map_err(|e| PipelineError::InvalidConfig {
-                    reason: e.to_string(),
-                })?,
-            );
+            let mut overlay = RgbaOverlayCompositor::new(
+                &self.gpu,
+                self.output_format,
+                (self.viewport.width, self.viewport.height),
+                frame,
+            )
+            .map_err(|e| PipelineError::InvalidConfig {
+                reason: e.to_string(),
+            })?;
+            overlay.set_placement(&self.gpu, self.overlay_placement);
+            self.overlay = Some(overlay);
         }
         Ok(())
     }
@@ -300,6 +307,18 @@ impl StitchPipeline {
     /// Whether an overlay texture is currently active.
     pub fn has_overlay(&self) -> bool {
         self.overlay.is_some()
+    }
+
+    /// Reposition/resize the composited overlay - see
+    /// [`super::overlay::OverlayPlacement`]. Takes effect immediately if an
+    /// overlay is already active, and is (re-)applied to any overlay
+    /// created afterward, so it's safe to call before the first overlay
+    /// frame ever arrives.
+    pub fn set_overlay_placement(&mut self, placement: super::overlay::OverlayPlacement) {
+        self.overlay_placement = placement;
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.set_placement(&self.gpu, placement);
+        }
     }
 
     fn composite_target_commands(

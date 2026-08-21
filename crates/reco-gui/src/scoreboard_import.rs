@@ -14,6 +14,7 @@
 
 use std::fmt;
 
+use base64::Engine;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -333,6 +334,63 @@ pub fn state_at(export: &MatchLoggerExport, sync: &SyncAnchor, video_seconds: f6
     })
 }
 
+/// GUI-only presentation fields for the "Edit Scoreboard" panel - team
+/// crest images and a font family. Kept out of [`state_at`] itself, which
+/// only knows about match/sport data derived from the event log; these
+/// aren't derived from anything, just carried through from whatever the
+/// panel currently holds.
+#[derive(Debug, Clone, Default)]
+pub struct ScoreboardStyle {
+    /// `data:` URI, read from a local image file - never a remote URL, so
+    /// the sandboxed package renderer never makes a network fetch for it.
+    pub home_logo: Option<String>,
+    pub away_logo: Option<String>,
+    /// CSS `font-family` value, e.g. `"Georgia, serif"`.
+    pub font_family: Option<String>,
+}
+
+/// Read an image file and encode it as a `data:` URI for
+/// [`ScoreboardStyle::home_logo`]/`away_logo` - the sandboxed, offline
+/// package renderer (`headless_chrome` with the `offline` feature) can't
+/// fetch a plain file:// or http:// URL, so the bytes have to travel
+/// inline in the JSON state itself.
+pub fn image_data_uri(path: &std::path::Path) -> Result<String, String> {
+    let mime = match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        _ => return Err("Unsupported image type - use PNG, JPG, GIF, WebP, or SVG".into()),
+    };
+    let bytes = std::fs::read(path).map_err(|error| format!("Cannot read image: {error}"))?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:{mime};base64,{encoded}"))
+}
+
+/// Merge `style` into an already-computed [`state_at`] payload. A no-op
+/// per-field for anything left `None` in `style`.
+pub fn apply_style(mut state: Value, style: &ScoreboardStyle) -> Value {
+    if let Some(logo) = style.home_logo.as_deref() {
+        state["home"]["logo"] = json!(logo);
+    }
+    if let Some(logo) = style.away_logo.as_deref() {
+        state["away"]["logo"] = json!(logo);
+    }
+    if let Some(font) = style.font_family.as_deref() {
+        // Single-shot assignment (not nested indexing) since `state_at`
+        // never populates `custom` - indexing into a not-yet-existing
+        // nested object would panic on serde_json::Value.
+        state["custom"] = json!({ "fontFamily": font });
+    }
+    state
+}
+
 /// Parse the fixed `YYYY-MM-DDTHH:mm:ss.sssZ` shape
 /// `Date.prototype.toISOString()` always produces (UTC, millisecond
 /// precision, `Z` suffix) into milliseconds since the Unix epoch.
@@ -416,6 +474,27 @@ mod tests {
             event_ts_ms: parse_iso8601_ms("2026-08-21T14:00:00.000Z").unwrap(),
             video_seconds: 0.0,
         }
+    }
+
+    #[test]
+    fn apply_style_sets_only_the_fields_present() {
+        let base = state_at(&fixture(), &anchor(), 0.0);
+        let styled = apply_style(
+            base.clone(),
+            &ScoreboardStyle {
+                home_logo: Some("data:image/png;base64,AAAA".into()),
+                away_logo: None,
+                font_family: Some("Georgia, serif".into()),
+            },
+        );
+        assert_eq!(styled["home"]["logo"], "data:image/png;base64,AAAA");
+        assert!(styled["away"].get("logo").is_none());
+        assert_eq!(styled["custom"]["fontFamily"], "Georgia, serif");
+        // Untouched fields survive the merge.
+        assert_eq!(styled["home"]["shortName"], base["home"]["shortName"]);
+
+        let unstyled = apply_style(base.clone(), &ScoreboardStyle::default());
+        assert_eq!(unstyled, base);
     }
 
     #[test]

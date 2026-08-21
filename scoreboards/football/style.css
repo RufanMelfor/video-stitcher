@@ -28,16 +28,31 @@ body {
     --home-secondary: #ffffff;
     --away-color: #cf2027;
     --away-secondary: #ffffff;
+    /* Set from state.custom.fontFamily by scoreboard.js; falls back to
+       the :root default above when unset. */
+    --scoreboard-font: inherit;
     display: grid;
     grid-template-columns: 330px 116px 270px 116px 330px;
     min-height: 146px;
     color: #fff;
+    font-family: var(--scoreboard-font);
     background: linear-gradient(180deg, rgba(17, 22, 31, 0.94), rgba(5, 8, 14, 0.92));
     border: 1px solid rgba(255, 255, 255, 0.26);
     border-radius: 18px;
     box-shadow: 0 12px 36px rgba(0, 0, 0, 0.55), inset 0 1px rgba(255, 255, 255, 0.12);
     overflow: hidden;
 }
+
+.team-logo {
+    position: absolute;
+    top: 14px;
+    width: 34px;
+    height: 34px;
+    object-fit: contain;
+    filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.6));
+}
+.team-home .team-logo { left: 22px; }
+.team-away .team-logo { right: 22px; }
 
 .team {
     position: relative;

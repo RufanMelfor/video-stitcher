@@ -255,6 +255,17 @@ struct AppState {
     /// at most a few times a second and each push is a real JS eval in the
     /// headless browser.
     scoreboard_replay_last_push: Option<std::time::Instant>,
+    /// Overlay position/size set via the "Edit Scoreboard" in-place
+    /// editor. Session-only for now, same deliberate-deferral precedent
+    /// as `cut_ranges` - applied to the live pipeline immediately on
+    /// change and re-applied to export (see `run_export`'s
+    /// `scoreboard_placement` argument).
+    scoreboard_placement: reco_core::render::overlay::OverlayPlacement,
+    /// Team logos / font chosen via the same editor - merged into the
+    /// replayed state via `scoreboard_import::apply_style`. Only takes
+    /// effect while a Match Logger import is loaded (see that function's
+    /// doc comment for why the live-manual editor path can't use it).
+    scoreboard_style: scoreboard_import::ScoreboardStyle,
     recording_tx: Option<std::sync::mpsc::SyncSender<RecordingFrame>>,
     recording_thread: Option<std::thread::JoinHandle<()>>,
     recording_path: Option<PathBuf>,
@@ -575,6 +586,8 @@ impl AppState {
             scoreboard_import: None,
             scoreboard_sync_anchor: None,
             scoreboard_replay_last_push: None,
+            scoreboard_placement: reco_core::render::overlay::OverlayPlacement::default(),
+            scoreboard_style: scoreboard_import::ScoreboardStyle::default(),
             recording_tx: None,
             recording_thread: None,
             recording_path: None,
@@ -752,6 +765,7 @@ impl AppState {
             0.0
         };
         let state = scoreboard_import::state_at(export, anchor, video_seconds);
+        let state = scoreboard_import::apply_style(state, &self.scoreboard_style);
         if let Err(error) = runtime.update(&state) {
             self.scoreboard_error = format!("Cannot update scoreboard: {error}");
             log::error!("{}", self.scoreboard_error);
@@ -3843,6 +3857,65 @@ fn main() -> anyhow::Result<()> {
         );
     });
 
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_scoreboard_placement(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let placement = reco_core::render::overlay::OverlayPlacement {
+            offset: (app.get_scoreboard_offset_x(), app.get_scoreboard_offset_y()),
+            scale: app.get_scoreboard_scale(),
+        };
+        let mut s = state_ref.borrow_mut();
+        s.scoreboard_placement = placement;
+        if let Some(bridge) = s.bridge.as_mut() {
+            bridge.set_overlay_placement(placement);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_pick_scoreboard_logo(move |team| {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let dialog = rfd::FileDialog::new()
+            .set_title("Choose a team logo")
+            .add_filter("Image", &["png", "jpg", "jpeg", "gif", "webp", "svg"]);
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        match scoreboard_import::image_data_uri(&path) {
+            Ok(data_uri) => {
+                let mut s = state_ref.borrow_mut();
+                let display_path = path.to_string_lossy().into_owned();
+                if team == "home" {
+                    s.scoreboard_style.home_logo = Some(data_uri);
+                    drop(s);
+                    app.set_scoreboard_home_logo_path(display_path.into());
+                } else {
+                    s.scoreboard_style.away_logo = Some(data_uri);
+                    drop(s);
+                    app.set_scoreboard_away_logo_path(display_path.into());
+                }
+            }
+            Err(message) => {
+                app.set_scoreboard_error_text(message.into());
+            }
+        }
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_changed_scoreboard_font(move |font| {
+        let mut s = state_ref.borrow_mut();
+        s.scoreboard_style.font_family = if font.is_empty() {
+            None
+        } else {
+            Some(font.to_string())
+        };
+    });
+
     // ── Auto-calibration callback ──
 
     let app_weak = app.as_weak();
@@ -5555,6 +5628,8 @@ fn main() -> anyhow::Result<()> {
             }),
             _ => None,
         };
+        let scoreboard_placement = s.scoreboard_placement;
+        let scoreboard_style = s.scoreboard_style.clone();
 
         // Persist the user's codec / quality / blend choices as the
         // defaults for next session. Model path is saved in the
@@ -5623,6 +5698,8 @@ fn main() -> anyhow::Result<()> {
                 scoreboard_package,
                 scoreboard_state,
                 scoreboard_replay,
+                scoreboard_placement,
+                scoreboard_style,
                 app_weak_bg,
                 &interrupted,
                 last_progress_at,

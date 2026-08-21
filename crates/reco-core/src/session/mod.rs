@@ -379,6 +379,13 @@ impl StitchSession {
         self.core.pipeline_mut().clear_overlay();
     }
 
+    /// Reposition/resize the composited overlay - see
+    /// [`crate::render::overlay::OverlayPlacement`]. Independent of which
+    /// overlay source is active (or whether one is active yet).
+    pub fn set_overlay_placement(&mut self, placement: crate::render::overlay::OverlayPlacement) {
+        self.core.pipeline_mut().set_overlay_placement(placement);
+    }
+
     /// Borrow the underlying [`StitchCore`]. Useful for consumers that
     /// want to reach through to the push-first API
     /// (`submit_frame_*`, replay buffer, etc.) without giving up the

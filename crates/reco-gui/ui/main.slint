@@ -1125,6 +1125,19 @@ export component RecoApp inherits Window {
     // synced - set a sync point".
     in-out property <string> scoreboard-sync-label: "";
 
+    // "Edit Scoreboard" in-place editor - position/size drag handle over
+    // the preview, plus a side panel for logo/font. offset-x/y are a
+    // fraction of the output frame the overlay's centerpoint is shifted
+    // from center (see reco_core::render::overlay::OverlayPlacement);
+    // scale multiplies its auto-fit size.
+    in-out property <bool> scoreboard-edit-mode: false;
+    in-out property <float> scoreboard-offset-x: 0.0;
+    in-out property <float> scoreboard-offset-y: 0.0;
+    in-out property <float> scoreboard-scale: 1.0;
+    in-out property <string> scoreboard-home-logo-path: "";
+    in-out property <string> scoreboard-away-logo-path: "";
+    in-out property <string> scoreboard-font-family: "";
+
     // Export progress (also used by the main status bar).
     in-out property <bool> export-in-progress: false;
     in-out property <float> export-progress: 0.0; // 0..1
@@ -1515,6 +1528,9 @@ export component RecoApp inherits Window {
     callback copy-scoreboard-share();
     callback load-scoreboard-events();
     callback set-scoreboard-sync-point();
+    callback changed-scoreboard-placement();
+    callback pick-scoreboard-logo(string); // "home" | "away"
+    callback changed-scoreboard-font(string);
 
     // File management: per-side segment lists and removal.
     in-out property <[string]> left-segments: [];
@@ -2080,6 +2096,62 @@ export component RecoApp inherits Window {
                                     clicked => { root.edit-scoreboard(); }
                                 }
 
+                                // Position/size/logo/font editor - drags a
+                                // handle directly on the preview (see the
+                                // scoreboard-edit-mode branch of the big
+                                // preview TouchArea below), independent of
+                                // whether the live-manual or replay path is
+                                // driving score/cards/clock.
+                                if root.scoreboard-enabled: FlatButton {
+                                    text: root.scoreboard-edit-mode ? "Done Editing" : "Edit Scoreboard…";
+                                    primary: root.scoreboard-edit-mode;
+                                    clicked => { root.scoreboard-edit-mode = !root.scoreboard-edit-mode; }
+                                }
+
+                                if root.scoreboard-edit-mode: Text {
+                                    text: "Drag the scoreboard on the preview to move it.";
+                                    color: root.text-dim;
+                                    font-size: 10px;
+                                    wrap: word-wrap;
+                                }
+
+                                if root.scoreboard-edit-mode: LabeledSlider {
+                                    label: "Size";
+                                    minimum: 0.1;
+                                    maximum: 1.0;
+                                    value <=> root.scoreboard-scale;
+                                    decimals: 2;
+                                    step: 0.05;
+                                    changed(v) => { root.changed-scoreboard-placement(); }
+                                }
+
+                                if root.scoreboard-edit-mode: HorizontalLayout {
+                                    spacing: 4px;
+                                    Text { text: "Font"; color: #aaa; font-size: 11px; vertical-alignment: center; }
+                                    ComboBox {
+                                        model: ["Default", "Arial", "Georgia", "Segoe UI"];
+                                        current-value: root.scoreboard-font-family == "" ? "Default" : root.scoreboard-font-family;
+                                        selected(value) => {
+                                            root.scoreboard-font-family = value == "Default" ? "" : value;
+                                            root.changed-scoreboard-font(root.scoreboard-font-family);
+                                        }
+                                    }
+                                }
+
+                                if root.scoreboard-edit-mode: HorizontalLayout {
+                                    spacing: 4px;
+                                    FlatButton {
+                                        text: root.scoreboard-home-logo-path == "" ? "Home logo…" : "Home logo ✓";
+                                        horizontal-stretch: 1;
+                                        clicked => { root.pick-scoreboard-logo("home"); }
+                                    }
+                                    FlatButton {
+                                        text: root.scoreboard-away-logo-path == "" ? "Away logo…" : "Away logo ✓";
+                                        horizontal-stretch: 1;
+                                        clicked => { root.pick-scoreboard-logo("away"); }
+                                    }
+                                }
+
                                 if root.scoreboard-error-text != "": Text {
                                     text: root.scoreboard-error-text;
                                     color: #e06060;
@@ -2196,6 +2268,25 @@ export component RecoApp inherits Window {
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
+                    }
+
+                    // Scoreboard placement handle (drag target for the
+                    // scoreboard-edit-mode branch above). No fill, so the
+                    // actual composited overlay underneath stays the real
+                    // visual feedback - this is purely a draggable target
+                    // and rough size indicator, not a pixel-accurate
+                    // footprint (the compositor generically repositions/
+                    // rescales the whole package canvas; it doesn't know
+                    // where within it any given package draws content).
+                    if root.scoreboard-edit-mode: Rectangle {
+                        width: preview-box.width * 0.6 * root.scoreboard-scale;
+                        height: preview-box.height * 0.16 * root.scoreboard-scale;
+                        x: preview-box.width * (0.5 + root.scoreboard-offset-x) - self.width / 2;
+                        y: preview-box.height * (0.5 + root.scoreboard-offset-y) - self.height / 2;
+                        border-width: 2px;
+                        border-color: #e5b84b;
+                        border-radius: 6px;
+                        background: #e5b84b22;
                     }
 
                     // ROI polygon outline (visible in lens preview mode),
@@ -2435,7 +2526,20 @@ export component RecoApp inherits Window {
                                 );
 
                             if (self.pressed) {
-                                if (root.lens-preview-active && root.zone-edit-mode && root.zone-edit-type == "roi" && self.roi-dragging-index >= 0) {
+                                if (root.scoreboard-edit-mode) {
+                                    // Single continuous drag - no
+                                    // click-vs-drag disambiguation needed
+                                    // (there's nothing to click-to-add,
+                                    // unlike the ROI/GOAL point editors
+                                    // below). preview-box IS the full
+                                    // composited output frame outside
+                                    // lens-preview mode, so a pixel delta
+                                    // divided by its size is directly the
+                                    // placement's normalized offset delta.
+                                    root.scoreboard-offset-x += (self.mouse-x - self.last-x) / preview-box.width;
+                                    root.scoreboard-offset-y += (self.mouse-y - self.last-y) / preview-box.height;
+                                    root.changed-scoreboard-placement();
+                                } else if (root.lens-preview-active && root.zone-edit-mode && root.zone-edit-type == "roi" && self.roi-dragging-index >= 0) {
                                     root.roi-pointer-drag(
                                         self.roi-dragging-index,
                                         self.local-x / 1px,
