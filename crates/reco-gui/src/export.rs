@@ -194,6 +194,8 @@ pub fn run_export(
     scoreboard_package: Option<reco_scoreboard::ScoreboardPackage>,
     scoreboard_state: Option<serde_json::Value>,
     scoreboard_replay: Option<ScoreboardReplay>,
+    scoreboard_placement: reco_core::render::overlay::OverlayPlacement,
+    scoreboard_style: crate::scoreboard_import::ScoreboardStyle,
     app_weak: slint::Weak<RecoApp>,
     interrupted: &AtomicBool,
     last_progress_at: Arc<Mutex<Option<Instant>>>,
@@ -389,6 +391,7 @@ pub fn run_export(
                     &replay.anchor,
                     video_seconds,
                 );
+                let state = crate::scoreboard_import::apply_style(state, &scoreboard_style);
                 if let Ok(runtime) = runtime.lock() {
                     let _ = runtime.update(&state);
                 }
@@ -418,6 +421,7 @@ pub fn run_export(
 
     if let Some(shared) = scoreboard_shared {
         job = job.on_session(move |session, _source| {
+            session.set_overlay_placement(scoreboard_placement);
             session.set_overlay_source(Box::new(SharedScoreboardSource(shared)));
         });
     }

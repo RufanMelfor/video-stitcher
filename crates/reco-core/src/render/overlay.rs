@@ -78,6 +78,42 @@ pub trait OverlayFrameSource: Send {
 struct OverlayParams {
     reference_size: [f32; 2],
     output_size: [f32; 2],
+    /// Fraction of `output_size` the overlay's centerpoint is shifted from
+    /// the frame's own center - `[0.0, 0.0]` (default) keeps the existing
+    /// auto-centered behavior. See [`OverlayPlacement`].
+    placement_offset: [f32; 2],
+    /// Multiplies the auto-fit scale that fits `reference_size` into
+    /// `output_size` - `1.0` (default) reproduces the previous
+    /// letterboxed-and-centered behavior exactly.
+    placement_scale: f32,
+    /// Uniform buffer size padding (28 -> 32 bytes, a multiple of 16).
+    _padding: f32,
+}
+
+/// Where and how large a composited overlay appears within the output
+/// frame, independent of anything the overlay package itself knows about
+/// (see this module's doc comment - the compositor stays sport/package
+/// agnostic). `Default` reproduces the original centered-letterbox
+/// behavior exactly, so existing callers are unaffected.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct OverlayPlacement {
+    /// Fraction of the output frame's width/height the overlay's
+    /// centerpoint is shifted from the frame's own center, e.g. `[0.0,
+    /// 0.35]` moves it most of the way toward the bottom edge.
+    pub offset: (f32, f32),
+    /// Multiplies the auto-fit ("contain") scale - `1.0` is the largest
+    /// size that still fits entirely inside the output frame; `0.3` is
+    /// roughly a third of that.
+    pub scale: f32,
+}
+
+impl Default for OverlayPlacement {
+    fn default() -> Self {
+        Self {
+            offset: (0.0, 0.0),
+            scale: 1.0,
+        }
+    }
 }
 
 /// Cached GPU resources for blending one RGBA surface over render targets.
@@ -90,6 +126,7 @@ pub(crate) struct RgbaOverlayCompositor {
     params_buffer: wgpu::Buffer,
     reference_size: (u32, u32),
     output_size: (u32, u32),
+    placement: OverlayPlacement,
 }
 
 impl RgbaOverlayCompositor {
@@ -181,6 +218,9 @@ impl RgbaOverlayCompositor {
             contents: bytemuck::bytes_of(&OverlayParams {
                 reference_size: [frame.width as f32, frame.height as f32],
                 output_size: [output_size.0 as f32, output_size.1 as f32],
+                placement_offset: [0.0, 0.0],
+                placement_scale: 1.0,
+                _padding: 0.0,
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -201,6 +241,7 @@ impl RgbaOverlayCompositor {
             params_buffer,
             reference_size: (frame.width, frame.height),
             output_size,
+            placement: OverlayPlacement::default(),
         };
         compositor.upload(gpu, frame)?;
         Ok(compositor)
@@ -298,6 +339,14 @@ impl RgbaOverlayCompositor {
         self.write_params(gpu);
     }
 
+    /// Reposition/resize the overlay within the output frame - see
+    /// [`OverlayPlacement`]. Cheap (one uniform-buffer write), safe to call
+    /// every frame while a user drags an on-screen handle.
+    pub(crate) fn set_placement(&mut self, gpu: &GpuContext, placement: OverlayPlacement) {
+        self.placement = placement;
+        self.write_params(gpu);
+    }
+
     fn write_params(&self, gpu: &GpuContext) {
         gpu.queue().write_buffer(
             &self.params_buffer,
@@ -305,6 +354,9 @@ impl RgbaOverlayCompositor {
             bytemuck::bytes_of(&OverlayParams {
                 reference_size: [self.reference_size.0 as f32, self.reference_size.1 as f32],
                 output_size: [self.output_size.0 as f32, self.output_size.1 as f32],
+                placement_offset: [self.placement.offset.0, self.placement.offset.1],
+                placement_scale: self.placement.scale,
+                _padding: 0.0,
             }),
         );
     }

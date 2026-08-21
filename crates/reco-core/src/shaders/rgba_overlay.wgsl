@@ -1,6 +1,12 @@
 struct OverlayParams {
     reference_size: vec2<f32>,
     output_size: vec2<f32>,
+    // Fraction of output_size the overlay's centerpoint is shifted from
+    // the frame's own center; [0, 0] is the original centered behavior.
+    placement_offset: vec2<f32>,
+    // Multiplies the auto-fit ("contain") scale; 1.0 is unchanged.
+    placement_scale: f32,
+    _padding: f32,
 };
 
 @group(0) @binding(0) var overlay_texture: texture_2d<f32>;
@@ -31,9 +37,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let scale = min(
         params.output_size.x / params.reference_size.x,
         params.output_size.y / params.reference_size.y,
-    );
+    ) * params.placement_scale;
     let fitted_size = params.reference_size * scale;
-    let fitted_origin = (params.output_size - fitted_size) * 0.5;
+    let center = params.output_size * 0.5 + params.placement_offset * params.output_size;
+    let fitted_origin = center - fitted_size * 0.5;
     let output_pixel = input.uv * params.output_size;
     let overlay_uv = (output_pixel - fitted_origin) / fitted_size;
     if (overlay_uv.x < 0.0 || overlay_uv.y < 0.0 || overlay_uv.x > 1.0 || overlay_uv.y > 1.0) {
