@@ -1,0 +1,1194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<title>Match Logger</title>
+<style>
+  :root {
+    --bg: #f1f5f9;
+    --panel: #ffffff;
+    --panel-border: #e2e8f0;
+    --text: #0f172a;
+    --muted: #64748b;
+
+    --brand: #16a34a;
+    --brand-dark: #15803d;
+    --home: #2563eb;
+    --away: #f97316;
+    --yellow: #eab308;
+    --red: #dc2626;
+    --anchor: #475569;
+    --period: #0891b2;
+    --end: #b91c1c;
+    --pause: #d97706;
+    --undo: #a16207;
+    --share: #16a34a;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    font-size: 16px;
+    user-select: none;
+  }
+
+  .app-shell {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 12px calc(28px + env(safe-area-inset-bottom));
+  }
+
+  /* --- sticky header / scorebar --- */
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    margin: 0 -12px 14px;
+    padding: calc(10px + env(safe-area-inset-top)) 12px 12px;
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    box-shadow: 0 4px 14px rgba(15, 23, 42, 0.25);
+  }
+  .lang-btn {
+    position: absolute;
+    top: calc(8px + env(safe-area-inset-top));
+    right: 10px;
+    width: 26px;
+    height: 20px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.08);
+    font-size: 12px;
+    line-height: 20px;
+    text-align: center;
+  }
+  .lang-btn:active { background: rgba(255, 255, 255, 0.2); }
+  .topbar h1 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #94a3b8;
+    text-align: center;
+  }
+  .scorebar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .scorebar .team { flex: 1; text-align: center; min-width: 0; }
+  .scorebar .team .name {
+    font-size: 13px;
+    color: #cbd5e1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .scorebar .team.home .name { color: #93c5fd; }
+  .scorebar .team.away .name { color: #fdba74; }
+  .scorebar .team .score {
+    font-size: 42px;
+    font-weight: 800;
+    color: #ffffff;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+  }
+  .scorebar .mid { text-align: center; padding: 0 10px; flex: 0 0 auto; }
+  .scorebar .mid .period {
+    font-size: 12px;
+    color: #a7f3d0;
+    background: rgba(22, 163, 74, 0.18);
+    border: 1px solid rgba(22, 163, 74, 0.4);
+    border-radius: 999px;
+    padding: 3px 10px;
+    white-space: nowrap;
+  }
+  .scorebar .mid .period.paused {
+    color: #fde68a;
+    background: rgba(217, 119, 6, 0.22);
+    border-color: rgba(217, 119, 6, 0.5);
+  }
+  .scorebar .mid .clock {
+    margin-top: 6px;
+    font-size: 22px;
+    font-weight: 700;
+    color: #ffffff;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* --- responsive card layout: CSS multi-column instead of CSS Grid.
+     Grid rows size to the tallest item in the row, so a collapsed card
+     left a gap instead of letting the next card slide up underneath it.
+     Multi-column re-balances column heights on every reflow, so a
+     collapse/expand actually pulls the following card up. Trade-off:
+     cards fill column-by-column (top-to-bottom, then next column)
+     rather than row-by-row, so on wide/landscape screens the reading
+     order across columns is a little less linear than a grid - fine
+     for this app since portrait single-column is the common case. --- */
+  .grid {
+    column-width: 260px;
+    column-gap: 12px;
+  }
+  .span-all { column-span: all; }
+
+  section {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 16px;
+    padding: 14px;
+    margin: 0 0 12px;
+    break-inside: avoid;
+    -webkit-column-break-inside: avoid;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+  }
+  section h2 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin: 0 0 10px;
+  }
+  section h2.collapsible-header {
+    cursor: pointer;
+    margin: -2px -2px 10px;
+    padding: 2px;
+    border-radius: 8px;
+  }
+  section h2.collapsible-header .chevron {
+    margin-left: auto;
+    font-size: 12px;
+    transition: transform 0.2s ease;
+  }
+  section.collapsed h2.collapsible-header {
+    margin-bottom: -2px;
+  }
+  section.collapsed h2.collapsible-header .chevron {
+    transform: rotate(-90deg);
+  }
+  .collapsible-body {
+    overflow: hidden;
+    max-height: 400px;
+    opacity: 1;
+    transition: max-height 0.25s ease, opacity 0.2s ease, margin-top 0.25s ease;
+  }
+  section.collapsed .collapsible-body {
+    max-height: 0;
+    opacity: 0;
+  }
+
+  input[type=text] {
+    width: 100%;
+    font-size: 16px;
+    padding: 12px;
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    margin-bottom: 8px;
+    background: #f8fafc;
+    color: var(--text);
+  }
+  input[type=text]:focus { outline: 2px solid var(--brand); background: #ffffff; }
+  label.field { display: block; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
+
+  .period-picker {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .period-picker button {
+    flex: 1 0 44px;
+    min-width: 44px;
+    height: 44px;
+    font-size: 16px;
+    font-weight: 700;
+    border-radius: 10px;
+    border: 1px solid var(--panel-border);
+    background: #f8fafc;
+    color: var(--text);
+  }
+  .period-picker button.active {
+    background: var(--brand);
+    border-color: var(--brand-dark);
+    color: #ffffff;
+  }
+  .period-picker button:disabled { opacity: 0.5; }
+
+  .btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    padding: 15px 10px;
+    font-size: 15px;
+    font-weight: 700;
+    border: none;
+    border-radius: 12px;
+    color: white;
+    margin-bottom: 8px;
+    min-height: 54px;
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.15);
+    transition: transform 0.08s ease, filter 0.08s ease;
+  }
+  .btn .ico { font-size: 18px; line-height: 1; }
+  .btn:active { transform: scale(0.97); filter: brightness(0.9); }
+  .btn:disabled { background: #cbd5e1 !important; color: #94a3b8; box-shadow: none; }
+  .btn:last-child { margin-bottom: 0; }
+
+  .btn-row { display: flex; gap: 8px; }
+  .btn-row .btn { margin-bottom: 0; }
+
+  .btn-anchor { background: var(--anchor); }
+  .btn-period { background: var(--period); }
+  .btn-pause { background: var(--pause); }
+  .btn-end { background: var(--end); }
+
+  .btn-home { background: var(--home); }
+  .btn-away { background: var(--away); }
+  .btn-yellow { background: var(--yellow); color: #1c1917; }
+  .btn-red { background: var(--red); }
+
+  .btn-undo { background: var(--undo); }
+  .btn-export { background: var(--share); }
+  .btn-danger-outline {
+    background: #ffffff;
+    color: var(--red);
+    border: 1px solid var(--red);
+    box-shadow: none;
+  }
+
+  .stepper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    padding: 2px 0 8px;
+  }
+  .stepper button {
+    width: 46px; height: 46px;
+    font-size: 22px;
+    border-radius: 10px;
+    border: 1px solid var(--panel-border);
+    background: #f8fafc;
+    color: var(--text);
+  }
+  .stepper button:active { background: #e2e8f0; }
+  .stepper .val { font-size: 18px; font-weight: 700; min-width: 90px; text-align: center; }
+
+  #log {
+    max-height: 260px;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+  #log .row {
+    display: flex;
+    justify-content: space-between;
+    padding: 7px 4px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  #log .row:last-child { border-bottom: none; }
+  #log .row .t { color: var(--muted); font-variant-numeric: tabular-nums; }
+  #log .empty { color: var(--muted); text-align: center; padding: 10px 0; }
+
+  .toast {
+    position: fixed;
+    left: 50%; bottom: calc(20px + env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    background: #0f172a;
+    color: white;
+    padding: 10px 18px;
+    border-radius: 999px;
+    font-size: 14px;
+    font-weight: 600;
+    opacity: 0;
+    transition: opacity 0.2s;
+    pointer-events: none;
+    z-index: 100;
+    max-width: 90%;
+    text-align: center;
+    box-shadow: 0 4px 14px rgba(15, 23, 42, 0.35);
+  }
+  .toast.show { opacity: 1; }
+
+  .savedinfo { font-size: 11px; color: var(--muted); text-align: center; margin-top: 6px; }
+
+  /* landscape: give the grid more breathing room and let the score sit
+     a bit smaller since screen height is tighter */
+  @media (orientation: landscape) {
+    .app-shell { max-width: 1200px; padding-top: 4px; }
+    .scorebar .team .score { font-size: 34px; }
+    .scorebar .mid .clock { font-size: 18px; }
+  }
+</style>
+</head>
+<body>
+<div class="app-shell">
+
+  <header class="topbar">
+    <button class="lang-btn" id="btnForceEnglish" title="English" aria-label="English">&#127468;&#127463;</button>
+    <h1 id="appTitle">Match Logger</h1>
+    <div class="scorebar">
+      <div class="team home">
+        <div class="name" id="dispHome">Home</div>
+        <div class="score" id="scoreHome">0</div>
+      </div>
+      <div class="mid">
+        <div class="period" id="dispPeriod">Not started yet</div>
+        <div class="clock" id="dispClock">--:--</div>
+      </div>
+      <div class="team away">
+        <div class="name" id="dispAway">Away</div>
+        <div class="score" id="scoreAway">0</div>
+      </div>
+    </div>
+  </header>
+
+  <main class="grid">
+
+    <section id="setup">
+      <h2 id="hSetup" class="collapsible-header"></h2>
+      <div class="collapsible-body" id="setupBody">
+        <label class="field" id="lblHome">Home team</label>
+        <input type="text" id="homeName" autocomplete="off" list="teamNamesList">
+        <label class="field" id="lblAway">Away team</label>
+        <input type="text" id="awayName" autocomplete="off" list="teamNamesList">
+        <datalist id="teamNamesList"></datalist>
+        <label class="field" id="lblPeriods">Number of periods</label>
+        <div class="period-picker" id="periodPicker">
+          <button data-n="1">1</button>
+          <button data-n="2">2</button>
+          <button data-n="3">3</button>
+          <button data-n="4">4</button>
+          <button data-n="5">5</button>
+          <button data-n="6">6</button>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2 id="hStart"></h2>
+      <button class="btn btn-anchor" id="btnVideoStart"></button>
+      <button class="btn btn-period" id="btnPeriodAction"></button>
+      <button class="btn btn-pause" id="btnPause"></button>
+      <button class="btn btn-end" id="btnMatchEnd"></button>
+    </section>
+
+    <section>
+      <h2 id="hGoal"></h2>
+      <div class="btn-row">
+        <button class="btn btn-home" id="btnGoalHome"></button>
+        <button class="btn btn-away" id="btnGoalAway"></button>
+      </div>
+    </section>
+
+    <section>
+      <h2 id="hNote"></h2>
+      <button class="btn btn-anchor" id="btnAddNote"></button>
+    </section>
+
+    <section id="cardsSection">
+      <h2 id="hCards" class="collapsible-header"></h2>
+      <div class="collapsible-body" id="cardsBody">
+        <div class="btn-row" style="margin-bottom:8px;">
+          <button class="btn btn-yellow" id="btnYellowHome"></button>
+          <button class="btn btn-yellow" id="btnYellowAway"></button>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-red" id="btnRedHome"></button>
+          <button class="btn btn-red" id="btnRedAway"></button>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2 id="hAddedTime"></h2>
+      <div class="stepper">
+        <button id="stepMinus">-</button>
+        <div class="val" id="addedTimeVal">0 min</div>
+        <button id="stepPlus">+</button>
+      </div>
+    </section>
+
+    <section id="controlsSection">
+      <h2 id="hControls" class="collapsible-header"></h2>
+      <div class="collapsible-body" id="controlsBody">
+        <button class="btn btn-undo" id="btnUndo"></button>
+        <button class="btn btn-export" id="btnExport"></button>
+        <button class="btn btn-export" id="btnYoutubeChapters" style="background:#0f172a;"></button>
+        <div class="savedinfo" id="savedInfo"></div>
+        <button class="btn btn-danger-outline" id="btnNewMatch" style="margin-top:10px;"></button>
+      </div>
+    </section>
+
+    <section class="span-all" id="logSection">
+      <h2 id="hLog" class="collapsible-header"></h2>
+      <div class="collapsible-body" id="logBody">
+        <div id="log"></div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  var STORAGE_KEY = 'scoreboard_logger_v1';
+
+  // --- known team names: remembered separately from the match state,
+  // so "New match" never wipes them and the list just grows over time.
+  // Fed into a <datalist> on the two name fields for native autocomplete
+  // suggestions. ------------------------------------------------------
+  var KNOWN_TEAMS_KEY = 'match_logger_known_teams';
+  var KNOWN_TEAMS_MAX = 30;
+
+  function loadKnownTeams() {
+    try {
+      var arr = JSON.parse(localStorage.getItem(KNOWN_TEAMS_KEY) || '[]');
+      return Array.isArray(arr) ? arr : [];
+    } catch (e) { return []; }
+  }
+
+  function renderKnownTeams() {
+    var list = document.getElementById('teamNamesList');
+    list.innerHTML = '';
+    loadKnownTeams().forEach(function (name) {
+      var opt = document.createElement('option');
+      opt.value = name;
+      list.appendChild(opt);
+    });
+  }
+
+  // Commit a finished name (on blur, not on every keystroke) to the
+  // front of the list, most-recently-used first, capped so it doesn't
+  // grow forever.
+  function rememberTeamName(name) {
+    name = (name || '').trim();
+    if (!name) return;
+    var known = loadKnownTeams();
+    var idx = known.indexOf(name);
+    if (idx !== -1) known.splice(idx, 1);
+    known.unshift(name);
+    if (known.length > KNOWN_TEAMS_MAX) known.length = KNOWN_TEAMS_MAX;
+    try { localStorage.setItem(KNOWN_TEAMS_KEY, JSON.stringify(known)); } catch (e) { /* ignore */ }
+    renderKnownTeams();
+  }
+
+  // --- i18n: auto-detect from the phone/PC, default to English -------
+  var ICO = {
+    video: '\u{1F3A5}',      // camera
+    play: '\u{25B6}\u{FE0F}', // play
+    pause: '\u{23F8}\u{FE0F}', // pause
+    check: '✅',
+    flag: '\u{1F3C1}',       // checkered flag
+    ball: '⚽',
+    yellow: '\u{1F7E8}',
+    red: '\u{1F534}',
+    hourglass: '⌛',
+    gear: '⚙\u{FE0F}',
+    undo: '↩\u{FE0F}',
+    download: '\u{2B07}\u{FE0F}',
+    note: '\u{1F4DD}',
+    clip: '\u{1F4CB}',
+    cards: '\u{1F4D2}',
+    chapters: '\u{1F3AC}',
+    pin: '\u{1F4CC}'
+  };
+
+  var STRINGS = {
+    en: {
+      appTitle: 'Match Logger', home: 'Home', away: 'Away',
+      notStarted: 'Not started yet', period: 'Period', matchEnded: 'Match ended', ended: 'end',
+      sectionSetup: 'Before kickoff', homeTeamLabel: 'Home team', awayTeamLabel: 'Away team',
+      periodsLabel: 'Number of periods',
+      sectionStart: 'Start / periods',
+      btnStartVideo: 'Start video', btnVideoStarted: 'Video started',
+      btnStartMatch: 'Start match (period 1)',
+      btnNextPeriod: 'Next period',
+      btnLastPeriod: 'Last period in progress',
+      btnMatchEndedShort: 'Match ended',
+      btnEndMatch: 'End match',
+      btnPause: 'Pause', btnResume: 'Resume',
+      sectionGoal: 'Goal', sectionCards: 'Cards', sectionAddedTime: 'Added time (current period)',
+      sectionControls: 'Controls',
+      btnUndo: 'Undo', btnExport: 'Download',
+      savedNothing: 'nothing saved yet', savedAt: 'saved',
+      sectionLog: 'Log', logEmpty: 'No events yet',
+      confirmEndMatch: 'End the match now?',
+      toastVideoStart: 'Video start logged', toastPeriodStart: 'Period {n} started',
+      toastMatchEnded: 'Match end logged', toastGoal: 'Goal {team} - {score}',
+      toastYellow: 'Yellow {team}', toastRed: 'Red {team}',
+      toastUndone: 'Undone: {label}', toastDownloaded: 'Downloaded',
+      toastShareUnavailable: 'Sharing not available here - saved to Downloads instead, share it from there',
+      toastPause: 'Pause logged', toastResume: 'Resume logged',
+      logVideoStart: 'Start video', logPeriodStart: 'Start period {n}', logMatchEnd: 'Match end',
+      logGoal: 'Goal {team}', logYellow: 'Yellow {team}', logRed: 'Red {team}',
+      logAddedTime: '+{n} min (period {p})', logPauseStart: 'Pause', logPauseEnd: 'Resume',
+      btnYoutubeChapters: 'YouTube chapters',
+      toastChaptersCopied: 'Chapters copied to clipboard', toastChaptersShared: 'Chapters shared',
+      toastChaptersNone: 'Not enough events yet for chapters',
+      chapterStart: 'Start', chapterKickoff: 'Kickoff', chapterPeriod: 'Period {n}',
+      chapterFullTime: 'Full time', chapterGoal: 'Goal {team} ({score})',
+      btnNewMatch: 'New match', confirmNewMatch: 'Start a new match? This clears all current events - export/share first if you want to keep them.',
+      toastNewMatch: 'New match started',
+      sectionNote: 'Note', btnAddNote: 'Add note', promptNote: 'Note text:',
+      toastNote: 'Note added', logNote: 'Note: {text}'
+    },
+    nl: {
+      appTitle: 'Voetbal Match Logger', home: 'Thuis', away: 'Uit',
+      notStarted: 'Nog niet gestart', period: 'Periode', matchEnded: 'Wedstrijd afgelopen', ended: 'einde',
+      sectionSetup: 'Voor aftrap', homeTeamLabel: 'Team thuis', awayTeamLabel: 'Team uit',
+      periodsLabel: 'Aantal periodes',
+      sectionStart: 'Start / periodes',
+      btnStartVideo: 'Start video', btnVideoStarted: 'Video gestart',
+      btnStartMatch: 'Start wedstrijd (periode 1)',
+      btnNextPeriod: 'Volgende periode',
+      btnLastPeriod: 'Laatste periode bezig',
+      btnMatchEndedShort: 'Wedstrijd afgelopen',
+      btnEndMatch: 'Einde wedstrijd',
+      btnPause: 'Pauze', btnResume: 'Hervatten',
+      sectionGoal: 'Doelpunt', sectionCards: 'Kaarten', sectionAddedTime: 'Extra tijd (huidige periode)',
+      sectionControls: 'Beheer',
+      btnUndo: 'Ongedaan maken', btnExport: 'Downloaden',
+      savedNothing: 'nog niets opgeslagen', savedAt: 'opgeslagen',
+      sectionLog: 'Log', logEmpty: 'Nog geen events',
+      confirmEndMatch: 'Wedstrijd nu echt beeindigen?',
+      toastVideoStart: 'Start video genoteerd', toastPeriodStart: 'Periode {n} gestart',
+      toastMatchEnded: 'Wedstrijd afgelopen genoteerd', toastGoal: 'Doelpunt {team} - {score}',
+      toastYellow: 'Geel {team}', toastRed: 'Rood {team}',
+      toastUndone: 'Ongedaan gemaakt: {label}', toastDownloaded: 'Gedownload',
+      toastShareUnavailable: 'Delen niet beschikbaar hier - opgeslagen in Downloads, deel het vanuit daar',
+      toastPause: 'Pauze genoteerd', toastResume: 'Hervat genoteerd',
+      logVideoStart: 'Start video', logPeriodStart: 'Start periode {n}', logMatchEnd: 'Einde wedstrijd',
+      logGoal: 'Doelpunt {team}', logYellow: 'Geel {team}', logRed: 'Rood {team}',
+      logAddedTime: '+{n} min (periode {p})', logPauseStart: 'Pauze', logPauseEnd: 'Hervat',
+      btnYoutubeChapters: 'YouTube hoofdstukken',
+      toastChaptersCopied: 'Hoofdstukken gekopieerd', toastChaptersShared: 'Hoofdstukken gedeeld',
+      toastChaptersNone: 'Nog niet genoeg events voor hoofdstukken',
+      chapterStart: 'Start', chapterKickoff: 'Aftrap', chapterPeriod: 'Periode {n}',
+      chapterFullTime: 'Einde wedstrijd', chapterGoal: 'Doelpunt {team} ({score})',
+      btnNewMatch: 'Nieuwe wedstrijd', confirmNewMatch: 'Nieuwe wedstrijd starten? Dit wist alle huidige events - exporteer/deel eerst als je ze wil bewaren.',
+      toastNewMatch: 'Nieuwe wedstrijd gestart',
+      sectionNote: 'Notitie', btnAddNote: 'Notitie toevoegen', promptNote: 'Tekst notitie:',
+      toastNote: 'Notitie toegevoegd', logNote: 'Notitie: {text}'
+    }
+  };
+
+  var LANG_OVERRIDE_KEY = 'match_logger_lang_override';
+
+  function detectLang() {
+    try {
+      if (localStorage.getItem(LANG_OVERRIDE_KEY) === 'en') return 'en';
+    } catch (e) { /* ignore */ }
+    return ((navigator.language || navigator.userLanguage || 'en') + '').slice(0, 2).toLowerCase();
+  }
+
+  var detectedLang = detectLang();
+  var L = STRINGS[detectedLang] || STRINGS.en;
+  document.documentElement.lang = STRINGS[detectedLang] ? detectedLang : 'en';
+
+  function tr(str, vars) {
+    if (!vars) return str;
+    return str.replace(/\{(\w+)\}/g, function (m, key) {
+      return (key in vars) ? vars[key] : m;
+    });
+  }
+
+  function setIconText(id, icon, text) {
+    document.getElementById(id).innerHTML = '<span class="ico">' + icon + '</span> ' + text;
+  }
+
+  // Collapsible section headers: click the h2 to fold/unfold its body.
+  // 'setup' also auto-collapses once the match actually gets underway
+  // (see addEvent) - the others are manual-only.
+  function makeCollapsible(headerId, icon, title, key) {
+    document.getElementById(headerId).innerHTML =
+      '<span class="ico">' + icon + '</span> ' + title + '<span class="chevron">▾</span>';
+    document.getElementById(headerId).addEventListener('click', function () {
+      state.collapsed[key] = !state.collapsed[key];
+      save();
+      render();
+    });
+  }
+
+  // --- state ------------------------------------------------------
+  function freshState() {
+    return {
+      meta: { home: '', away: '', periods: 4, createdAt: new Date().toISOString() },
+      events: [],
+      currentPeriod: 0,
+      matchEnded: false,
+      paused: false,
+      addedTimeThisPeriod: 0,
+      collapsed: { setup: false, cards: true, controls: false, log: false }
+    };
+  }
+  var state = freshState();
+
+  function load() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        if (parsed && parsed.events) state = parsed;
+      }
+    } catch (e) { /* ignore corrupt storage */ }
+    // Backward-compat with the pre-multi-section collapse format, and a
+    // safety net for any missing key regardless of where it came from.
+    if (!state.collapsed) state.collapsed = {};
+    if (typeof state.setupCollapsed === 'boolean' && state.collapsed.setup === undefined) {
+      state.collapsed.setup = state.setupCollapsed;
+    }
+    var collapsedDefaults = { setup: false, cards: true, controls: false, log: false };
+    Object.keys(collapsedDefaults).forEach(function (k) {
+      if (typeof state.collapsed[k] !== 'boolean') state.collapsed[k] = collapsedDefaults[k];
+    });
+  }
+
+  function save() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    document.getElementById('savedInfo').textContent =
+      L.savedAt + ' ' + new Date().toLocaleTimeString();
+  }
+
+  function nowIso() { return new Date().toISOString(); }
+
+  function addEvent(type, extra) {
+    // First real event of the match: fold up the one-time setup section
+    // automatically, it's not needed anymore once things are underway.
+    if (state.events.length === 0) state.collapsed.setup = true;
+    var ev = Object.assign({ type: type, ts: nowIso() }, extra || {});
+    state.events.push(ev);
+    save();
+    render();
+    return ev;
+  }
+
+  // Roll back derived state that isn't purely computed from the log.
+  function applyUndo(ev) {
+    if (ev.type === 'period_start') state.currentPeriod -= 1;
+    if (ev.type === 'match_end') state.matchEnded = false;
+    if (ev.type === 'pause_start') state.paused = false;
+    if (ev.type === 'pause_end') state.paused = true;
+  }
+
+  function undo() {
+    if (state.events.length === 0) return;
+    var removed = state.events.pop();
+    applyUndo(removed);
+    // A period_start that auto-resumed a pause (see btnPeriodAction) is
+    // really one user action split into two log entries - undo both
+    // together so the pause state comes back cleanly.
+    if (removed.type === 'period_start') {
+      var prev = state.events[state.events.length - 1];
+      if (prev && prev.type === 'pause_end' && prev.auto) {
+        state.events.pop();
+        applyUndo(prev);
+      }
+    }
+    if (state.events.length === 0) state.collapsed.setup = false;
+    save();
+    render();
+    toast(tr(L.toastUndone, { label: labelFor(removed) }));
+  }
+
+  function toast(msg) {
+    var t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toast._h);
+    toast._h = setTimeout(function () { t.classList.remove('show'); }, 1600);
+  }
+
+  function labelFor(ev) {
+    var teamName = ev.team === 'home' ? (state.meta.home || L.home)
+                 : ev.team === 'away' ? (state.meta.away || L.away) : '';
+    switch (ev.type) {
+      case 'video_start': return L.logVideoStart;
+      case 'period_start': return tr(L.logPeriodStart, { n: ev.period });
+      case 'match_end': return L.logMatchEnd;
+      case 'goal': return tr(L.logGoal, { team: teamName });
+      case 'yellow_card': return tr(L.logYellow, { team: teamName });
+      case 'red_card': return tr(L.logRed, { team: teamName });
+      case 'added_time': return tr(L.logAddedTime, { n: ev.minutes, p: ev.period });
+      case 'pause_start': return L.logPauseStart;
+      case 'pause_end': return L.logPauseEnd;
+      case 'note': return tr(L.logNote, { text: ev.text });
+      default: return ev.type;
+    }
+  }
+
+  function countGoals(team) {
+    return state.events.filter(function (e) { return e.type === 'goal' && e.team === team; }).length;
+  }
+
+  function firstPeriodStartTs() {
+    var e = state.events.filter(function (e) { return e.type === 'period_start' && e.period === 1; })[0];
+    return e ? e.ts : null;
+  }
+
+  function periodLabel() {
+    if (state.matchEnded) return L.matchEnded;
+    if (state.currentPeriod === 0) return L.notStarted;
+    var base = L.period + ' ' + state.currentPeriod + ' / ' + state.meta.periods;
+    if (state.paused) base += ' - ' + L.btnPause;
+    return base;
+  }
+
+  function fmtClock(ms) {
+    var totalSec = Math.floor(ms / 1000);
+    var m = Math.floor(totalSec / 60);
+    var s = totalSec % 60;
+    return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  // --- one-time static text setup (i18n) ---------------------------
+  function initStaticText() {
+    document.title = L.appTitle;
+    document.getElementById('appTitle').textContent = L.appTitle;
+
+    makeCollapsible('hSetup', ICO.note, L.sectionSetup, 'setup');
+    document.getElementById('lblHome').textContent = L.homeTeamLabel;
+    document.getElementById('lblAway').textContent = L.awayTeamLabel;
+    document.getElementById('lblPeriods').textContent = L.periodsLabel;
+    document.getElementById('homeName').placeholder = L.home;
+    document.getElementById('awayName').placeholder = L.away;
+
+    setIconText('hStart', ICO.hourglass, L.sectionStart);
+    setIconText('hNote', ICO.pin, L.sectionNote);
+    setIconText('btnAddNote', ICO.pin, L.btnAddNote);
+    setIconText('hGoal', ICO.ball, L.sectionGoal);
+    makeCollapsible('hCards', ICO.cards, L.sectionCards, 'cards');
+    setIconText('hAddedTime', ICO.hourglass, L.sectionAddedTime);
+    makeCollapsible('hControls', ICO.gear, L.sectionControls, 'controls');
+    makeCollapsible('hLog', ICO.clip, L.sectionLog, 'log');
+
+    setIconText('btnGoalHome', ICO.ball, L.home);
+    setIconText('btnGoalAway', ICO.ball, L.away);
+    setIconText('btnYellowHome', ICO.yellow, L.home);
+    setIconText('btnYellowAway', ICO.yellow, L.away);
+    setIconText('btnRedHome', ICO.red, L.home);
+    setIconText('btnRedAway', ICO.red, L.away);
+
+    setIconText('btnUndo', ICO.undo, L.btnUndo);
+    setIconText('btnExport', ICO.download, L.btnExport);
+    setIconText('btnYoutubeChapters', ICO.chapters, L.btnYoutubeChapters);
+    document.getElementById('btnNewMatch').textContent = L.btnNewMatch;
+    document.getElementById('savedInfo').textContent = L.savedNothing;
+  }
+
+  function render() {
+    document.getElementById('setup').classList.toggle('collapsed', state.collapsed.setup);
+    document.getElementById('cardsSection').classList.toggle('collapsed', state.collapsed.cards);
+    document.getElementById('controlsSection').classList.toggle('collapsed', state.collapsed.controls);
+    document.getElementById('logSection').classList.toggle('collapsed', state.collapsed.log);
+
+    // Never stamp over a field the user is actively typing in - the 1s
+    // redraw tick would otherwise wipe out in-progress keystrokes.
+    var homeInput = document.getElementById('homeName');
+    var awayInput = document.getElementById('awayName');
+    if (document.activeElement !== homeInput) homeInput.value = state.meta.home;
+    if (document.activeElement !== awayInput) awayInput.value = state.meta.away;
+
+    // Period quick-picker: highlight current choice, lock once the
+    // match has actually started so it can't be changed mid-match.
+    var periodLocked = state.currentPeriod > 0;
+    document.querySelectorAll('#periodPicker button').forEach(function (btn) {
+      var n = parseInt(btn.getAttribute('data-n'), 10);
+      btn.classList.toggle('active', n === state.meta.periods);
+      btn.disabled = periodLocked;
+    });
+
+    document.getElementById('dispHome').textContent = state.meta.home || L.home;
+    document.getElementById('dispAway').textContent = state.meta.away || L.away;
+    document.getElementById('scoreHome').textContent = countGoals('home');
+    document.getElementById('scoreAway').textContent = countGoals('away');
+    var periodEl = document.getElementById('dispPeriod');
+    periodEl.textContent = periodLabel();
+    periodEl.classList.toggle('paused', state.paused);
+
+    var videoStarted = state.events.some(function (e) { return e.type === 'video_start'; });
+    document.getElementById('btnVideoStart').disabled = videoStarted;
+    setIconText('btnVideoStart', videoStarted ? ICO.check : ICO.video,
+      videoStarted ? L.btnVideoStarted : L.btnStartVideo);
+
+    var actionBtn = document.getElementById('btnPeriodAction');
+    if (state.matchEnded) {
+      actionBtn.disabled = true;
+      setIconText('btnPeriodAction', ICO.flag, L.btnMatchEndedShort);
+    } else if (state.currentPeriod === 0) {
+      actionBtn.disabled = false;
+      setIconText('btnPeriodAction', ICO.play, L.btnStartMatch);
+    } else if (state.currentPeriod < state.meta.periods) {
+      actionBtn.disabled = false;
+      setIconText('btnPeriodAction', ICO.play,
+        L.btnNextPeriod + ' (' + (state.currentPeriod + 1) + ' / ' + state.meta.periods + ')');
+    } else {
+      actionBtn.disabled = true;
+      setIconText('btnPeriodAction', ICO.play, L.btnLastPeriod);
+    }
+
+    // Pause / resume toggle - only meaningful once the match is running.
+    var pauseBtn = document.getElementById('btnPause');
+    pauseBtn.disabled = state.currentPeriod === 0 || state.matchEnded;
+    setIconText('btnPause', state.paused ? ICO.play : ICO.pause,
+      state.paused ? L.btnResume : L.btnPause);
+
+    // Emergency-stop button: must work at any moment during the match,
+    // regardless of how many periods have been played.
+    setIconText('btnMatchEnd', ICO.flag, L.btnEndMatch);
+    document.getElementById('btnMatchEnd').disabled = state.matchEnded;
+
+    document.getElementById('addedTimeVal').textContent = state.addedTimeThisPeriod + ' min';
+
+    if (state.events.length > 0) {
+      var restoredNote = L.savedAt + ' ' + new Date(state.events[state.events.length - 1].ts).toLocaleTimeString();
+      var savedEl = document.getElementById('savedInfo');
+      if (savedEl.textContent === L.savedNothing) savedEl.textContent = restoredNote;
+    }
+
+    // Live cumulative clock since period 1 start.
+    var startTs = firstPeriodStartTs();
+    if (startTs && !state.matchEnded) {
+      document.getElementById('dispClock').textContent =
+        fmtClock(Date.now() - new Date(startTs).getTime());
+    } else if (state.matchEnded) {
+      document.getElementById('dispClock').textContent = L.ended;
+    } else {
+      document.getElementById('dispClock').textContent = '--:--';
+    }
+
+    // Log list, newest first.
+    var logEl = document.getElementById('log');
+    logEl.innerHTML = '';
+    if (state.events.length === 0) {
+      var empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = L.logEmpty;
+      logEl.appendChild(empty);
+    }
+    state.events.slice().reverse().forEach(function (ev) {
+      var row = document.createElement('div');
+      row.className = 'row';
+      var t = document.createElement('span');
+      t.className = 't';
+      t.textContent = new Date(ev.ts).toLocaleTimeString();
+      var l = document.createElement('span');
+      l.textContent = labelFor(ev);
+      row.appendChild(t);
+      row.appendChild(l);
+      logEl.appendChild(row);
+    });
+  }
+
+  // Setup fields - 'input' fires on every keystroke, not just on blur,
+  // so state.meta stays in sync with what's on screen at all times.
+  // 'blur' additionally commits the finished name to the known-teams
+  // list, once - not on every keystroke, so half-typed names never
+  // pollute the autocomplete suggestions.
+  document.getElementById('homeName').addEventListener('input', function (e) {
+    state.meta.home = e.target.value; save(); render();
+  });
+  document.getElementById('homeName').addEventListener('blur', function (e) {
+    rememberTeamName(e.target.value);
+  });
+  document.getElementById('awayName').addEventListener('input', function (e) {
+    state.meta.away = e.target.value; save(); render();
+  });
+  document.getElementById('awayName').addEventListener('blur', function (e) {
+    rememberTeamName(e.target.value);
+  });
+
+  document.querySelectorAll('#periodPicker button').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      if (btn.disabled) return;
+      state.meta.periods = parseInt(btn.getAttribute('data-n'), 10);
+      save(); render();
+    });
+  });
+
+  // Anchors / periods
+  document.getElementById('btnVideoStart').addEventListener('click', function () {
+    addEvent('video_start');
+    toast(L.toastVideoStart);
+  });
+
+  document.getElementById('btnPeriodAction').addEventListener('click', function () {
+    // Starting the next period always means play has resumed - if a
+    // pause was still open (e.g. logged at half-time), close it out
+    // automatically instead of leaving the header stuck on "Pause".
+    if (state.paused) {
+      state.paused = false;
+      addEvent('pause_end', { auto: true });
+    }
+    state.currentPeriod += 1;
+    state.addedTimeThisPeriod = 0;
+    addEvent('period_start', { period: state.currentPeriod });
+    toast(tr(L.toastPeriodStart, { n: state.currentPeriod }));
+  });
+
+  document.getElementById('btnPause').addEventListener('click', function () {
+    if (state.paused) {
+      state.paused = false;
+      addEvent('pause_end');
+      toast(L.toastResume);
+    } else {
+      state.paused = true;
+      addEvent('pause_start');
+      toast(L.toastPause);
+    }
+  });
+
+  document.getElementById('btnMatchEnd').addEventListener('click', function () {
+    // Available at any time (emergency stop), but requires an explicit
+    // confirmation so a stray tap mid-match can't end it by accident.
+    if (!confirm(L.confirmEndMatch)) return;
+    state.matchEnded = true;
+    addEvent('match_end');
+    toast(L.toastMatchEnded);
+  });
+
+  // Goals
+  document.getElementById('btnGoalHome').addEventListener('click', function () {
+    addEvent('goal', { team: 'home' });
+    toast(tr(L.toastGoal, { team: state.meta.home || L.home, score: countGoals('home') + '-' + countGoals('away') }));
+  });
+  document.getElementById('btnGoalAway').addEventListener('click', function () {
+    addEvent('goal', { team: 'away' });
+    toast(tr(L.toastGoal, { team: state.meta.away || L.away, score: countGoals('home') + '-' + countGoals('away') }));
+  });
+
+  // Cards
+  document.getElementById('btnYellowHome').addEventListener('click', function () {
+    addEvent('yellow_card', { team: 'home' }); toast(tr(L.toastYellow, { team: state.meta.home || L.home }));
+  });
+  document.getElementById('btnYellowAway').addEventListener('click', function () {
+    addEvent('yellow_card', { team: 'away' }); toast(tr(L.toastYellow, { team: state.meta.away || L.away }));
+  });
+  document.getElementById('btnRedHome').addEventListener('click', function () {
+    addEvent('red_card', { team: 'home' }); toast(tr(L.toastRed, { team: state.meta.home || L.home }));
+  });
+  document.getElementById('btnRedAway').addEventListener('click', function () {
+    addEvent('red_card', { team: 'away' }); toast(tr(L.toastRed, { team: state.meta.away || L.away }));
+  });
+
+  // Free-text note, timestamped like any other event - a native prompt()
+  // is the quickest way to grab a few words without building a whole
+  // input UI for something used occasionally.
+  document.getElementById('btnAddNote').addEventListener('click', function () {
+    var text = prompt(L.promptNote);
+    if (text === null) return; // cancelled
+    text = text.trim();
+    if (!text) return;
+    addEvent('note', { text: text });
+    toast(tr(L.toastNote, { text: text }));
+  });
+
+  // Added time stepper (logs immediately on each tap, cumulative for current period)
+  document.getElementById('stepPlus').addEventListener('click', function () {
+    if (state.currentPeriod === 0) return;
+    state.addedTimeThisPeriod += 1;
+    addEvent('added_time', { period: state.currentPeriod, minutes: state.addedTimeThisPeriod });
+  });
+  document.getElementById('stepMinus').addEventListener('click', function () {
+    if (state.currentPeriod === 0 || state.addedTimeThisPeriod === 0) return;
+    state.addedTimeThisPeriod -= 1;
+    addEvent('added_time', { period: state.currentPeriod, minutes: state.addedTimeThisPeriod });
+  });
+
+  // Undo
+  document.getElementById('btnUndo').addEventListener('click', undo);
+
+  // New match: wipes the current log and starts clean. Confirm first -
+  // this is destructive and there's no undo for it.
+  document.getElementById('btnNewMatch').addEventListener('click', function () {
+    if (!confirm(L.confirmNewMatch)) return;
+    state = freshState();
+    save();
+    render();
+    toast(L.toastNewMatch);
+  });
+
+  // Export: build the JSON file once, then prefer the native share
+  // sheet (Save to Files / WhatsApp / Quick Share / Nearby Share all
+  // show up there automatically) and fall back to a plain download
+  // link when the Web Share API (or file sharing specifically) isn't
+  // available - e.g. on a desktop browser.
+  // YouTube chapters: video-relative timestamps derived from the same
+  // event log, anchored on "video_start" (falls back to the first
+  // logged event if that's missing). Only the events a viewer would
+  // actually want to jump to become chapters - cards/pauses/added-time
+  // are left out to keep the list clean.
+  var CHAPTER_TYPES = ['video_start', 'period_start', 'goal', 'match_end'];
+
+  function fmtChapterTime(totalSec) {
+    var h = Math.floor(totalSec / 3600);
+    var m = Math.floor((totalSec % 3600) / 60);
+    var s = totalSec % 60;
+    var mm = (m < 10 ? '0' : '') + m;
+    var ss = (s < 10 ? '0' : '') + s;
+    return h > 0 ? (h + ':' + mm + ':' + ss) : (m + ':' + ss);
+  }
+
+  function buildYoutubeChapters() {
+    var anchorEvent = state.events.filter(function (e) { return e.type === 'video_start'; })[0];
+    var anchorTs = anchorEvent ? new Date(anchorEvent.ts).getTime()
+                 : state.events.length ? new Date(state.events[0].ts).getTime() : null;
+    if (anchorTs === null) return { list: [], text: '' };
+
+    var homeN = state.meta.home || L.home;
+    var awayN = state.meta.away || L.away;
+    var hs = 0, as = 0;
+    var list = [];
+
+    state.events
+      .filter(function (e) { return CHAPTER_TYPES.indexOf(e.type) !== -1; })
+      .forEach(function (ev) {
+        var sec = Math.round((new Date(ev.ts).getTime() - anchorTs) / 1000);
+        if (sec < 0) sec = 0;
+        var label;
+        if (ev.type === 'video_start') label = L.chapterStart;
+        else if (ev.type === 'match_end') label = L.chapterFullTime;
+        else if (ev.type === 'period_start') label = ev.period === 1 ? L.chapterKickoff : tr(L.chapterPeriod, { n: ev.period });
+        else if (ev.type === 'goal') {
+          if (ev.team === 'home') hs++; else if (ev.team === 'away') as++;
+          label = tr(L.chapterGoal, { team: ev.team === 'home' ? homeN : awayN, score: hs + '-' + as });
+        }
+        list.push({ sec: sec, label: label });
+      });
+
+    // YouTube requires strictly ascending timestamps at least ~10s
+    // apart and the very first one at 0:00 - dedupe anything crowding
+    // the previous entry rather than emitting an invalid chapter list.
+    var filtered = [];
+    list.forEach(function (item) {
+      var prev = filtered[filtered.length - 1];
+      if (!prev || item.sec - prev.sec >= 10) filtered.push(item);
+    });
+    if (filtered.length && filtered[0].sec !== 0) filtered[0].sec = 0;
+
+    var lines = filtered.map(function (item) { return fmtChapterTime(item.sec) + ' ' + item.label; });
+    return { list: filtered, text: lines.join('\n') };
+  }
+
+  // Filenames use the team names plus the export timestamp (not just the
+  // date) - readable in a downloads folder at a glance, and two exports
+  // of the same match (e.g. before/after half-time) never overwrite
+  // each other. Only strip characters that are actually invalid in a
+  // filename; accented team names etc. are left intact.
+  function safeFilenamePart(s) {
+    return (s || '').trim().replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, '_');
+  }
+
+  function fmtFilenameStamp(d) {
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+      '_' + p(d.getHours()) + p(d.getMinutes());
+  }
+
+  function buildExportFile() {
+    var chapters = buildYoutubeChapters();
+    var exportDate = new Date();
+    var payload = {
+      meta: state.meta,
+      exportedAt: exportDate.toISOString(),
+      events: state.events,
+      youtubeChapters: chapters.list,
+      youtubeChaptersText: chapters.text
+    };
+    var json = JSON.stringify(payload, null, 2);
+    var homePart = safeFilenamePart(state.meta.home) || L.home;
+    var awayPart = safeFilenamePart(state.meta.away) || L.away;
+    var filename = homePart + '_vs_' + awayPart + '_' + fmtFilenameStamp(exportDate) + '.json';
+    return { json: json, filename: filename };
+  }
+
+  function downloadFallback(json, filename, message) {
+    var blob = new Blob([json], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+    toast(message || L.toastDownloaded);
+  }
+
+  // Plain download - the Web Share API route was tried here before, but
+  // it never actually shared on the target device, so the button now
+  // does exactly what it says.
+  document.getElementById('btnExport').addEventListener('click', function () {
+    var built = buildExportFile();
+    downloadFallback(built.json, built.filename);
+  });
+
+  // YouTube chapters as plain, pasteable text - share as text (works
+  // with WhatsApp/Keep/Notes/YouTube Studio's own share targets, no
+  // file involved), else copy to clipboard, else fall back to a .txt
+  // download as a last resort.
+  document.getElementById('btnYoutubeChapters').addEventListener('click', async function () {
+    var chapters = buildYoutubeChapters();
+    if (!chapters.list.length) {
+      toast(L.toastChaptersNone);
+      return;
+    }
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: L.btnYoutubeChapters, text: chapters.text });
+        toast(L.toastChaptersShared);
+        return;
+      } catch (err) {
+        if (err && err.name === 'AbortError') return; // user cancelled the share sheet
+      }
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        await navigator.clipboard.writeText(chapters.text);
+        toast(L.toastChaptersCopied);
+        return;
+      } catch (err) { /* fall through to file download */ }
+    }
+    var blob = new Blob([chapters.text], { type: 'text/plain' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'youtube_chapters.txt';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+    toast(L.toastShareUnavailable);
+  });
+
+  // Small flag button: force English permanently, regardless of the
+  // phone/PC's detected locale. One-way (no toggle back) - matches how
+  // the auto-detect already defaults to English for anything unknown.
+  document.getElementById('btnForceEnglish').addEventListener('click', function () {
+    try { localStorage.setItem(LANG_OVERRIDE_KEY, 'en'); } catch (e) { /* ignore */ }
+    L = STRINGS.en;
+    document.documentElement.lang = 'en';
+    initStaticText();
+    render();
+  });
+
+  initStaticText();
+  load();
+  renderKnownTeams();
+  render();
+  setInterval(render, 1000);
+})();
+</script>
+</body>
+</html>
