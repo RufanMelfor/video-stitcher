@@ -3872,6 +3872,13 @@ fn main() -> anyhow::Result<()> {
         if let Some(bridge) = s.bridge.as_mut() {
             bridge.set_overlay_placement(placement);
         }
+        // Without this, the preview only redraws while playing/seeking
+        // (see vsync_render_tick's gate) - a drag while paused updated the
+        // compositor instantly but the screen wouldn't reflect it until
+        // something unrelated happened to trigger a redraw, which read as
+        // a huge, unusable lag. seam_drag (same kind of live-drag-a-render-
+        // parameter interaction) sets this for the same reason.
+        s.preview_dirty = true;
     });
 
     let app_weak = app.as_weak();
@@ -3899,6 +3906,10 @@ fn main() -> anyhow::Result<()> {
                     drop(s);
                     app.set_scoreboard_away_logo_path(display_path.into());
                 }
+                // See on_changed_scoreboard_placement's comment - the same
+                // gate applies to picking up the re-rendered overlay
+                // texture once push_scoreboard_replay pushes this change.
+                state_ref.borrow_mut().preview_dirty = true;
             }
             Err(message) => {
                 app.set_scoreboard_error_text(message.into());
@@ -3914,11 +3925,14 @@ fn main() -> anyhow::Result<()> {
         } else {
             Some(font.to_string())
         };
+        s.preview_dirty = true;
     });
 
     let state_ref = Rc::clone(&state);
     app.on_changed_scoreboard_logo_size(move |size| {
-        state_ref.borrow_mut().scoreboard_style.logo_size_px = Some(size);
+        let mut s = state_ref.borrow_mut();
+        s.scoreboard_style.logo_size_px = Some(size);
+        s.preview_dirty = true;
     });
 
     let state_ref = Rc::clone(&state);
@@ -3935,7 +3949,9 @@ fn main() -> anyhow::Result<()> {
             "Purple" => Some("#241333"),
             _ => None,
         };
-        state_ref.borrow_mut().scoreboard_style.banner_color = hex.map(str::to_string);
+        let mut s = state_ref.borrow_mut();
+        s.scoreboard_style.banner_color = hex.map(str::to_string);
+        s.preview_dirty = true;
     });
 
     // ── Auto-calibration callback ──
