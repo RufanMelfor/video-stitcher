@@ -510,7 +510,7 @@ component CalGroupBox inherits Rectangle {
         padding: 12px;
         spacing: 10px;
 
-        Text {
+        if root.title != "": Text {
             text: root.title;
             color: #7a8087;
             font-size: 10.5px;
@@ -1117,6 +1117,13 @@ export component RecoApp inherits Window {
     in-out property <bool> scoreboard-share-available: false;
     in-out property <string> scoreboard-share-url: "";
     in-out property <bool> scoreboard-share-dialog-open: false;
+    // Match Logger import (replaces the live-manual editor above while
+    // loaded): "" until Load... succeeds, then e.g. "Sharks vs United - 42
+    // events".
+    in-out property <string> scoreboard-match-summary: "";
+    // Sync-anchor status text, e.g. "Synced to video start" or "Not
+    // synced - set a sync point".
+    in-out property <string> scoreboard-sync-label: "";
 
     // Export progress (also used by the main status bar).
     in-out property <bool> export-in-progress: false;
@@ -1506,6 +1513,8 @@ export component RecoApp inherits Window {
     callback changed-scoreboard();
     callback edit-scoreboard();
     callback copy-scoreboard-share();
+    callback load-scoreboard-events();
+    callback set-scoreboard-sync-point();
 
     // File management: per-side segment lists and removal.
     in-out property <[string]> left-segments: [];
@@ -1808,9 +1817,15 @@ export component RecoApp inherits Window {
                         if root.files-loaded: VerticalLayout {
                             spacing: 10px;
 
-                            CalGroupBox {
+                            // Collapsed by default - tuned once during setup,
+                            // rarely revisited afterward, and eating vertical
+                            // space in a sidebar that's on screen constantly.
+                            seam-section := SectionHeader {
                                 title: "SEAM";
+                                expanded: false;
+                            }
 
+                            if seam-section.expanded: CalGroupBox {
                                 LabeledSlider {
                                     tip: "Width of the feathered blend at the seam between the two cameras.";
                                     label: "Seam blend";
@@ -1861,9 +1876,13 @@ export component RecoApp inherits Window {
                                 }
                             }
 
-                            CalGroupBox {
+                            // Collapsed by default, same reasoning as SEAM above.
+                            rig-section := SectionHeader {
                                 title: "RIG ALIGNMENT";
+                                expanded: false;
+                            }
 
+                            if rig-section.expanded: CalGroupBox {
                                 LabeledSlider {
                                     tip: "Forward/backward lean of the camera rig; straightens vertical lines at the panorama edges.";
                                     label: "Rig tilt";
@@ -1990,6 +2009,81 @@ export component RecoApp inherits Window {
                                     text: "Or paste ROI JSON above (from another calibration, or scripted).";
                                     color: root.text-dim;
                                     font-size: 10px;
+                                    wrap: word-wrap;
+                                }
+                            }
+
+                            CalGroupBox {
+                                title: "SCOREBOARD";
+
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: "Overlay";
+                                        color: #ccc;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+                                    if root.scoreboard-enabled && root.scoreboard-share-available: Button {
+                                        text: "QR";
+                                        clicked => { root.scoreboard-share-dialog-open = true; }
+                                    }
+                                    CheckBox {
+                                        text: root.scoreboard-enabled ? "ON" : "OFF";
+                                        checked <=> root.scoreboard-enabled;
+                                        toggled => { root.changed-scoreboard(); }
+                                    }
+                                }
+
+                                if root.scoreboard-enabled: ComboBox {
+                                    model: root.available-scoreboards;
+                                    current-index <=> root.scoreboard-current-index;
+                                    selected(value) => { root.changed-scoreboard(); }
+                                }
+
+                                // Match Logger import replaces the live-manual
+                                // editor below for as long as it's loaded -
+                                // the scoreboard then replays real timestamped
+                                // events instead of needing someone to click
+                                // buttons live during export.
+                                if root.scoreboard-enabled: FlatButton {
+                                    text: root.scoreboard-match-summary == "" ? "Load Match Logger export..." : "Load…";
+                                    clicked => { root.load-scoreboard-events(); }
+                                }
+
+                                if root.scoreboard-match-summary != "": Text {
+                                    text: root.scoreboard-match-summary;
+                                    color: #8ae68a;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
+
+                                if root.scoreboard-match-summary != "": HorizontalLayout {
+                                    spacing: 4px;
+                                    Text {
+                                        text: root.scoreboard-sync-label;
+                                        color: root.text-dim;
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                        wrap: word-wrap;
+                                        horizontal-stretch: 1;
+                                    }
+                                    FlatButton {
+                                        text: "Set sync point";
+                                        clicked => { root.set-scoreboard-sync-point(); }
+                                    }
+                                }
+
+                                if root.scoreboard-enabled && root.scoreboard-match-summary == "" && root.scoreboard-editor-available: FlatButton {
+                                    text: "Edit scoreboard (live)…";
+                                    clicked => { root.edit-scoreboard(); }
+                                }
+
+                                if root.scoreboard-error-text != "": Text {
+                                    text: root.scoreboard-error-text;
+                                    color: #e06060;
+                                    font-size: 11px;
                                     wrap: word-wrap;
                                 }
                             }
@@ -2849,46 +2943,11 @@ export component RecoApp inherits Window {
                     }
 
                     if !audio-section.expanded: Rectangle { height: 1px; background: #2a2a2a; }
-                    if !root.lens-preview-active: HorizontalLayout {
-                        spacing: 8px;
-                        Text {
-                            text: "Scoreboard";
-                            color: #fff;
-                            font-size: 13px;
-                            font-weight: 600;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                        }
-                        if root.scoreboard-enabled && root.scoreboard-share-available: Button {
-                            text: "QR";
-                            clicked => { root.scoreboard-share-dialog-open = true; }
-                        }
-                        CheckBox {
-                            text: root.scoreboard-enabled ? "ON" : "OFF";
-                            checked <=> root.scoreboard-enabled;
-                            toggled => { root.changed-scoreboard(); }
-                        }
-                    }
 
-                    if !root.lens-preview-active && root.scoreboard-enabled: VerticalLayout {
-                        spacing: 4px;
-                        Text { text: "Scoreboard:"; color: #ccc; font-size: 12px; }
-                        ComboBox {
-                            model: root.available-scoreboards;
-                            current-index <=> root.scoreboard-current-index;
-                            selected(value) => { root.changed-scoreboard(); }
-                        }
-                        if root.scoreboard-editor-available: Button {
-                            text: "Edit scoreboard…";
-                            clicked => { root.edit-scoreboard(); }
-                        }
-                        if root.scoreboard-error-text != "": Text {
-                            text: root.scoreboard-error-text;
-                            color: #e06060;
-                            font-size: 11px;
-                            wrap: word-wrap;
-                        }
-                    }
+                    // Scoreboard controls moved to the left sidebar's
+                    // SCOREBOARD card, under DETECTION ZONES - it belongs
+                    // next to the calibration/zone setup it depends on
+                    // rather than in this per-camera lens/advanced panel.
 
                     if !root.lens-preview-active: Rectangle { height: 1px; background: root.border-subtle; }
 
