@@ -44,16 +44,23 @@ body {
     overflow: hidden;
 }
 
+/* Logo sits inline next to the team name (see .team-identity below)
+   instead of floating in the top corner - an earlier absolutely
+   positioned version overlapped the HOME/AWAY label and team name. */
+.team-identity {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.team-away .team-identity { flex-direction: row-reverse; }
+
 .team-logo {
-    position: absolute;
-    top: 14px;
+    flex-shrink: 0;
     width: var(--logo-size, 34px);
     height: var(--logo-size, 34px);
     object-fit: contain;
     filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.6));
 }
-.team-home .team-logo { left: 22px; }
-.team-away .team-logo { right: 22px; }
 
 .team {
     position: relative;
@@ -79,7 +86,11 @@ body {
 .team-away::before { background: linear-gradient(260deg, var(--away-color), transparent 92%); }
 
 .team-label { font-size: 18px; letter-spacing: 0.16em; opacity: 0.72; }
-.team-name { max-width: 275px; font-size: 38px; line-height: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 2px 6px #000; }
+/* min-width: 0 lets a flex item shrink below its content size at all -
+   without it, overflow/text-overflow can't kick in inside .team-identity
+   and a long name (or a large logo, see the Logo size slider) would push
+   the card wider instead of eliding. */
+.team-name { min-width: 0; font-size: 38px; line-height: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 2px 6px #000; }
 .score { display: grid; place-items: center; font-size: 72px; font-variant-numeric: tabular-nums; text-shadow: 0 3px 8px #000; }
 
 .cards { display: flex; gap: 6px; }
