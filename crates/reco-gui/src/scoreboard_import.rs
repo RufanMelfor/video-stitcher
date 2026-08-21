@@ -205,6 +205,62 @@ pub struct SyncAnchor {
     pub video_seconds: f64,
 }
 
+/// Cut ranges (in video seconds, same space as reco-gui's existing manual
+/// cut-range timeline) derived from a Match Logger export: a pre-roll trim
+/// before kickoff, plus one range per logged pause - the dead time before
+/// play starts and during any stoppage, the two things worth automatically
+/// trimming out of an export. `buffer_secs` of context is kept at every
+/// cut boundary (e.g. the last couple of seconds before kickoff, or just
+/// after play resumes) so a hard trim doesn't clip right up against the
+/// moment of interest.
+///
+/// Deliberately narrow: only derives from *explicit* `period_start`(1)/
+/// `pause_start`/`pause_end` events, never inferred gaps (e.g. a
+/// half-time break the operator forgot to mark with Pause) - a range that
+/// doesn't show up here is exactly a range nothing in the log justified
+/// cutting automatically.
+pub fn derived_cut_ranges(
+    export: &MatchLoggerExport,
+    anchor: &SyncAnchor,
+    buffer_secs: f64,
+) -> Vec<(f64, f64)> {
+    let to_video_secs =
+        |ts_ms: i64| anchor.video_seconds + (ts_ms - anchor.event_ts_ms) as f64 / 1000.0;
+    let mut ranges = Vec::new();
+
+    if let Some(kickoff_ms) = export
+        .events
+        .iter()
+        .find(|e| e.kind == EventKind::PeriodStart && e.period == Some(1))
+        .map(|e| e.ts_ms)
+    {
+        let cut_end = to_video_secs(kickoff_ms) - buffer_secs;
+        if cut_end > 0.0 {
+            ranges.push((0.0, cut_end));
+        }
+    }
+
+    let mut pending_pause_start_ms: Option<i64> = None;
+    for e in &export.events {
+        match e.kind {
+            EventKind::PauseStart => pending_pause_start_ms = Some(e.ts_ms),
+            EventKind::PauseEnd => {
+                // An unpaired pause_end (start missing/already consumed)
+                // has nothing to cut from - skip it rather than guessing.
+                if let Some(start_ms) = pending_pause_start_ms.take() {
+                    let start_secs = (to_video_secs(start_ms) - buffer_secs).max(0.0);
+                    let end_secs = to_video_secs(e.ts_ms) + buffer_secs;
+                    if end_secs > start_secs {
+                        ranges.push((start_secs, end_secs));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    ranges
+}
+
 /// Reconstruct the `RecoScoreboard.update(state)` JSON contract
 /// (`scoreboards/football/scoreboard.js`'s `Reco.onUpdate` handler) at a
 /// given point in the video's timeline, by replaying every event up to
@@ -553,6 +609,34 @@ mod tests {
             export.video_start_ms(),
             Some(parse_iso8601_ms("2026-08-21T14:00:00.000Z").unwrap())
         );
+    }
+
+    #[test]
+    fn derived_cut_ranges_trims_pre_roll_and_the_pause() {
+        let export = fixture();
+        let ranges = derived_cut_ranges(&export, &anchor(), 2.0);
+        // Kickoff (period_start 1) is at video_seconds 5.0 - keep 2s of
+        // lead-in, cut [0, 3.0].
+        assert_eq!(ranges[0], (0.0, 3.0));
+        // pause_start/pause_end are at video_seconds 1205.0/1325.0 (see
+        // the fixture's timestamps) - keep 2s of context on each side.
+        assert_eq!(ranges[1], (1203.0, 1327.0));
+        assert_eq!(ranges.len(), 2);
+    }
+
+    #[test]
+    fn derived_cut_ranges_skips_a_kickoff_too_close_to_the_anchor() {
+        let export = fixture();
+        // A buffer bigger than the actual 5s gap to kickoff would cut a
+        // negative-width (or zero) range - must be skipped, not clamped
+        // into something nonsensical.
+        let ranges = derived_cut_ranges(&export, &anchor(), 10.0);
+        assert!(
+            ranges
+                .iter()
+                .all(|&(start, end)| !(start == 0.0 && end <= 0.0))
+        );
+        assert_eq!(ranges.len(), 1); // only the pause range remains
     }
 
     #[test]

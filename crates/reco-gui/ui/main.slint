@@ -1142,6 +1142,11 @@ export component RecoApp inherits Window {
     // mapped to a hex color in Rust; kept here only so the ComboBox shows
     // the right selection after a rebuild/reload.
     in-out property <string> scoreboard-banner-color-name: "";
+    // Auto-derived cut ranges from the loaded Match Logger export (dead
+    // time before kickoff + logged pauses) - optional, off by default;
+    // toggling adds/removes exactly those ranges from cut-ranges below,
+    // any manually added/edited ranges are left alone.
+    in-out property <bool> scoreboard-derive-cut-ranges: false;
 
     // Export progress (also used by the main status bar).
     in-out property <bool> export-in-progress: false;
@@ -1538,6 +1543,7 @@ export component RecoApp inherits Window {
     callback changed-scoreboard-font(string);
     callback changed-scoreboard-logo-size(float);
     callback changed-scoreboard-banner-color(string); // preset name, e.g. "Navy"
+    callback toggled-scoreboard-derive-cut-ranges(bool);
 
     // File management: per-side segment lists and removal.
     in-out property <[string]> left-segments: [];
@@ -2095,6 +2101,15 @@ export component RecoApp inherits Window {
                                     FlatButton {
                                         text: "Set sync point";
                                         clicked => { root.set-scoreboard-sync-point(); }
+                                    }
+                                }
+
+                                if root.scoreboard-match-summary != "": Tip {
+                                    tip: "Adds cut ranges for the dead time before kickoff and any logged pause, +/-2s of context kept at each cut. Only from period_start(1)/pause_start/pause_end events actually in the log - won't guess at a break you forgot to mark with Pause. Doesn't touch cut ranges you added or edited by hand.";
+                                    CheckBox {
+                                        text: "Auto-cut kickoff lead-in + pauses";
+                                        checked <=> root.scoreboard-derive-cut-ranges;
+                                        toggled => { root.toggled-scoreboard-derive-cut-ranges(self.checked); }
                                     }
                                 }
 
