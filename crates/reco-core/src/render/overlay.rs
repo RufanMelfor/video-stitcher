@@ -7,6 +7,7 @@
 use std::num::NonZeroU64;
 
 use bytemuck::{Pod, Zeroable};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
@@ -95,7 +96,7 @@ struct OverlayParams {
 /// (see this module's doc comment - the compositor stays sport/package
 /// agnostic). `Default` reproduces the original centered-letterbox
 /// behavior exactly, so existing callers are unaffected.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OverlayPlacement {
     /// Fraction of the output frame's width/height the overlay's
     /// centerpoint is shifted from the frame's own center, e.g. `[0.0,
