@@ -1181,3 +1181,83 @@ fresh driver script that didn't check for it first - no data lost
 (images uploaded fine, just needed a follow-up pass to attach
 predictions via `GET /api/tasks` filename-matching instead). Full
 narrative in `SESSION_HANDOFF.md`'s 2026-08-17 entry.
+
+## Merged training set across all reviewed data, all LS projects (2026-08-21)
+
+User asked for one training set pooling every reviewed image across
+*all* LS projects, including projects still mid-review - not just the
+latest round's dedicated project. Checked all 6 projects on the LS
+instance via the API:
+
+| id | title | tasks | reviewed |
+|---|---|---|---|
+| 24 | Ai Learning - yolo26s | 100 | 100 |
+| 19 | 02 RPC - ball-rich pre-labels (soccana) | 200 | 34 |
+| 18 | 01 Vierluik - ball-rich pre-labels (soccana) | 556 | 10 |
+| 16 | yolo26s rough_v6_1280_b4_e300 predictions | 200 | 0 |
+| 9 | yolo11 football (soccana) - RECO test | 150 | 4 |
+| 8 | Finetuned yolo26n (rough v1) | 258 | 258 |
+
+Excluded 16 (0 reviewed - pure unreviewed model predictions, would add
+noise not signal) and 9 (a 4-task test project) on the user's call.
+Kept 8/18/19/24 = **402 reviewed images total** (vs. round 4's 258).
+
+**Real bug caught while verifying, not just assumed correct**: the
+existing local `training/ai_learning_dataset/` copy of project 24's
+labels does NOT match project 24's actual current annotations - its
+`classes.txt` claims `0 person / 1 ball / 2 referee` but the label
+files underneath hold class-frequency counts (1534/591/4) that don't
+correspond to *either* class ordering once cross-checked against a
+freshly re-pulled official export (`ball, person, referee` order per
+`classes.txt`, counts 144/1288/119 for the same 100 tasks) - it's
+stale/from an earlier, uncorrected point in the review, not the
+finished data. Would have silently trained on wrong review state (or
+worse, swapped ball/person if naively remapped) had this not been
+cross-checked. Used the fresh re-pulled export instead; the stale
+local copy is untouched, not deleted, in case its provenance matters
+later.
+
+**Image pairing**: LS's YOLO export bundles labels only (no image
+bytes, as `prepare_yolo_train_split_from_ls_export.py`'s docstring
+already notes), and label filenames get a per-task uuid prefix
+assigned at *upload* time (confirmed stable across repeated exports of
+the same task - not regenerated per-export). For project 8, the
+matching pre-upload flat image set already existed locally
+(`training/_archive/finetuned_n_preds/ls_flat/images/`, uuid-prefixed
+filenames already matching). For project 24, the local pre-upload
+images existed but *without* the uuid prefix
+(`training/ai_learning_dataset/ls_flat/images/`) - resolved by
+stripping the `XXXXXXXX-` prefix from each export label's stem and
+matching the remainder (confirmed via `GET /api/tasks/?project=24`:
+each task's `data.image` is literally `/data/upload/<project>/<uuid>-
+<original filename>.jpg`, i.e. the uuid prefix *is* the original
+filename with a collision-avoidance prefix bolted on at upload). For
+18/19 (uploaded from elsewhere - probably the other PC, no local trace
+here) there was no pre-upload copy at all; downloaded the 10+34
+actually-annotated images directly from the LS instance instead (cheap
+at that count - not the full 756 unreviewed tasks).
+
+**New `scripts/merge_yolo_datasets.py`**: `prepare_yolo_train_split_
+from_ls_export.py` only ever handled one project at a time. The new
+script takes multiple `--raw-source` (a raw LS export + matching
+images, remapped from LS's ball/person/referee order same as the
+existing script) and `--ready-source` (an already-prepared dataset
+like `round4`, pooled as-is - remapping it again would have silently
+swapped classes, exactly the bug caught above) entries, pools every
+source's pairs, and does *one* global shuffle+split - not a separate
+split per source, which would bias val toward whichever source ran
+last and could leave a small source with zero val representation.
+
+Produced `training/merged_v1/`: 342 train / 60 val (402 total, 15%
+val). Verified: total person/ball/referee counts (4650/387/365) equal
+the sum of each source's individually-confirmed counts exactly; zero
+zero-byte images; each source contributes to train (vierluik, only 10
+images total, landed 0 in this particular val shuffle - plausible at
+that sample size, not a bug, but worth a stratified split later if it
+matters).
+
+**Not started yet**: the actual `yolo detect train` run - staging and
+verification only this session, training itself needs a separate
+go-ahead (it's a long GPU-bound run). Base checkpoint choice
+(continue from round 4's, or start fresh given the ~1.5x larger and
+more diverse pool) also not decided yet.
