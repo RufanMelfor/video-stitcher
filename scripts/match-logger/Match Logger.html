@@ -222,6 +222,25 @@
   }
   .period-picker button:disabled { opacity: 0.5; }
 
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 14px;
+    padding: 10px 12px;
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    background: #f8fafc;
+  }
+  .toggle-row span { font-size: 14px; color: var(--text); }
+  .toggle-row input[type=checkbox] {
+    width: 44px;
+    height: 26px;
+    flex-shrink: 0;
+    accent-color: var(--brand);
+  }
+
   .btn {
     display: flex;
     align-items: center;
@@ -371,6 +390,10 @@
           <button data-n="5">5</button>
           <button data-n="6">6</button>
         </div>
+        <label class="toggle-row" id="cardsEnabledRow">
+          <span id="cardsEnabledLabel"></span>
+          <input type="checkbox" id="cardsEnabledToggle">
+        </label>
       </div>
     </section>
 
@@ -511,6 +534,7 @@
       notStarted: 'Not started yet', period: 'Period', matchEnded: 'Match ended', ended: 'end',
       sectionSetup: 'Before kickoff', homeTeamLabel: 'Home team', awayTeamLabel: 'Away team',
       periodsLabel: 'Number of periods',
+      cardsEnabledLabel: 'Track yellow/red cards',
       sectionStart: 'Start / periods',
       btnStartVideo: 'Start video', btnVideoStarted: 'Video started',
       btnStartMatch: 'Start match (period 1)',
@@ -549,6 +573,7 @@
       notStarted: 'Nog niet gestart', period: 'Periode', matchEnded: 'Wedstrijd afgelopen', ended: 'einde',
       sectionSetup: 'Voor aftrap', homeTeamLabel: 'Team thuis', awayTeamLabel: 'Team uit',
       periodsLabel: 'Aantal periodes',
+      cardsEnabledLabel: 'Gele/rode kaarten bijhouden',
       sectionStart: 'Start / periodes',
       btnStartVideo: 'Start video', btnVideoStarted: 'Video gestart',
       btnStartMatch: 'Start wedstrijd (periode 1)',
@@ -624,7 +649,7 @@
   // --- state ------------------------------------------------------
   function freshState() {
     return {
-      meta: { home: '', away: '', periods: 4, createdAt: new Date().toISOString() },
+      meta: { home: '', away: '', periods: 4, cardsEnabled: true, createdAt: new Date().toISOString() },
       events: [],
       currentPeriod: 0,
       matchEnded: false,
@@ -643,6 +668,10 @@
         if (parsed && parsed.events) state = parsed;
       }
     } catch (e) { /* ignore corrupt storage */ }
+    // Backward-compat: exports/local storage from before this toggle
+    // existed have no meta.cardsEnabled at all - default to the old
+    // (only) behavior, cards on.
+    if (typeof state.meta.cardsEnabled !== 'boolean') state.meta.cardsEnabled = true;
     // Backward-compat with the pre-multi-section collapse format, and a
     // safety net for any missing key regardless of where it came from.
     if (!state.collapsed) state.collapsed = {};
@@ -761,6 +790,7 @@
     document.getElementById('lblHome').textContent = L.homeTeamLabel;
     document.getElementById('lblAway').textContent = L.awayTeamLabel;
     document.getElementById('lblPeriods').textContent = L.periodsLabel;
+    document.getElementById('cardsEnabledLabel').textContent = L.cardsEnabledLabel;
     document.getElementById('homeName').placeholder = L.home;
     document.getElementById('awayName').placeholder = L.away;
 
@@ -792,6 +822,11 @@
     document.getElementById('cardsSection').classList.toggle('collapsed', state.collapsed.cards);
     document.getElementById('controlsSection').classList.toggle('collapsed', state.collapsed.controls);
     document.getElementById('logSection').classList.toggle('collapsed', state.collapsed.log);
+
+    // Hide the Cards section entirely (not just collapsed - collapsed
+    // still shows the header) for age groups that don't play with cards.
+    document.getElementById('cardsSection').hidden = !state.meta.cardsEnabled;
+    document.getElementById('cardsEnabledToggle').checked = state.meta.cardsEnabled;
 
     // Never stamp over a field the user is actively typing in - the 1s
     // redraw tick would otherwise wipe out in-progress keystrokes.
@@ -915,6 +950,17 @@
       state.meta.periods = parseInt(btn.getAttribute('data-n'), 10);
       save(); render();
     });
+  });
+
+  // Some age groups (e.g. youth football) don't play with cards yet -
+  // hides the whole Cards section rather than just leaving it empty, so
+  // there's nothing there to accidentally tap. Travels with the export
+  // via state.meta (already included wholesale in buildExportFile), so
+  // reco-gui's Match Logger import reflects the same setting without any
+  // separate flag round-trip.
+  document.getElementById('cardsEnabledToggle').addEventListener('change', function (e) {
+    state.meta.cardsEnabled = e.target.checked;
+    save(); render();
   });
 
   // Anchors / periods
