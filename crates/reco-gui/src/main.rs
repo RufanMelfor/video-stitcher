@@ -245,6 +245,11 @@ struct AppState {
     /// calibration file. Driving the scoreboard from this replaces the
     /// live-manual editor path for as long as it's loaded.
     scoreboard_import: Option<scoreboard_import::MatchLoggerExport>,
+    /// Path the currently loaded `scoreboard_import` was read from - kept
+    /// alongside it purely so "Save Calibration" can persist a reference
+    /// to re-load from, without embedding the whole event log (see
+    /// `reco_core::calibration::ScoreboardSettings`'s doc comment for why).
+    scoreboard_import_path: Option<PathBuf>,
     /// Video-seconds <-> match-wall-clock anchor for `scoreboard_import`.
     /// Defaults to the log's `video_start` event at `video_seconds: 0.0`
     /// when present; adjustable by scrubbing to the matching frame.
@@ -611,6 +616,7 @@ impl AppState {
             scoreboard_frame_dirty: false,
             scoreboard_error,
             scoreboard_import: None,
+            scoreboard_import_path: None,
             scoreboard_sync_anchor: None,
             scoreboard_replay_last_push: None,
             scoreboard_placement: reco_core::render::overlay::OverlayPlacement::default(),
@@ -2424,6 +2430,195 @@ fn apply_autocam_defaults(app: &RecoApp, ac: &reco_core::calibration::AutocamDef
     app.set_export_cluster_alpha(ac.cluster_alpha);
 }
 
+/// Curated banner-color presets shown in the SCOREBOARD card's ComboBox -
+/// shared between `on_changed_scoreboard_banner_color` and
+/// `apply_scoreboard_settings` so restoring a saved preset can't drift
+/// from what picking it live actually produces.
+fn scoreboard_banner_color_hex(preset_name: &str) -> Option<&'static str> {
+    match preset_name {
+        "Navy" => Some("#0b1a33"),
+        "Black" => Some("#0a0a0a"),
+        "Forest Green" => Some("#0e2e1a"),
+        "Maroon" => Some("#33101a"),
+        "Purple" => Some("#241333"),
+        _ => None,
+    }
+}
+
+/// Snapshot the current scoreboard state into a persistable
+/// `ScoreboardSettings` - the scoreboard equivalent of
+/// `snapshot_autocam_defaults`, see `do_save_calibration`. Unlike
+/// autocam's pure-Slint mirror, some of this lives in `AppState` (the
+/// loaded import's path, encoded logo paths), so this needs both.
+fn snapshot_scoreboard_settings(
+    app: &RecoApp,
+    s: &AppState,
+) -> reco_core::calibration::ScoreboardSettings {
+    let package_id = s
+        .scoreboard_packages
+        .get(app.get_scoreboard_current_index().max(0) as usize)
+        .map(|package| package.manifest.id.clone())
+        .unwrap_or_default();
+    reco_core::calibration::ScoreboardSettings {
+        enabled: app.get_scoreboard_enabled(),
+        package_id,
+        match_logger_path: s.scoreboard_import_path.clone(),
+        sync_event_ts_ms: s.scoreboard_sync_anchor.map(|anchor| anchor.event_ts_ms),
+        sync_video_seconds: s
+            .scoreboard_sync_anchor
+            .map(|anchor| anchor.video_seconds)
+            .unwrap_or(0.0),
+        placement: s.scoreboard_placement,
+        home_logo_path: s.scoreboard_style.home_logo_path.clone(),
+        away_logo_path: s.scoreboard_style.away_logo_path.clone(),
+        font_family: s.scoreboard_style.font_family.clone().unwrap_or_default(),
+        logo_size_px: s.scoreboard_style.logo_size_px.unwrap_or(34.0),
+        banner_color_name: app.get_scoreboard_banner_color_name().to_string(),
+        derive_cut_ranges: app.get_scoreboard_derive_cut_ranges(),
+    }
+}
+
+/// Restore a persisted `ScoreboardSettings` onto the SCOREBOARD card and
+/// `AppState` - the inverse of `snapshot_scoreboard_settings`. Re-reads
+/// the Match Logger export and team logos from their saved paths rather
+/// than trusting any embedded copy (there isn't one - see
+/// `ScoreboardSettings`'s doc comment); a moved/deleted file is logged
+/// and surfaced in `scoreboard_error_text`, not a reason to abort
+/// restoring everything else.
+fn apply_scoreboard_settings(
+    state_ref: &Rc<RefCell<AppState>>,
+    app: &RecoApp,
+    settings: &reco_core::calibration::ScoreboardSettings,
+) {
+    let mut s = state_ref.borrow_mut();
+
+    let package_index = s
+        .scoreboard_packages
+        .iter()
+        .position(|package| package.manifest.id == settings.package_id);
+    if let Some(index) = package_index {
+        app.set_scoreboard_current_index(index as i32);
+    }
+    app.set_scoreboard_enabled(settings.enabled);
+    if settings.enabled && package_index.is_some() {
+        s.configure_scoreboard(
+            app.get_scoreboard_enabled(),
+            app.get_scoreboard_current_index().max(0) as usize,
+        );
+        app.set_scoreboard_editor_available(
+            s.scoreboard_runtime
+                .as_ref()
+                .and_then(reco_scoreboard::ScoreboardRuntime::editor_url)
+                .is_some(),
+        );
+        let network_editor_url = s
+            .scoreboard_runtime
+            .as_ref()
+            .and_then(reco_scoreboard::ScoreboardRuntime::network_editor_url);
+        app.set_scoreboard_share_available(network_editor_url.is_some());
+        app.set_scoreboard_share_url(network_editor_url.unwrap_or_default().into());
+    }
+
+    if let Some(path) = settings.match_logger_path.as_ref() {
+        match scoreboard_import::load(path) {
+            Ok(export) => {
+                let summary = format!(
+                    "{} vs {} - {} events",
+                    export.home,
+                    export.away, // team_label's fallback doesn't matter for a restore - a valid saved export always has names
+                    export.event_count()
+                );
+                s.scoreboard_import = Some(export);
+                s.scoreboard_import_path = Some(path.clone());
+                app.set_scoreboard_match_summary(summary.into());
+            }
+            Err(error) => {
+                log::warn!(
+                    "Cannot restore Match Logger export from {}: {error}",
+                    path.display()
+                );
+                app.set_scoreboard_error_text(
+                    format!("Saved Match Logger export not found: {}", path.display()).into(),
+                );
+            }
+        }
+    }
+    // Restores the anchor exactly as saved (including a manual "Set sync
+    // point" correction) rather than re-deriving the file's own
+    // video_start default, which a prior manual correction may disagree
+    // with.
+    s.scoreboard_sync_anchor =
+        settings
+            .sync_event_ts_ms
+            .map(|event_ts_ms| scoreboard_import::SyncAnchor {
+                event_ts_ms,
+                video_seconds: settings.sync_video_seconds,
+            });
+    if s.scoreboard_import.is_some() {
+        app.set_scoreboard_sync_label(if s.scoreboard_sync_anchor.is_some() {
+            format!(
+                "Synced: video_start = {:.1}s into this video",
+                settings.sync_video_seconds
+            )
+            .into()
+        } else {
+            "Not synced - tap \"Set sync point\"".into()
+        });
+    }
+
+    s.scoreboard_placement = settings.placement;
+    if let Some(bridge) = s.bridge.as_mut() {
+        bridge.set_overlay_placement(settings.placement);
+    }
+    app.set_scoreboard_offset_x(settings.placement.offset.0);
+    app.set_scoreboard_offset_y(settings.placement.offset.1);
+    app.set_scoreboard_scale(settings.placement.scale);
+
+    for (path, home) in [
+        (settings.home_logo_path.as_ref(), true),
+        (settings.away_logo_path.as_ref(), false),
+    ] {
+        let Some(path) = path else { continue };
+        match scoreboard_import::image_data_uri(path) {
+            Ok(data_uri) => {
+                if home {
+                    s.scoreboard_style.home_logo = Some(data_uri);
+                    s.scoreboard_style.home_logo_path = Some(path.clone());
+                    app.set_scoreboard_home_logo_path(path.to_string_lossy().into_owned().into());
+                } else {
+                    s.scoreboard_style.away_logo = Some(data_uri);
+                    s.scoreboard_style.away_logo_path = Some(path.clone());
+                    app.set_scoreboard_away_logo_path(path.to_string_lossy().into_owned().into());
+                }
+            }
+            Err(error) => {
+                log::warn!("Cannot restore team logo from {}: {error}", path.display());
+            }
+        }
+    }
+
+    s.scoreboard_style.font_family = if settings.font_family.is_empty() {
+        None
+    } else {
+        Some(settings.font_family.clone())
+    };
+    app.set_scoreboard_font_family(settings.font_family.clone().into());
+
+    s.scoreboard_style.logo_size_px = Some(settings.logo_size_px);
+    app.set_scoreboard_logo_size(settings.logo_size_px);
+
+    s.scoreboard_style.banner_color =
+        scoreboard_banner_color_hex(&settings.banner_color_name).map(str::to_string);
+    app.set_scoreboard_banner_color_name(settings.banner_color_name.clone().into());
+
+    app.set_scoreboard_derive_cut_ranges(settings.derive_cut_ranges);
+    if settings.derive_cut_ranges {
+        refresh_derived_cut_ranges(&mut s, app);
+    }
+
+    s.preview_dirty = true;
+}
+
 fn main() -> anyhow::Result<()> {
     init_tracing();
     install_panic_hook();
@@ -3861,6 +4056,7 @@ fn main() -> anyhow::Result<()> {
                     }
                 });
                 let mut s = state_ref.borrow_mut();
+                s.scoreboard_import_path = Some(path);
                 s.scoreboard_sync_anchor = default_anchor;
                 s.scoreboard_import = Some(export);
                 // Same fix as on_changed_scoreboard_placement below: without
@@ -3995,10 +4191,12 @@ fn main() -> anyhow::Result<()> {
                 let display_path = path.to_string_lossy().into_owned();
                 if team == "home" {
                     s.scoreboard_style.home_logo = Some(data_uri);
+                    s.scoreboard_style.home_logo_path = Some(path);
                     drop(s);
                     app.set_scoreboard_home_logo_path(display_path.into());
                 } else {
                     s.scoreboard_style.away_logo = Some(data_uri);
+                    s.scoreboard_style.away_logo_path = Some(path);
                     drop(s);
                     app.set_scoreboard_away_logo_path(display_path.into());
                 }
@@ -5007,9 +5205,11 @@ fn main() -> anyhow::Result<()> {
         // renderer, so they're only synced here rather than on every edit.
         if let Some(app) = app_weak.upgrade() {
             let ac = snapshot_autocam_defaults(&app);
+            let sb = snapshot_scoreboard_settings(&app, &state_ref.borrow());
             let mut s = state_ref.borrow_mut();
             if let Some(cal) = s.calibration.as_mut() {
                 cal.autocam_defaults = Some(ac);
+                cal.scoreboard = Some(sb);
             }
         }
         let save_result = state_ref.borrow().save_calibration();
@@ -6731,6 +6931,16 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 {
                     apply_autocam_defaults(&app, ac);
                     log::info!("Restored AI Tracking defaults from calibration");
+                }
+                // apply_scoreboard_settings borrows `state` itself, so `s`
+                // has to be released for the duration of the call - it's
+                // re-borrowed right after to keep the rest of this
+                // function (VRAM checks etc. below) working unchanged.
+                if let Some(sb) = s.calibration.as_ref().and_then(|c| c.scoreboard.clone()) {
+                    drop(s);
+                    apply_scoreboard_settings(state, &app, &sb);
+                    s = state.borrow_mut();
+                    log::info!("Restored scoreboard settings from calibration");
                 }
                 // Lookahead VRAM risk thresholds for the export slider. The
                 // pool stores source-resolution frames (re-rendered into the
