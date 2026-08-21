@@ -266,6 +266,11 @@ struct AppState {
     /// effect while a Match Logger import is loaded (see that function's
     /// doc comment for why the live-manual editor path can't use it).
     scoreboard_style: scoreboard_import::ScoreboardStyle,
+    /// Exactly the ranges last added to `cut_ranges` by the "Auto-cut
+    /// kickoff lead-in + pauses" toggle, so turning it off removes only
+    /// those - any manually added/edited cut ranges are left alone. Empty
+    /// when the toggle is off.
+    scoreboard_derived_cut_ranges: Vec<(f64, f64)>,
     recording_tx: Option<std::sync::mpsc::SyncSender<RecordingFrame>>,
     recording_thread: Option<std::thread::JoinHandle<()>>,
     recording_path: Option<PathBuf>,
@@ -610,6 +615,7 @@ impl AppState {
             scoreboard_replay_last_push: None,
             scoreboard_placement: reco_core::render::overlay::OverlayPlacement::default(),
             scoreboard_style: scoreboard_import::ScoreboardStyle::default(),
+            scoreboard_derived_cut_ranges: Vec::new(),
             recording_tx: None,
             recording_thread: None,
             recording_path: None,
@@ -1887,6 +1893,29 @@ fn sync_cut_ranges(state: &AppState, app: &RecoApp) {
         })
         .collect();
     app.set_cut_ranges(slint::ModelRc::new(slint::VecModel::from(items)));
+}
+
+/// Recompute and re-apply the "Auto-cut kickoff lead-in + pauses" derived
+/// cut ranges from the current Match Logger export + sync anchor,
+/// replacing whatever this toggle previously added (see
+/// `AppState::scoreboard_derived_cut_ranges`'s doc comment) without
+/// touching any manually added/edited range. A no-op push of an empty set
+/// when the toggle is on but the export/anchor aren't available - callers
+/// check that before turning the toggle on in the first place.
+fn refresh_derived_cut_ranges(s: &mut AppState, app: &RecoApp) {
+    let previous = std::mem::take(&mut s.scoreboard_derived_cut_ranges);
+    if !previous.is_empty() {
+        s.cut_ranges.retain(|r| !previous.contains(r));
+    }
+    if let (Some(export), Some(anchor)) = (
+        s.scoreboard_import.as_ref(),
+        s.scoreboard_sync_anchor.as_ref(),
+    ) {
+        let derived = scoreboard_import::derived_cut_ranges(export, anchor, 2.0);
+        s.cut_ranges.extend(derived.iter().copied());
+        s.scoreboard_derived_cut_ranges = derived;
+    }
+    sync_cut_ranges(s, app);
 }
 
 /// Push the per-side segment filenames into the Slint left/right-segments
@@ -3844,6 +3873,12 @@ fn main() -> anyhow::Result<()> {
                     },
                 );
                 app.set_scoreboard_error_text("".into());
+                // Loading a different export while the toggle is already
+                // on would otherwise leave the previous file's derived
+                // ranges sitting there, silently stale.
+                if app.get_scoreboard_derive_cut_ranges() {
+                    refresh_derived_cut_ranges(&mut state_ref.borrow_mut(), &app);
+                }
             }
             Err(error) => {
                 app.set_scoreboard_error_text(error.to_string().into());
@@ -3877,6 +3912,36 @@ fn main() -> anyhow::Result<()> {
         app.set_scoreboard_sync_label(
             format!("Synced: video_start = {video_seconds:.1}s into this video").into(),
         );
+        // Keep the derived cut ranges in step with a corrected sync point
+        // instead of leaving them stale from the old anchor.
+        if app.get_scoreboard_derive_cut_ranges() {
+            refresh_derived_cut_ranges(&mut s, &app);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_toggled_scoreboard_derive_cut_ranges(move |enabled| {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let mut s = state_ref.borrow_mut();
+        if !enabled {
+            let previous = std::mem::take(&mut s.scoreboard_derived_cut_ranges);
+            if !previous.is_empty() {
+                s.cut_ranges.retain(|r| !previous.contains(r));
+            }
+            sync_cut_ranges(&s, &app);
+            return;
+        }
+        if s.scoreboard_import.is_none() || s.scoreboard_sync_anchor.is_none() {
+            app.set_scoreboard_error_text(
+                "Load a Match Logger export and set its sync point first".into(),
+            );
+            app.set_scoreboard_derive_cut_ranges(false);
+            return;
+        }
+        refresh_derived_cut_ranges(&mut s, &app);
     });
 
     let app_weak = app.as_weak();
