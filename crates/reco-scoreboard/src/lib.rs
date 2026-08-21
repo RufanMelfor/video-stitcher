@@ -9,7 +9,8 @@ mod manifest;
 mod runtime;
 
 pub use discovery::{
-    DiscoveryIssue, DiscoveryReport, default_scoreboard_roots, discover_installed,
+    DiscoveryIssue, DiscoveryIssueSeverity, DiscoveryReport, default_scoreboard_roots,
+    discover_installed,
 };
 pub use manifest::{ScoreboardManifest, ScoreboardPackage, ScoreboardViewport};
 pub use runtime::{RuntimeError, ScoreboardRuntime};
