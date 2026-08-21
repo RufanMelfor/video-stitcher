@@ -557,17 +557,39 @@ impl AppState {
     fn new() -> Self {
         let discovery = reco_scoreboard::discover_installed();
         for issue in &discovery.issues {
-            log::error!(
-                "Skipping scoreboard package {}: {}",
-                issue.path.display(),
-                issue.message
-            );
+            match issue.severity {
+                // A later search root re-finding a package an earlier one
+                // already provided (e.g. the exe-adjacent bundle build.rs
+                // copies next to both debug and release binaries, plus
+                // the dev-tree fallback discover_installed also checks in
+                // debug builds) isn't a failure - not worth error!-level
+                // log noise, let alone a scary red banner in the GUI.
+                reco_scoreboard::DiscoveryIssueSeverity::Info => log::debug!(
+                    "Scoreboard package overlap at {}: {}",
+                    issue.path.display(),
+                    issue.message
+                ),
+                reco_scoreboard::DiscoveryIssueSeverity::Warning => log::warn!(
+                    "Skipping scoreboard package {}: {}",
+                    issue.path.display(),
+                    issue.message
+                ),
+            }
         }
-        let scoreboard_error = discovery
-            .issues
-            .first()
-            .map(|issue| issue.message.clone())
-            .unwrap_or_default();
+        // Only surface an issue in the GUI when it actually left the
+        // feature unusable (no packages found at all) - a Warning
+        // alongside at least one successfully loaded package (or any
+        // Info-only overlap) isn't something the user needs to act on.
+        let scoreboard_error = if discovery.packages.is_empty() {
+            discovery
+                .issues
+                .iter()
+                .find(|issue| issue.severity == reco_scoreboard::DiscoveryIssueSeverity::Warning)
+                .map(|issue| issue.message.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         Self {
             left_path: None,
             right_path: None,
