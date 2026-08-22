@@ -1288,3 +1288,94 @@ ai_learning tile.
 Still needs a matching tiled-inference pipeline to use a checkpoint
 trained on this in any production path - not built yet, same caveat as
 the original round. Training itself also not started.
+
+## Tiled-1920 training on the merged multi-project set - real-footage regression found (2026-08-21/22)
+
+Full run on `training/merged_v1_tiled_1920/` (804 tiles), fresh from
+`yolo26s.pt`, same hyperparams as round-4's own tiled run (`batch=2,
+imgsz=1920, workers=2, patience=100`). 8-epoch smoke test first
+(healthy - losses down monotonically, mAP50-95 0.30->0.55, no
+crashes), then the full run per user go-ahead ("duidelijk als alles
+gezond is start dan maar de volle patience"). Early-stopped at epoch
+288 (best @ 188), 11.2 hours.
+
+Val-set (all-class aggregate, not ball-specific):
+```
+              Precision  Recall  mAP50  mAP50-95
+old (round4 tiled1920, best@59)   0.767   0.854  0.838   0.611
+new (merged tiled1920, best@188)  0.882   0.816  0.864   0.647
+```
+Precision and mAP50-95 up, recall down slightly - on the aggregate
+number. Exported to ONNX (`1x3x1920x1920` in, `1x300x6` out, correct
+`{0:person,1:ball,2:referee}` names) and real-footage tested: 900
+extracted frames per camera (t=100-130s, 03 OJC, raw left/right camera
+files - NOT the historically-tracked stitched-panorama frame-720-898
+window, since Rust-side tiled dual-inference doesn't exist in
+production yet; this test tiles each raw camera frame the same way
+`tile_yolo_dataset.py` does and runs both tiles through the checkpoint
+via the ultralytics Python API directly, not the CLI/GUI app), `conf=0.1`
+(matches reco-detect's documented production threshold):
+
+```
+                                   left rate  left conf  right rate  right conf
+old (round4 tiled1920)               12.3%      0.28       92.0%       0.53
+new (merged tiled1920, 2026-08-21)    4.7%      0.55       94.2%       0.63
+```
+
+**Not a clean win.** Right camera (where the ball spent most of this
+clip) is flat-to-better and clearly more confident. Left camera is a
+real recall regression - less than half the raw-ball hits the old
+checkpoint found, despite each hit being much more confident. Pattern:
+new model is pickier, not simply worse - it drops marginal/low-confidence
+calls the old model still caught.
+
+## Non-tiled 1920 training on the same merged set, to isolate the cause (2026-08-22)
+
+Open question after the tiled result: is the left-camera regression
+from the tiling method, or from the merged dataset itself? Round-4's
+own non-tiled 1920 run (2026-08-14/15) was a genuine win at the time,
+so a non-tiled run on the *same* merged data as the tiled round, using
+`training/merged_v1/` (already on disk, no new data prep), isolates
+the variable. Same discipline: 8-epoch smoke test (healthy, mAP50-95
+0.19->0.52 by epoch 8, no crashes) then full `patience=100` run per
+user go-ahead ("voer de niet-tiled merged-run uit" / "als de smoke
+test goed is, start dan zelf de volledige test"). Ran the full 300
+epochs without early-stopping this time (4.46 hours) - `patience=100`
+never triggered.
+
+Val-set (all-class aggregate):
+```
+              Precision  Recall  mAP50  mAP50-95
+old (round4 1920 non-tiled, best@59)     0.767   0.854  0.838   0.611
+new (merged 1920 non-tiled, best@210)    0.848   0.822  0.873   0.640
+```
+
+Real-footage test, same clip/methodology as above but no tiling (full
+3840x2880 frame, ultralytics letterboxes to 1920x1920 itself):
+
+```
+                                        left rate  left conf  right rate  right conf
+old (round4 imgsz1920 non-tiled)          11.4%      0.28       81.9%       0.64
+new (merged imgsz1920 non-tiled, 08-22)    5.0%      0.45       82.2%       0.77
+```
+
+**Conclusion: the regression is the merged dataset, not the tiling.**
+Both independently-trained checkpoints (tiled and non-tiled) on the
+same merged data show essentially the same effect - left-camera raw-ball
+rate roughly halved (11-12% -> ~5%) while right-camera stays flat and
+confidence rises substantially across the board. If tiling were the
+cause the non-tiled run wouldn't reproduce it; it does, closely. Most
+likely explanation: combining projects 8/18/19/24 shifted the ball
+example distribution in a way that makes the model systematically more
+conservative on left-camera-style scenes specifically - not chased
+further yet (would need per-source-project confidence-distribution
+comparison, or a `dump_detection_frames` diff on specific left-camera
+frames the old checkpoint caught and the new one dropped).
+
+**Not shipping either new checkpoint (tiled or non-tiled) as a
+replacement.** Checkpoints kept for reference:
+`training/merged_v1_tiled_1920/runs/full_patience100/weights/best.pt`,
+`training/merged_v1/runs/full_patience100_nontiled/weights/best.pt`.
+Next step, not started: root-cause the merged-data recall regression
+before another training attempt, rather than trying further blind
+training variants.
