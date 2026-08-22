@@ -5569,6 +5569,7 @@ dependencies = [
  "serde_json",
  "slint",
  "slint-build",
+ "tempfile",
  "tracing",
  "tracing-log",
  "tracing-subscriber",
