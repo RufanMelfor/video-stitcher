@@ -1,4 +1,36 @@
-# Session handoff - 2026-08-22 (TGR_PC): Match Folder picker + export-to-folder, upstream PR #476, scoreboard merged into main
+# Session handoff - 2026-08-22 (TGR_PC): Match Folder picker + export-to-folder + sync-offset prompt, upstream PR #476, scoreboard merged into main
+
+## 5. Sync-offset detect+save prompt after Select Match Folder
+
+User caught a real gap: a calibration copied from Default Calibration
+carries a `sync_offset` tuned for whatever footage it came from, which
+almost certainly doesn't match a new match's camera start-time gap.
+Added a confirm popup right after Select Match Folder (only on the
+copy-from-default path, not when reusing an existing per-match file)
+offering to run the existing "Detect Sync Offset" job and save straight
+to the new calibration file. `AppState::pending_sync_offset_autosave`
+flag routes the save; `start_sync_offset_detection()` extracted so the
+manual button and the new prompt share the same job. Built, verified
+(fmt/clippy/test 57/57), merged to internal `main`, both debug+release
+rebuilt.
+
+## 6. Same feature ported to PR #476 - corrected an over-estimate
+
+User then asked to update PR #476 with this. First attempt: found the
+whole sync-offset-detection mechanism (`sync_offset.rs`,
+`on_compute_sync_offset`) doesn't exist on `origin/main` at all, and
+told the user this needed a large new port. **User pushed back** ("but
+wasn't sync-offset already standard in reco?") - correctly. Checking
+precisely: the `sync_offset` field, manual slider, and
+`save_calibration()` are all core and already upstream; only the
+~90-line auto-*detection* wrapper was missing, and every dependency it
+calls (`CalibrationPipeline`, `CalibrationConfig`, `calibration_io`)
+already exists unchanged on `origin/main`. So it was a small, clean
+port after all - ported as a second commit on the PR #476 branch
+(`a57c3a06`), verified clean, PR body updated, pushed. See
+[[project_match_folder_picker]] for the fuller lesson on not
+extrapolating a scope estimate without checking the actual dependency
+chain.
 
 **Pushed to `github` (RufanMelfor/reco-video-stitcher-rig) main.** Two
 new features built and merged same day (see
