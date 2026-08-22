@@ -20,6 +20,7 @@ mod export;
 mod match_folder;
 mod playback;
 mod preview;
+mod scoreboard_import;
 mod settings;
 mod sync_offset;
 mod telemetry_client;
@@ -40,6 +41,7 @@ use reco_control::pose_control::{PoseControl, PoseControlConfig};
 use reco_control::{ControlIntent, PoseIntent};
 use reco_core::calibration::Calibration;
 use reco_core::geometry::ViewportPosition;
+use reco_core::render::overlay::{OverlayFrame, OverlayFrameSource};
 use reco_core::wgpu;
 
 use crate::playback::{PlayState, Playback};
@@ -240,6 +242,48 @@ struct AppState {
     cut_ranges: Vec<(f64, f64)>,
     playback: Playback,
     bridge: Option<PreviewBridge>,
+    scoreboard_packages: Vec<reco_scoreboard::ScoreboardPackage>,
+    scoreboard_runtime: Option<reco_scoreboard::ScoreboardRuntime>,
+    scoreboard_frame: Option<OverlayFrame>,
+    scoreboard_frame_dirty: bool,
+    scoreboard_error: String,
+    /// Parsed Match Logger event log, loaded via the Scoreboard section's
+    /// Load button. Session-only for now (same deliberate-deferral
+    /// precedent as `cut_ranges` above) - not yet persisted into the
+    /// calibration file. Driving the scoreboard from this replaces the
+    /// live-manual editor path for as long as it's loaded.
+    scoreboard_import: Option<scoreboard_import::MatchLoggerExport>,
+    /// Path the currently loaded `scoreboard_import` was read from - kept
+    /// alongside it purely so "Save Calibration" can persist a reference
+    /// to re-load from, without embedding the whole event log (see
+    /// `reco_core::calibration::ScoreboardSettings`'s doc comment for why).
+    scoreboard_import_path: Option<PathBuf>,
+    /// Video-seconds <-> match-wall-clock anchor for `scoreboard_import`.
+    /// Defaults to the log's `video_start` event at `video_seconds: 0.0`
+    /// when present; adjustable by scrubbing to the matching frame.
+    scoreboard_sync_anchor: Option<scoreboard_import::SyncAnchor>,
+    /// Wall-clock throttle for `push_scoreboard_replay` - the replayed
+    /// state is recomputed and pushed to the running package on a timer
+    /// rather than every render tick, since a scoreboard plausibly changes
+    /// at most a few times a second and each push is a real JS eval in the
+    /// headless browser.
+    scoreboard_replay_last_push: Option<std::time::Instant>,
+    /// Overlay position/size set via the "Edit Scoreboard" in-place
+    /// editor. Session-only for now, same deliberate-deferral precedent
+    /// as `cut_ranges` - applied to the live pipeline immediately on
+    /// change and re-applied to export (see `run_export`'s
+    /// `scoreboard_placement` argument).
+    scoreboard_placement: reco_core::render::overlay::OverlayPlacement,
+    /// Team logos / font chosen via the same editor - merged into the
+    /// replayed state via `scoreboard_import::apply_style`. Only takes
+    /// effect while a Match Logger import is loaded (see that function's
+    /// doc comment for why the live-manual editor path can't use it).
+    scoreboard_style: scoreboard_import::ScoreboardStyle,
+    /// Exactly the ranges last added to `cut_ranges` by the "Auto-cut
+    /// kickoff lead-in + pauses" toggle, so turning it off removes only
+    /// those - any manually added/edited cut ranges are left alone. Empty
+    /// when the toggle is off.
+    scoreboard_derived_cut_ranges: Vec<(f64, f64)>,
     recording_tx: Option<std::sync::mpsc::SyncSender<RecordingFrame>>,
     recording_thread: Option<std::thread::JoinHandle<()>>,
     recording_path: Option<PathBuf>,
@@ -529,6 +573,41 @@ struct RecordingFrame {
 
 impl AppState {
     fn new() -> Self {
+        let discovery = reco_scoreboard::discover_installed();
+        for issue in &discovery.issues {
+            match issue.severity {
+                // A later search root re-finding a package an earlier one
+                // already provided (e.g. the exe-adjacent bundle build.rs
+                // copies next to both debug and release binaries, plus
+                // the dev-tree fallback discover_installed also checks in
+                // debug builds) isn't a failure - not worth error!-level
+                // log noise, let alone a scary red banner in the GUI.
+                reco_scoreboard::DiscoveryIssueSeverity::Info => log::debug!(
+                    "Scoreboard package overlap at {}: {}",
+                    issue.path.display(),
+                    issue.message
+                ),
+                reco_scoreboard::DiscoveryIssueSeverity::Warning => log::warn!(
+                    "Skipping scoreboard package {}: {}",
+                    issue.path.display(),
+                    issue.message
+                ),
+            }
+        }
+        // Only surface an issue in the GUI when it actually left the
+        // feature unusable (no packages found at all) - a Warning
+        // alongside at least one successfully loaded package (or any
+        // Info-only overlap) isn't something the user needs to act on.
+        let scoreboard_error = if discovery.packages.is_empty() {
+            discovery
+                .issues
+                .iter()
+                .find(|issue| issue.severity == reco_scoreboard::DiscoveryIssueSeverity::Warning)
+                .map(|issue| issue.message.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         Self {
             left_path: None,
             right_path: None,
@@ -540,6 +619,18 @@ impl AppState {
             cut_ranges: Vec::new(),
             playback: Playback::new(),
             bridge: None,
+            scoreboard_packages: discovery.packages,
+            scoreboard_runtime: None,
+            scoreboard_frame: None,
+            scoreboard_frame_dirty: false,
+            scoreboard_error,
+            scoreboard_import: None,
+            scoreboard_import_path: None,
+            scoreboard_sync_anchor: None,
+            scoreboard_replay_last_push: None,
+            scoreboard_placement: reco_core::render::overlay::OverlayPlacement::default(),
+            scoreboard_style: scoreboard_import::ScoreboardStyle::default(),
+            scoreboard_derived_cut_ranges: Vec::new(),
             recording_tx: None,
             recording_thread: None,
             recording_path: None,
@@ -614,8 +705,120 @@ impl AppState {
         self.export_thread.is_some()
     }
 
+    fn configure_scoreboard(&mut self, enabled: bool, selected_index: usize) {
+        self.scoreboard_runtime = None;
+        self.scoreboard_frame = None;
+        self.scoreboard_frame_dirty = false;
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge.clear_overlay();
+        }
+        self.preview_dirty = true;
+        if !enabled {
+            self.scoreboard_error.clear();
+            return;
+        }
+        let Some(package) = self.scoreboard_packages.get(selected_index).cloned() else {
+            self.scoreboard_error = "No valid scoreboard package is installed".into();
+            return;
+        };
+        match reco_scoreboard::ScoreboardRuntime::start(package, 30) {
+            Ok(runtime) => {
+                self.scoreboard_runtime = Some(runtime);
+                self.scoreboard_error.clear();
+            }
+            Err(error) => {
+                self.scoreboard_error = error.to_string();
+                log::error!("Cannot enable scoreboard: {error}");
+            }
+        }
+    }
+
+    /// Poll the independent HTML worker and upload only a changed RGBA frame.
+    fn poll_scoreboard_overlay(&mut self) -> bool {
+        let frame_result = self
+            .scoreboard_runtime
+            .as_mut()
+            .map(OverlayFrameSource::try_frame);
+        match frame_result {
+            None | Some(Ok(None)) => {}
+            Some(Ok(Some(frame))) => {
+                self.scoreboard_frame = Some(frame);
+                self.scoreboard_frame_dirty = true;
+            }
+            Some(Err(error)) => {
+                self.scoreboard_error = error;
+                log::error!("Disabling scoreboard: {}", self.scoreboard_error);
+                self.scoreboard_runtime = None;
+                self.scoreboard_frame = None;
+                self.scoreboard_frame_dirty = false;
+                if let Some(bridge) = self.bridge.as_mut() {
+                    bridge.clear_overlay();
+                }
+                return true;
+            }
+        }
+
+        if !self.scoreboard_frame_dirty {
+            return false;
+        }
+        let (Some(frame), Some(bridge)) = (self.scoreboard_frame.as_ref(), self.bridge.as_mut())
+        else {
+            return false;
+        };
+        match bridge.set_overlay_frame(frame) {
+            Ok(()) => {
+                self.scoreboard_frame_dirty = false;
+                true
+            }
+            Err(error) => {
+                self.scoreboard_error = format!("Cannot upload scoreboard: {error}");
+                log::error!("{}", self.scoreboard_error);
+                self.scoreboard_runtime = None;
+                self.scoreboard_frame = None;
+                self.scoreboard_frame_dirty = false;
+                bridge.clear_overlay();
+                true
+            }
+        }
+    }
+
+    /// Recompute the replayed scoreboard state for the current preview
+    /// position and push it to the running package, throttled to avoid a
+    /// JS eval on every render tick (see `scoreboard_replay_last_push`).
+    /// A no-op unless both a Match Logger export and a sync anchor are
+    /// loaded - live-manual editing (no import loaded) is unaffected.
+    fn push_scoreboard_replay(&mut self) {
+        const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
+        let (Some(export), Some(anchor), Some(runtime)) = (
+            self.scoreboard_import.as_ref(),
+            self.scoreboard_sync_anchor.as_ref(),
+            self.scoreboard_runtime.as_ref(),
+        ) else {
+            return;
+        };
+        if let Some(last) = self.scoreboard_replay_last_push
+            && last.elapsed() < MIN_INTERVAL
+        {
+            return;
+        }
+        let fps = self.playback.fps();
+        let video_seconds = if fps > 0.0 {
+            self.playback.frame_index() as f64 / fps
+        } else {
+            0.0
+        };
+        let state = scoreboard_import::state_at(export, anchor, video_seconds);
+        let state = scoreboard_import::apply_style(state, &self.scoreboard_style);
+        if let Err(error) = runtime.update(&state) {
+            self.scoreboard_error = format!("Cannot update scoreboard: {error}");
+            log::error!("{}", self.scoreboard_error);
+        }
+        self.scoreboard_replay_last_push = Some(std::time::Instant::now());
+    }
+
     fn reset_pipeline(&mut self) {
         self.bridge = None;
+        self.scoreboard_frame_dirty = self.scoreboard_frame.is_some();
         self.playback = Playback::new();
         self.pose = PoseControl::new(PoseControlConfig {
             drag_deg_per_pixel: DRAG_DEG_PER_PIXEL,
@@ -1763,6 +1966,29 @@ fn sync_cut_ranges(state: &AppState, app: &RecoApp) {
     app.set_cut_ranges(slint::ModelRc::new(slint::VecModel::from(items)));
 }
 
+/// Recompute and re-apply the "Auto-cut kickoff lead-in + pauses" derived
+/// cut ranges from the current Match Logger export + sync anchor,
+/// replacing whatever this toggle previously added (see
+/// `AppState::scoreboard_derived_cut_ranges`'s doc comment) without
+/// touching any manually added/edited range. A no-op push of an empty set
+/// when the toggle is on but the export/anchor aren't available - callers
+/// check that before turning the toggle on in the first place.
+fn refresh_derived_cut_ranges(s: &mut AppState, app: &RecoApp) {
+    let previous = std::mem::take(&mut s.scoreboard_derived_cut_ranges);
+    if !previous.is_empty() {
+        s.cut_ranges.retain(|r| !previous.contains(r));
+    }
+    if let (Some(export), Some(anchor)) = (
+        s.scoreboard_import.as_ref(),
+        s.scoreboard_sync_anchor.as_ref(),
+    ) {
+        let derived = scoreboard_import::derived_cut_ranges(export, anchor, 2.0);
+        s.cut_ranges.extend(derived.iter().copied());
+        s.scoreboard_derived_cut_ranges = derived;
+    }
+    sync_cut_ranges(s, app);
+}
+
 /// Push the per-side segment filenames into the Slint left/right-segments
 /// models so the Files panel shows what was imported.
 fn sync_segments(state: &AppState, app: &RecoApp) {
@@ -2269,6 +2495,195 @@ fn apply_autocam_defaults(app: &RecoApp, ac: &reco_core::calibration::AutocamDef
     app.set_export_cluster_alpha(ac.cluster_alpha);
 }
 
+/// Curated banner-color presets shown in the SCOREBOARD card's ComboBox -
+/// shared between `on_changed_scoreboard_banner_color` and
+/// `apply_scoreboard_settings` so restoring a saved preset can't drift
+/// from what picking it live actually produces.
+fn scoreboard_banner_color_hex(preset_name: &str) -> Option<&'static str> {
+    match preset_name {
+        "Navy" => Some("#0b1a33"),
+        "Black" => Some("#0a0a0a"),
+        "Forest Green" => Some("#0e2e1a"),
+        "Maroon" => Some("#33101a"),
+        "Purple" => Some("#241333"),
+        _ => None,
+    }
+}
+
+/// Snapshot the current scoreboard state into a persistable
+/// `ScoreboardSettings` - the scoreboard equivalent of
+/// `snapshot_autocam_defaults`, see `do_save_calibration`. Unlike
+/// autocam's pure-Slint mirror, some of this lives in `AppState` (the
+/// loaded import's path, encoded logo paths), so this needs both.
+fn snapshot_scoreboard_settings(
+    app: &RecoApp,
+    s: &AppState,
+) -> reco_core::calibration::ScoreboardSettings {
+    let package_id = s
+        .scoreboard_packages
+        .get(app.get_scoreboard_current_index().max(0) as usize)
+        .map(|package| package.manifest.id.clone())
+        .unwrap_or_default();
+    reco_core::calibration::ScoreboardSettings {
+        enabled: app.get_scoreboard_enabled(),
+        package_id,
+        match_logger_path: s.scoreboard_import_path.clone(),
+        sync_event_ts_ms: s.scoreboard_sync_anchor.map(|anchor| anchor.event_ts_ms),
+        sync_video_seconds: s
+            .scoreboard_sync_anchor
+            .map(|anchor| anchor.video_seconds)
+            .unwrap_or(0.0),
+        placement: s.scoreboard_placement,
+        home_logo_path: s.scoreboard_style.home_logo_path.clone(),
+        away_logo_path: s.scoreboard_style.away_logo_path.clone(),
+        font_family: s.scoreboard_style.font_family.clone().unwrap_or_default(),
+        logo_size_px: s.scoreboard_style.logo_size_px.unwrap_or(34.0),
+        banner_color_name: app.get_scoreboard_banner_color_name().to_string(),
+        derive_cut_ranges: app.get_scoreboard_derive_cut_ranges(),
+    }
+}
+
+/// Restore a persisted `ScoreboardSettings` onto the SCOREBOARD card and
+/// `AppState` - the inverse of `snapshot_scoreboard_settings`. Re-reads
+/// the Match Logger export and team logos from their saved paths rather
+/// than trusting any embedded copy (there isn't one - see
+/// `ScoreboardSettings`'s doc comment); a moved/deleted file is logged
+/// and surfaced in `scoreboard_error_text`, not a reason to abort
+/// restoring everything else.
+fn apply_scoreboard_settings(
+    state_ref: &Rc<RefCell<AppState>>,
+    app: &RecoApp,
+    settings: &reco_core::calibration::ScoreboardSettings,
+) {
+    let mut s = state_ref.borrow_mut();
+
+    let package_index = s
+        .scoreboard_packages
+        .iter()
+        .position(|package| package.manifest.id == settings.package_id);
+    if let Some(index) = package_index {
+        app.set_scoreboard_current_index(index as i32);
+    }
+    app.set_scoreboard_enabled(settings.enabled);
+    if settings.enabled && package_index.is_some() {
+        s.configure_scoreboard(
+            app.get_scoreboard_enabled(),
+            app.get_scoreboard_current_index().max(0) as usize,
+        );
+        app.set_scoreboard_editor_available(
+            s.scoreboard_runtime
+                .as_ref()
+                .and_then(reco_scoreboard::ScoreboardRuntime::editor_url)
+                .is_some(),
+        );
+        let network_editor_url = s
+            .scoreboard_runtime
+            .as_ref()
+            .and_then(reco_scoreboard::ScoreboardRuntime::network_editor_url);
+        app.set_scoreboard_share_available(network_editor_url.is_some());
+        app.set_scoreboard_share_url(network_editor_url.unwrap_or_default().into());
+    }
+
+    if let Some(path) = settings.match_logger_path.as_ref() {
+        match scoreboard_import::load(path) {
+            Ok(export) => {
+                let summary = format!(
+                    "{} vs {} - {} events",
+                    export.home,
+                    export.away, // team_label's fallback doesn't matter for a restore - a valid saved export always has names
+                    export.event_count()
+                );
+                s.scoreboard_import = Some(export);
+                s.scoreboard_import_path = Some(path.clone());
+                app.set_scoreboard_match_summary(summary.into());
+            }
+            Err(error) => {
+                log::warn!(
+                    "Cannot restore Match Logger export from {}: {error}",
+                    path.display()
+                );
+                app.set_scoreboard_error_text(
+                    format!("Saved Match Logger export not found: {}", path.display()).into(),
+                );
+            }
+        }
+    }
+    // Restores the anchor exactly as saved (including a manual "Set sync
+    // point" correction) rather than re-deriving the file's own
+    // video_start default, which a prior manual correction may disagree
+    // with.
+    s.scoreboard_sync_anchor =
+        settings
+            .sync_event_ts_ms
+            .map(|event_ts_ms| scoreboard_import::SyncAnchor {
+                event_ts_ms,
+                video_seconds: settings.sync_video_seconds,
+            });
+    if s.scoreboard_import.is_some() {
+        app.set_scoreboard_sync_label(if s.scoreboard_sync_anchor.is_some() {
+            format!(
+                "Synced: video_start = {:.1}s into this video",
+                settings.sync_video_seconds
+            )
+            .into()
+        } else {
+            "Not synced - tap \"Set sync point\"".into()
+        });
+    }
+
+    s.scoreboard_placement = settings.placement;
+    if let Some(bridge) = s.bridge.as_mut() {
+        bridge.set_overlay_placement(settings.placement);
+    }
+    app.set_scoreboard_offset_x(settings.placement.offset.0);
+    app.set_scoreboard_offset_y(settings.placement.offset.1);
+    app.set_scoreboard_scale(settings.placement.scale);
+
+    for (path, home) in [
+        (settings.home_logo_path.as_ref(), true),
+        (settings.away_logo_path.as_ref(), false),
+    ] {
+        let Some(path) = path else { continue };
+        match scoreboard_import::image_data_uri(path) {
+            Ok(data_uri) => {
+                if home {
+                    s.scoreboard_style.home_logo = Some(data_uri);
+                    s.scoreboard_style.home_logo_path = Some(path.clone());
+                    app.set_scoreboard_home_logo_path(path.to_string_lossy().into_owned().into());
+                } else {
+                    s.scoreboard_style.away_logo = Some(data_uri);
+                    s.scoreboard_style.away_logo_path = Some(path.clone());
+                    app.set_scoreboard_away_logo_path(path.to_string_lossy().into_owned().into());
+                }
+            }
+            Err(error) => {
+                log::warn!("Cannot restore team logo from {}: {error}", path.display());
+            }
+        }
+    }
+
+    s.scoreboard_style.font_family = if settings.font_family.is_empty() {
+        None
+    } else {
+        Some(settings.font_family.clone())
+    };
+    app.set_scoreboard_font_family(settings.font_family.clone().into());
+
+    s.scoreboard_style.logo_size_px = Some(settings.logo_size_px);
+    app.set_scoreboard_logo_size(settings.logo_size_px);
+
+    s.scoreboard_style.banner_color =
+        scoreboard_banner_color_hex(&settings.banner_color_name).map(str::to_string);
+    app.set_scoreboard_banner_color_name(settings.banner_color_name.clone().into());
+
+    app.set_scoreboard_derive_cut_ranges(settings.derive_cut_ranges);
+    if settings.derive_cut_ranges {
+        refresh_derived_cut_ranges(&mut s, app);
+    }
+
+    s.preview_dirty = true;
+}
+
 fn main() -> anyhow::Result<()> {
     init_tracing();
     install_panic_hook();
@@ -2456,6 +2871,18 @@ fn main() -> anyhow::Result<()> {
         );
     }
     app.set_available_codecs(slint::ModelRc::new(slint::VecModel::from(codecs)));
+
+    // The selector is manifest-driven; no sport name is compiled into Rust.
+    {
+        let s = state.borrow();
+        let names = s
+            .scoreboard_packages
+            .iter()
+            .map(|package| package.manifest.name.clone().into())
+            .collect::<Vec<slint::SharedString>>();
+        app.set_available_scoreboards(slint::ModelRc::new(slint::VecModel::from(names)));
+        app.set_scoreboard_error_text(s.scoreboard_error.clone().into());
+    }
 
     // Seed recording and preview settings from persisted preferences.
     {
@@ -3677,6 +4104,303 @@ fn main() -> anyhow::Result<()> {
         s.user_settings.save();
     });
 
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_scoreboard(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let mut s = state_ref.borrow_mut();
+        s.configure_scoreboard(
+            app.get_scoreboard_enabled(),
+            app.get_scoreboard_current_index().max(0) as usize,
+        );
+        app.set_scoreboard_error_text(s.scoreboard_error.clone().into());
+        app.set_scoreboard_editor_available(
+            s.scoreboard_runtime
+                .as_ref()
+                .and_then(reco_scoreboard::ScoreboardRuntime::editor_url)
+                .is_some(),
+        );
+        let network_editor_url = s
+            .scoreboard_runtime
+            .as_ref()
+            .and_then(reco_scoreboard::ScoreboardRuntime::network_editor_url);
+        app.set_scoreboard_share_available(network_editor_url.is_some());
+        app.set_scoreboard_share_url(network_editor_url.unwrap_or_default().into());
+        if network_editor_url.is_none() {
+            app.set_scoreboard_share_dialog_open(false);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_edit_scoreboard(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let editor_url = state_ref
+            .borrow()
+            .scoreboard_runtime
+            .as_ref()
+            .and_then(reco_scoreboard::ScoreboardRuntime::editor_url)
+            .map(str::to_owned);
+        let Some(editor_url) = editor_url else {
+            app.set_scoreboard_error_text("This scoreboard has no editor".into());
+            return;
+        };
+        if let Err(error) = open::that(&editor_url) {
+            let message = format!("Cannot open scoreboard editor: {error}");
+            state_ref.borrow_mut().scoreboard_error.clone_from(&message);
+            app.set_scoreboard_error_text(message.into());
+        }
+    });
+
+    let app_weak = app.as_weak();
+    app.on_copy_scoreboard_share(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let url = app.get_scoreboard_share_url().to_string();
+        if url.is_empty() {
+            return;
+        }
+        if let Err(error) =
+            arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(url))
+        {
+            app.set_scoreboard_error_text(
+                format!("Cannot copy scoreboard address: {error}").into(),
+            );
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_load_scoreboard_events(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let dialog = rfd::FileDialog::new()
+            .set_title("Load Match Logger export")
+            .add_filter("Match Logger export", &["json"]);
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        match scoreboard_import::load(&path) {
+            Ok(export) => {
+                fn team_label(name: &str, fallback: &str) -> String {
+                    let trimmed = name.trim();
+                    if trimmed.is_empty() {
+                        fallback.to_string()
+                    } else {
+                        trimmed.to_string()
+                    }
+                }
+                let summary = format!(
+                    "{} vs {} - {} events",
+                    team_label(&export.home, "Home"),
+                    team_label(&export.away, "Away"),
+                    export.event_count()
+                );
+                let default_anchor = export.video_start_ms().map(|event_ts_ms| {
+                    scoreboard_import::SyncAnchor {
+                        event_ts_ms,
+                        video_seconds: 0.0,
+                    }
+                });
+                let mut s = state_ref.borrow_mut();
+                s.scoreboard_import_path = Some(path);
+                s.scoreboard_sync_anchor = default_anchor;
+                s.scoreboard_import = Some(export);
+                // Same fix as on_changed_scoreboard_placement below: without
+                // this, the preview only redraws while playing/seeking (see
+                // vsync_render_tick's gate), so the banner wouldn't actually
+                // pick up the freshly loaded data until something unrelated
+                // happened to trigger a redraw - read as a long, confusing
+                // delay after Load, even though push_scoreboard_replay
+                // itself runs within ~150ms once a tick fires at all.
+                s.preview_dirty = true;
+                drop(s);
+                app.set_scoreboard_match_summary(summary.into());
+                app.set_scoreboard_sync_label(
+                    if default_anchor.is_some() {
+                        "Synced to video start - tap \"Set sync point\" if that's off".into()
+                    } else {
+                        "No video_start event in this export - tap \"Set sync point\" once scrubbed to the matching frame".into()
+                    },
+                );
+                app.set_scoreboard_error_text("".into());
+                // Loading a different export while the toggle is already
+                // on would otherwise leave the previous file's derived
+                // ranges sitting there, silently stale.
+                if app.get_scoreboard_derive_cut_ranges() {
+                    refresh_derived_cut_ranges(&mut state_ref.borrow_mut(), &app);
+                }
+            }
+            Err(error) => {
+                app.set_scoreboard_error_text(error.to_string().into());
+            }
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_set_scoreboard_sync_point(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let mut s = state_ref.borrow_mut();
+        let Some(export) = s.scoreboard_import.as_ref() else {
+            return;
+        };
+        let Some(video_start_ms) = export.video_start_ms() else {
+            app.set_scoreboard_error_text("This export has no video_start event to sync to".into());
+            return;
+        };
+        let video_seconds = if s.playback.fps() > 0.0 {
+            s.playback.frame_index() as f64 / s.playback.fps()
+        } else {
+            0.0
+        };
+        s.scoreboard_sync_anchor = Some(scoreboard_import::SyncAnchor {
+            event_ts_ms: video_start_ms,
+            video_seconds,
+        });
+        s.preview_dirty = true;
+        app.set_scoreboard_sync_label(
+            format!("Synced: video_start = {video_seconds:.1}s into this video").into(),
+        );
+        // Keep the derived cut ranges in step with a corrected sync point
+        // instead of leaving them stale from the old anchor.
+        if app.get_scoreboard_derive_cut_ranges() {
+            refresh_derived_cut_ranges(&mut s, &app);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_toggled_scoreboard_derive_cut_ranges(move |enabled| {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let mut s = state_ref.borrow_mut();
+        if !enabled {
+            let previous = std::mem::take(&mut s.scoreboard_derived_cut_ranges);
+            if !previous.is_empty() {
+                s.cut_ranges.retain(|r| !previous.contains(r));
+            }
+            sync_cut_ranges(&s, &app);
+            return;
+        }
+        if s.scoreboard_import.is_none() || s.scoreboard_sync_anchor.is_none() {
+            app.set_scoreboard_error_text(
+                "Load a Match Logger export and set its sync point first".into(),
+            );
+            app.set_scoreboard_derive_cut_ranges(false);
+            return;
+        }
+        refresh_derived_cut_ranges(&mut s, &app);
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_scoreboard_placement(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let placement = reco_core::render::overlay::OverlayPlacement {
+            offset: (app.get_scoreboard_offset_x(), app.get_scoreboard_offset_y()),
+            scale: app.get_scoreboard_scale(),
+        };
+        let mut s = state_ref.borrow_mut();
+        s.scoreboard_placement = placement;
+        if let Some(bridge) = s.bridge.as_mut() {
+            bridge.set_overlay_placement(placement);
+        }
+        // Without this, the preview only redraws while playing/seeking
+        // (see vsync_render_tick's gate) - a drag while paused updated the
+        // compositor instantly but the screen wouldn't reflect it until
+        // something unrelated happened to trigger a redraw, which read as
+        // a huge, unusable lag. seam_drag (same kind of live-drag-a-render-
+        // parameter interaction) sets this for the same reason.
+        s.preview_dirty = true;
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_pick_scoreboard_logo(move |team| {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let dialog = rfd::FileDialog::new()
+            .set_title("Choose a team logo")
+            .add_filter("Image", &["png", "jpg", "jpeg", "gif", "webp", "svg"]);
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        match scoreboard_import::image_data_uri(&path) {
+            Ok(data_uri) => {
+                let mut s = state_ref.borrow_mut();
+                let display_path = path.to_string_lossy().into_owned();
+                if team == "home" {
+                    s.scoreboard_style.home_logo = Some(data_uri);
+                    s.scoreboard_style.home_logo_path = Some(path);
+                    drop(s);
+                    app.set_scoreboard_home_logo_path(display_path.into());
+                } else {
+                    s.scoreboard_style.away_logo = Some(data_uri);
+                    s.scoreboard_style.away_logo_path = Some(path);
+                    drop(s);
+                    app.set_scoreboard_away_logo_path(display_path.into());
+                }
+                // See on_changed_scoreboard_placement's comment - the same
+                // gate applies to picking up the re-rendered overlay
+                // texture once push_scoreboard_replay pushes this change.
+                state_ref.borrow_mut().preview_dirty = true;
+            }
+            Err(message) => {
+                app.set_scoreboard_error_text(message.into());
+            }
+        }
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_changed_scoreboard_font(move |font| {
+        let mut s = state_ref.borrow_mut();
+        s.scoreboard_style.font_family = if font.is_empty() {
+            None
+        } else {
+            Some(font.to_string())
+        };
+        s.preview_dirty = true;
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_changed_scoreboard_logo_size(move |size| {
+        let mut s = state_ref.borrow_mut();
+        s.scoreboard_style.logo_size_px = Some(size);
+        s.preview_dirty = true;
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_changed_scoreboard_banner_color(move |preset_name| {
+        // Curated presets, matching the ComboBox in main.slint - a full
+        // color picker isn't otherwise used anywhere in reco-gui yet, so
+        // this stays consistent with the Font dropdown right above it
+        // rather than introducing a new kind of control for one field.
+        let hex = match preset_name.as_str() {
+            "Navy" => Some("#0b1a33"),
+            "Black" => Some("#0a0a0a"),
+            "Forest Green" => Some("#0e2e1a"),
+            "Maroon" => Some("#33101a"),
+            "Purple" => Some("#241333"),
+            _ => None,
+        };
+        let mut s = state_ref.borrow_mut();
+        s.scoreboard_style.banner_color = hex.map(str::to_string);
+        s.preview_dirty = true;
+    });
+
     // ── Auto-calibration callback ──
 
     let app_weak = app.as_weak();
@@ -4634,9 +5358,11 @@ fn main() -> anyhow::Result<()> {
         // renderer, so they're only synced here rather than on every edit.
         if let Some(app) = app_weak.upgrade() {
             let ac = snapshot_autocam_defaults(&app);
+            let sb = snapshot_scoreboard_settings(&app, &state_ref.borrow());
             let mut s = state_ref.borrow_mut();
             if let Some(cal) = s.calibration.as_mut() {
                 cal.autocam_defaults = Some(ac);
+                cal.scoreboard = Some(sb);
             }
         }
         let save_result = state_ref.borrow().save_calibration();
@@ -5365,6 +6091,32 @@ fn main() -> anyhow::Result<()> {
         } else {
             None
         };
+        let scoreboard_package = if app.get_scoreboard_enabled() {
+            s.scoreboard_packages
+                .get(app.get_scoreboard_current_index().max(0) as usize)
+                .cloned()
+        } else {
+            None
+        };
+        let scoreboard_state = s
+            .scoreboard_runtime
+            .as_ref()
+            .and_then(reco_scoreboard::ScoreboardRuntime::current_editor_state);
+        // When a Match Logger export is loaded, it drives the scoreboard
+        // through the whole export instead of the one frozen snapshot
+        // above - see `crate::export::ScoreboardReplay`.
+        let scoreboard_replay = match (
+            s.scoreboard_import.as_ref(),
+            s.scoreboard_sync_anchor.as_ref(),
+        ) {
+            (Some(export), Some(anchor)) => Some(crate::export::ScoreboardReplay {
+                export: export.clone(),
+                anchor: *anchor,
+            }),
+            _ => None,
+        };
+        let scoreboard_placement = s.scoreboard_placement;
+        let scoreboard_style = s.scoreboard_style.clone();
 
         // Persist the user's codec / quality / blend choices as the
         // defaults for next session. Model path is saved in the
@@ -5396,6 +6148,7 @@ fn main() -> anyhow::Result<()> {
         // Release the preview pipeline so its VRAM is free for the export;
         // rebuilt on completion. run_export uses its own source.
         log::info!("Releasing preview GPU pipeline to free VRAM for export");
+        s.scoreboard_runtime = None;
         s.reset_pipeline();
 
         app.set_export_error_text("".into());
@@ -5429,6 +6182,11 @@ fn main() -> anyhow::Result<()> {
                 end_secs,
                 cut_ranges,
                 autocam,
+                scoreboard_package,
+                scoreboard_state,
+                scoreboard_replay,
+                scoreboard_placement,
+                scoreboard_style,
                 app_weak_bg,
                 &interrupted,
                 last_progress_at,
@@ -5669,6 +6427,11 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 if let Some(app) = app_weak.upgrade() {
+                    s.configure_scoreboard(
+                        app.get_scoreboard_enabled(),
+                        app.get_scoreboard_current_index().max(0) as usize,
+                    );
+                    app.set_scoreboard_error_text(s.scoreboard_error.clone().into());
                     app.set_export_in_progress(false);
                     app.set_export_progress(0.0);
                     match outcome {
@@ -5953,6 +6716,29 @@ fn vsync_render_tick(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<RecoA
     let mut s = state.borrow_mut();
     if s.is_exporting() {
         return false;
+    }
+
+    s.push_scoreboard_replay();
+    if s.poll_scoreboard_overlay() {
+        s.preview_dirty = true;
+    }
+    if let Some(app) = app_weak.upgrade() {
+        app.set_scoreboard_error_text(s.scoreboard_error.clone().into());
+        app.set_scoreboard_editor_available(
+            s.scoreboard_runtime
+                .as_ref()
+                .and_then(reco_scoreboard::ScoreboardRuntime::editor_url)
+                .is_some(),
+        );
+        let network_editor_url = s
+            .scoreboard_runtime
+            .as_ref()
+            .and_then(reco_scoreboard::ScoreboardRuntime::network_editor_url);
+        app.set_scoreboard_share_available(network_editor_url.is_some());
+        app.set_scoreboard_share_url(network_editor_url.unwrap_or_default().into());
+        if network_editor_url.is_none() {
+            app.set_scoreboard_share_dialog_open(false);
+        }
     }
 
     // Adaptive preview: resize render target to match the preview
@@ -6298,6 +7084,16 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 {
                     apply_autocam_defaults(&app, ac);
                     log::info!("Restored AI Tracking defaults from calibration");
+                }
+                // apply_scoreboard_settings borrows `state` itself, so `s`
+                // has to be released for the duration of the call - it's
+                // re-borrowed right after to keep the rest of this
+                // function (VRAM checks etc. below) working unchanged.
+                if let Some(sb) = s.calibration.as_ref().and_then(|c| c.scoreboard.clone()) {
+                    drop(s);
+                    apply_scoreboard_settings(state, &app, &sb);
+                    s = state.borrow_mut();
+                    log::info!("Restored scoreboard settings from calibration");
                 }
                 // Lookahead VRAM risk thresholds for the export slider. The
                 // pool stores source-resolution frames (re-rendered into the

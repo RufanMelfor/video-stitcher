@@ -84,6 +84,8 @@ pub struct StitchSession {
     pub(crate) encoder: Option<AsyncEncodeThread>,
     /// Additional encoders for multi-output (stream + record).
     pub(crate) extra_encoders: Vec<AsyncEncodeThread>,
+    /// Independently rendered post-camera overlay. Polled without blocking.
+    pub(crate) overlay_source: Option<Box<dyn crate::render::overlay::OverlayFrameSource>>,
     /// When true, `process_frame_any` skips detection (the produce phase
     /// already ran it and stored the WorldState in the buffer).
     pub(crate) skip_detection: bool,
@@ -270,6 +272,7 @@ impl StitchSession {
             lookahead_bit_depth: vram_pool::LookaheadBitDepth::default(),
             frame_count: 0,
             extra_encoders: Vec::new(),
+            overlay_source: None,
             session_start: None,
             error_policy: ErrorPolicy::default(),
             frames_dropped: 0,
@@ -357,6 +360,30 @@ impl StitchSession {
     /// changes (resize, set_fov).
     pub fn pipeline_mut(&mut self) -> &mut StitchPipeline {
         self.core.pipeline_mut()
+    }
+
+    /// Attach a non-blocking source of post-camera RGBA overlay frames.
+    ///
+    /// The source is polled after the autocam pose has been resolved and
+    /// immediately before rendering. `Ok(None)` reuses the cached GPU texture.
+    pub fn set_overlay_source(
+        &mut self,
+        source: Box<dyn crate::render::overlay::OverlayFrameSource>,
+    ) {
+        self.overlay_source = Some(source);
+    }
+
+    /// Disable the overlay source and release its cached GPU resources.
+    pub fn clear_overlay_source(&mut self) {
+        self.overlay_source = None;
+        self.core.pipeline_mut().clear_overlay();
+    }
+
+    /// Reposition/resize the composited overlay - see
+    /// [`crate::render::overlay::OverlayPlacement`]. Independent of which
+    /// overlay source is active (or whether one is active yet).
+    pub fn set_overlay_placement(&mut self, placement: crate::render::overlay::OverlayPlacement) {
+        self.core.pipeline_mut().set_overlay_placement(placement);
     }
 
     /// Borrow the underlying [`StitchCore`]. Useful for consumers that

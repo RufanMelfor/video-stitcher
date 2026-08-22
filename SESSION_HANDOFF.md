@@ -1,3 +1,134 @@
+# Session handoff - 2026-08-21 (TGR_PC): Match Logger scoreboard overlay end-to-end
+
+**Pushed to `github` (RufanMelfor/reco-video-stitcher-rig), branch
+`feat/scoreboard-overlay` (16 commits). Not merged into `main` yet -
+waiting on the user's go-ahead after more testing.** Separately,
+`scripts/match-logger/Match Logger.html` itself is already on `main`
+(`aaccc840`, pushed directly - just the one file pulled in from the
+otherwise-stale `feat/mlpipe-gui` branch).
+
+Big session: built the Match Logger -> reco-gui scoreboard overlay
+feature end to end, starting from a port of the paused PR #474 work
+([[project_scoreboard_overlay_pr474]]), through several rounds of real
+user testing on their own 03 OJC vs Berghem Sport footage and demo
+data, each round surfacing a real bug.
+
+## What shipped
+
+1. **Ported PR #474** (`204b0c57`) cleanly onto current `main` rather
+   than resuming the stale `scoreboard-on-main` branch (it had fallen
+   ~209 commits behind) - `reco-scoreboard` crate (headless-Chrome
+   package runtime), `scoreboards/football` package,
+   `render/overlay.rs` compositor. `main.rs`/`export.rs`/`main.slint`
+   needed a 3-way diff apply (not a plain checkout) since they'd
+   diverged since the fork point - applied cleanly, no conflicts.
+2. **Match Logger import + replay engine** (`ae4bf166`) -
+   `crates/reco-gui/src/scoreboard_import.rs`: parses a Match Logger
+   export, `state_at(events, sync_anchor, video_seconds)` replays
+   score/cards/clock at any point in the video's timeline (pauses
+   freeze the clock, added time, clock stays continuous across
+   halves). Moved the Scoreboard controls from the right Lens panel
+   into a new SCOREBOARD card under DETECTION ZONES (left sidebar);
+   also collapsed SEAM/RIG ALIGNMENT by default while in there (user's
+   original ask that started the session).
+3. **Live preview + export actually driven by the replay** (`ea614b75`)
+   - PR #474 could previously only freeze one static state at export
+   start; now both live scrubbing and export encode call `state_at()`
+   on a timer, so score/cards/clock genuinely change at the right
+   moments instead of staying frozen.
+4. **Drag-to-reposition + logo/font/size/color editor** (`7d8ac8f5`) -
+   new generic `OverlayPlacement` in the compositor (position + scale,
+   package-agnostic, not football-specific), "Edit Scoreboard..."
+   in-place editor mirroring the existing ROI-editor pattern.
+5. **"Auto-cut kickoff lead-in + pauses" toggle** (`71c05f54`) -
+   derives cut ranges from the same event log (pre-roll before
+   kickoff, one range per logged pause, 2s context kept at each
+   boundary), reusing the existing cut-range timeline; only from
+   events actually in the log, never inferred gaps.
+6. **Match Logger: optional card-tracking toggle** (`1f8bf666`) - hides
+   the whole Cards section for age groups that don't play with cards
+   yet (prompted by the user's own JO11 use case).
+7. **Calibration persistence** (`2e245713`, `cd5a77cd`) - new
+   `ScoreboardSettings` in `reco_core::calibration`, saved/restored on
+   Save/Load Calibration. Stores file *paths* (Match Logger export,
+   both logos), not embedded content - calibration files are capped at
+   1MB (`MAX_CALIBRATION_FILE_SIZE`).
+
+## Real bugs found testing on the user's own footage/data
+
+- **Release build had no scoreboard packages at all** (`72cd8831`) -
+  the dev-only `CARGO_MANIFEST_DIR` discovery fallback is
+  `debug_assertions`-gated on purpose (a release binary shouldn't leak
+  the build machine's source path); nothing copied `scoreboards/` next
+  to a locally-built release exe. Fixed by having `build.rs` bundle it
+  next to both profiles, matching how a packaged install would ship it.
+- **Drag-to-reposition had "een gigantische vertraging"**, and
+  separately **the banner didn't update after Load/sync-point/style
+  changes** (`bca0ff15`, `d3646ae8`) - `vsync_render_tick` only does the
+  actual redraw while playing/seeking/`preview_dirty`; several
+  scoreboard handlers updated state instantly but never set
+  `preview_dirty`, so nothing visible happened until some unrelated
+  redraw trigger came along. Same root cause, found and fixed twice as
+  more handlers were added over the session (placement/style first,
+  then Load/sync-point).
+- **"duplicate scoreboard id" logged as `error!` and shown as a
+  persistent GUI error** (`5e3eece2`) - direct side effect of the
+  build.rs fix above (debug builds now find the package via two
+  overlapping roots); added `DiscoveryIssueSeverity` (Info for an
+  expected root overlap vs Warning for a real problem) so a
+  successfully-loaded package never shows a false alarm.
+- **Card badge stayed visible showing "0 0" even with zero card
+  events** (`2cc6314a`) - real CSS bug:
+  `.card-badge { display: inline-flex }` ties `[hidden]`'s UA-default
+  `display:none` on specificity, and an author stylesheet wins that tie
+  - `hidden` was a no-op, and since the badge only ever writes its text
+  when shown, it just displayed the static HTML placeholder "0"
+  forever. Fixed with a combined `.card-badge[hidden]` selector.
+- **Logo overlapped the HOME/AWAY label** (`bf231e0a`) - was
+  `position: absolute` floating in the top corner; moved inline next
+  to the team name via a flex row (mirrored for the away side).
+- **Period label assumed 2 halves** (`bf231e0a`) - hardcoded "1st/2nd
+  Half" map read wrong for e.g. youth quarters; now reads
+  `sport.periodCount` (2=Half, 4=Quarter, else=Period).
+- **Misaligned scoreboard-edit drag handle** (`0652b097`) - the
+  placeholder rectangle assumed the banner sits centered in its
+  package canvas; football actually anchors to the bottom
+  (`.broadcast-safe-area`). Removed the handle entirely per the user's
+  own feedback ("ik hoef geen polygon te zien") - the drag math itself
+  was already pixel-accurate, only the decorative overlay disagreed
+  with reality.
+- **Misleading "Got a timeout while listening for browser events"
+  error** (`8fd22db7`) - root-caused as a harmless `headless_chrome`
+  crate quirk (a 30s idle timer on browser-level tab-lifecycle events
+  our single-tab package never generates, unrelated to the actual
+  page connection used for updates/captures). Raised to 6h.
+
+## Demo/test data
+
+`D:\VOETBAL_VIDEO\Berghem Sport J011-1\03 OJC -Bergem Sport 04072026\
+OJC_vs_Berghem_Sport_DEMO.json` - hand-built Match Logger export
+matching the real duration of the first L/R camera segment pair
+(~1223s, ffprobe-measured), used throughout for testing. Current
+content: OJC vs Berghem Sport, 2 periods, cards disabled, 3 pauses
+(45s/60s/45s), 2 goals, one added-time call. Re-verified against the
+real `state_at()`/`derived_cut_ranges()` code (a throwaway test, run
+then reverted - not committed) every time it was edited, which caught
+two of my own timestamp-arithmetic mistakes before they shipped.
+
+## Not done / next steps
+
+- Branch not merged into `main` yet - needs the user's go-ahead once
+  they're satisfied with testing.
+- Sync anchor / import / style are session-only in the *live-manual*
+  editor path (no Match Logger loaded) - only the Match-Logger-driven
+  replay path persists, via the new calibration settings.
+- No upstream PR planned for this feature yet.
+- The user's "kan ik niet alsnog een andere kiezen" (can't pick a
+  different Match Logger file after already loading one) report is
+  suspected to be the same missing-`preview_dirty` bug (fixed in
+  `d3646ae8`, landed before this was reported) but not yet explicitly
+  re-confirmed by the user after that specific fix.
+
 # Session handoff - 2026-08-20 (TGR_PC), continued: cut-range GUI hardening
 
 **Pushed to `github` (RufanMelfor/reco-video-stitcher-rig) main,

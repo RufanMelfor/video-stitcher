@@ -33,7 +33,13 @@ profiling = ["reco-core/profiling", "reco-io/profiling", "reco-calibrate/profili
 automation = []
 
 [dependencies]
+# Encodes team logo images as data: URIs for the sandboxed, offline
+# scoreboard package renderer (see scoreboard_import::ScoreboardStyle) -
+# already resolved transitively at 0.22 (headless_chrome), pinned here as
+# a direct dependency since we call it ourselves.
+base64 = "0.22"
 reco-core = { path = "../reco-core" }
+reco-scoreboard = { path = "../reco-scoreboard" }
 reco-control = { path = "../reco-control" }
 reco-io = { path = "../reco-io", features = ["ffmpeg", "config", "stacked-output"] }
 serde = { version = "1", features = ["derive"] }

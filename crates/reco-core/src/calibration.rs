@@ -15,6 +15,8 @@
 //! The distortion model is `fisheye_kb4` (Kannala-Brandt 4-coefficient):
 //! `θ_d = θ × (1 + k₁θ² + k₂θ⁴ + k₃θ⁶ + k₄θ⁸)`.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -633,6 +635,65 @@ fn default_ball_coast_secs() -> f32 {
     20.0 / 30.0
 }
 
+/// Scoreboard overlay settings saved alongside a calibration, so opening
+/// it re-populates the SCOREBOARD card (reco-gui) instead of resetting to
+/// defaults every session. Transitional (a reco-scoreboard concern, kept
+/// here for the same "no upward dependency" reason as [`AutocamDefaults`]
+/// - reco-core can't depend on reco-scoreboard).
+///
+/// References the Match Logger export and team logos by *file path*, not
+/// embedded content - keeps this struct small regardless of image size or
+/// event-log length (calibration files are capped at
+/// `MAX_CALIBRATION_FILE_SIZE`) and always reflects whatever is currently
+/// on disk at that path rather than a stale embedded copy. A moved or
+/// deleted file is a soft failure for the consumer to surface, not a
+/// reason to fail loading the rest of the calibration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScoreboardSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Selected package id (e.g. `"football"`) - not an index, which
+    /// could shift if packages are added/removed between sessions.
+    #[serde(default)]
+    pub package_id: String,
+    /// Absolute path to the last-loaded Match Logger export, if any.
+    #[serde(default)]
+    pub match_logger_path: Option<PathBuf>,
+    /// Video-seconds <-> match-wall-clock sync anchor for that export -
+    /// `None` until a `video_start` event or a manual "Set sync point"
+    /// has actually established one.
+    #[serde(default)]
+    pub sync_event_ts_ms: Option<i64>,
+    #[serde(default)]
+    pub sync_video_seconds: f64,
+    /// Where/how large the overlay appears in the output frame - see
+    /// `crate::render::overlay::OverlayPlacement`.
+    #[serde(default)]
+    pub placement: crate::render::overlay::OverlayPlacement,
+    #[serde(default)]
+    pub home_logo_path: Option<PathBuf>,
+    #[serde(default)]
+    pub away_logo_path: Option<PathBuf>,
+    /// CSS `font-family` value, e.g. `"Georgia, serif"`. Empty = package
+    /// default.
+    #[serde(default)]
+    pub font_family: String,
+    #[serde(default = "default_scoreboard_logo_size_px")]
+    pub logo_size_px: f32,
+    /// Display name of the chosen banner-color preset (e.g. `"Navy"`) -
+    /// empty = package default. Kept as the preset name rather than a raw
+    /// color so a future preset-list change doesn't strand old values.
+    #[serde(default)]
+    pub banner_color_name: String,
+    /// Whether the "Auto-cut kickoff lead-in + pauses" toggle was on.
+    #[serde(default)]
+    pub derive_cut_ranges: bool,
+}
+
+fn default_scoreboard_logo_size_px() -> f32 {
+    34.0
+}
+
 /// The calibration document: canonical, serializable source of truth.
 ///
 /// Everything the stitch needs to turn source frames into a panorama. Plain
@@ -666,6 +727,10 @@ pub struct Calibration {
     /// detection/autocam concern).
     #[serde(default)]
     pub autocam_defaults: Option<AutocamDefaults>,
+    /// Optional saved scoreboard overlay settings. Transitional (a
+    /// reco-scoreboard concern).
+    #[serde(default)]
+    pub scoreboard: Option<ScoreboardSettings>,
 }
 
 /// Maximum calibration file size (1 MB).
@@ -684,6 +749,7 @@ impl Calibration {
             field_roi: None,
             goal_geometry: None,
             autocam_defaults: None,
+            scoreboard: None,
         }
     }
 
@@ -1299,6 +1365,65 @@ mod tests {
         assert!((ac.cluster_alpha - 0.012).abs() < 1e-9);
     }
 
+    #[test]
+    fn old_calibration_without_scoreboard_still_parses() {
+        // sample_json() predates this field entirely - #[serde(default)]
+        // must let it parse as None rather than erroring.
+        let cal: Calibration = serde_json::from_str(sample_json()).unwrap();
+        assert!(cal.scoreboard.is_none());
+    }
+
+    #[test]
+    fn parse_calibration_with_scoreboard_settings() {
+        let mut cal: Calibration = serde_json::from_str(sample_json()).unwrap();
+        cal.scoreboard = Some(ScoreboardSettings {
+            enabled: true,
+            package_id: "football".into(),
+            match_logger_path: Some(PathBuf::from("D:/matches/OJC_vs_Berghem_Sport_DEMO.json")),
+            sync_event_ts_ms: Some(1_784_620_775_000),
+            sync_video_seconds: 3.2,
+            placement: crate::render::overlay::OverlayPlacement {
+                offset: (0.0, 0.32),
+                scale: 0.45,
+            },
+            home_logo_path: Some(PathBuf::from("D:/logos/ojc.png")),
+            away_logo_path: None,
+            font_family: "Georgia, serif".into(),
+            logo_size_px: 48.0,
+            banner_color_name: "Navy".into(),
+            derive_cut_ranges: true,
+        });
+        let json = cal.to_json_pretty();
+        let back: Calibration = serde_json::from_str(&json).unwrap();
+        let sb = back.scoreboard.as_ref().unwrap();
+        assert!(sb.enabled);
+        assert_eq!(sb.package_id, "football");
+        assert_eq!(
+            sb.match_logger_path,
+            Some(PathBuf::from("D:/matches/OJC_vs_Berghem_Sport_DEMO.json"))
+        );
+        assert_eq!(sb.sync_event_ts_ms, Some(1_784_620_775_000));
+        assert!((sb.sync_video_seconds - 3.2).abs() < 1e-9);
+        assert!((sb.placement.offset.1 - 0.32).abs() < 1e-6);
+        assert!((sb.placement.scale - 0.45).abs() < 1e-6);
+        assert_eq!(sb.home_logo_path, Some(PathBuf::from("D:/logos/ojc.png")));
+        assert!(sb.away_logo_path.is_none());
+        assert_eq!(sb.font_family, "Georgia, serif");
+        assert!((sb.logo_size_px - 48.0).abs() < 1e-6);
+        assert_eq!(sb.banner_color_name, "Navy");
+        assert!(sb.derive_cut_ranges);
+    }
+
+    #[test]
+    fn old_scoreboard_without_logo_size_gets_sane_default() {
+        // Same #[serde(default = "...")] pattern as fov_alpha above -
+        // an absent logo_size_px must fall back to the package's own
+        // default (34px), not 0.0 (an invisible logo).
+        let json = r#"{"enabled":true,"package_id":"football"}"#;
+        let sb: ScoreboardSettings = serde_json::from_str(json).unwrap();
+        assert!((sb.logo_size_px - 34.0).abs() < 1e-9);
+    }
+
     fn valid_cal() -> Calibration {
         let lens = || Lens {
             width: 1920,
@@ -1348,6 +1473,7 @@ mod tests {
             field_roi: None,
             goal_geometry: None,
             autocam_defaults: None,
+            scoreboard: None,
         }
     }
 
