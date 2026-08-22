@@ -1,4 +1,31 @@
-# Session handoff - 2026-08-22 (TGR_PC): Match Folder picker + export-to-folder + sync-offset prompt, upstream PR #476, scoreboard merged into main
+# Session handoff - 2026-08-22 (TGR_PC): Match Folder picker + export-to-folder + sync-offset prompt, upstream PR #476, Skia PR #477, scoreboard merged into main
+
+## 7. Todo review + Skia renderer PR #477 opened; cut-range PR explicitly held back
+
+User asked "wat staat er nog op todo" - compiled current state across
+memory + SESSION_HANDOFF (see chat for the full list: awaiting user
+input on YOLO recall + app icon, several merged-but-unconfirmed
+features, 16 open upstream PRs with zero merges in a month, known
+non-blocking bugs, paused research threads).
+
+User picked "Skia-renderer-switch and cut-range-feature: merged in
+main, no upstream PR yet" to act on. Scoped both before touching code:
+- **Skia renderer**: verified trivial - `origin/main` still uses
+  `renderer-femtovg-wgpu`, the exact same 2-line change from the
+  original 2026-08-12 work (Cargo.toml feature flag +
+  `default-font-family: "Segoe UI"`) applies cleanly with zero
+  adaptation, no Calibration/AppState coupling at all. Built fresh off
+  `origin/main`, verified (fmt/clippy/test 11/11/doc all clean, same
+  pre-existing #423-tracked failures elsewhere), opened as
+  [PR #477](https://github.com/reco-project/video-stitcher/pull/477),
+  confirmed `MERGEABLE`.
+- **Cut-range**: scoped as much bigger - `async_detect.rs` (the Async
+  Detect Thread feature this depends on for its VramPool/FrameBuffer
+  flush-on-cut logic) doesn't exist on `origin/main` at all, so a real
+  port would mean porting that feature first too. Flagged this to the
+  user before starting anything. **User said explicitly: hold off,
+  still testing this feature** - no PR opened, none planned until told
+  otherwise. See [[project_video_cutout_research]].
 
 ## 5. Sync-offset detect+save prompt after Select Match Folder
 
