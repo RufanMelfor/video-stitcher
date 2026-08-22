@@ -394,16 +394,20 @@ mod tests {
 
     #[test]
     fn default_calibration_none_when_file_no_longer_exists() {
-        let mut s = GuiSettings::default();
-        s.default_calibration_path = Some(PathBuf::from("does-not-exist.json"));
+        let s = GuiSettings {
+            default_calibration_path: Some(PathBuf::from("does-not-exist.json")),
+            ..Default::default()
+        };
         assert!(s.default_calibration().is_none());
     }
 
     #[test]
     fn default_calibration_returns_path_when_it_exists() {
         let paths = make_temp_files("default-cal", 1);
-        let mut s = GuiSettings::default();
-        s.default_calibration_path = Some(paths[0].clone());
+        let s = GuiSettings {
+            default_calibration_path: Some(paths[0].clone()),
+            ..Default::default()
+        };
         assert_eq!(s.default_calibration(), Some(paths[0].clone()));
     }
 
