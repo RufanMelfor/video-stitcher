@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=1920, initial-scale=1">
+    <title>Reco Football Scoreboard</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <main class="broadcast-safe-area" aria-label="Football scoreboard">
+        <section class="scoreboard">
+            <div class="team team-home">
+                <span class="team-label">HOME</span>
+                <div class="team-identity">
+                    <img id="home-logo" class="team-logo" alt="" hidden>
+                    <strong id="home-name" class="team-name">SHARKS FC</strong>
+                </div>
+                <span class="cards">
+                    <span id="home-yellow-wrap" class="card-badge card-yellow" hidden><strong id="home-yellow">0</strong></span>
+                    <span id="home-red-wrap" class="card-badge card-red" hidden><strong id="home-red">0</strong></span>
+                </span>
+            </div>
+            <strong id="home-score" class="score">2</strong>
+
+            <div class="game-center">
+                <span id="competition" class="competition">FRIENDLY</span>
+                <strong id="clock" class="clock">63:18</strong>
+                <span id="added-time-wrap" class="added-time" hidden>+<strong id="added-time">0</strong></span>
+                <span id="period" class="period">2nd Half</span>
+            </div>
+
+            <strong id="away-score" class="score">1</strong>
+            <div class="team team-away">
+                <span class="team-label">AWAY</span>
+                <div class="team-identity">
+                    <img id="away-logo" class="team-logo" alt="" hidden>
+                    <strong id="away-name" class="team-name">UNITED FC</strong>
+                </div>
+                <span class="cards">
+                    <span id="away-yellow-wrap" class="card-badge card-yellow" hidden><strong id="away-yellow">0</strong></span>
+                    <span id="away-red-wrap" class="card-badge card-red" hidden><strong id="away-red">0</strong></span>
+                </span>
+            </div>
+        </section>
+    </main>
+
+    <aside id="debug-controls" class="debug-controls" hidden>
+        <header>
+            <strong>Edit football scoreboard</strong>
+            <span id="editor-status">Live</span>
+        </header>
+        <label>Competition<input id="competition-input" type="text" maxlength="48"></label>
+        <div class="form-grid">
+            <label>Home team<input id="home-name-input" type="text" maxlength="24"></label>
+            <label>Away team<input id="away-name-input" type="text" maxlength="24"></label>
+            <label>Halves<input id="period-count-input" type="number" min="1" max="5"></label>
+            <label>Half length (min)<input id="period-duration-input" type="number" min="1" max="60"></label>
+            <label>Current half<input id="period-input" type="number" min="1" max="5"></label>
+            <label>Added time (min)<input id="added-time-input" type="number" min="0" max="15"></label>
+        </div>
+        <div class="button-row"><button data-score="home" data-points="1">Home goal +1</button><button data-score="away" data-points="1">Away goal +1</button></div>
+        <div class="button-row card-row"><button id="home-yellow-btn">Yellow Home</button><button id="away-yellow-btn">Yellow Away</button></div>
+        <div class="button-row card-row red"><button id="home-red-btn">Red Home</button><button id="away-red-btn">Red Away</button></div>
+        <div class="button-row"><button id="toggle-clock">Start clock</button><button id="reset-clock">Reset clock</button><button id="next-period">Next half</button></div>
+    </aside>
+
+    <script src="../sdk/reco-scoreboard.js"></script>
+    <script src="scoreboard.js"></script>
+</body>
+</html>
