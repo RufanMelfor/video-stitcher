@@ -1367,10 +1367,51 @@ confidence rises substantially across the board. If tiling were the
 cause the non-tiled run wouldn't reproduce it; it does, closely. Most
 likely explanation: combining projects 8/18/19/24 shifted the ball
 example distribution in a way that makes the model systematically more
-conservative on left-camera-style scenes specifically - not chased
-further yet (would need per-source-project confidence-distribution
-comparison, or a `dump_detection_frames` diff on specific left-camera
-frames the old checkpoint caught and the new one dropped).
+conservative on left-camera-style scenes specifically.
+
+## Root cause found: the merged data has a real "easy ball" size bias (2026-08-22, same session)
+
+Checked `training/merged_v1/labels/train` per source project (by
+filename prefix - `round4`, `ai_learning`, `rpc`, `vierluik`), counting
+ball (class 1) instances and mean normalized bbox area:
+
+```
+source        images  ball instances  balls/image  mean ball size (px, approx)
+round4         220     173             0.79          232
+ai_learning     85     122             1.44          251  (+8%)
+rpc             27      19             0.70          331  (+43%)
+vierluik        10       9             0.90          295  (+27%)
+```
+
+**`round4` - the only source that actually contains the 03 OJC match/
+camera this real-footage test uses - has the smallest average ball
+size of all four sources.** All three newly-merged sources skew
+larger/easier. `ai_learning` in particular was deliberately curated as
+"ball-richest frames" via `select_ball_rich_frames.py`'s teacher-model
+scoring, which selects for clearly-visible (and thus typically larger)
+balls by construction, not a representative sample of ball difficulty.
+
+Replacing ~46% of round4's training images with proportionally larger/
+easier ball examples explains the exact pattern seen in both real-
+footage tests: higher confidence everywhere (the model learned clean,
+large balls better) but lower recall specifically on hard/small cases
+like the left camera's - the same class of case round4-only training
+already struggled with, now pushed further by a training distribution
+that's even less representative of it.
+
+**This mirrors round-4's own original finding, inverted**: round-4
+concluded "more hard-frame data > augmentation" for improving ball
+recall. This round accidentally did the opposite - added more *easy*
+data, and recall regressed as a direct, predictable consequence, not a
+tiling artifact or a training instability.
+
+**Not shipping either new checkpoint. Next step, not started**: any
+future round on this merged pool should deliberately balance for
+ball-size/difficulty (e.g. weight or filter for small/hard ball
+examples specifically) rather than just adding more images -
+`ai_learning`-style "ball-richest" curation is good for finding *any*
+ball to bootstrap labels quickly, but is the wrong selection criterion
+for a training set meant to improve recall on hard cases.
 
 **Not shipping either new checkpoint (tiled or non-tiled) as a
 replacement.** Checkpoints kept for reference:
