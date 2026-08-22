@@ -1,4 +1,99 @@
-# Session handoff - 2026-08-21 (TGR_PC): Match Logger scoreboard overlay end-to-end
+# Session handoff - 2026-08-22 (TGR_PC): Match Folder picker + export-to-folder, upstream PR #476, scoreboard merged into main
+
+**Pushed to `github` (RufanMelfor/reco-video-stitcher-rig) main.** Two
+new features built and merged same day (see
+[[project_match_folder_picker]] for full detail), then ported to a new
+upstream PR, then the previously-held-back scoreboard branch merged in
+too on user request.
+
+## 1. reco-gui "Select Match Folder" picker (`951fe85d`)
+
+New `crates/reco-gui/src/match_folder.rs` module (unit-tested) scans a
+chosen match folder for case-insensitive `Left`/`Right` subfolders,
+collects+sorts each camera's videos, and derives a per-match calibration
+filename from the folder name. New "Select Match Folder..." button
+fills left/right/calibration in one pick (replaces, doesn't append to,
+the current selection). Calibration: reuses an existing per-match file,
+else copies the configured Default Calibration into the match folder,
+else leaves it unset. Extracted the duplicated InputPath-building logic
+from the manual Left/Right pickers into `input_path_from_picks`, reused
+by all three pickers.
+
+## 2. Export output suggested inside the match folder (`9290f26e`)
+
+When the current selection came from Select Match Folder, the export
+dialog now suggests an output path inside that folder, named after it
+(team names + date) - new `AppState::match_folder` field, cleared by any
+manual left/right re-pick.
+
+Both verified: `cargo fmt --check`/`clippy --features tensorrt
+--all-targets -D warnings`/`test --features tensorrt` all clean (44/44
+tests), debug+release builds both succeeded.
+
+## 3. Upstream PR #476 - hand-ported, not cherry-picked
+
+User asked to open a PR, which surfaced that PR #435 (Default
+Calibration, a dependency of the match-folder feature) had drifted into
+`CONFLICTING` against current `origin/main` - same architecture
+regression [[project_v054_upstream_sync]] found in August: upstream's
+current main is still on `MatchCalibration`/`cal_baseline_layout`/
+`bridge.renderer()`, not the `Calibration`/`bridge.engine()` model our
+main uses. Hand-ported all 3 commits (plus #435's own commit) onto a
+fresh branch off `origin/main`, resolving real conflicts by checking
+each cherry-pick's actual diff (`git diff <commit>~1 <commit>`) against
+what the 3-way merge proposed - several conflict "resolutions" the
+naive cherry-pick suggested were actually unrelated content bleeding in
+from OTHER not-yet-ported features on our internal main (AKAZE preview,
+segment-restart-persistence, in-app ROI editor tests) and had to be
+dropped, not merged in. Also: upstream's `main.slint` has no
+`FlatButton` (fork-only unmerged restyle) - swapped to plain `Button`.
+
+Verified reco-gui itself 100% clippy-clean on the ported branch (used
+temporary local `#[allow(...)]` in unrelated crates to see past 6
+pre-existing, already-tracked-by-#423 failures in
+reco-core/reco-detect/reco-io/reco-autocam, then reverted those before
+committing - never fix another PR's scope as a side effect). 25/25
+tests, fmt clean, both debug+release build clean.
+
+PR #476 opened, confirmed `MERGEABLE` (no conflicts) against
+`origin/main`. Old PR #435 closed with a comment pointing to #476.
+
+**Owner status check while doing this**: `gh pr list --author
+RufanMelfor --state all` shows the owner has merged ZERO of the 16
+still-open PRs in over a month since the first batch (2026-07-16). Two
+(#422, #424) closed unmerged back on 2026-07-21, likely superseded by
+the [[project_v054_upstream_sync]] hand-port rather than rejected.
+
+## 4. Scoreboard merged into main (user request)
+
+User asked mid-session to include the scoreboard in the next build for
+continued testing. `feat/scoreboard-overlay` (held back since
+2026-08-21 pending more testing, see
+[[project_match_logger_scoreboard]]) merged into `main` with `--no-ff`,
+clean (no conflicts, verified via `git merge-tree` first). Combined
+build (match-folder-picker + export-to-folder + scoreboard) verified:
+`cargo fmt --all --check` clean, `cargo clippy -p reco-gui --features
+tensorrt --all-targets -D warnings` clean, `cargo test -p reco-gui
+--features tensorrt` 57/57 pass, both debug and release
+(`reco-gui.exe`, `--features tensorrt`) built successfully. Pushed to
+`github` main (`181c6100`).
+
+## 5. PR #476 CI: Security Audit job failing, unrelated to this PR
+
+User asked about a "Rust CI / Security Audit (pull_request) Failing
+after 17s" GitHub notification on #476. Root cause (pulled the actual
+job log via `gh run view --job <id> --log`): the job's `cargo install
+cargo-audit` step fails because `cargo-audit`'s own transitive
+dependency `kstring@2.0.4` now requires rustc 1.96.0, but this repo's
+CI pins 1.92.0 (same version the separate, passing "MSRV (1.92.0)" job
+uses). Confirmed via `gh run list --workflow "Rust CI" --branch main`
+that this same job has been failing on upstream's own `main` branch
+since 2026-07-21 - a repo-wide, pre-existing CI/tooling issue, nothing
+to do with #476's content. All other checks on #476 pass (Check &
+Lint, Test, Documentation, every platform Check, cargo-deny, CLA,
+Secret Scanning).
+
+
 
 **Pushed to `github` (RufanMelfor/reco-video-stitcher-rig), branch
 `feat/scoreboard-overlay` (16 commits). Not merged into `main` yet -
