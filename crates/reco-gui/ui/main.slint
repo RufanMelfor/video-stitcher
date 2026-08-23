@@ -1095,6 +1095,7 @@ export component RecoApp inherits Window {
     // persistence in `on_pick_export_model`) or the progress/status
     // fields below (not tuning parameters).
     callback autocam-settings-changed();
+    changed export-autocam-enabled => { root.autocam-settings-changed(); }
     changed export-tracking-mode => { root.autocam-settings-changed(); }
     changed export-detection-interval => { root.autocam-settings-changed(); }
     changed export-player-anchor-rad => { root.autocam-settings-changed(); }
@@ -3724,7 +3725,12 @@ export component RecoApp inherits Window {
                         horizontal-stretch: 1;
                         height: 20px;
 
-                        // Export range indicator (green tint behind the slider)
+                        // Export range indicator (green tint) - visual layer
+                        // only here, kept below the Slider in z-order like
+                        // before; the draggable version (with edge handles)
+                        // is drawn again, on top of the Slider, right after
+                        // it - see that copy's comment for why it can't just
+                        // live here.
                         if root.export-start-secs > 0 || root.export-end-secs < root.clip-duration-secs: Rectangle {
                             property <float> start-frac: root.clip-duration-secs > 0
                                 ? root.export-start-secs / root.clip-duration-secs : 0;
@@ -3746,6 +3752,66 @@ export component RecoApp inherits Window {
                             enabled: root.files-loaded;
                             released(val) => {
                                 if root.total-frames > 0 { root.seek(val / root.total-frames); }
+                            }
+                        }
+
+                        // Draggable edge handles for the export range, same
+                        // ew-resize convention as the cut-range bands below -
+                        // drawn on top of the Slider (this block, unlike the
+                        // tint above, must come after it) so the handles
+                        // actually receive drag events instead of the Slider
+                        // swallowing them. Updates root.export-start-secs/
+                        // -end-secs live - no Rust round-trip needed (unlike
+                        // cut-ranges, these are plain two-way `in-out`
+                        // properties, not a Rust-owned list).
+                        if root.export-start-secs > 0 || root.export-end-secs < root.clip-duration-secs: Rectangle {
+                            // Captured from `parent` rather than a named
+                            // self-reference - see the cut-range bands'
+                            // `track-width` comment below for why
+                            // (unsized-on-first-layout-pass gotcha).
+                            property <length> track-width: parent.width;
+                            property <float> start-frac: root.clip-duration-secs > 0
+                                ? root.export-start-secs / root.clip-duration-secs : 0;
+                            property <float> end-frac: root.clip-duration-secs > 0
+                                ? root.export-end-secs / root.clip-duration-secs : 1.0;
+
+                            x: track-width * start-frac;
+                            width: track-width * (end-frac - start-frac);
+                            height: parent.height;
+                            background: transparent;
+                            clip: false;
+
+                            Rectangle {
+                                x: 0px;
+                                width: 5px;
+                                height: parent.height;
+                                background: #ffffff70;
+                                TouchArea {
+                                    mouse-cursor: ew-resize;
+                                    moved => {
+                                        if self.pressed && track-width > 0px {
+                                            root.export-start-secs = max(0, min(
+                                                root.export-start-secs + (self.mouse-x - self.pressed-x) / track-width * root.clip-duration-secs,
+                                                root.export-end-secs - 0.2));
+                                        }
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                x: parent.width - 5px;
+                                width: 5px;
+                                height: parent.height;
+                                background: #ffffff70;
+                                TouchArea {
+                                    mouse-cursor: ew-resize;
+                                    moved => {
+                                        if self.pressed && track-width > 0px {
+                                            root.export-end-secs = min(root.clip-duration-secs, max(
+                                                root.export-end-secs + (self.mouse-x - self.pressed-x) / track-width * root.clip-duration-secs,
+                                                root.export-start-secs + 0.2));
+                                        }
+                                    }
+                                }
                             }
                         }
 

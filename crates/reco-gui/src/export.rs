@@ -31,6 +31,17 @@ pub struct ScoreboardReplay {
 /// independently pushes replayed state into it (`update`, only needs
 /// `&self`) from the same underlying runtime - `update()`'s effect is a
 /// non-blocking channel send, so the two never actually contend.
+///
+/// No longer gates on a "first push landed" flag (an earlier version
+/// of this did) - that only masked the symptom and raced against the
+/// browser's own async capture loop besides (the flag could flip true
+/// before a *fresh* screenshot reflecting the push had actually been
+/// captured, so the very next pull could still hand back the stale
+/// placeholder). The real fix is at the source: `run_export` now seeds
+/// `ScoreboardRuntime::start_with_state` with the *correct* frame-0
+/// state up front, so the very first screenshot the browser ever
+/// takes already matches - see the `initial_scoreboard_state` doc
+/// comment there.
 struct SharedScoreboardSource(Arc<Mutex<reco_scoreboard::ScoreboardRuntime>>);
 
 impl OverlayFrameSource for SharedScoreboardSource {
@@ -247,7 +258,29 @@ pub fn run_export(
         } else {
             full_total
         };
-        let range_total = end_frames.saturating_sub(start_frames);
+        let naive_total = end_frames.saturating_sub(start_frames);
+        // `naive_total` (the plain start/end span) is what "remaining
+        // time" used to divide against unconditionally - wrong the
+        // moment cut ranges are in play (it never subtracted the
+        // excluded time) and, once the pause overlay shipped, also
+        // missing its added hold frames. `planned_output_frames`
+        // mirrors StitchJob::run's own frame-count math exactly; only
+        // fall back to the naive span if it can't compute (e.g. an
+        // invalid cut range - StitchJob::run will surface that error
+        // properly once the export actually starts).
+        let overlay_cfg = pause_overlay.and_then(|(fade_secs, hold_secs)| {
+            reco_core::render::pause_overlay::PauseOverlayConfig::new(fade_secs, hold_secs, "PAUZE")
+                .ok()
+        });
+        let range_total = reco_io::cut_range::planned_output_frames(
+            start_secs as f64,
+            (end_secs > 0.0).then_some(end_secs as f64),
+            &cut_ranges,
+            fps,
+            None,
+            overlay_cfg.as_ref(),
+        )
+        .unwrap_or(naive_total);
         let weak = app_weak.clone();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(app) = weak.upgrade() {
@@ -327,19 +360,97 @@ pub fn run_export(
     .seam_offset(seam_offset)
     .metadata_comment(metadata_comment);
 
+    // Real video-time fps for the replay below - distinct from the
+    // encode-throughput `fps` computed inside the progress closure for the
+    // ETA display (frames processed per wall-clock second), which is a
+    // different quantity despite the name collision.
+    let video_fps = fps;
+    // Precomputed once, *before* the scoreboard runtime starts below (see
+    // `initial_scoreboard_state` right after): the same output-frame ->
+    // source-seconds mapping the real export uses
+    // (`reco_io::cut_range::output_frame_to_source_secs`). Replaces a
+    // naive `start_secs + frames/video_fps` formula that was exact for a
+    // plain start/end trim but drifted behind by roughly a cut's own
+    // duration after each one - visible as the on-screen clock stalling
+    // for a long stretch right after a mid-match pause instead of
+    // resuming immediately. `validate_cut_ranges` failing here (a
+    // malformed cut) falls back to treating the whole export as one
+    // unbroken span rather than blocking the replay entirely -
+    // `StitchJob::run` still surfaces the real error through the normal
+    // export-failure path.
+    let replay_keep_windows = reco_io::cut_range::validate_cut_ranges(cut_ranges.clone())
+        .map(|sorted| {
+            reco_io::cut_range::keep_windows(
+                start_secs as f64,
+                (end_secs > 0.0).then_some(end_secs as f64),
+                &sorted,
+            )
+        })
+        .unwrap_or_else(|_| {
+            vec![(
+                start_secs as f64,
+                (end_secs > 0.0).then_some(end_secs as f64),
+            )]
+        });
+    let mut replay_window_limits =
+        reco_io::cut_range::window_limits(&replay_keep_windows, video_fps, None);
+    if let Some((fade_secs, hold_secs)) = pause_overlay
+        && let Ok(overlay_cfg) =
+            reco_core::render::pause_overlay::PauseOverlayConfig::new(fade_secs, hold_secs, "PAUZE")
+    {
+        reco_io::cut_range::extend_for_pause_overlay(
+            &replay_keep_windows,
+            &mut replay_window_limits,
+            video_fps,
+            u64::MAX,
+            &overlay_cfg,
+        );
+    }
+
+    // The state to seed the scoreboard runtime's *very first* rendered
+    // frame with. When a live Match Logger replay is configured, this is
+    // the correct state for output frame 0 (not `scoreboard_state`'s
+    // usually-unrelated frozen live-preview snapshot, and not the
+    // package's own placeholder HTML either) - computed and pushed
+    // *before* the runtime's first screenshot is ever taken, so there's
+    // no async gap for a wrong frame to show in. An earlier fix tried to
+    // paper over this by withholding overlay frames until the on_progress
+    // closure's first push landed, but that raced the browser's own
+    // async capture loop (the "ready" flag could flip true before a
+    // *fresh* screenshot reflecting the push had actually been captured)
+    // and was found not to reliably fix it - this is the real fix, at
+    // the source.
+    let initial_scoreboard_state = match scoreboard_replay.as_ref() {
+        Some(replay) => {
+            let video_seconds = reco_io::cut_range::output_frame_to_source_secs(
+                0,
+                &replay_keep_windows,
+                &replay_window_limits,
+                video_fps,
+            );
+            let state =
+                crate::scoreboard_import::state_at(&replay.export, &replay.anchor, video_seconds);
+            Some(crate::scoreboard_import::apply_style(
+                state,
+                &scoreboard_style,
+            ))
+        }
+        None => scoreboard_state,
+    };
+
     // Scoreboard runtime is started before `.on_progress` (not inline with
     // `.on_session` below, as PR #474 originally had it) so a shared
     // handle can also be captured into the progress callback - that's what
     // lets a Match Logger replay actually change the on-screen score/
     // clock/cards over the course of the export instead of freezing
-    // whatever `scoreboard_state` held at the moment export started.
+    // whatever `initial_scoreboard_state` held at the moment export started.
     let scoreboard_shared: Option<Arc<Mutex<reco_scoreboard::ScoreboardRuntime>>> =
         match scoreboard_package {
             Some(package) => {
                 match reco_scoreboard::ScoreboardRuntime::start_with_state(
                     package,
                     30,
-                    scoreboard_state,
+                    initial_scoreboard_state,
                 ) {
                     Ok(runtime) => Some(Arc::new(Mutex::new(runtime))),
                     Err(error) => {
@@ -357,19 +468,28 @@ pub fn run_export(
             }
             None => None,
         };
-
-    // Real video-time fps for the replay below - distinct from the
-    // encode-throughput `fps` computed inside the progress closure for the
-    // ETA display (frames processed per wall-clock second), which is a
-    // different quantity despite the name collision.
-    let video_fps = fps;
     let replay_runtime = scoreboard_shared.clone();
-    // Approximates true source position as `start_secs + frames/video_fps`,
-    // which is exact for a plain start/end trim but doesn't account for
-    // `cut_ranges` removing segments mid-export - acceptable drift for a
-    // scoreboard (seconds-scale granularity), not attempted here.
-    let replay_start_secs = start_secs as f64;
     let mut last_replay_frames: Option<u64> = None;
+
+    // Diagnostic: which scoreboard source (if any) this export actually
+    // has, so a stuck/wrong on-screen scoreboard can be told apart from
+    // "no replay was ever wired up" at a glance in the log instead of
+    // by guessing. See the update() logging below for the other half.
+    if replay_runtime.is_some() {
+        match scoreboard_replay.as_ref() {
+            Some(replay) => log::info!(
+                "Scoreboard: live Match Logger replay active ({} events)",
+                replay.export.event_count()
+            ),
+            None => log::info!(
+                "Scoreboard: showing a single frozen snapshot only (no Match Logger \
+                 replay wired up - scoreboard_import/scoreboard_sync_anchor not both \
+                 set when export started)"
+            ),
+        }
+    } else {
+        log::info!("Scoreboard: disabled for this export");
+    }
 
     job = job.on_progress(move |p: &reco_core::session::types::FrameProgress| {
         let frames = p.frames_completed;
@@ -388,16 +508,44 @@ pub fn run_export(
             let due = last_replay_frames
                 .is_none_or(|last| frames.saturating_sub(last) as f64 >= video_fps.max(1.0));
             if due {
+                let first_push = last_replay_frames.is_none();
                 last_replay_frames = Some(frames);
-                let video_seconds = replay_start_secs + frames as f64 / video_fps.max(1.0);
+                let video_seconds = reco_io::cut_range::output_frame_to_source_secs(
+                    frames,
+                    &replay_keep_windows,
+                    &replay_window_limits,
+                    video_fps,
+                );
                 let state = crate::scoreboard_import::state_at(
                     &replay.export,
                     &replay.anchor,
                     video_seconds,
                 );
                 let state = crate::scoreboard_import::apply_style(state, &scoreboard_style);
-                if let Ok(runtime) = runtime.lock() {
-                    let _ = runtime.update(&state);
+                match runtime.lock() {
+                    Ok(runtime) => match runtime.update(&state) {
+                        Ok(()) => {
+                            if first_push {
+                                log::info!(
+                                    "Scoreboard: first replay push succeeded (video_seconds={video_seconds:.1}s)"
+                                );
+                            }
+                        }
+                        // Previously silently swallowed (`let _ =`) - a
+                        // failure here is exactly what would leave the
+                        // on-screen scoreboard stuck on its last-good
+                        // (or, if this is the very first push, its
+                        // built-in placeholder) state for the rest of
+                        // the export with no visible sign why.
+                        Err(error) => {
+                            log::warn!(
+                                "Scoreboard: replay push failed at video_seconds={video_seconds:.1}s: {error}"
+                            );
+                        }
+                    },
+                    Err(_) => {
+                        log::warn!("Scoreboard: replay push skipped, runtime lock poisoned");
+                    }
                 }
             }
         }
@@ -423,12 +571,15 @@ pub fn run_export(
         });
     });
 
-    let scoreboard_will_show = scoreboard_shared.is_some();
     if let Some(shared) = scoreboard_shared {
-        job = job.on_session(move |session, _source| {
-            session.set_overlay_placement(scoreboard_placement);
-            session.set_overlay_source(Box::new(SharedScoreboardSource(shared)));
-        });
+        // Registered as a layer (not `on_session` + `set_overlay_source`
+        // directly) so it composites cleanly with the "PAUZE" pause
+        // overlay below when both are enabled, always drawn on top of
+        // it - see `StitchJob::overlay_layer`'s doc comment.
+        job = job.overlay_layer(
+            Box::new(SharedScoreboardSource(shared)),
+            scoreboard_placement,
+        );
     }
 
     if start_secs > 0.0 {
@@ -454,20 +605,6 @@ pub fn run_export(
         job = job.cut_ranges(cut_ranges);
     }
     if let Some((fade_secs, hold_secs)) = pause_overlay {
-        if scoreboard_will_show {
-            // StitchJob::pause_overlay's doc comment: both claim the
-            // session's single overlay slot, and pause_overlay is
-            // attached after session_hooks (which is where the
-            // scoreboard's own set_overlay_source call above runs) -
-            // so it wins and the scoreboard silently stops appearing.
-            // Not fixed yet (needs a real compositor, not a slot);
-            // surfaced here instead of silently losing the scoreboard.
-            log::warn!(
-                "Both a scoreboard and the PAUZE pause-overlay are enabled - only the \
-                 PAUZE overlay will actually show during export (they share one overlay \
-                 slot; combining them isn't supported yet)"
-            );
-        }
         job = job.pause_overlay(fade_secs, hold_secs);
     }
 

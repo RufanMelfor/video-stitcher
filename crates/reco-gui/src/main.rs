@@ -284,6 +284,14 @@ struct AppState {
     /// those - any manually added/edited cut ranges are left alone. Empty
     /// when the toggle is off.
     scoreboard_derived_cut_ranges: Vec<(f64, f64)>,
+    /// The `export-start-secs` value last set by that same toggle (see
+    /// `scoreboard_import::derived_start_secs`), so turning it off only
+    /// resets the field if the user hasn't since edited it by hand -
+    /// same "only touch what we own" idea as
+    /// `scoreboard_derived_cut_ranges`, just for a single scalar instead
+    /// of a list. `None` when the toggle is off or never suggested one
+    /// (no `period_start` event to derive from).
+    scoreboard_derived_start_secs: Option<f32>,
     recording_tx: Option<std::sync::mpsc::SyncSender<RecordingFrame>>,
     recording_thread: Option<std::thread::JoinHandle<()>>,
     recording_path: Option<PathBuf>,
@@ -639,6 +647,7 @@ impl AppState {
             scoreboard_placement: reco_core::render::overlay::OverlayPlacement::default(),
             scoreboard_style: scoreboard_import::ScoreboardStyle::default(),
             scoreboard_derived_cut_ranges: Vec::new(),
+            scoreboard_derived_start_secs: None,
             recording_tx: None,
             recording_thread: None,
             recording_path: None,
@@ -1987,6 +1996,15 @@ fn refresh_derived_cut_ranges(s: &mut AppState, app: &RecoApp) {
     if !previous.is_empty() {
         s.cut_ranges.retain(|r| !previous.contains(r));
     }
+    // Same "only touch what we own" idea for export-start-secs (see
+    // `scoreboard_derived_start_secs`'s doc comment) - only reset it if
+    // it still holds exactly what we last suggested, so a manual edit
+    // since then survives toggling this off.
+    if let Some(previous_start) = s.scoreboard_derived_start_secs.take()
+        && app.get_export_start_secs() == previous_start
+    {
+        app.set_export_start_secs(0.0);
+    }
     if let (Some(export), Some(anchor)) = (
         s.scoreboard_import.as_ref(),
         s.scoreboard_sync_anchor.as_ref(),
@@ -1994,6 +2012,16 @@ fn refresh_derived_cut_ranges(s: &mut AppState, app: &RecoApp) {
         let derived = scoreboard_import::derived_cut_ranges(export, anchor, 2.0);
         s.cut_ranges.extend(derived.iter().copied());
         s.scoreboard_derived_cut_ranges = derived;
+
+        // Pre-roll trim is a --start-time seek, not a cut range - see
+        // `scoreboard_import::derived_start_secs`'s doc comment for why
+        // (also fixes a real bug: a cut range starting at the export's
+        // own start wasn't actually being skipped).
+        if let Some(start_secs) = scoreboard_import::derived_start_secs(export, anchor, 2.0) {
+            let start_secs = start_secs as f32;
+            app.set_export_start_secs(start_secs);
+            s.scoreboard_derived_start_secs = Some(start_secs);
+        }
     }
     sync_cut_ranges(s, app);
 }
@@ -2552,6 +2580,16 @@ fn snapshot_scoreboard_settings(
     }
 }
 
+/// Persist the scoreboard's current settings at app level (see
+/// `GuiSettings::scoreboard_settings`'s doc comment) - call after any
+/// change `snapshot_scoreboard_settings` would reflect. Takes `&mut
+/// AppState` directly (not `Rc<RefCell<AppState>>`) so it composes
+/// with a handler that already holds a `borrow_mut()`.
+fn persist_scoreboard_settings(app: &RecoApp, s: &mut AppState) {
+    let sb = snapshot_scoreboard_settings(app, s);
+    s.user_settings.set_scoreboard_settings(sb);
+}
+
 /// Restore a persisted `ScoreboardSettings` onto the SCOREBOARD card and
 /// `AppState` - the inverse of `snapshot_scoreboard_settings`. Re-reads
 /// the Match Logger export and team logos from their saved paths rather
@@ -2691,6 +2729,17 @@ fn apply_scoreboard_settings(
     }
 
     s.preview_dirty = true;
+
+    // `app.set_scoreboard_scale` above two-way-binds to a Slider with a
+    // `changed` callback wired to `changed-scoreboard-placement`, which
+    // fires synchronously and re-persists via `persist_scoreboard_settings`
+    // - but at that point in this function the logo/font/logo-size/banner/
+    // derive-cut-ranges fields set further down hadn't been applied yet,
+    // so that mid-restore write saves a placement-correct-but-otherwise-
+    // stale snapshot. Persisting again here, now that every field is
+    // actually applied, overwrites that stale write with the real state
+    // so the next restore reads back what was actually restored.
+    persist_scoreboard_settings(app, &mut s);
 }
 
 fn main() -> anyhow::Result<()> {
@@ -2773,6 +2822,25 @@ fn main() -> anyhow::Result<()> {
             apply_autocam_defaults(&app, ac);
             log::info!("Restored AI Tracking defaults from last session");
         }
+        // "AI Tracking"/"Async Detect" checkboxes: always app-level,
+        // never overridden by a calibration's own autocam_defaults (see
+        // GuiSettings::autocam_enabled's doc comment) - restored here
+        // unconditionally, not gated on autocam_defaults existing.
+        app.set_export_autocam_enabled(s.user_settings.autocam_enabled);
+        app.set_export_async_detect(s.user_settings.async_detect_enabled);
+    }
+
+    // App-level SCOREBOARD card settings, same "restore before any
+    // calibration" precedence as AI Tracking above - a calibration
+    // with its own `scoreboard` field still overrides this once
+    // loaded (the `RenderingSetup` branch below). Cloned out of its
+    // own short borrow first: `apply_scoreboard_settings` takes the
+    // `Rc<RefCell<AppState>>` directly and does its own `borrow_mut()`,
+    // which would panic (already borrowed) inside the block above.
+    let restored_scoreboard = state.borrow().user_settings.scoreboard_settings.clone();
+    if let Some(sb) = restored_scoreboard.as_ref() {
+        apply_scoreboard_settings(&state, &app, sb);
+        log::info!("Restored SCOREBOARD settings from last session");
     }
 
     // Reopen the last-used left/right video and calibration file (if they
@@ -2805,6 +2873,15 @@ fn main() -> anyhow::Result<()> {
             app.set_right_path(label.into());
             s.right_input = Some(input);
             s.right_path = Some(first);
+        }
+        // Restore the match-folder export-suggestion link too (see
+        // `GuiSettings::last_match_folder`'s doc comment) - without
+        // this, a restart would still reopen the same left/right
+        // videos but silently lose "suggest the export path inside
+        // the match folder" and fall back to "next to the left video"
+        // (i.e. inside its `Left/` subfolder) instead.
+        if let Some(folder) = s.user_settings.last_match_folder.clone() {
+            s.match_folder = Some(folder);
         }
         // Prefer the last calibration actually used in a session; only
         // fall back to the user's configured default when there's no
@@ -3042,8 +3119,11 @@ fn main() -> anyhow::Result<()> {
             s.left_input = Some(input);
             s.left_path = Some(first);
             // A manual pick no longer necessarily matches this match
-            // folder's `Left` subdir - drop the export-suggestion link.
+            // folder's `Left` subdir - drop the export-suggestion link
+            // (both the live one and the persisted one, so a stale
+            // folder doesn't come back on the next restart either).
             s.match_folder = None;
+            s.user_settings.last_match_folder = None;
             s.persist_left_segments();
             drop(s);
             try_init_and_update(&state_ref, &app_weak);
@@ -3099,6 +3179,7 @@ fn main() -> anyhow::Result<()> {
             s.right_path = Some(first);
             // See the matching comment in `on_pick_left_video`.
             s.match_folder = None;
+            s.user_settings.last_match_folder = None;
             s.persist_right_segments();
             drop(s);
             try_init_and_update(&state_ref, &app_weak);
@@ -3162,6 +3243,9 @@ fn main() -> anyhow::Result<()> {
 
         let mut s = state_ref.borrow_mut();
         s.match_folder = Some(folder.clone());
+        // Saved below via persist_left_segments/persist_right_segments
+        // (both call UserSettings::save()) - no separate save() needed.
+        s.user_settings.last_match_folder = Some(folder.clone());
 
         let left_input = input_path_from_picks(scan.left_videos, None, "Left");
         let right_input = input_path_from_picks(scan.right_videos, None, "Right");
@@ -4161,6 +4245,7 @@ fn main() -> anyhow::Result<()> {
         if network_editor_url.is_none() {
             app.set_scoreboard_share_dialog_open(false);
         }
+        persist_scoreboard_settings(&app, &mut s);
     });
 
     let app_weak = app.as_weak();
@@ -4266,6 +4351,7 @@ fn main() -> anyhow::Result<()> {
                 if app.get_scoreboard_derive_cut_ranges() {
                     refresh_derived_cut_ranges(&mut state_ref.borrow_mut(), &app);
                 }
+                persist_scoreboard_settings(&app, &mut state_ref.borrow_mut());
             }
             Err(error) => {
                 app.set_scoreboard_error_text(error.to_string().into());
@@ -4305,6 +4391,7 @@ fn main() -> anyhow::Result<()> {
         if app.get_scoreboard_derive_cut_ranges() {
             refresh_derived_cut_ranges(&mut s, &app);
         }
+        persist_scoreboard_settings(&app, &mut s);
     });
 
     let app_weak = app.as_weak();
@@ -4320,6 +4407,7 @@ fn main() -> anyhow::Result<()> {
                 s.cut_ranges.retain(|r| !previous.contains(r));
             }
             sync_cut_ranges(&s, &app);
+            persist_scoreboard_settings(&app, &mut s);
             return;
         }
         if s.scoreboard_import.is_none() || s.scoreboard_sync_anchor.is_none() {
@@ -4330,6 +4418,7 @@ fn main() -> anyhow::Result<()> {
             return;
         }
         refresh_derived_cut_ranges(&mut s, &app);
+        persist_scoreboard_settings(&app, &mut s);
     });
 
     let app_weak = app.as_weak();
@@ -4354,6 +4443,7 @@ fn main() -> anyhow::Result<()> {
         // a huge, unusable lag. seam_drag (same kind of live-drag-a-render-
         // parameter interaction) sets this for the same reason.
         s.preview_dirty = true;
+        persist_scoreboard_settings(&app, &mut s);
     });
 
     let app_weak = app.as_weak();
@@ -4386,7 +4476,9 @@ fn main() -> anyhow::Result<()> {
                 // See on_changed_scoreboard_placement's comment - the same
                 // gate applies to picking up the re-rendered overlay
                 // texture once push_scoreboard_replay pushes this change.
-                state_ref.borrow_mut().preview_dirty = true;
+                let mut s = state_ref.borrow_mut();
+                s.preview_dirty = true;
+                persist_scoreboard_settings(&app, &mut s);
             }
             Err(message) => {
                 app.set_scoreboard_error_text(message.into());
@@ -4394,8 +4486,12 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
+    let app_weak = app.as_weak();
     let state_ref = Rc::clone(&state);
     app.on_changed_scoreboard_font(move |font| {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
         let mut s = state_ref.borrow_mut();
         s.scoreboard_style.font_family = if font.is_empty() {
             None
@@ -4403,17 +4499,27 @@ fn main() -> anyhow::Result<()> {
             Some(font.to_string())
         };
         s.preview_dirty = true;
+        persist_scoreboard_settings(&app, &mut s);
     });
 
+    let app_weak = app.as_weak();
     let state_ref = Rc::clone(&state);
     app.on_changed_scoreboard_logo_size(move |size| {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
         let mut s = state_ref.borrow_mut();
         s.scoreboard_style.logo_size_px = Some(size);
         s.preview_dirty = true;
+        persist_scoreboard_settings(&app, &mut s);
     });
 
+    let app_weak = app.as_weak();
     let state_ref = Rc::clone(&state);
     app.on_changed_scoreboard_banner_color(move |preset_name| {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
         // Curated presets, matching the ComboBox in main.slint - a full
         // color picker isn't otherwise used anywhere in reco-gui yet, so
         // this stays consistent with the Font dropdown right above it
@@ -4429,6 +4535,7 @@ fn main() -> anyhow::Result<()> {
         let mut s = state_ref.borrow_mut();
         s.scoreboard_style.banner_color = hex.map(str::to_string);
         s.preview_dirty = true;
+        persist_scoreboard_settings(&app, &mut s);
     });
 
     // ── Auto-calibration callback ──
@@ -5967,10 +6074,15 @@ fn main() -> anyhow::Result<()> {
     app.on_autocam_settings_changed(move || {
         if let Some(app) = app_weak.upgrade() {
             let ac = snapshot_autocam_defaults(&app);
-            state_ref
-                .borrow_mut()
-                .user_settings
-                .set_autocam_defaults(ac);
+            let mut s = state_ref.borrow_mut();
+            s.user_settings.set_autocam_defaults(ac);
+            // "AI Tracking"/"Async Detect" checkboxes: app-level only,
+            // deliberately not part of `AutocamDefaults` - see
+            // `GuiSettings::autocam_enabled`'s doc comment.
+            s.user_settings.set_ai_toggle_defaults(
+                app.get_export_autocam_enabled(),
+                app.get_export_async_detect(),
+            );
         }
     });
 
@@ -7162,7 +7274,26 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 // has to be released for the duration of the call - it's
                 // re-borrowed right after to keep the rest of this
                 // function (VRAM checks etc. below) working unchanged.
-                if let Some(sb) = s.calibration.as_ref().and_then(|c| c.scoreboard.clone()) {
+                if let Some(mut sb) = s.calibration.as_ref().and_then(|c| c.scoreboard.clone()) {
+                    // The calibration's own copy of the "preference"-style
+                    // fields (placement, banner color, font, logo size,
+                    // auto-cut) is whatever was true when THIS calibration
+                    // was last saved - it goes stale the moment the user
+                    // tweaks those app-wide from a different match, and
+                    // applying it here would silently undo the app-level
+                    // persistence added for exactly this reason (see
+                    // `persist_scoreboard_settings`). Match-specific bits
+                    // (Match Logger export, sync anchor, team logos,
+                    // package/enabled) still come from the calibration.
+                    // The app-level settings win for the rest whenever
+                    // they exist.
+                    if let Some(app_sb) = s.user_settings.scoreboard_settings.clone() {
+                        sb.placement = app_sb.placement;
+                        sb.banner_color_name = app_sb.banner_color_name;
+                        sb.font_family = app_sb.font_family;
+                        sb.logo_size_px = app_sb.logo_size_px;
+                        sb.derive_cut_ranges = app_sb.derive_cut_ranges;
+                    }
                     drop(s);
                     apply_scoreboard_settings(state, &app, &sb);
                     s = state.borrow_mut();
