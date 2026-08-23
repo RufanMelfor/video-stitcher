@@ -168,6 +168,25 @@ enum Commands {
         #[arg(long = "cut-range", value_name = "START:END", value_parser = parse_cut_range)]
         cut_range: Vec<reco_io::cut_range::CutRange>,
 
+        /// Show a "PAUZE" dip-to-black transition at every --cut-range
+        /// boundary instead of an instant content jump. No effect
+        /// without --cut-range.
+        #[arg(long)]
+        pause_overlay: bool,
+
+        /// Fade duration (seconds) on each side of the --pause-overlay
+        /// transition - composited over content already being shown,
+        /// so it adds no extra output duration.
+        #[arg(long, default_value_t = 3.0)]
+        pause_overlay_fade: f32,
+
+        /// How long (seconds) the --pause-overlay stays fully opaque
+        /// between the two fades. The only part of the transition that
+        /// lengthens the export; silently clamped per-cut when a cut
+        /// range is shorter than this.
+        #[arg(long, default_value_t = 4.0)]
+        pause_overlay_hold: f32,
+
         /// Force a specific encoder (e.g., h264_nvenc, hevc_nvenc, libx264). Auto-detects by default.
         #[arg(long)]
         encoder: Option<String>,
@@ -958,6 +977,9 @@ fn main() -> anyhow::Result<()> {
             end_time,
             max_frames,
             cut_range,
+            pause_overlay,
+            pause_overlay_fade,
+            pause_overlay_hold,
             encoder,
             codec,
             quality,
@@ -1007,6 +1029,7 @@ fn main() -> anyhow::Result<()> {
                 end_time,
                 max_frames,
                 cut_ranges: cut_range,
+                pause_overlay: pause_overlay.then_some((pause_overlay_fade, pause_overlay_hold)),
                 encoder_name: encoder,
                 codec: &codec,
                 quality: &quality,

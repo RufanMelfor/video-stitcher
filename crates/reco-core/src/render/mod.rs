@@ -11,6 +11,8 @@ mod color_match;
 pub mod lookahead_downconvert;
 #[cfg(feature = "gpu")]
 pub mod overlay;
+#[cfg(feature = "gpu")]
+pub mod pause_overlay;
 pub mod pipeline;
 pub mod planes;
 #[cfg(feature = "gpu")]

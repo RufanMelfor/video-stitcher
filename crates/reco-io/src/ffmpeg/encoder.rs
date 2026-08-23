@@ -457,6 +457,20 @@ pub struct EncoderConfig {
     /// passthrough with a logged warning rather than silently
     /// misbehaving.
     pub audio_cut_windows: Vec<(f64, Option<f64>)>,
+    /// Extra silent gap (seconds) to insert at each `audio_cut_windows`
+    /// boundary, in the same order `audio_cut_windows`' internal
+    /// boundaries are crossed - the audio counterpart of the video
+    /// side's "PAUZE" overlay hold (`reco_core::render::pause_overlay`,
+    /// `reco_io::cut_range::extend_for_pause_overlay`): video keeps
+    /// `hold_secs` of extra (visually hidden) real frames at a cut, so
+    /// audio must advance its own output timeline by the same amount
+    /// to stay in sync, even though nothing is actually written for
+    /// it - real audio resumes exactly `hold_secs` later than it
+    /// otherwise would have. Shorter than `audio_cut_windows`'
+    /// boundary count is fine (missing entries mean no extra gap, e.g.
+    /// a boundary past `--max-frames` that video never reaches
+    /// either); empty (the default) adds no gap, unchanged behavior.
+    pub pause_overlay_hold_secs: Vec<f32>,
     /// Output container format. Defaults to plain MP4 to match the
     /// existing stitch-output behavior; opt in to fragmented MP4 or
     /// Matroska for streamable / write-while-read workflows (e.g.,
@@ -594,6 +608,13 @@ struct AudioPassthrough {
     /// until `end_secs`". Consumed one at a time as boundaries are hit;
     /// empty once the last window is active.
     remaining_windows: std::collections::VecDeque<(f64, Option<f64>)>,
+    /// Per-boundary silent-gap seconds, consumed in lockstep with
+    /// `remaining_windows` (see `EncoderConfig::pause_overlay_hold_secs`).
+    remaining_pause_holds: std::collections::VecDeque<f32>,
+    /// The current boundary's gap, latched when it's crossed
+    /// (alongside `pending_seek_target_secs`) and applied once the
+    /// real resume point is known (see `pending_start`'s use below).
+    pending_pause_hold_secs: f32,
     /// Set right after a cut-range jump's `ictx.seek()` call, source
     /// seconds. `avformat_seek_file` with no explicit stream (as used
     /// here) snaps backward to the nearest seek point in whichever
@@ -738,6 +759,7 @@ impl VideoEncoder {
                             audio_paths,
                             config.audio_start_time,
                             &config.audio_cut_windows,
+                            &config.pause_overlay_hold_secs,
                         )?
                     } else {
                         None
@@ -972,6 +994,7 @@ impl VideoEncoder {
         sources: &[PathBuf],
         start_time_secs: f64,
         cut_windows: &[(f64, Option<f64>)],
+        pause_overlay_hold_secs: &[f32],
     ) -> Result<Option<AudioPassthrough>, EncodeError> {
         let Some((source_path, rest)) = sources.split_first() else {
             return Ok(None);
@@ -986,8 +1009,13 @@ impl VideoEncoder {
         // audio + cut ranges isn't supported yet - falls back to plain
         // passthrough with a loud warning rather than silently producing
         // misaligned audio. See `EncoderConfig::audio_cut_windows`'s doc.
-        let (current_end_secs, remaining_windows) = if cut_windows.is_empty() {
-            (None, std::collections::VecDeque::new())
+        let (current_end_secs, remaining_windows, remaining_pause_holds) = if cut_windows.is_empty()
+        {
+            (
+                None,
+                std::collections::VecDeque::new(),
+                std::collections::VecDeque::new(),
+            )
         } else if !rest.is_empty() {
             log::warn!(
                 "Cut ranges requested with a chained (multi-file) audio source \
@@ -996,12 +1024,23 @@ impl VideoEncoder {
                  each cut). See EncoderConfig::audio_cut_windows's doc comment.",
                 sources.len(),
             );
-            (None, std::collections::VecDeque::new())
+            (
+                None,
+                std::collections::VecDeque::new(),
+                std::collections::VecDeque::new(),
+            )
         } else {
             let mut windows: std::collections::VecDeque<(f64, Option<f64>)> =
                 cut_windows.iter().copied().collect();
             let first_end = windows.pop_front().and_then(|(_, end)| end);
-            (first_end, windows)
+            // Aligned 1:1 with `windows` (both index by boundary number,
+            // consumed together at each crossing below); shorter than
+            // `windows` just means "no extra gap" for the missing tail
+            // (`pop_front().unwrap_or(0.0)` handles that with no padding
+            // needed here).
+            let holds: std::collections::VecDeque<f32> =
+                pause_overlay_hold_secs.iter().copied().collect();
+            (first_end, windows, holds)
         };
 
         let audio_stream = ictx.streams().best(ffmpeg::media::Type::Audio);
@@ -1070,6 +1109,8 @@ impl VideoEncoder {
             first_segment: true,
             current_end_secs,
             remaining_windows,
+            remaining_pause_holds,
+            pending_pause_hold_secs: 0.0,
             pending_seek_target_secs: None,
         }))
     }
@@ -1261,6 +1302,8 @@ impl VideoEncoder {
                                     audio.pending_seek_target_secs = Some(seek_secs);
                                     audio.current_end_secs = next_end;
                                     audio.first_segment = false;
+                                    audio.pending_pause_hold_secs =
+                                        audio.remaining_pause_holds.pop_front().unwrap_or(0.0);
                                     continue;
                                 }
                                 Err(e) => {
@@ -1285,7 +1328,21 @@ impl VideoEncoder {
                             continue;
                         }
                         audio.pending_seek_target_secs = None;
-                        audio.pending_start = Some(audio.next_offset);
+                        // Advance the resume point by this boundary's
+                        // pause-overlay hold, if any, so the real audio
+                        // picks back up exactly as much later as the
+                        // video side's added (visually hidden) hold
+                        // frames delay it - see
+                        // `EncoderConfig::pause_overlay_hold_secs`.
+                        // Nothing is written for the gap itself; an
+                        // unwritten span in a passthrough audio track
+                        // is silence to any player.
+                        let hold_ticks = seconds_to_pts(
+                            audio.pending_pause_hold_secs as f64,
+                            audio.output_time_base,
+                        );
+                        audio.pending_start = Some(audio.next_offset + hold_ticks);
+                        audio.pending_pause_hold_secs = 0.0;
                     }
 
                     // First packet of a continuation segment: rebase it so the

@@ -44,6 +44,11 @@ pub struct StitchArgs<'a> {
     /// Time ranges to exclude from the export (e.g. a halftime pause).
     /// See `reco_io::cut_range` and `--cut-range`'s help text.
     pub cut_ranges: Vec<reco_io::cut_range::CutRange>,
+    /// `Some((fade_secs, hold_secs))` shows a "PAUZE" dip-to-black
+    /// transition at every cut-range boundary. See
+    /// `--pause-overlay`/`--pause-overlay-fade`/`--pause-overlay-hold`'s
+    /// help text.
+    pub pause_overlay: Option<(f32, f32)>,
     pub encoder_name: Option<String>,
     pub codec: &'a str,
     pub quality: &'a str,
@@ -213,6 +218,9 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
     }
     if !args.cut_ranges.is_empty() {
         job = job.cut_ranges(args.cut_ranges.clone());
+    }
+    if let Some((fade_secs, hold_secs)) = args.pause_overlay {
+        job = job.pause_overlay(fade_secs, hold_secs);
     }
     if args.sync_offset != 0 {
         job = job.sync_offset(args.sync_offset);

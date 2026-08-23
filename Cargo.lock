@@ -5712,6 +5712,7 @@ dependencies = [
 name = "reco-core"
 version = "0.5.3-beta.2"
 dependencies = [
+ "ab_glyph",
  "approx",
  "ash",
  "block2 0.6.2",

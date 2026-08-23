@@ -20,3 +20,9 @@ with local bug fixes.
 
 **Lens Distortion** - The Kannala-Brandt fisheye model follows the
 published paper and OpenCV documentation.
+
+**Roboto** - The "PAUZE" cut-range overlay renders text with the
+[Roboto](https://github.com/google/fonts/tree/main/ofl/roboto) variable
+font by Google, vendored at
+`crates/reco-core/assets/fonts/Roboto-Variable.ttf` under the SIL Open
+Font License 1.1 (full text: `crates/reco-core/assets/fonts/Roboto-OFL.txt`).

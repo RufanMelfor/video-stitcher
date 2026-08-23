@@ -190,6 +190,10 @@ pub fn run_export(
     start_secs: f32,
     end_secs: f32,
     cut_ranges: Vec<reco_io::cut_range::CutRange>,
+    // `Some((fade_secs, hold_secs))` shows a "PAUZE" dip-to-black
+    // transition at every cut-range boundary. See
+    // `StitchJob::pause_overlay`'s doc comment.
+    pause_overlay: Option<(f32, f32)>,
     autocam: AutocamUiConfig,
     scoreboard_package: Option<reco_scoreboard::ScoreboardPackage>,
     scoreboard_state: Option<serde_json::Value>,
@@ -419,6 +423,7 @@ pub fn run_export(
         });
     });
 
+    let scoreboard_will_show = scoreboard_shared.is_some();
     if let Some(shared) = scoreboard_shared {
         job = job.on_session(move |session, _source| {
             session.set_overlay_placement(scoreboard_placement);
@@ -447,6 +452,23 @@ pub fn run_export(
                 .join(", ")
         );
         job = job.cut_ranges(cut_ranges);
+    }
+    if let Some((fade_secs, hold_secs)) = pause_overlay {
+        if scoreboard_will_show {
+            // StitchJob::pause_overlay's doc comment: both claim the
+            // session's single overlay slot, and pause_overlay is
+            // attached after session_hooks (which is where the
+            // scoreboard's own set_overlay_source call above runs) -
+            // so it wins and the scoreboard silently stops appearing.
+            // Not fixed yet (needs a real compositor, not a slot);
+            // surfaced here instead of silently losing the scoreboard.
+            log::warn!(
+                "Both a scoreboard and the PAUZE pause-overlay are enabled - only the \
+                 PAUZE overlay will actually show during export (they share one overlay \
+                 slot; combining them isn't supported yet)"
+            );
+        }
+        job = job.pause_overlay(fade_secs, hold_secs);
     }
 
     if replay_enabled {
