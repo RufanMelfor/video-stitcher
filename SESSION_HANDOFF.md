@@ -1,3 +1,86 @@
+# Session handoff - 2026-08-23 (TGR_PC): PAUZE-overlay follow-up bug batch, committed+pushed (afc054ae)
+
+Direct continuation of the "PAUZE" dip-to-black cut-range overlay
+(commit `fe90ffb8`, previous session). User ran real GUI exports
+against that build and reported a string of real bugs one by one, each
+diagnosed via logs/frame extraction/code review, not assumed correct.
+Full narrative in [[project_video_cutout_research]] ("STATUS
+2026-08-23, update 2"); short version here.
+
+## What was fixed, all in one commit (`afc054ae`)
+
+1. **Leading cut-range silently not applied** ("de wedstrijd begint
+   gewoon bij 0min") - `StitchJob::run`'s `skip_frames` used
+   `start_time` directly instead of `keep_windows[0]`'s real first-kept
+   position. Verified via CLI log ("skipping 3536 frames (first kept
+   window starts at 118.00s)" instead of the old wrong "skipping 0
+   frames").
+2. **Integer overflow panic** in `extend_for_pause_overlay` on an
+   open-ended `--pause-overlay` export (no `--end-time`) -
+   `saturating_add` fix + regression test.
+3. **Scoreboard showing "SHARKS FC" placeholder at t=0"** - the
+   headless scoreboard browser always takes a screenshot immediately
+   on start, before any real state is pushed. A first fix attempt
+   (gate frames behind a "ready" flag) was proven insufficient by the
+   user's own screenshots (race condition). Real fix: seed the
+   runtime's *initial* state (computed for output frame 0 via a new
+   `cut_range::output_frame_to_source_secs` inverse-mapping fn) before
+   the renderer starts at all.
+4. **Scoreboard clock stalling for a long time after a pause resumes**
+   - the replay's `video_seconds` used a naive linear formula that
+   didn't account for cut ranges; fixed using the same
+   `output_frame_to_source_secs` fn.
+5. **AI Tracking / Async Detect checkboxes and scoreboard settings
+   (auto-cut kickoff, size, font, placement, banner color, logo size)
+   not remembered across app restart.** Added app-level persistence
+   (`GuiSettings::autocam_enabled`/`async_detect_enabled`/
+   `scoreboard_settings`). Found a SECOND bug in the same area via a
+   user follow-up report ("de positie en size van de scoreboard banner
+   wordt niet goed opgeslagen") - a calibration-load code path was
+   unconditionally re-applying the loaded calibration's OWN (often
+   stale) copy of placement/banner/font/logo-size/auto-cut right after
+   the app-level restore ran, silently discarding it on every
+   calibration load (including at startup via Default Calibration).
+   Fixed: calibration still supplies match-specific fields (Match
+   Logger path, sync anchor, team logos, package/enabled); app-level
+   settings now always win for the "preference"-style fields when
+   present. Also fixed a same-function bug where restoring the
+   placement's scale mid-restore fired a premature persist of
+   not-yet-applied fields (font/logo/banner/auto-cut still stale at
+   that point) - now re-persisted once more at the end of the restore
+   so nothing drifts.
+6. **Period label always "1st Half" even with >2 periods** - user
+   wants "Section" always (confirmed via AskUserQuestion, real match
+   has 4 periods). `scoreboards/football/scoreboard.js`'s
+   `periodLabel` now always returns "Nth Section" - a plain JS asset,
+   no rebuild needed for that part alone.
+7. **New**: draggable start/end handles added directly on the main
+   video scrubber timeline (`main.slint`), in addition to the existing
+   small Start/End sliders in the export panel - needed a Slint
+   z-order fix (handle TouchAreas declared after the Slider so they
+   actually receive drag events instead of the Slider swallowing
+   them).
+
+## Verification
+
+`cargo fmt --all --check` / `cargo clippy -p reco-gui --features
+tensorrt --all-targets -- -D warnings` / `cargo test -p reco-gui
+--features tensorrt` (64/64) / `cargo test -p reco-io` (50/50 + 3/3
+doctests) all clean before building. Both debug+release
+`reco-gui.exe` rebuilt with `--features tensorrt`
+([[feedback_rebuild_gui_before_user_test]] /
+[[feedback_always_tensorrt_build]]). `git fsck --full` clean (only
+harmless dangling objects) before pushing per
+[[feedback_git_object_corruption]]. Committed (`afc054ae`) and pushed
+to `github` (RufanMelfor/reco-video-stitcher-rig) main.
+
+**Not yet hands-on re-verified by the user in this exact build** - in
+particular the Sharks-FC seed fix and the calibration-vs-app-level
+placement fix both still need a real export + an actual app restart to
+confirm. Ask next session if not already confirmed.
+
+---
+
 # Session handoff - 2026-08-22 (TGR_PC): Match Folder picker + export-to-folder + sync-offset prompt, upstream PR #476, Skia PR #477, scoreboard merged into main
 
 ## 7. Todo review + Skia renderer PR #477 opened; cut-range PR explicitly held back
