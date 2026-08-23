@@ -1028,6 +1028,14 @@ export component RecoApp inherits Window {
     // default width, clamped to the export window).
     callback cut-range-add();
     callback cut-range-remove(int);
+    // "PAUZE" dip-to-black transition shown at every cut range boundary
+    // instead of an instant content jump - see
+    // `StitchJob::pause_overlay`'s doc comment. No effect with no cut
+    // ranges. `-hold-secs` is the only part that lengthens the export;
+    // `-fade-secs` plays over content already being shown.
+    in-out property <bool> export-pause-overlay-enabled: false;
+    in-out property <float> export-pause-overlay-fade-secs: 3.0;
+    in-out property <float> export-pause-overlay-hold-secs: 4.0;
     in-out property <string> export-model-path: "";
     in-out property <string> export-tracking-mode: "field";
     in-out property <int> export-detection-interval: 3;
@@ -5071,6 +5079,33 @@ export component RecoApp inherits Window {
                             Text { text: "×"; color: cut-rm.has-hover ? #ff6b6b : #6a7077; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
                             cut-rm := TouchArea { clicked => { root.cut-range-remove(i); } }
                         }
+                    }
+
+                    Tip {
+                        tip: "Shows a \"PAUZE\" dip-to-black transition at every cut range above, instead of an instant content jump. No effect with no cut ranges.";
+                        CheckBox {
+                            text: "PAUZE overlay on cuts";
+                            checked <=> root.export-pause-overlay-enabled;
+                        }
+                    }
+                    if root.export-pause-overlay-enabled: HorizontalBox {
+                        padding: 0;
+                        spacing: 6px;
+                        Text { text: "Fade"; color: #888; font-size: 11px; vertical-alignment: center; }
+                        NumEdit {
+                            text: root.export-pause-overlay-fade-secs;
+                            width: 56px;
+                            edited(v) => { root.export-pause-overlay-fade-secs = Math.max(v.to-float(), 0); }
+                            escaped => { self.text = root.export-pause-overlay-fade-secs; }
+                        }
+                        Text { text: "s   Hold"; color: #888; font-size: 11px; vertical-alignment: center; }
+                        NumEdit {
+                            text: root.export-pause-overlay-hold-secs;
+                            width: 56px;
+                            edited(v) => { root.export-pause-overlay-hold-secs = Math.max(v.to-float(), 0); }
+                            escaped => { self.text = root.export-pause-overlay-hold-secs; }
+                        }
+                        Text { text: "s"; color: #888; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
                     }
 
                     Tip {

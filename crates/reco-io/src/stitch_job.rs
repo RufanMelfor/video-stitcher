@@ -55,6 +55,9 @@ pub struct StitchJob {
     /// Time ranges to exclude from the export (e.g. a halftime pause).
     /// See [`Self::cut_ranges`].
     cut_ranges: Vec<crate::cut_range::CutRange>,
+    /// `(fade_secs, hold_secs)` for the "PAUZE" dip-to-black transition
+    /// at every cut-range boundary. See [`Self::pause_overlay`].
+    pause_overlay: Option<(f32, f32)>,
     sync_offset: Option<i64>,
     /// Seam blend override. `None` (default) respects the calibration
     /// document's saved value - the single home for render params.
@@ -291,6 +294,7 @@ impl StitchJob {
             end_time: None,
             max_frames: None,
             cut_ranges: Vec::new(),
+            pause_overlay: None,
             sync_offset: None,
             blend_width: None,
             blend_flip_direction: false,
@@ -443,6 +447,36 @@ impl StitchJob {
     /// overlap.
     pub fn cut_ranges(mut self, ranges: Vec<crate::cut_range::CutRange>) -> Self {
         self.cut_ranges = ranges;
+        self
+    }
+
+    /// Show a short "PAUZE" dip-to-black transition at every cut-range
+    /// boundary instead of an instant content jump. No effect without
+    /// [`Self::cut_ranges`].
+    ///
+    /// `fade_secs` is how long the black card + caption take to fade in
+    /// before the cut, and symmetrically to fade back out after it -
+    /// composited over content the export was already going to show, so
+    /// it adds no extra duration. `hold_secs` is how long the card
+    /// stays fully opaque in between; this is the only part that
+    /// lengthens the export, and is carved out of the (real, just
+    /// visually hidden) footage immediately inside the cut itself -
+    /// silently clamped per-boundary when a cut is shorter than that
+    /// (see [`crate::cut_range::extend_for_pause_overlay`]).
+    ///
+    /// [`Self::run`] returns an error if `fade_secs`/`hold_secs` are
+    /// negative, non-finite, or both zero - validated there, not here,
+    /// so this builder method can stay infallible like its siblings.
+    ///
+    /// Not yet combinable with a GUI-style scoreboard overlay
+    /// (`on_session`'s `set_overlay_source` hook): both claim the
+    /// session's single overlay slot, and this one is attached later
+    /// (after `session_hooks` run), so it would win and the scoreboard
+    /// would simply stop appearing. Fine today - nothing currently
+    /// calls both on the same job - but a real fix (composite the two)
+    /// is needed before reco-gui wires this up alongside scoreboards.
+    pub fn pause_overlay(mut self, fade_secs: f32, hold_secs: f32) -> Self {
+        self.pause_overlay = Some((fade_secs, hold_secs));
         self
     }
 
@@ -952,6 +986,17 @@ impl StitchJob {
             .map(|(s, e)| (s + audio_offset_secs, e.map(|e| e + audio_offset_secs)))
             .collect();
 
+        // Audio counterpart of the "PAUZE" video overlay's hold - see
+        // `cut_range::pause_overlay_hold_seconds`'s doc comment for why
+        // this is computed independently, here, rather than reusing the
+        // later frame-based schedule.
+        let pause_overlay_hold_secs = self
+            .pause_overlay
+            .map(|(_, hold_secs)| {
+                crate::cut_range::pause_overlay_hold_seconds(&keep_windows, hold_secs)
+            })
+            .unwrap_or_default();
+
         let enc_config = crate::ffmpeg::encoder::EncoderConfig {
             encoder_name: self.encoder_name.clone(),
             codec: self.codec.into(),
@@ -961,6 +1006,7 @@ impl StitchJob {
             audio_source,
             audio_start_time,
             audio_cut_windows,
+            pause_overlay_hold_secs,
             container: self.format.into(),
             gop_size: None,
             stream_url: None,
@@ -1035,6 +1081,35 @@ impl StitchJob {
                 break;
             }
         }
+        // "PAUZE" dip-to-black transition at each cut-range boundary -
+        // extends `window_limits` in place (see
+        // `cut_range::extend_for_pause_overlay`'s doc for why the hold
+        // portion needs real, just visually-hidden, extra frames) and
+        // attaches the overlay source that plays the fade schedule it
+        // returns. No-ops (empty schedule, nothing attached) when there
+        // are no cut ranges to transition at.
+        if let Some((fade_secs, hold_secs)) = self.pause_overlay {
+            let overlay_cfg = reco_core::render::pause_overlay::PauseOverlayConfig::new(
+                fade_secs, hold_secs, "PAUZE",
+            )
+            .map_err(|e| StitchError::Other(format!("pause_overlay: {e}")))?;
+            let schedule = crate::cut_range::extend_for_pause_overlay(
+                &keep_windows,
+                &mut window_limits,
+                fps,
+                overall_cap,
+                &overlay_cfg,
+            );
+            if !schedule.is_empty() {
+                session.set_overlay_source(Box::new(
+                    reco_core::render::pause_overlay::PauseOverlaySource::new(
+                        schedule,
+                        &overlay_cfg,
+                    ),
+                ));
+            }
+        }
+
         let frame_limit = *window_limits.last().unwrap_or(&0);
         log::info!(
             "frame limit: {frame_limit}{}",

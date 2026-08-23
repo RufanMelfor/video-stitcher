@@ -6089,6 +6089,12 @@ fn main() -> anyhow::Result<()> {
             "Export range: start={start_secs:.1}s, end={end_secs:.1}s, {} cut range(s)",
             cut_ranges.len()
         );
+        let pause_overlay = app.get_export_pause_overlay_enabled().then(|| {
+            (
+                app.get_export_pause_overlay_fade_secs(),
+                app.get_export_pause_overlay_hold_secs(),
+            )
+        });
         let autocam = crate::export::AutocamUiConfig {
             enabled: app.get_export_autocam_enabled(),
             model_path: app.get_export_model_path().to_string(),
@@ -6210,6 +6216,7 @@ fn main() -> anyhow::Result<()> {
                 start_secs,
                 end_secs,
                 cut_ranges,
+                pause_overlay,
                 autocam,
                 scoreboard_package,
                 scoreboard_state,
