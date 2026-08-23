@@ -30,9 +30,11 @@ static FONT_BYTES: &[u8] = include_bytes!("../../assets/fonts/Roboto-Variable.tt
 /// whatever the real output resolution is (same trick the scoreboard
 /// overlay uses), and every active frame reallocates this buffer, so
 /// keeping it modest matters for the handful of seconds it churns
-/// around each cut boundary.
-const CANVAS_WIDTH: u32 = 960;
-const CANVAS_HEIGHT: u32 = 540;
+/// around each cut boundary. `pub` so
+/// `render::overlay_layers::LayeredOverlaySource` can size its own
+/// combined canvas to match when this overlay is one of its layers.
+pub const CANVAS_WIDTH: u32 = 960;
+pub const CANVAS_HEIGHT: u32 = 540;
 
 /// Settings for the transition. See the module doc for what `fade_secs`
 /// and `hold_secs` each cover.
@@ -198,6 +200,27 @@ impl PauseOverlaySource {
         }
     }
 
+    /// Advance one frame and return the alpha at that frame, without
+    /// building an [`OverlayFrame`] for it - for a caller compositing
+    /// this overlay together with something else (e.g. reco-gui's
+    /// scoreboard+pause combinator, which needs this overlay's current
+    /// alpha on every frame the *scoreboard* changes too, not just the
+    /// frames this overlay would call "changed" on its own) rather
+    /// than using this source standalone via
+    /// [`OverlayFrameSource::try_frame`].
+    pub fn advance(&mut self) -> f32 {
+        let frame_index = self.frame_index;
+        self.frame_index += 1;
+        self.alpha_at(frame_index)
+    }
+
+    /// Render this overlay's black+caption card at an arbitrary alpha
+    /// (not necessarily whatever [`Self::advance`] last returned) -
+    /// the non-advancing counterpart a compositing caller needs.
+    pub fn render_at(&self, alpha: f32) -> OverlayFrame {
+        self.render(alpha)
+    }
+
     fn alpha_at(&mut self, frame_index: u64) -> f32 {
         while self
             .schedule
@@ -249,9 +272,7 @@ impl PauseOverlaySource {
 
 impl OverlayFrameSource for PauseOverlaySource {
     fn try_frame(&mut self) -> Result<Option<OverlayFrame>, String> {
-        let frame_index = self.frame_index;
-        self.frame_index += 1;
-        let alpha = self.alpha_at(frame_index);
+        let alpha = self.advance();
         if alpha <= 0.0 {
             if self.was_active {
                 self.was_active = false;

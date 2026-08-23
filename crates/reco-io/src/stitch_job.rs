@@ -58,6 +58,13 @@ pub struct StitchJob {
     /// `(fade_secs, hold_secs)` for the "PAUZE" dip-to-black transition
     /// at every cut-range boundary. See [`Self::pause_overlay`].
     pause_overlay: Option<(f32, f32)>,
+    /// Externally-registered overlay layers (e.g. reco-gui's
+    /// scoreboard) to composite together with each other and with
+    /// `pause_overlay`, if any. See [`Self::overlay_layer`].
+    overlay_layers: Vec<(
+        Box<dyn reco_core::render::overlay::OverlayFrameSource>,
+        reco_core::render::overlay::OverlayPlacement,
+    )>,
     sync_offset: Option<i64>,
     /// Seam blend override. `None` (default) respects the calibration
     /// document's saved value - the single home for render params.
@@ -295,6 +302,7 @@ impl StitchJob {
             max_frames: None,
             cut_ranges: Vec::new(),
             pause_overlay: None,
+            overlay_layers: Vec::new(),
             sync_offset: None,
             blend_width: None,
             blend_flip_direction: false,
@@ -468,15 +476,29 @@ impl StitchJob {
     /// negative, non-finite, or both zero - validated there, not here,
     /// so this builder method can stay infallible like its siblings.
     ///
-    /// Not yet combinable with a GUI-style scoreboard overlay
-    /// (`on_session`'s `set_overlay_source` hook): both claim the
-    /// session's single overlay slot, and this one is attached later
-    /// (after `session_hooks` run), so it would win and the scoreboard
-    /// would simply stop appearing. Fine today - nothing currently
-    /// calls both on the same job - but a real fix (composite the two)
-    /// is needed before reco-gui wires this up alongside scoreboards.
+    /// Composites cleanly with any [`Self::overlay_layer`]s registered
+    /// on the same job (e.g. reco-gui's scoreboard) - this one always
+    /// draws full-frame on the *bottom*, underneath every registered
+    /// layer, regardless of the order these builder methods are
+    /// called in.
     pub fn pause_overlay(mut self, fade_secs: f32, hold_secs: f32) -> Self {
         self.pause_overlay = Some((fade_secs, hold_secs));
+        self
+    }
+
+    /// Register an additional overlay layer (e.g. reco-gui's
+    /// scoreboard) to composite over the stitched output, on top of
+    /// [`Self::pause_overlay`]'s dip-to-black transition if that's
+    /// also configured (a scoreboard's score/clock should stay
+    /// legible through a paused transition, not dim along with the
+    /// real video underneath it) and on top of any other layers
+    /// registered this way, in call order. Repeatable.
+    pub fn overlay_layer(
+        mut self,
+        source: Box<dyn reco_core::render::overlay::OverlayFrameSource>,
+        placement: reco_core::render::overlay::OverlayPlacement,
+    ) -> Self {
+        self.overlay_layers.push((source, placement));
         self
     }
 
@@ -1033,7 +1055,23 @@ impl StitchJob {
         }
 
         // Resolve processing window (start_time / end_time / max_frames / cut_ranges).
-        let skip_frames = (start_secs * fps).round() as u64;
+        //
+        // The initial seek target is the first KEPT window's own start,
+        // not `start_secs` directly - they differ whenever a cut range
+        // starts at or before `start_secs` (a "leading" cut, e.g.
+        // trimming dead time before kickoff): `keep_windows` then
+        // absorbs `[start_secs, cut.end_secs)` entirely and its first
+        // window starts at the cut's end, not at `start_secs`. Using
+        // `start_secs` here unconditionally (as this did before) skips
+        // too few frames, so the export incorrectly starts by including
+        // the supposedly-excluded leading range and then cuts off that
+        // much too early at the other end (since window_limits[0] is
+        // sized for the CORRECT window duration, decoded from the WRONG
+        // start position). `run_windows` below relies on this being
+        // right - it only seeks explicitly for i > 0, on the assumption
+        // window 0's start was already reached here.
+        let first_window_start = keep_windows.first().map_or(start_secs, |(s, _)| *s);
+        let skip_frames = (first_window_start * fps).round() as u64;
 
         if let Some(end) = self.end_time {
             let end_frames = ((end - start_secs) * fps).round() as i64;
@@ -1049,14 +1087,17 @@ impl StitchJob {
             && skip_frames >= total
         {
             return Err(StitchError::Other(format!(
-                "start_time ({start_secs:.2}s = frame {skip_frames}) \
+                "processing window start ({first_window_start:.2}s = frame {skip_frames}) \
                  is past the end of the source ({total} frames)"
             )));
         }
 
         // Skip frames to reach the first window's start position.
         if skip_frames > 0 {
-            log::info!("skipping {skip_frames} frames (start_time={start_secs:.2}s)");
+            log::info!(
+                "skipping {skip_frames} frames (first kept window starts at \
+                 {first_window_start:.2}s)"
+            );
             let skipped = source.skip_frames(skip_frames)?;
             if skipped < skip_frames {
                 log::warn!("source ended during skip at frame {skipped}/{skip_frames}");
@@ -1066,28 +1107,35 @@ impl StitchJob {
         // Per-window cumulative frame counts, capped by the overall
         // max_frames budget (matches the pre-cut-ranges behavior when
         // there's exactly one window: `keep_windows` degenerates to
-        // `[(start_secs, end_time)]` when `cut_ranges` is empty).
+        // `[(start_secs, end_time)]` when `cut_ranges` is empty). See
+        // `cut_range::window_limits`'s doc comment for why this is a
+        // shared function rather than inline here.
         let overall_cap = self.max_frames.unwrap_or(u64::MAX);
-        let mut cumulative = 0u64;
-        let mut window_limits: Vec<u64> = Vec::with_capacity(keep_windows.len());
-        for (win_start, win_end) in &keep_windows {
-            let window_frames = match win_end {
-                Some(end) => ((end - win_start) * fps).round().max(0.0) as u64,
-                None => u64::MAX - cumulative,
-            };
-            cumulative = cumulative.saturating_add(window_frames).min(overall_cap);
-            window_limits.push(cumulative);
-            if cumulative >= overall_cap {
-                break;
-            }
-        }
-        // "PAUZE" dip-to-black transition at each cut-range boundary -
-        // extends `window_limits` in place (see
-        // `cut_range::extend_for_pause_overlay`'s doc for why the hold
-        // portion needs real, just visually-hidden, extra frames) and
-        // attaches the overlay source that plays the fade schedule it
-        // returns. No-ops (empty schedule, nothing attached) when there
-        // are no cut ranges to transition at.
+        let mut window_limits =
+            crate::cut_range::window_limits(&keep_windows, fps, self.max_frames);
+        // Overlay compositing: the "PAUZE" cut-range transition when
+        // `pause_overlay` is configured, plus any externally-
+        // registered layers (e.g. reco-gui's scoreboard, via
+        // `Self::overlay_layer`) - collected into `layers` and
+        // attached together below via `LayeredOverlaySource` when
+        // there's more than one, since the session only has a single
+        // overlay slot (calling `set_overlay_source` twice would just
+        // have the second call silently replace the first). The PAUZE
+        // layer always goes in FIRST (bottom, full-frame) regardless
+        // of the order `Self::pause_overlay`/`Self::overlay_layer`
+        // were called on the builder - `overlay_layers` always ends
+        // up drawn on top of it, e.g. so a scoreboard's score/clock
+        // stays legible through a paused transition instead of
+        // dimming along with the real video underneath it.
+        //
+        // Building the PAUZE layer also extends `window_limits` in
+        // place (see `cut_range::extend_for_pause_overlay`'s doc for
+        // why the hold portion needs real, just visually-hidden,
+        // extra frames).
+        let mut layers: Vec<(
+            Box<dyn reco_core::render::overlay::OverlayFrameSource>,
+            reco_core::render::overlay::OverlayPlacement,
+        )> = Vec::new();
         if let Some((fade_secs, hold_secs)) = self.pause_overlay {
             let overlay_cfg = reco_core::render::pause_overlay::PauseOverlayConfig::new(
                 fade_secs, hold_secs, "PAUZE",
@@ -1101,10 +1149,34 @@ impl StitchJob {
                 &overlay_cfg,
             );
             if !schedule.is_empty() {
-                session.set_overlay_source(Box::new(
-                    reco_core::render::pause_overlay::PauseOverlaySource::new(
+                layers.push((
+                    Box::new(reco_core::render::pause_overlay::PauseOverlaySource::new(
                         schedule,
                         &overlay_cfg,
+                    ))
+                        as Box<dyn reco_core::render::overlay::OverlayFrameSource>,
+                    reco_core::render::overlay::OverlayPlacement::default(),
+                ));
+            }
+        }
+        layers.extend(std::mem::take(&mut self.overlay_layers));
+        match layers.len() {
+            0 => {}
+            1 => {
+                let (source, placement) = layers.into_iter().next().expect("len checked above");
+                session.set_overlay_placement(placement);
+                session.set_overlay_source(source);
+            }
+            _ => {
+                session
+                    .set_overlay_placement(reco_core::render::overlay::OverlayPlacement::default());
+                session.set_overlay_source(Box::new(
+                    reco_core::render::overlay_layers::LayeredOverlaySource::new(
+                        (
+                            reco_core::render::pause_overlay::CANVAS_WIDTH,
+                            reco_core::render::pause_overlay::CANVAS_HEIGHT,
+                        ),
+                        layers,
                     ),
                 ));
             }

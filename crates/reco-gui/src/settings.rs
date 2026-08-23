@@ -13,7 +13,7 @@
 
 use std::path::PathBuf;
 
-use reco_core::calibration::AutocamDefaults;
+use reco_core::calibration::{AutocamDefaults, ScoreboardSettings};
 use reco_io::settings::RecentFiles;
 use serde::{Deserialize, Serialize};
 
@@ -119,6 +119,49 @@ pub struct GuiSettings {
     /// just on save.
     #[serde(default)]
     pub autocam_defaults: Option<AutocamDefaults>,
+
+    /// Match folder last selected via "Select Match Folder" (see
+    /// `AppState::match_folder`), so the export dialog keeps suggesting
+    /// a path inside it across an app restart instead of silently
+    /// falling back to "next to the left video" (i.e. inside `Left/`) -
+    /// `AppState::match_folder` itself is session-only and would
+    /// otherwise be lost on every restart even though the restored
+    /// left/right paths still point into this same match folder.
+    /// Cleared whenever the user manually re-picks a left/right video
+    /// (see `on_pick_left_video`/`on_pick_right_video`) so a stale
+    /// folder never gets restored after that.
+    #[serde(default)]
+    pub last_match_folder: Option<PathBuf>,
+
+    /// Last-used state of the Export dialog's "AI Tracking" master
+    /// checkbox. Deliberately separate from `autocam_defaults`
+    /// (`reco_core::calibration::AutocamDefaults` excludes this on
+    /// purpose - see that type's own doc comment: whether AI tracking
+    /// runs at all is a per-run choice, not something a shared
+    /// calibration file should force on everyone who opens it). This
+    /// field is purely an app-level convenience so the checkbox itself
+    /// doesn't reset to off on every restart.
+    #[serde(default)]
+    pub autocam_enabled: bool,
+    /// Last-used state of the Export dialog's "Async Detect" checkbox.
+    /// Same reasoning and same app-level-only scope as
+    /// `autocam_enabled`.
+    #[serde(default)]
+    pub async_detect_enabled: bool,
+
+    /// Last-used SCOREBOARD card settings - enabled/package, auto-cut
+    /// kickoff+pauses, placement/size, font, banner color, logo size,
+    /// and the loaded Match Logger export path + sync anchor. Reuses
+    /// `reco_core::calibration::ScoreboardSettings` (the same struct a
+    /// calibration file's own `scoreboard` field holds) purely as a
+    /// convenient existing shape - this copy is app-level only, so the
+    /// SCOREBOARD card doesn't reset to defaults every restart just
+    /// because the user hasn't loaded a calibration with its own
+    /// scoreboard settings yet. A calibration's own `scoreboard` field
+    /// still overrides this once one is loaded (same precedence as
+    /// `autocam_defaults`/`Calibration::autocam_defaults`).
+    #[serde(default)]
+    pub scoreboard_settings: Option<ScoreboardSettings>,
 }
 
 fn default_dark_mode() -> bool {
@@ -161,6 +204,10 @@ impl Default for GuiSettings {
             last_left_segments: Vec::new(),
             last_right_segments: Vec::new(),
             autocam_defaults: None,
+            last_match_folder: None,
+            autocam_enabled: false,
+            async_detect_enabled: false,
+            scoreboard_settings: None,
         }
     }
 }
@@ -293,6 +340,22 @@ impl GuiSettings {
         self.autocam_defaults = Some(ac);
         self.save();
     }
+
+    /// Persist the "AI Tracking" and "Async Detect" checkbox states
+    /// (see their own doc comments for why they're separate from
+    /// `autocam_defaults`).
+    pub fn set_ai_toggle_defaults(&mut self, autocam_enabled: bool, async_detect_enabled: bool) {
+        self.autocam_enabled = autocam_enabled;
+        self.async_detect_enabled = async_detect_enabled;
+        self.save();
+    }
+
+    /// Persist the SCOREBOARD card's settings (see
+    /// `Self::scoreboard_settings`'s doc comment).
+    pub fn set_scoreboard_settings(&mut self, settings: ScoreboardSettings) {
+        self.scoreboard_settings = Some(settings);
+        self.save();
+    }
 }
 
 #[cfg(test)]
@@ -415,6 +478,71 @@ mod tests {
     fn autocam_defaults_absent_until_set() {
         let s = GuiSettings::default();
         assert!(s.autocam_defaults.is_none());
+    }
+
+    #[test]
+    fn ai_toggle_defaults_false_until_set() {
+        let s = GuiSettings::default();
+        assert!(!s.autocam_enabled);
+        assert!(!s.async_detect_enabled);
+    }
+
+    #[test]
+    fn set_ai_toggle_defaults_roundtrips_through_json() {
+        let mut s = GuiSettings::default();
+        s.set_ai_toggle_defaults(true, true);
+        let json = serde_json::to_string(&s).unwrap();
+        let restored: GuiSettings = serde_json::from_str(&json).unwrap();
+        assert!(restored.autocam_enabled);
+        assert!(restored.async_detect_enabled);
+    }
+
+    #[test]
+    fn scoreboard_settings_absent_until_set() {
+        let s = GuiSettings::default();
+        assert!(s.scoreboard_settings.is_none());
+    }
+
+    #[test]
+    fn set_scoreboard_settings_roundtrips_through_json() {
+        let mut s = GuiSettings::default();
+        let sb = ScoreboardSettings {
+            enabled: true,
+            package_id: "football".into(),
+            match_logger_path: None,
+            sync_event_ts_ms: None,
+            sync_video_seconds: 0.0,
+            placement: reco_core::render::overlay::OverlayPlacement {
+                offset: (0.0, 0.35),
+                scale: 0.4,
+            },
+            home_logo_path: None,
+            away_logo_path: None,
+            font_family: "Georgia, serif".into(),
+            logo_size_px: 40.0,
+            banner_color_name: "Navy".into(),
+            derive_cut_ranges: true,
+        };
+        s.set_scoreboard_settings(sb);
+        let json = serde_json::to_string(&s).unwrap();
+        let restored: GuiSettings = serde_json::from_str(&json).unwrap();
+        let restored_sb = restored.scoreboard_settings.expect("should roundtrip");
+        assert!(restored_sb.enabled);
+        assert_eq!(restored_sb.package_id, "football");
+        assert!((restored_sb.placement.scale - 0.4).abs() < 1e-6);
+        assert_eq!(restored_sb.banner_color_name, "Navy");
+        assert!(restored_sb.derive_cut_ranges);
+    }
+
+    #[test]
+    fn missing_ai_toggle_fields_default_to_false() {
+        // Simulate loading an older settings JSON predating these
+        // fields - #[serde(default)] must let it parse as false, not
+        // error.
+        let json = r#"{ "autocam_defaults": null }"#;
+        let s: GuiSettings = serde_json::from_str(json).unwrap();
+        assert!(!s.autocam_enabled);
+        assert!(!s.async_detect_enabled);
     }
 
     #[test]

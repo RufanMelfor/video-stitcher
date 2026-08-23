@@ -25,12 +25,15 @@
     };
 
     // Broadcast label for a period, driven by sport.periodCount instead
-    // of hardcoding a 2-half match - youth football commonly plays
-    // quarters (periodCount 4) instead of halves, and a fixed "1st
-    // Half"/"2nd Half" map read wrong for those. Anything past the
-    // configured regular periods (extra time, penalties - rules vary too
-    // much by competition to model generically) falls back to a plain
-    // "Extra Period N".
+    // of hardcoding a 2-half match - youth football commonly plays more
+    // than 2 periods (e.g. 4 quarters of a match split into sections),
+    // and a fixed "1st Half"/"2nd Half" map read wrong for those.
+    // Always "Section" regardless of periodCount, deliberately not
+    // "Half"/"Quarter" for any specific count - one consistent word
+    // avoids having to special-case every format a club might use.
+    // Anything past the configured regular periods (extra time,
+    // penalties - rules vary too much by competition to model
+    // generically) falls back to a plain "Extra Section N".
     function ordinal(n) {
         const v = n % 100;
         if (v >= 11 && v <= 13) return `${n}th`;
@@ -46,10 +49,9 @@
         const p = Number(period) || 1;
         const count = Number(periodCount) || 2;
         if (p <= count) {
-            const noun = count === 2 ? "Half" : count === 4 ? "Quarter" : "Period";
-            return `${ordinal(p)} ${noun}`;
+            return `${ordinal(p)} Section`;
         }
-        return `Extra Period ${p - count}`;
+        return `Extra Section ${p - count}`;
     }
 
     const fallbackState = {
@@ -62,16 +64,16 @@
             status: "live"
         },
         home: {
-            name: "Schapen Sharks FC",
-            shortName: "SHARKS FC",
+            name: "Team 1",
+            shortName: "TEAM 1",
             score: 2,
             color: "#0057a8",
             secondaryColor: "#ffffff",
             logo: null
         },
         away: {
-            name: "Braunschweig United FC",
-            shortName: "UNITED FC",
+            name: "Team 2",
+            shortName: "TEAM 2",
             score: 1,
             color: "#cf2027",
             secondaryColor: "#ffffff",

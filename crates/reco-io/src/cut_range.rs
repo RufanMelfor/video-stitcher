@@ -110,6 +110,112 @@ pub fn keep_windows(
     windows
 }
 
+/// Per-window cumulative output frame counts (see [`keep_windows`]),
+/// capped by `max_frames` if set - `window_limits[i]` is the total
+/// number of frames the export will have written once window `i`
+/// finishes. Extracted out of `StitchJob::run` so this exact
+/// computation has one place to live: both the real encode path and
+/// anything estimating the export's total frame count up front (e.g.
+/// reco-gui's progress/ETA display, via [`planned_output_frames`])
+/// call this instead of maintaining their own copy that could drift
+/// out of sync with it.
+pub fn window_limits(
+    keep_windows: &[(f64, Option<f64>)],
+    fps: f64,
+    max_frames: Option<u64>,
+) -> Vec<u64> {
+    let overall_cap = max_frames.unwrap_or(u64::MAX);
+    let mut cumulative = 0u64;
+    let mut limits = Vec::with_capacity(keep_windows.len());
+    for (win_start, win_end) in keep_windows {
+        let window_frames = match win_end {
+            Some(end) => ((end - win_start) * fps).round().max(0.0) as u64,
+            None => u64::MAX - cumulative,
+        };
+        cumulative = cumulative.saturating_add(window_frames).min(overall_cap);
+        limits.push(cumulative);
+        if cumulative >= overall_cap {
+            break;
+        }
+    }
+    limits
+}
+
+/// Total real output frames a [`StitchJob`](crate::stitch_job::StitchJob)
+/// configured this way would actually produce - a convenience wrapper
+/// around [`validate_cut_ranges`] + [`keep_windows`] + [`window_limits`]
+/// (+ [`extend_for_pause_overlay`] when a pause overlay is configured)
+/// for callers that only need the final count, e.g. reco-gui's export
+/// progress/ETA display. That display previously used the naive
+/// `end_frames - start_frames` span, which silently ignored excluded
+/// cut ranges (and, once the pause overlay shipped, its added hold
+/// time) - "remaining time" drifted further wrong the more a cut ate
+/// into the export. `Err` only when `cut_ranges` itself is invalid
+/// (overlapping/malformed); callers estimating a display value should
+/// treat that as "can't estimate" rather than a hard failure.
+pub fn planned_output_frames(
+    export_start: f64,
+    export_end: Option<f64>,
+    cut_ranges: &[CutRange],
+    fps: f64,
+    max_frames: Option<u64>,
+    pause_overlay: Option<&reco_core::render::pause_overlay::PauseOverlayConfig>,
+) -> Result<u64, String> {
+    let sorted = validate_cut_ranges(cut_ranges.to_vec())?;
+    let windows = keep_windows(export_start, export_end, &sorted);
+    let mut limits = window_limits(&windows, fps, max_frames);
+    if let Some(overlay) = pause_overlay {
+        extend_for_pause_overlay(
+            &windows,
+            &mut limits,
+            fps,
+            max_frames.unwrap_or(u64::MAX),
+            overlay,
+        );
+    }
+    Ok(*limits.last().unwrap_or(&0))
+}
+
+/// Inverse of the cumulative frame counting [`window_limits`] does:
+/// given an absolute OUTPUT frame index, returns the corresponding
+/// SOURCE video position in seconds. Needed by anything that has to
+/// know "what part of the original recording is on screen right now"
+/// from the export's own frame count alone - e.g. reco-gui's
+/// scoreboard replay, which previously just did
+/// `start_secs + frames / fps`, correct only when nothing was ever
+/// cut. Once cut ranges remove a chunk from the middle, that naive
+/// formula drifts behind by roughly the cut's own duration from that
+/// point on: the frame count keeps counting up linearly, but the true
+/// source position actually jumped forward at the cut. Symptom
+/// matches exactly what showed up in testing - a scoreboard clock
+/// that visibly lags/stalls after a mid-match pause instead of
+/// resuming immediately.
+///
+/// `window_limits` should be the same (possibly pause-overlay-hold-
+/// extended, see [`extend_for_pause_overlay`]) array the real export
+/// used - a hold's extra frames are real decoded source content
+/// continuing past the kept window's nominal end, so this mapping
+/// falls out correctly with no special-casing needed as long as both
+/// arrays came from the same computation.
+pub fn output_frame_to_source_secs(
+    output_frame: u64,
+    keep_windows: &[(f64, Option<f64>)],
+    window_limits: &[u64],
+    fps: f64,
+) -> f64 {
+    let mut prev_limit = 0u64;
+    let window_count = keep_windows.len().min(window_limits.len());
+    for (i, (window, &limit)) in keep_windows.iter().zip(window_limits.iter()).enumerate() {
+        let is_last = i + 1 == window_count;
+        if output_frame < limit || is_last {
+            let offset_frames = output_frame.saturating_sub(prev_limit);
+            return window.0 + offset_frames as f64 / fps.max(1.0);
+        }
+        prev_limit = limit;
+    }
+    0.0 // keep_windows/window_limits empty - nothing to map.
+}
+
 /// Per-boundary silent-gap seconds for `EncoderConfig::pause_overlay_hold_secs`,
 /// the audio counterpart of [`extend_for_pause_overlay`]'s video-side
 /// frame schedule, computed independently and earlier (audio setup runs
@@ -214,7 +320,13 @@ pub fn extend_for_pause_overlay(
     let mut running = 0u64;
     for (limit, &hold) in window_limits.iter_mut().zip(hold_at.iter()) {
         running += hold;
-        *limit += running;
+        // Saturating: an open-ended last window's limit is already the
+        // `u64::MAX` "unbounded" sentinel `window_limits` uses (see its
+        // own doc comment) - a plain `+=` there overflows and panics.
+        // Adding more hold on top of "unbounded" is still just
+        // "unbounded", so saturating is the correct behavior, not a
+        // silently-wrong fallback.
+        *limit = limit.saturating_add(running);
     }
 
     schedule
@@ -238,6 +350,121 @@ mod tests {
     fn duration_secs_is_end_minus_start() {
         let r = CutRange::new(100.0, 130.5).unwrap();
         assert_eq!(r.duration_secs(), 30.5);
+    }
+
+    #[test]
+    fn window_limits_no_cap_sums_every_window() {
+        let windows = vec![(0.0, Some(10.0)), (20.0, Some(30.0))];
+        let limits = window_limits(&windows, 30.0, None);
+        assert_eq!(limits, vec![300, 600]);
+    }
+
+    #[test]
+    fn window_limits_caps_at_max_frames_mid_window() {
+        let windows = vec![(0.0, Some(10.0)), (20.0, Some(30.0))];
+        let limits = window_limits(&windows, 30.0, Some(400));
+        // Second window would push cumulative to 600, capped at 400 -
+        // and the loop stops there rather than pushing a further entry.
+        assert_eq!(limits, vec![300, 400]);
+    }
+
+    #[test]
+    fn output_frame_to_source_secs_within_first_window() {
+        let windows = vec![(0.0, Some(10.0)), (20.0, Some(30.0))];
+        let limits = window_limits(&windows, 30.0, None); // [300, 600]
+        assert_eq!(
+            output_frame_to_source_secs(150, &windows, &limits, 30.0),
+            5.0
+        );
+    }
+
+    #[test]
+    fn output_frame_to_source_secs_jumps_the_cut_in_the_second_window() {
+        // This is the exact bug the naive `start_secs + frames/fps`
+        // formula had: frame 450 is 150 frames into the SECOND kept
+        // window, which starts at source 20s (10s of source content -
+        // the cut - was excluded) - not source 15s, which is what
+        // treating the whole export as one unbroken 30fps span would
+        // give.
+        let windows = vec![(0.0, Some(10.0)), (20.0, Some(30.0))];
+        let limits = window_limits(&windows, 30.0, None); // [300, 600]
+        assert_eq!(
+            output_frame_to_source_secs(450, &windows, &limits, 30.0),
+            25.0
+        );
+    }
+
+    #[test]
+    fn output_frame_to_source_secs_accounts_for_pause_overlay_hold() {
+        // Same shape as extend_for_pause_overlay_single_boundary_uses_full_hold:
+        // window0 0..100s (3000 frames @30fps), cut 100..105s, window1
+        // resumes at 105s. hold=2s -> window_limits[0] becomes 3060.
+        let windows = vec![(0.0, Some(100.0)), (105.0, Some(200.0))];
+        let mut limits = vec![3000u64, 6000u64];
+        let cfg = overlay(3.0, 2.0);
+        extend_for_pause_overlay(&windows, &mut limits, 30.0, u64::MAX, &cfg);
+
+        // Frame 3030 is 30 frames (1s) into the hold - real source
+        // content continuing past window0's 100s end, into the cut
+        // itself (still hidden behind the "PAUZE" card, but a genuine
+        // position in the original recording).
+        assert_eq!(
+            output_frame_to_source_secs(3030, &windows, &limits, 30.0),
+            101.0
+        );
+        // Frame 3061 (just past the hold) should be back in window1's
+        // own space, 1 frame into it.
+        let expected = 105.0 + 1.0 / 30.0;
+        assert!(
+            (output_frame_to_source_secs(3061, &windows, &limits, 30.0) - expected).abs() < 1e-9
+        );
+    }
+
+    #[test]
+    fn output_frame_to_source_secs_clamps_past_the_last_window() {
+        let windows = vec![(0.0, Some(10.0))];
+        let limits = window_limits(&windows, 30.0, None); // [300]
+        // One frame past the computed total - shouldn't panic or wrap;
+        // extrapolates from the last (only) window's own start.
+        let expected = 300.0 / 30.0 + 1.0 / 30.0;
+        assert!(
+            (output_frame_to_source_secs(301, &windows, &limits, 30.0) - expected).abs() < 1e-9
+        );
+    }
+
+    #[test]
+    fn planned_output_frames_matches_naive_span_with_no_cuts() {
+        let total = planned_output_frames(60.0, Some(90.0), &[], 30.0, None, None).unwrap();
+        assert_eq!(total, 900); // 30s * 30fps, no cuts to subtract
+    }
+
+    #[test]
+    fn planned_output_frames_subtracts_cut_duration() {
+        let cuts = vec![CutRange::new(70.0, 80.0).unwrap()];
+        let total = planned_output_frames(60.0, Some(90.0), &cuts, 30.0, None, None).unwrap();
+        // 30s total span minus the 10s cut = 20s kept = 600 frames.
+        assert_eq!(total, 600);
+    }
+
+    #[test]
+    fn planned_output_frames_adds_pause_overlay_hold() {
+        let cuts = vec![CutRange::new(70.0, 80.0).unwrap()];
+        let overlay =
+            reco_core::render::pause_overlay::PauseOverlayConfig::new(2.0, 3.0, "PAUZE").unwrap();
+        let total =
+            planned_output_frames(60.0, Some(90.0), &cuts, 30.0, None, Some(&overlay)).unwrap();
+        // 600 kept frames + 3s hold * 30fps = 690, matching the real
+        // CLI smoke-test export's exact frame count for this shape.
+        assert_eq!(total, 690);
+    }
+
+    #[test]
+    fn planned_output_frames_rejects_invalid_cut_ranges() {
+        let cuts = vec![
+            CutRange::new(10.0, 30.0).unwrap(),
+            CutRange::new(20.0, 40.0).unwrap(), // overlaps
+        ];
+        assert!(planned_output_frames(0.0, Some(50.0), &cuts, 30.0, None, None).is_err());
     }
 
     #[test]
@@ -392,6 +619,31 @@ mod tests {
         let schedule = extend_for_pause_overlay(&keep, &mut limits, 30.0, 3000, &cfg);
         assert_eq!(schedule[0].hold_start, schedule[0].hold_end);
         assert_eq!(limits[0], 3000);
+    }
+
+    #[test]
+    fn extend_for_pause_overlay_open_ended_last_window_does_not_overflow() {
+        // Regression test: an export with no --end-time (the common
+        // case - "export to the end of the source") makes the last
+        // keep-window open-ended, whose window_limits entry is the
+        // u64::MAX "unbounded" sentinel. Adding the pause overlay's
+        // hold on top of that used to overflow-panic (found via a
+        // real CLI run: `--cut-range 0:118 --cut-range 658:962
+        // --pause-overlay` with no --end-time).
+        let keep = vec![(0.0, Some(50.0)), (60.0, None)];
+        let mut limits = window_limits(&keep, 30.0, None);
+        assert_eq!(*limits.last().unwrap(), u64::MAX);
+
+        let cfg = overlay(3.0, 4.0);
+        let schedule = extend_for_pause_overlay(&keep, &mut limits, 30.0, u64::MAX, &cfg);
+
+        assert_eq!(schedule.len(), 1);
+        // The open-ended window stays "unbounded" - saturates rather
+        // than wrapping.
+        assert_eq!(*limits.last().unwrap(), u64::MAX);
+        // The real (bounded) first window still gets its hold applied
+        // normally.
+        assert!(limits[0] > 1500); // 50s * 30fps = 1500, plus some hold
     }
 
     #[test]
