@@ -163,6 +163,41 @@ fn try_send_command(
     }
 }
 
+/// How many times a lost connection may be retried before giving up
+/// and disabling the overlay for good - bounds a crash *loop* (a
+/// genuinely broken environment) while still comfortably covering an
+/// isolated crash or two over a long export. Reset back to full budget
+/// whenever a session survives past [`RESTART_BUDGET_RESET_AFTER`], so
+/// two unrelated crashes far apart in the same export both get the
+/// full retry budget rather than sharing one.
+const MAX_RESTART_ATTEMPTS: u32 = 3;
+const RESTART_BUDGET_RESET_AFTER: Duration = Duration::from_secs(60);
+/// Brief pause before relaunching, in case whatever killed the
+/// browser (e.g. a GPU driver hiccup) needs a moment to settle.
+const RESTART_BACKOFF: Duration = Duration::from_millis(750);
+
+/// Runs the browser session, transparently relaunching it on a lost
+/// connection instead of permanently disabling the overlay.
+///
+/// A lost DevTools connection ("Unable to make method calls because
+/// underlying connection is closed") used to end the worker thread for
+/// good: the error bubbles up through [`OverlayFrameSource::try_frame`]
+/// and `reco_core::session::frame_processing::refresh_overlay` treats
+/// any error as fatal, dropping the overlay source - so on a
+/// multi-minute export, one Chrome crash meant the scoreboard was gone
+/// for the rest of the video, with no recovery. Retried here instead,
+/// relaunching the browser and reseeding it with the last state this
+/// worker actually applied (both the regular `Update` stream and the
+/// package's own editor state, which survives externally in
+/// `editor_state` regardless of restarts) - the visible effect is the
+/// overlay briefly freezing on its last frame during the relaunch,
+/// never disappearing.
+///
+/// Only [`RuntimeError::Browser`] (a CDP/connection-level failure) is
+/// retried. Every other variant means the package or setup itself is
+/// broken (a bad manifest, a JS contract violation, no browser
+/// installed, ...) - relaunching wouldn't fix that, and would just
+/// spin up Chrome processes forever.
 fn run_worker(
     package: ScoreboardPackage,
     browser_path: std::path::PathBuf,
@@ -173,15 +208,72 @@ fn run_worker(
     command_rx: &Receiver<RuntimeCommand>,
     frame_tx: &SyncSender<Result<OverlayFrame, String>>,
 ) -> Result<(), RuntimeError> {
+    let mut state_json = initial_json;
+    let mut attempts_left = MAX_RESTART_ATTEMPTS;
+    loop {
+        let session_start = Instant::now();
+        match run_session(
+            &package,
+            &browser_path,
+            &page_url,
+            &editor_state,
+            state_json.clone(),
+            max_fps,
+            command_rx,
+            frame_tx,
+            &mut state_json,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(RuntimeError::Browser(error)) if attempts_left > 0 => {
+                attempts_left = if session_start.elapsed() >= RESTART_BUDGET_RESET_AFTER {
+                    MAX_RESTART_ATTEMPTS - 1
+                } else {
+                    attempts_left - 1
+                };
+                log::warn!(
+                    "scoreboard renderer lost its connection, restarting \
+                     ({attempts_left} attempt(s) left): {error}"
+                );
+                std::thread::sleep(RESTART_BACKOFF);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// One browser launch, tab session, and its capture loop - see
+/// [`run_worker`] for the retry wrapper around this. `state_json` is
+/// both the seed applied on entry and, on return, updated to the most
+/// recent state actually applied - so a caller that relaunches can
+/// reseed the new session with it.
+#[allow(clippy::too_many_arguments)]
+fn run_session(
+    package: &ScoreboardPackage,
+    browser_path: &std::path::Path,
+    page_url: &str,
+    editor_state: &EditorState,
+    initial_json: Option<String>,
+    max_fps: u32,
+    command_rx: &Receiver<RuntimeCommand>,
+    frame_tx: &SyncSender<Result<OverlayFrame, String>>,
+    state_json: &mut Option<String>,
+) -> Result<(), RuntimeError> {
     let viewport = (
         package.manifest.viewport.width,
         package.manifest.viewport.height,
     );
     let options = LaunchOptionsBuilder::default()
-        .path(Some(browser_path))
+        .path(Some(browser_path.to_path_buf()))
         .headless(true)
         .sandbox(true)
-        .enable_gpu(true)
+        // The scoreboard packages this compositor supports are plain
+        // DOM/CSS (no canvas/WebGL), so Chrome's own GPU process buys
+        // nothing here - and disabling it removes a real source of
+        // instability: it used to contend for the same GPU as the
+        // app's own wgpu render pipeline + AI detection + video decode
+        // during an export, which could crash Chrome's GPU process
+        // (and with it this DevTools connection) under sustained load.
+        .enable_gpu(false)
         .ignore_certificate_errors(false)
         .window_size(Some(viewport))
         // headless_chrome's default is 30s, but that timer isn't really
@@ -206,11 +298,11 @@ fn run_worker(
     install_error_hook(&tab)?;
     tab.set_transparent_background_color()
         .map_err(RuntimeError::Browser)?;
-    tab.navigate_to(&page_url)
+    tab.navigate_to(page_url)
         .and_then(|tab| tab.wait_until_navigated())
         .map_err(RuntimeError::Browser)?;
 
-    install_host_bridge(&tab, &package)?;
+    install_host_bridge(&tab, package)?;
     if let Some(json) = initial_json.as_deref() {
         evaluate_update(&tab, json)?;
     }
@@ -220,7 +312,13 @@ fn run_worker(
     }
     let _ = capture(&tab, viewport, frame_tx)?;
     let mut last_version = initial_status.version;
-    let mut editor_version = u64::from(initial_json.is_some());
+    // Always replay from scratch (not gated on whether this launch had
+    // its own `initial_json`) - a freshly launched tab, including one
+    // spun up mid-export by `run_worker`'s restart loop, has no DOM
+    // state of its own yet, so any editor content published before
+    // this particular launch (`editor_state` persists across restarts
+    // even though this local counter doesn't) needs a chance to reapply.
+    let mut editor_version = 0;
     let interval = Duration::from_secs_f64(1.0 / f64::from(max_fps));
     let mut next_capture_check = Instant::now() + interval;
 
@@ -231,7 +329,10 @@ fn run_worker(
         }
         loop {
             match command_rx.try_recv() {
-                Ok(RuntimeCommand::Update(json)) => evaluate_update(&tab, &json)?,
+                Ok(RuntimeCommand::Update(json)) => {
+                    evaluate_update(&tab, &json)?;
+                    *state_json = Some(json);
+                }
                 Ok(RuntimeCommand::Reset) => evaluate_optional(&tab, "reset")?,
                 Ok(RuntimeCommand::Shutdown) | Err(TryRecvError::Disconnected) => {
                     let _ = evaluate_optional(&tab, "destroy");
@@ -490,7 +591,7 @@ mod tests {
             .path(Some(browser_path))
             .headless(true)
             .sandbox(true)
-            .enable_gpu(true)
+            .enable_gpu(false)
             .ignore_certificate_errors(false)
             .window_size(Some(viewport))
             .build()
@@ -536,7 +637,10 @@ mod tests {
             .unwrap();
         let json = remote.value.unwrap();
         let values: Vec<String> = serde_json::from_str(json.as_str().unwrap()).unwrap();
-        assert_eq!(values, ["2", "1", "63:18", "2nd Half"]);
+        // "Nth Section", not "Nth Half" - `scoreboard.js`'s `periodLabel`
+        // always says "Section" regardless of period count (see
+        // SESSION_HANDOFF's 2026-08-23 entry).
+        assert_eq!(values, ["2", "1", "63:18", "2nd Section"]);
 
         let png = tab
             .capture_screenshot(Page::CaptureScreenshotFormatOption::Png, None, None, true)
