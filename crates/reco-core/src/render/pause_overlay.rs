@@ -30,9 +30,12 @@ static FONT_BYTES: &[u8] = include_bytes!("../../assets/fonts/Roboto-Variable.tt
 /// whatever the real output resolution is (same trick the scoreboard
 /// overlay uses), and every active frame reallocates this buffer, so
 /// keeping it modest matters for the handful of seconds it churns
-/// around each cut boundary. `pub` so
-/// `render::overlay_layers::LayeredOverlaySource` can size its own
-/// combined canvas to match when this overlay is one of its layers.
+/// around each cut boundary. When this overlay shares a session with
+/// a higher-resolution layer (e.g. a scoreboard) via
+/// `render::overlay_layers::LayeredOverlaySource`, that combiner sizes
+/// its shared canvas to the largest active layer, so this one gets
+/// upscaled into it rather than forcing the other layer down to this
+/// size - see that module's doc comment.
 pub const CANVAS_WIDTH: u32 = 960;
 pub const CANVAS_HEIGHT: u32 = 540;
 
