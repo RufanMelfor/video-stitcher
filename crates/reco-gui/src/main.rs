@@ -1007,7 +1007,18 @@ impl AppState {
             .input_dimensions()
             .ok_or("No input dimensions")?;
 
-        let bridge = self.build_bridge(&cal, input_w, input_h)?;
+        let mut bridge = self.build_bridge(&cal, input_w, input_h)?;
+        // A freshly built bridge starts with the compositor's own
+        // hardcoded default placement (centered, largest that fits) -
+        // sync in whatever placement is already known (app-level
+        // restored settings, or a mid-session drag), regardless of
+        // whether this calibration itself has a saved `scoreboard`
+        // block. Without this, the scoreboard visibly jumps back to
+        // that default every time the pipeline is rebuilt (app start,
+        // after an export, ...) unless the calibration happens to carry
+        // its own placement - see `init_with_calibration`'s copy of
+        // this same fix for the other rebuild path.
+        bridge.set_overlay_placement(self.scoreboard_placement);
 
         self.calibration = Some(cal);
         self.bridge = Some(bridge);
@@ -1031,7 +1042,12 @@ impl AppState {
             .input_dimensions()
             .ok_or("No input dimensions")?;
 
-        let bridge = self.build_bridge(&cal, input_w, input_h)?;
+        let mut bridge = self.build_bridge(&cal, input_w, input_h)?;
+        // See `try_init`'s copy of this same fix - this is the rebuild
+        // path used after an export (and after auto-calibration), so
+        // without it the scoreboard visibly jumps to the compositor's
+        // default placement every time an export finishes.
+        bridge.set_overlay_placement(self.scoreboard_placement);
 
         self.calibration = Some(cal);
         self.bridge = Some(bridge);
