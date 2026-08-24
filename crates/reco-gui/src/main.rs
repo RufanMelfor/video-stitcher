@@ -1915,16 +1915,38 @@ fn suggested_export_path(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "match".into());
-        return Some(folder.join(format!("{name}_stitched.mp4")));
+        return Some(folder.join(format!("{name}.mp4")));
     }
     let left_path = left_path?;
-    Some(left_path.with_file_name(format!(
-        "{}_stitched.mp4",
+    let candidate = left_path.with_file_name(format!(
+        "{}.mp4",
         left_path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "reco".into())
-    )))
+    ));
+    // A source clip whose extension is already exactly (Windows
+    // filenames are case-insensitive, so this includes e.g. `.MP4` -
+    // the common DJI/most-camera case) `.mp4` would otherwise suggest
+    // an output path that's the *same file* as the raw left camera
+    // footage - starting that export would silently overwrite the
+    // source. Fall back to a `_stitched` suffix (the old, always-safe
+    // behavior) only in that case, so a source with any other
+    // extension (`.mov`, `.MOV`, ...) still gets the plain name.
+    let collides_with_source = candidate
+        .file_name()
+        .zip(left_path.file_name())
+        .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b));
+    if collides_with_source {
+        return Some(left_path.with_file_name(format!(
+            "{}_stitched.mp4",
+            left_path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "reco".into())
+        )));
+    }
+    Some(candidate)
 }
 
 /// Build the `InputPath` for a camera slot from freshly picked file(s),
@@ -7949,14 +7971,32 @@ mod suggested_export_path_tests {
         assert_eq!(
             suggested_export_path(Some(folder), Some(left)),
             Some(PathBuf::from(
-                "D:/Matches/TeamA - TeamB 2026-08-22/TeamA - TeamB 2026-08-22_stitched.mp4"
+                "D:/Matches/TeamA - TeamB 2026-08-22/TeamA - TeamB 2026-08-22.mp4"
             ))
         );
     }
 
     #[test]
     fn falls_back_to_left_video_without_a_match_folder() {
-        let left = Path::new("D:/Recordings/DJI_0001.mp4");
+        // A source extension that isn't already exactly `.mp4` (`.MOV`,
+        // as an iPhone/GoPro source might use) so the suggested `.mp4`
+        // output genuinely differs from it - see the collision test
+        // below for the (very common, e.g. any already-`.mp4`/`.MP4`
+        // source) case where it doesn't.
+        let left = Path::new("D:/Recordings/DJI_0001.MOV");
+        assert_eq!(
+            suggested_export_path(None, Some(left)),
+            Some(PathBuf::from("D:/Recordings/DJI_0001.mp4"))
+        );
+    }
+
+    #[test]
+    fn falls_back_to_stitched_suffix_when_the_plain_name_would_overwrite_the_source() {
+        // Windows filenames are case-insensitive - `DJI_0001.MP4` (the
+        // real, uppercase-extension form DJI cameras actually use) and
+        // a suggested `DJI_0001.mp4` output are the *same file* there,
+        // so the plain name must not be suggested in this case.
+        let left = Path::new("D:/Recordings/DJI_0001.MP4");
         assert_eq!(
             suggested_export_path(None, Some(left)),
             Some(PathBuf::from("D:/Recordings/DJI_0001_stitched.mp4"))
