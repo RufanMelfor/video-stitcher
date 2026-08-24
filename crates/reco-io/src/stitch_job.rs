@@ -1171,13 +1171,7 @@ impl StitchJob {
                 session
                     .set_overlay_placement(reco_core::render::overlay::OverlayPlacement::default());
                 session.set_overlay_source(Box::new(
-                    reco_core::render::overlay_layers::LayeredOverlaySource::new(
-                        (
-                            reco_core::render::pause_overlay::CANVAS_WIDTH,
-                            reco_core::render::pause_overlay::CANVAS_HEIGHT,
-                        ),
-                        layers,
-                    ),
+                    reco_core::render::overlay_layers::LayeredOverlaySource::new(layers),
                 ));
             }
         }
