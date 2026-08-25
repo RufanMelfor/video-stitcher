@@ -103,6 +103,41 @@ end-to-end (raw capture *and* final encoded video, checked via direct
 frame extraction + pixel-level crop/zoom, not just eyeballing the
 preview) before this was committed.
 
+## 6. Post-commit scare: "2K export is bad" - resolved as a stale-process/test-mixup, not a real bug
+
+Right after committing, the user hit what looked like a second real
+2K-specific regression: exports came out badly blurred/warped again,
+apparently at random - some 2K exports fine, others bad, with no
+correlation to settings, no errors logged, and (re-confirmed via the
+`RECO_SCOREBOARD_DUMP_DIR` debug dump, temporarily re-added and
+removed again) Chrome's raw capture staying crisp in every single
+case, including runs whose final video was bad. Spent a long stretch
+chasing real-seeming leads that all checked out clean (command-queue
+congestion, browser crash/restart, VRAM exhaustion, encoder rate-
+control settings, bitrate) before the user realized their own test
+sequence had gotten tangled (an old `reco-gui.exe` process not
+restarted after a rebuild at least once, confirmed via `Get-Process`
++ log timestamp cross-referencing). A final clean 3-test sequence
+(1.7s / 90s / 300s, all 2560x1440, no PAUZE/cut-range, one fresh
+still-open process, distinct output filenames per test, checked start
+*and* end of each) came back **crisp at every duration** - confirms
+the fix from sections 1-5 is genuinely solid; there was no second bug.
+
+**Lesson for next time**: when a "same settings, worse now" report
+shows up, check `Get-Process reco-gui | Select StartTime` against the
+last build's mtime *before* spending time on new theories - a stale
+running process is cheap to rule out and explains this exact
+symptom pattern.
+
+## Verification (final, post-cleanup)
+
+Re-ran after removing the temporary debug dump a second time: `cargo
+fmt --all --check` clean, `cargo clippy` clean, `cargo test -p
+reco-scoreboard --lib` 13/13, `cargo test -p reco-gui --features
+tensorrt` 65/65. Both debug+release `reco-gui.exe` rebuilt one more
+time from the exact committed state (`72e1307e`) after the debug-dump
+round-trip, confirmed via file mtime. No further code changes pending.
+
 ## Not done / next steps
 
 - 2 throwaway diagnostic examples kept in
