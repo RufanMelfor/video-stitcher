@@ -29,11 +29,26 @@ const STRAIGHT_ALPHA_BLEND: wgpu::BlendState = wgpu::BlendState {
 /// A complete straight-alpha RGBA8 overlay surface.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OverlayFrame {
-    /// Pixel width of the reference canvas.
+    /// Pixel width of the actual pixel buffer in `rgba` - may be smaller
+    /// than `design_size` when a producer has pre-scaled its rendering
+    /// down to roughly match how large this frame will end up on
+    /// screen (e.g. the scoreboard renderer picking a Chrome device
+    /// scale factor for the current placement), to avoid relying on
+    /// GPU minification for quality. Equal to `design_size` for every
+    /// producer that doesn't do this.
     pub width: u32,
-    /// Pixel height of the reference canvas.
+    /// Pixel height of the actual pixel buffer in `rgba` - see `width`.
     pub height: u32,
-    /// Tightly packed RGBA8 pixels in row-major order.
+    /// The resolution this frame's placement (contain-fit + offset,
+    /// see [`OverlayPlacement`]) is computed against - independent of
+    /// `width`/`height`, which describe only how large the actual
+    /// pixel buffer is. Keeping these separate lets a producer shrink
+    /// its real pixel buffer for sharper rendering at a known target
+    /// size without that shrink *also* changing where/how large the
+    /// frame is placed - placement always reasons about `design_size`,
+    /// texture upload/sampling always uses `width`/`height`.
+    pub design_size: (u32, u32),
+    /// Tightly packed RGBA8 pixels in row-major order, `width x height`.
     pub rgba: Vec<u8>,
 }
 
@@ -43,6 +58,11 @@ impl OverlayFrame {
         if self.width == 0 || self.height == 0 {
             return Err(OverlayError::InvalidFrame(
                 "overlay dimensions must be non-zero".into(),
+            ));
+        }
+        if self.design_size.0 == 0 || self.design_size.1 == 0 {
+            return Err(OverlayError::InvalidFrame(
+                "overlay design_size must be non-zero".into(),
             ));
         }
         let expected = self
@@ -117,6 +137,31 @@ impl Default for OverlayPlacement {
     }
 }
 
+/// The scale factor at which a frame's actual pixel content will end
+/// up on screen, given its `design_size`, the final `output_size` it's
+/// composited into, and its `placement` - the exact same contain-fit +
+/// `placement.scale` math [`RgbaOverlayCompositor`]'s shader uses.
+///
+/// Meant for a producer capable of choosing its own render resolution
+/// (e.g. the scoreboard renderer's headless-Chrome device pixel ratio)
+/// to pre-scale its actual pixel buffer to roughly match this, instead
+/// of always rendering at full `design_size` and relying on GPU
+/// minification for quality - see [`OverlayFrame::design_size`] for
+/// why that pixel-size choice is independent of the placement math
+/// itself.
+pub fn contain_fit_render_scale(
+    design_size: (u32, u32),
+    output_size: (u32, u32),
+    placement: OverlayPlacement,
+) -> f32 {
+    if design_size.0 == 0 || design_size.1 == 0 {
+        return placement.scale;
+    }
+    let fit = (output_size.0 as f32 / design_size.0 as f32)
+        .min(output_size.1 as f32 / design_size.1 as f32);
+    fit * placement.scale
+}
+
 /// Cached GPU resources for blending one RGBA surface over render targets.
 pub(crate) struct RgbaOverlayCompositor {
     pipeline: wgpu::RenderPipeline,
@@ -125,7 +170,15 @@ pub(crate) struct RgbaOverlayCompositor {
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     params_buffer: wgpu::Buffer,
+    /// The frame's `design_size` - drives the shader's contain-fit
+    /// placement math. Independent of the texture's actual pixel
+    /// dimensions (`texture_size`) - see [`OverlayFrame::design_size`].
     reference_size: (u32, u32),
+    /// The GPU texture's actual allocated pixel dimensions - tracks
+    /// the uploaded frame's `(width, height)`, which may be smaller
+    /// than `reference_size`. Recreating the texture is keyed off this,
+    /// not `reference_size`.
+    texture_size: (u32, u32),
     output_size: (u32, u32),
     placement: OverlayPlacement,
 }
@@ -217,7 +270,7 @@ impl RgbaOverlayCompositor {
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("reco rgba overlay params"),
             contents: bytemuck::bytes_of(&OverlayParams {
-                reference_size: [frame.width as f32, frame.height as f32],
+                reference_size: [frame.design_size.0 as f32, frame.design_size.1 as f32],
                 output_size: [output_size.0 as f32, output_size.1 as f32],
                 placement_offset: [0.0, 0.0],
                 placement_scale: 1.0,
@@ -240,7 +293,8 @@ impl RgbaOverlayCompositor {
             texture,
             bind_group,
             params_buffer,
-            reference_size: (frame.width, frame.height),
+            reference_size: frame.design_size,
+            texture_size: (frame.width, frame.height),
             output_size,
             placement: OverlayPlacement::default(),
         };
@@ -301,7 +355,8 @@ impl RgbaOverlayCompositor {
         frame: &OverlayFrame,
     ) -> Result<(), OverlayError> {
         frame.validate()?;
-        if self.reference_size != (frame.width, frame.height) {
+        let mut params_dirty = false;
+        if self.texture_size != (frame.width, frame.height) {
             self.texture = Self::create_texture(gpu.device(), frame.width, frame.height);
             self.bind_group = Self::create_bind_group(
                 gpu.device(),
@@ -310,7 +365,13 @@ impl RgbaOverlayCompositor {
                 &self.sampler,
                 &self.params_buffer,
             );
-            self.reference_size = (frame.width, frame.height);
+            self.texture_size = (frame.width, frame.height);
+        }
+        if self.reference_size != frame.design_size {
+            self.reference_size = frame.design_size;
+            params_dirty = true;
+        }
+        if params_dirty {
             self.write_params(gpu);
         }
         gpu.queue().write_texture(
@@ -414,6 +475,7 @@ mod tests {
         let valid = OverlayFrame {
             width: 2,
             height: 3,
+            design_size: (2, 3),
             rgba: vec![0; 24],
         };
         assert!(valid.validate().is_ok());
@@ -430,6 +492,7 @@ mod tests {
             OverlayFrame {
                 width: 0,
                 height: 1080,
+                design_size: (1920, 1080),
                 rgba: Vec::new(),
             }
             .validate()
@@ -439,10 +502,39 @@ mod tests {
             OverlayFrame {
                 width: u32::MAX,
                 height: u32::MAX,
+                design_size: (u32::MAX, u32::MAX),
                 rgba: Vec::new(),
             }
             .validate()
             .is_err()
+        );
+    }
+
+    #[test]
+    fn contain_fit_render_scale_matches_shader_math() {
+        // 1920x1080 design, contain-fit into a 2560x1440 output: the
+        // height ratio (1440/1080 = 1.333) is the binding constraint,
+        // same as `min()` in the shader.
+        let scale = contain_fit_render_scale(
+            (1920, 1080),
+            (2560, 1440),
+            OverlayPlacement {
+                offset: (0.0, 0.0),
+                scale: 0.5,
+            },
+        );
+        assert!((scale - (1440.0 / 1080.0 * 0.5)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn contain_fit_render_scale_falls_back_to_placement_scale_for_zero_design_size() {
+        let placement = OverlayPlacement {
+            offset: (0.0, 0.0),
+            scale: 0.4,
+        };
+        assert_eq!(
+            contain_fit_render_scale((0, 1080), (2560, 1440), placement),
+            0.4
         );
     }
 
@@ -516,6 +608,7 @@ mod tests {
         let frame = OverlayFrame {
             width: size,
             height: size,
+            design_size: (size, size),
             rgba: [255_u8, 0, 255, 255].repeat((size * size) as usize),
         };
         let compositor =
@@ -531,5 +624,66 @@ mod tests {
         let pixels = readback.flush_pending(&gpu).unwrap().unwrap();
         let center = ((size / 2 * size + size / 2) * 4) as usize;
         assert_eq!(&pixels[center..center + 4], &[255, 0, 255, 255]);
+    }
+
+    /// Regression test for the GetData-timeout crash traced to the
+    /// mip-chain approach: a producer (the scoreboard renderer) that
+    /// pre-scales its actual pixel buffer down for sharper rendering
+    /// must still place/size correctly - `design_size`, not the
+    /// smaller `width`/`height`, drives the contain-fit placement math.
+    /// Here a 32x32 texture with `design_size: (64, 64)` in a 64x64
+    /// output must still cover the *entire* target (the sampler
+    /// upscaling the smaller texture to fill the full 64x64 footprint),
+    /// exactly like a native 64x64 texture would - not a 32x32 patch
+    /// letterboxed inside it.
+    #[test]
+    fn placement_uses_design_size_not_actual_texture_size() {
+        let Ok(gpu) = GpuContext::new_blocking() else {
+            eprintln!("GPU unavailable; skipping overlay compositor integration test");
+            return;
+        };
+        let size = 64;
+        let target = gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("design_size test target"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Actual pixel buffer is half the design/output size (stand-in
+        // for a Chrome capture pre-scaled to roughly match its
+        // on-screen footprint).
+        let half = size / 2;
+        let frame = OverlayFrame {
+            width: half,
+            height: half,
+            design_size: (size, size),
+            rgba: [0_u8, 255, 0, 255].repeat((half * half) as usize),
+        };
+        let compositor =
+            RgbaOverlayCompositor::new(&gpu, wgpu::TextureFormat::Rgba8Unorm, (size, size), &frame)
+                .unwrap();
+        let mut readback = crate::gpu::rgba_readback::RgbaReadback::new(&gpu, size, size).unwrap();
+        readback
+            .readback(&gpu, &target, compositor.encode(&gpu, &view))
+            .unwrap();
+        let pixels = readback.flush_pending(&gpu).unwrap().unwrap();
+        // Both the center and a corner near the target's edge are
+        // covered - proof the smaller texture was fit to the full
+        // design_size footprint, not left as a small patch in the
+        // corner or center.
+        for (x, y) in [(size / 2, size / 2), (1, 1), (size - 2, size - 2)] {
+            let idx = ((y * size + x) * 4) as usize;
+            assert_eq!(&pixels[idx..idx + 4], &[0, 255, 0, 255], "at ({x}, {y})");
+        }
     }
 }

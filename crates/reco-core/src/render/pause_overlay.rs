@@ -268,6 +268,7 @@ impl PauseOverlaySource {
         OverlayFrame {
             width: self.mask.width,
             height: self.mask.height,
+            design_size: (self.mask.width, self.mask.height),
             rgba,
         }
     }

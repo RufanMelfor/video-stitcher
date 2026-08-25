@@ -85,7 +85,15 @@ body {
 .team-away { color: var(--away-secondary); text-align: right; align-items: flex-end; }
 .team-away::before { background: linear-gradient(260deg, var(--away-color), transparent 92%); }
 
-.team-label { font-size: 18px; letter-spacing: 0.16em; opacity: 0.72; }
+/* 18px used to be the design size here, matching a real broadcast
+   caption's proportions - but at a typical on-screen banner size
+   (~0.5x render scale, see contain_fit_render_scale) that's under
+   10 physical pixels tall, illegible with any renderer (confirmed via
+   a real exported frame, not just a rendering-mechanism bug - see
+   SESSION_HANDOFF's 2026-08-25 entry). Bumped to stay readable; still
+   clearly smaller than .team-name so it reads as a caption, not a
+   second name. */
+.team-label { font-size: 26px; letter-spacing: 0.16em; opacity: 0.72; }
 /* min-width: 0 lets a flex item shrink below its content size at all -
    without it, overflow/text-overflow can't kick in inside .team-identity
    and a long name (or a large logo, see the Logo size slider) would push
@@ -99,11 +107,12 @@ body {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 22px;
-    height: 28px;
+    min-width: 26px;
+    height: 32px;
     padding: 0 6px;
     border-radius: 4px;
-    font-size: 16px;
+    /* Same too-small-at-typical-render-scale fix as .team-label above. */
+    font-size: 20px;
     font-variant-numeric: tabular-nums;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
 }
@@ -129,10 +138,12 @@ body {
     background: rgba(0, 0, 0, 0.28);
 }
 
-.competition { grid-column: 1 / -1; margin-bottom: 4px; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 700; letter-spacing: 0.09em; opacity: 0.72; }
+/* .competition/.added-time/.period bumped alongside .team-label above -
+   same too-small-to-render-legibly-at-any-scale issue, same fix. */
+.competition { grid-column: 1 / -1; margin-bottom: 4px; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 22px; font-weight: 700; letter-spacing: 0.09em; opacity: 0.72; }
 .clock { grid-column: 1 / -1; font-size: 54px; line-height: 1.05; font-variant-numeric: tabular-nums; letter-spacing: 0.04em; }
-.added-time { grid-column: 1 / -1; margin-top: -6px; font-size: 20px; font-variant-numeric: tabular-nums; color: #ffd45a; }
-.period { grid-column: 1 / -1; margin-top: 10px; font-size: 22px; letter-spacing: 0.06em; }
+.added-time { grid-column: 1 / -1; margin-top: -6px; font-size: 26px; font-variant-numeric: tabular-nums; color: #ffd45a; }
+.period { grid-column: 1 / -1; margin-top: 10px; font-size: 28px; letter-spacing: 0.06em; }
 
 .debug-controls {
     position: absolute;

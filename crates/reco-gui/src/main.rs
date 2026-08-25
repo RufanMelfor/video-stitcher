@@ -244,6 +244,28 @@ struct AppState {
     bridge: Option<PreviewBridge>,
     scoreboard_packages: Vec<reco_scoreboard::ScoreboardPackage>,
     scoreboard_runtime: Option<reco_scoreboard::ScoreboardRuntime>,
+    /// The running `scoreboard_runtime`'s package's declared design
+    /// resolution (`manifest.viewport`) - kept alongside it since the
+    /// runtime itself doesn't expose its package after start (it moves
+    /// into the worker thread). Used to compute the render scale to
+    /// pass to `ScoreboardRuntime::set_render_scale` whenever placement
+    /// or viewport size changes - see `apply_scoreboard_placement`.
+    scoreboard_design_size: Option<(u32, u32)>,
+    /// Throttles `apply_scoreboard_render_scale` the same way
+    /// `scoreboard_replay_last_push` throttles `push_scoreboard_replay` -
+    /// without it, the placement drag handler (which calls it on every
+    /// pointer-move tick, unthrottled) sends `SetRenderScale` commands
+    /// far faster than the renderer can drain them (each one costs a
+    /// CDP viewport resize + a JS `zoom` eval + a fresh capture, ~tens of
+    /// ms each with Chrome's own GPU disabled - see
+    /// `apply_zoom`/`set_viewport` in reco-scoreboard), overflowing the
+    /// 32-slot command queue mid-drag ("HTML renderer command queue is
+    /// full" - a real bug hit during the design_size/zoom rework, see
+    /// SESSION_HANDOFF's 2026-08-25 entry). Only gates *this* quality-
+    /// refinement call - `set_overlay_placement` (the live position/size
+    /// feedback the user actually watches while dragging) stays
+    /// unthrottled right next to every call site.
+    scoreboard_render_scale_last_apply: Option<std::time::Instant>,
     scoreboard_frame: Option<OverlayFrame>,
     scoreboard_frame_dirty: bool,
     scoreboard_error: String,
@@ -637,6 +659,8 @@ impl AppState {
             bridge: None,
             scoreboard_packages: discovery.packages,
             scoreboard_runtime: None,
+            scoreboard_design_size: None,
+            scoreboard_render_scale_last_apply: None,
             scoreboard_frame: None,
             scoreboard_frame_dirty: false,
             scoreboard_error,
@@ -725,6 +749,7 @@ impl AppState {
 
     fn configure_scoreboard(&mut self, enabled: bool, selected_index: usize) {
         self.scoreboard_runtime = None;
+        self.scoreboard_design_size = None;
         self.scoreboard_frame = None;
         self.scoreboard_frame_dirty = false;
         if let Some(bridge) = self.bridge.as_mut() {
@@ -739,16 +764,57 @@ impl AppState {
             self.scoreboard_error = "No valid scoreboard package is installed".into();
             return;
         };
+        let design_size = (
+            package.manifest.viewport.width,
+            package.manifest.viewport.height,
+        );
         match reco_scoreboard::ScoreboardRuntime::start(package, 30) {
             Ok(runtime) => {
                 self.scoreboard_runtime = Some(runtime);
+                self.scoreboard_design_size = Some(design_size);
                 self.scoreboard_error.clear();
+                // Apply whatever placement/viewport is already known
+                // right away - without this a freshly (re)started
+                // runtime renders at full design resolution until the
+                // next unrelated placement change happens to touch it.
+                self.apply_scoreboard_render_scale();
             }
             Err(error) => {
                 self.scoreboard_error = error.to_string();
                 log::error!("Cannot enable scoreboard: {error}");
             }
         }
+    }
+
+    /// Recompute and push the scoreboard's Chrome render scale from the
+    /// current `scoreboard_placement` and the live preview's viewport
+    /// size - see `reco_scoreboard::ScoreboardRuntime::set_render_scale`.
+    /// A no-op when no scoreboard runtime or preview pipeline is active
+    /// yet. Throttled (see `scoreboard_render_scale_last_apply`) - safe
+    /// to call on every placement drag tick regardless.
+    fn apply_scoreboard_render_scale(&mut self) {
+        const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
+        if let Some(last) = self.scoreboard_render_scale_last_apply
+            && last.elapsed() < MIN_INTERVAL
+        {
+            return;
+        }
+        let (Some(runtime), Some(design_size), Some(bridge)) = (
+            self.scoreboard_runtime.as_ref(),
+            self.scoreboard_design_size,
+            self.bridge.as_ref(),
+        ) else {
+            return;
+        };
+        let render_scale = reco_core::render::overlay::contain_fit_render_scale(
+            design_size,
+            bridge.viewport_size(),
+            self.scoreboard_placement,
+        );
+        if let Err(error) = runtime.set_render_scale(render_scale) {
+            log::warn!("Scoreboard: could not apply render scale {render_scale:.3}: {error}");
+        }
+        self.scoreboard_render_scale_last_apply = Some(std::time::Instant::now());
     }
 
     /// Poll the independent HTML worker and upload only a changed RGBA frame.
@@ -1022,6 +1088,10 @@ impl AppState {
 
         self.calibration = Some(cal);
         self.bridge = Some(bridge);
+        // Viewport size may have changed with this rebuild - resync the
+        // scoreboard's Chrome render scale to match (see
+        // `apply_scoreboard_render_scale`'s own doc comment).
+        self.apply_scoreboard_render_scale();
         Ok(true)
     }
 
@@ -1051,6 +1121,8 @@ impl AppState {
 
         self.calibration = Some(cal);
         self.bridge = Some(bridge);
+        // See `try_init`'s copy of this same fix.
+        self.apply_scoreboard_render_scale();
         Ok(true)
     }
 
@@ -2720,6 +2792,7 @@ fn apply_scoreboard_settings(
     if let Some(bridge) = s.bridge.as_mut() {
         bridge.set_overlay_placement(settings.placement);
     }
+    s.apply_scoreboard_render_scale();
     app.set_scoreboard_offset_x(settings.placement.offset.0);
     app.set_scoreboard_offset_y(settings.placement.offset.1);
     app.set_scoreboard_scale(settings.placement.scale);
@@ -4474,6 +4547,7 @@ fn main() -> anyhow::Result<()> {
         if let Some(bridge) = s.bridge.as_mut() {
             bridge.set_overlay_placement(placement);
         }
+        s.apply_scoreboard_render_scale();
         // Without this, the preview only redraws while playing/seeking
         // (see vsync_render_tick's gate) - a drag while paused updated the
         // compositor instantly but the screen wouldn't reflect it until
@@ -6946,6 +7020,7 @@ fn vsync_render_tick(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<RecoA
     // initialized at a fixed resolution and the NV12 readback must
     // match. Also caps at 1920x1080 to prevent GPU starvation on
     // high-DPI displays.
+    let mut viewport_resized = false;
     if !s.is_recording()
         && let Some(app) = app_weak.upgrade()
         && let Some(bridge) = s.bridge.as_mut()
@@ -6956,7 +7031,14 @@ fn vsync_render_tick(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<RecoA
         if area_w.abs_diff(cur_w) > 16 || area_h.abs_diff(cur_h) > 16 {
             bridge.resize(area_w, area_h);
             s.preview_dirty = true;
+            viewport_resized = true;
         }
+    }
+    if viewport_resized {
+        // The contain-fit ratio the scoreboard's render scale depends
+        // on changes with the viewport - see
+        // `apply_scoreboard_render_scale`'s own doc comment.
+        s.apply_scoreboard_render_scale();
     }
 
     let camera_changed = s.smooth_camera();

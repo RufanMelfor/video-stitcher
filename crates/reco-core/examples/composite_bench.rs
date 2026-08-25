@@ -33,6 +33,7 @@ fn solid(width: u32, height: u32, rgba: [u8; 4]) -> OverlayFrame {
     OverlayFrame {
         width,
         height,
+        design_size: (width, height),
         rgba: buf,
     }
 }

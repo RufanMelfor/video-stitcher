@@ -447,12 +447,38 @@ pub fn run_export(
     let scoreboard_shared: Option<Arc<Mutex<reco_scoreboard::ScoreboardRuntime>>> =
         match scoreboard_package {
             Some(package) => {
+                let design_size = (
+                    package.manifest.viewport.width,
+                    package.manifest.viewport.height,
+                );
                 match reco_scoreboard::ScoreboardRuntime::start_with_state(
                     package,
                     30,
                     initial_scoreboard_state,
                 ) {
-                    Ok(runtime) => Some(Arc::new(Mutex::new(runtime))),
+                    Ok(runtime) => {
+                        // Render at (roughly) the resolution this frame
+                        // will actually end up at on screen, instead of
+                        // always at the package's full design
+                        // resolution - avoids relying on GPU
+                        // minification for text quality when the
+                        // scoreboard is placed smaller than full-frame.
+                        // Export output resolution and placement are
+                        // both fixed for the whole run, so this is set
+                        // once here, not re-sent per frame.
+                        let render_scale = reco_core::render::overlay::contain_fit_render_scale(
+                            design_size,
+                            (width, height),
+                            scoreboard_placement,
+                        );
+                        if let Err(error) = runtime.set_render_scale(render_scale) {
+                            log::warn!(
+                                "Scoreboard: could not apply render scale {render_scale:.3}: \
+                                 {error} (falling back to full design resolution)"
+                            );
+                        }
+                        Some(Arc::new(Mutex::new(runtime)))
+                    }
                     Err(error) => {
                         log::error!("Scoreboard disabled for export: {error}");
                         let weak = app_weak.clone();

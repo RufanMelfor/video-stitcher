@@ -47,18 +47,29 @@ impl OverlayFrameSource for LayeredOverlaySource {
             return Ok(None);
         }
 
-        // Sized to the largest cached layer, not a fixed constant: a
-        // smaller layer (e.g. the PAUZE transition's deliberately
-        // small 960x540 reference canvas, see `pause_overlay`'s doc
-        // comment) then gets upscaled into this canvas, while a
-        // larger layer (e.g. a scoreboard package's full 1920x1080
-        // reference canvas) draws pixel-for-pixel with no resample at
-        // all instead of being downscaled into a smaller shared
-        // canvas first - that previous fixed-small-canvas behavior
-        // silently forced every scoreboard frame through a lossy
-        // nearest-neighbor downscale-then-upscale round trip on every
-        // export where a scoreboard and the PAUZE transition were
-        // both active, visibly degrading its text.
+        // Sized to the largest cached layer's actual pixel buffer, not
+        // a fixed constant: a smaller layer (e.g. the PAUZE
+        // transition's deliberately small 960x540 canvas, see
+        // `pause_overlay`'s doc comment) then gets upscaled into this
+        // canvas, while a larger layer (e.g. a scoreboard package's
+        // full 1920x1080 canvas) draws pixel-for-pixel with no
+        // resample at all instead of being downscaled into a smaller
+        // shared canvas first - that previous fixed-small-canvas
+        // behavior silently forced every scoreboard frame through a
+        // lossy nearest-neighbor downscale-then-upscale round trip on
+        // every export where a scoreboard and the PAUZE transition
+        // were both active, visibly degrading its text.
+        //
+        // The canvas's own `design_size` (used below, drives where/
+        // how large *this whole composited canvas* lands on the video
+        // frame one level up) is instead the largest *design* size -
+        // independent of a layer's actual pixel buffer, which may be
+        // smaller when that layer's producer pre-scaled its own
+        // rendering down for sharper output (see
+        // `OverlayFrame::design_size`). Using actual pixel size there
+        // instead would make the canvas's outer placement shrink right
+        // along with an inner producer's quality optimization, which
+        // has nothing to do with where the canvas itself should sit.
         let (width, height) = self
             .cache
             .iter()
@@ -66,9 +77,20 @@ impl OverlayFrameSource for LayeredOverlaySource {
             .fold((1u32, 1u32), |(max_w, max_h), frame| {
                 (max_w.max(frame.width), max_h.max(frame.height))
             });
+        let (design_w, design_h) =
+            self.cache
+                .iter()
+                .flatten()
+                .fold((1u32, 1u32), |(max_w, max_h), frame| {
+                    (
+                        max_w.max(frame.design_size.0),
+                        max_h.max(frame.design_size.1),
+                    )
+                });
         let mut canvas = OverlayFrame {
             width,
             height,
+            design_size: (design_w, design_h),
             rgba: vec![0u8; (width as usize) * (height as usize) * 4],
         };
         for (i, (_, placement)) in self.layers.iter().enumerate() {
@@ -89,7 +111,14 @@ impl OverlayFrameSource for LayeredOverlaySource {
 /// "over" blend.
 fn composite_over(canvas: &mut OverlayFrame, source: &OverlayFrame, placement: OverlayPlacement) {
     let (out_w, out_h) = (canvas.width as f32, canvas.height as f32);
-    let (ref_w, ref_h) = (source.width as f32, source.height as f32);
+    // The footprint `source` is fit into uses its *design* size, not
+    // its actual pixel buffer size - see `OverlayFrame::design_size`.
+    // These differ when `source`'s producer pre-scaled its own pixel
+    // buffer down for sharper rendering; the footprint math must stay
+    // based on the stable design size regardless, or that shrink would
+    // get (wrongly) re-applied here as an *additional* scale-down on
+    // top of whatever the producer already did.
+    let (ref_w, ref_h) = (source.design_size.0 as f32, source.design_size.1 as f32);
     if ref_w <= 0.0 || ref_h <= 0.0 {
         return;
     }
@@ -126,13 +155,21 @@ fn composite_over(canvas: &mut OverlayFrame, source: &OverlayFrame, placement: O
         if !(0.0..=1.0).contains(&v) {
             continue;
         }
-        let sy = ((v * ref_h) as u32).min(source.height - 1);
+        // `v`/`u` are fractions (0..1) of the *footprint*, independent
+        // of resolution - map them into `source`'s actual pixel buffer
+        // (`source.width`/`height`), not the `ref_w`/`ref_h` design
+        // size used only to compute that footprint above. These
+        // coincide whenever a producer hasn't pre-scaled its own pixel
+        // buffer; when it has, this is exactly what makes the smaller
+        // buffer sample correctly across the still-full-size footprint
+        // instead of only covering a corner of it.
+        let sy = ((v * source.height as f32) as u32).min(source.height - 1);
         for x in x0..x1 {
             let u = (x as f32 + 0.5 - origin_x) * inv_fitted_w;
             if !(0.0..=1.0).contains(&u) {
                 continue;
             }
-            let sx = ((u * ref_w) as u32).min(source.width - 1);
+            let sx = ((u * source.width as f32) as u32).min(source.width - 1);
             let src_idx = (sy * source.width + sx) as usize * 4;
             let dst_idx = (y * canvas.width + x) as usize * 4;
 
@@ -185,7 +222,24 @@ mod tests {
         OverlayFrame {
             width,
             height,
+            design_size: (width, height),
             rgba: buf,
+        }
+    }
+
+    /// Like `solid_frame`, but with a `design_size` different from the
+    /// actual pixel buffer - stand-in for a producer that pre-scaled
+    /// its own rendering down for sharper output (see
+    /// `OverlayFrame::design_size`).
+    fn solid_frame_pre_scaled(
+        width: u32,
+        height: u32,
+        design_size: (u32, u32),
+        rgba: [u8; 4],
+    ) -> OverlayFrame {
+        OverlayFrame {
+            design_size,
+            ..solid_frame(width, height, rgba)
         }
     }
 
@@ -326,5 +380,62 @@ mod tests {
         // The large layer's marker pixel survived exactly, at the same
         // coordinates it was drawn at - proof it wasn't resampled.
         assert_eq!(&frame.rgba[marker_idx..marker_idx + 4], &[255, 0, 255, 255]);
+    }
+
+    /// Regression test for the GetData-timeout crash traced to the
+    /// mip-chain approach: a layer whose producer pre-scaled its own
+    /// pixel buffer down (smaller `width`/`height` than `design_size`,
+    /// e.g. the scoreboard renderer picking a smaller Chrome capture
+    /// resolution for its current placement) must still land at the
+    /// same footprint a full-size buffer would have, not get shrunk a
+    /// second time by `composite_over` re-applying `placement.scale`
+    /// against its already-reduced pixel size.
+    #[test]
+    fn composite_over_uses_design_size_not_actual_pixel_size_for_placement() {
+        let full_size_canvas = {
+            let mut canvas = solid_frame(100, 100, [0, 0, 0, 0]);
+            let source = solid_frame(50, 50, [255, 0, 0, 255]);
+            composite_over(&mut canvas, &source, OverlayPlacement::default());
+            canvas
+        };
+        let pre_scaled_canvas = {
+            let mut canvas = solid_frame(100, 100, [0, 0, 0, 0]);
+            // Actual pixel buffer is only 20x20 (already scaled down by
+            // its producer), but its design_size is still the full
+            // 50x50 the placement math should use - the composited
+            // result must be pixel-identical to the full-size source
+            // above, just sourced from fewer texels.
+            let source = solid_frame_pre_scaled(20, 20, (50, 50), [255, 0, 0, 255]);
+            composite_over(&mut canvas, &source, OverlayPlacement::default());
+            canvas
+        };
+        // Same footprint in both cases (a solid color, so nearest-
+        // neighbor sampling the smaller buffer produces the exact same
+        // output): center pixel and the fitted region's covered area
+        // match exactly, not just visually.
+        assert_eq!(full_size_canvas.rgba, pre_scaled_canvas.rgba);
+    }
+
+    /// The combined canvas's own `design_size` must track each layer's
+    /// *design* size, not its actual (possibly pre-scaled) pixel
+    /// buffer - otherwise a scoreboard layer that shrank its own pixel
+    /// buffer for sharper rendering would also shrink where/how large
+    /// the whole composited canvas lands on the video frame one level
+    /// up, which has nothing to do with that producer-side optimization.
+    #[test]
+    fn canvas_design_size_tracks_largest_layer_design_size_not_pixel_size() {
+        let pre_scaled = solid_frame_pre_scaled(20, 20, (1920, 1080), [255, 0, 255, 255]);
+        let mut layered = LayeredOverlaySource::new(vec![(
+            Box::new(OnceSource(Some(pre_scaled))),
+            OverlayPlacement::default(),
+        )]);
+        let frame = layered.try_frame().unwrap().unwrap();
+        // Actual pixel buffer stays small (the canvas doesn't need to
+        // be any bigger than its one, already-small, layer)...
+        assert_eq!((frame.width, frame.height), (20, 20));
+        // ...but the canvas's design_size reports the layer's full
+        // design resolution, for the outer compositor's own placement
+        // math to use.
+        assert_eq!(frame.design_size, (1920, 1080));
     }
 }
