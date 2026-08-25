@@ -17,6 +17,9 @@ use crate::manifest::ScoreboardPackage;
 enum RuntimeCommand {
     Update(String),
     Reset,
+    /// Re-render at a new zoom level against the package's unchanged
+    /// CSS viewport - see [`ScoreboardRuntime::set_render_scale`].
+    SetRenderScale(f32),
     Shutdown,
 }
 
@@ -105,6 +108,39 @@ impl ScoreboardRuntime {
     /// Queue the package's optional `reset()` hook.
     pub fn reset(&self) -> Result<(), RuntimeError> {
         try_send_command(&self.command_tx, RuntimeCommand::Reset)
+    }
+
+    /// Re-render at a new zoom level, so future captures come out at
+    /// roughly `scale` times the package's declared CSS viewport
+    /// instead of always at its full native resolution.
+    ///
+    /// The CSS layout itself (`scoreboards/football/index.html`'s
+    /// fixed-px grid/fonts) is untouched in *design* terms - it's
+    /// re-laid-out at `scale`x via CSS `zoom` (Blink's own page-zoom
+    /// mechanism, the same one behind a real browser's Ctrl+-/Ctrl++),
+    /// not resampled after the fact, so Chrome's font
+    /// hinting/anti-aliasing picks the right glyphs for the final
+    /// physical size instead of sub-sampling glyphs rasterized for a
+    /// different size. An earlier attempt drove this via
+    /// `device_scale_factor` instead - looked equivalent, but Chrome's
+    /// text rasterizer assumes DSF >= 1 and produces visibly *worse*
+    /// text than a naive resize once `scale` drops below 1 (which it
+    /// almost always does - the scoreboard banner is a small fraction
+    /// of the frame). `device_scale_factor` is now always left at 1.0;
+    /// see `set_viewport`/`apply_zoom`. The caller (`reco-gui`) knows
+    /// how large this frame will actually end up on screen (its own
+    /// placement scale times how the compositor fits the package's
+    /// design resolution into the video frame) and should pass that
+    /// combined ratio here - see
+    /// [`reco_core::render::overlay::OverlayFrame::design_size`] for
+    /// the other half of this (the frame's *placement* stays keyed to
+    /// the stable design resolution regardless of this scale).
+    ///
+    /// Cheap to call on every placement drag/resize tick - a resize
+    /// command still only actually reaches the browser a few times a
+    /// second, same as [`Self::update`].
+    pub fn set_render_scale(&self, scale: f32) -> Result<(), RuntimeError> {
+        try_send_command(&self.command_tx, RuntimeCommand::SetRenderScale(scale))
     }
 
     /// Return the authenticated local editor URL declared by the package.
@@ -209,6 +245,10 @@ fn run_worker(
     frame_tx: &SyncSender<Result<OverlayFrame, String>>,
 ) -> Result<(), RuntimeError> {
     let mut state_json = initial_json;
+    // Survives restarts the same way `state_json` does - a relaunch
+    // mid-export must keep rendering at whatever placement scale was
+    // last set, not silently snap back to native resolution.
+    let mut render_scale = 1.0_f32;
     let mut attempts_left = MAX_RESTART_ATTEMPTS;
     loop {
         let session_start = Instant::now();
@@ -218,10 +258,12 @@ fn run_worker(
             &page_url,
             &editor_state,
             state_json.clone(),
+            render_scale,
             max_fps,
             command_rx,
             frame_tx,
             &mut state_json,
+            &mut render_scale,
         ) {
             Ok(()) => return Ok(()),
             Err(RuntimeError::Browser(error)) if attempts_left > 0 => {
@@ -242,10 +284,10 @@ fn run_worker(
 }
 
 /// One browser launch, tab session, and its capture loop - see
-/// [`run_worker`] for the retry wrapper around this. `state_json` is
-/// both the seed applied on entry and, on return, updated to the most
-/// recent state actually applied - so a caller that relaunches can
-/// reseed the new session with it.
+/// [`run_worker`] for the retry wrapper around this. `state_json` and
+/// `render_scale` are both the seed applied on entry and, on return,
+/// updated to the most recent value actually applied - so a caller
+/// that relaunches can reseed the new session with them.
 #[allow(clippy::too_many_arguments)]
 fn run_session(
     package: &ScoreboardPackage,
@@ -253,10 +295,12 @@ fn run_session(
     page_url: &str,
     editor_state: &EditorState,
     initial_json: Option<String>,
+    initial_scale: f32,
     max_fps: u32,
     command_rx: &Receiver<RuntimeCommand>,
     frame_tx: &SyncSender<Result<OverlayFrame, String>>,
     state_json: &mut Option<String>,
+    render_scale: &mut f32,
 ) -> Result<(), RuntimeError> {
     let viewport = (
         package.manifest.viewport.width,
@@ -294,13 +338,24 @@ fn run_session(
     let browser = Browser::new(options).map_err(RuntimeError::Browser)?;
     let tab = browser.new_tab().map_err(RuntimeError::Browser)?;
     tab.set_default_timeout(Duration::from_secs(10));
-    set_viewport(&tab, viewport)?;
+    // The CSS viewport (`viewport`, the package's declared design
+    // resolution) never changes here - only `capture_size`, the
+    // *physical* pixel resolution captures come out at, does, as
+    // `SetRenderScale` commands arrive. Every `capture()` call below
+    // reports `viewport` as the frame's `design_size` regardless of
+    // `capture_size`, so placement stays keyed to the stable design
+    // resolution - see `OverlayFrame::design_size`.
+    let mut capture_size = set_viewport(&tab, viewport, initial_scale)?;
     install_error_hook(&tab)?;
     tab.set_transparent_background_color()
         .map_err(RuntimeError::Browser)?;
     tab.navigate_to(page_url)
         .and_then(|tab| tab.wait_until_navigated())
         .map_err(RuntimeError::Browser)?;
+    // Only meaningful once a real document exists - `set_viewport`
+    // above ran against the pre-navigation `about:blank` target, which
+    // has no layout to zoom.
+    apply_zoom(&tab, initial_scale)?;
 
     install_host_bridge(&tab, package)?;
     if let Some(json) = initial_json.as_deref() {
@@ -310,7 +365,7 @@ fn run_session(
     if let Some(error) = initial_status.error {
         return Err(RuntimeError::JavaScript(error));
     }
-    let _ = capture(&tab, viewport, frame_tx)?;
+    let _ = capture(&tab, capture_size, viewport, frame_tx)?;
     let mut last_version = initial_status.version;
     // Always replay from scratch (not gated on whether this launch had
     // its own `initial_json`) - a freshly launched tab, including one
@@ -334,6 +389,19 @@ fn run_session(
                     *state_json = Some(json);
                 }
                 Ok(RuntimeCommand::Reset) => evaluate_optional(&tab, "reset")?,
+                Ok(RuntimeCommand::SetRenderScale(scale)) => {
+                    capture_size = set_viewport(&tab, viewport, scale)?;
+                    apply_zoom(&tab, scale)?;
+                    *render_scale = scale;
+                    // Push a fresh capture at the new resolution right
+                    // away, rather than waiting for the next natural
+                    // version-change tick - the DOM content hasn't
+                    // changed, only how many physical pixels it's
+                    // rasterized into, so nothing else would trigger one.
+                    if capture(&tab, capture_size, viewport, frame_tx)? {
+                        last_version = render_status(&tab)?.version;
+                    }
+                }
                 Ok(RuntimeCommand::Shutdown) | Err(TryRecvError::Disconnected) => {
                     let _ = evaluate_optional(&tab, "destroy");
                     return Ok(());
@@ -349,7 +417,7 @@ fn run_session(
                 return Err(RuntimeError::JavaScript(error));
             }
             if (status.version != last_version || status.animated)
-                && capture(&tab, viewport, frame_tx)?
+                && capture(&tab, capture_size, viewport, frame_tx)?
             {
                 last_version = status.version;
             }
@@ -359,15 +427,34 @@ fn run_session(
     }
 }
 
-fn set_viewport(tab: &Tab, viewport: (u32, u32)) -> Result<(), RuntimeError> {
+/// Resizes the CDP viewport to the *physical* pixel resolution a
+/// `capture()` call will now produce - `design_size * scale`, rounded,
+/// floored to at least 1px per dimension so a pathologically small
+/// placement never asks for a 0x0 capture. `device_scale_factor` is
+/// always left at 1.0: the zoom-vs-DSF distinction only matters for
+/// how the page's own content is *laid out* within this viewport,
+/// which is [`apply_zoom`]'s job, not this one - always call both
+/// together (see the two call sites in `run_session`).
+fn set_viewport(
+    tab: &Tab,
+    design_size: (u32, u32),
+    scale: f32,
+) -> Result<(u32, u32), RuntimeError> {
+    let scale = if scale.is_finite() {
+        scale.max(0.01)
+    } else {
+        1.0
+    };
+    let w = ((design_size.0 as f32) * scale).round().max(1.0) as u32;
+    let h = ((design_size.1 as f32) * scale).round().max(1.0) as u32;
     tab.call_method(Emulation::SetDeviceMetricsOverride {
-        width: viewport.0,
-        height: viewport.1,
+        width: w,
+        height: h,
         device_scale_factor: 1.0,
         mobile: false,
         scale: None,
-        screen_width: Some(viewport.0),
-        screen_height: Some(viewport.1),
+        screen_width: Some(w),
+        screen_height: Some(h),
         position_x: None,
         position_y: None,
         dont_set_visible_size: None,
@@ -377,6 +464,29 @@ fn set_viewport(tab: &Tab, viewport: (u32, u32)) -> Result<(), RuntimeError> {
         device_posture: None,
     })
     .map_err(RuntimeError::Browser)?;
+    Ok((w, h))
+}
+
+/// Applies CSS `zoom` to the live document's root element so its
+/// fixed-px design layout still measures out at the package's full
+/// declared CSS viewport, while Chrome paints that into the smaller
+/// physical viewport [`set_viewport`] just configured - the same
+/// mechanism behind a real browser's Ctrl+-/Ctrl++, which re-lays-out
+/// text (and picks new font hinting) for the final physical size
+/// instead of resampling glyphs rasterized for a different one. Must
+/// be called after the target document has loaded (the root element
+/// doesn't exist yet on an unloaded `about:blank` navigation target).
+fn apply_zoom(tab: &Tab, scale: f32) -> Result<(), RuntimeError> {
+    let scale = if scale.is_finite() {
+        scale.max(0.01)
+    } else {
+        1.0
+    };
+    tab.evaluate(
+        &format!(r#"document.documentElement.style.zoom = "{scale}";"#),
+        false,
+    )
+    .map_err(|error| RuntimeError::JavaScript(error.to_string()))?;
     Ok(())
 }
 
@@ -492,9 +602,18 @@ fn render_status(tab: &Tab) -> Result<RenderStatus, RuntimeError> {
     serde_json::from_str(&json).map_err(RuntimeError::Status)
 }
 
+/// Captures the tab's current transparent screenshot. `expected_size`
+/// is the *physical* pixel resolution this capture should come out at
+/// (`design_size * render scale`, see `set_viewport`/`apply_zoom`) - a
+/// mismatch is a real bug (a stale scale/viewport somewhere), not
+/// tolerated.
+/// `design_size` is always the package's unchanging CSS viewport,
+/// carried into the emitted frame regardless of `expected_size` - see
+/// [`OverlayFrame::design_size`].
 fn capture(
     tab: &Tab,
     expected_size: (u32, u32),
+    design_size: (u32, u32),
     frame_tx: &SyncSender<Result<OverlayFrame, String>>,
 ) -> Result<bool, RuntimeError> {
     let png = tab
@@ -512,6 +631,7 @@ fn capture(
     let frame = OverlayFrame {
         width: expected_size.0,
         height: expected_size.1,
+        design_size,
         rgba: rgba.into_raw(),
     };
     match frame_tx.try_send(Ok(frame)) {
@@ -598,7 +718,7 @@ mod tests {
             .unwrap();
         let browser = Browser::new(options).unwrap();
         let tab = browser.new_tab().unwrap();
-        set_viewport(&tab, viewport).unwrap();
+        set_viewport(&tab, viewport, 1.0).unwrap();
         install_error_hook(&tab).unwrap();
         tab.set_transparent_background_color().unwrap();
         let asset_server = LocalPackageServer::start(package.directory.clone()).unwrap();
@@ -658,7 +778,7 @@ mod tests {
 
         let editor_target = package.manifest.editor.as_deref().unwrap();
         let editor_tab = browser.new_tab().unwrap();
-        set_viewport(&editor_tab, viewport).unwrap();
+        set_viewport(&editor_tab, viewport, 1.0).unwrap();
         editor_tab
             .navigate_to(&asset_server.editor_url_for(editor_target))
             .and_then(|tab| tab.wait_until_navigated())

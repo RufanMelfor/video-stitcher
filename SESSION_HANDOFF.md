@@ -1,3 +1,281 @@
+# Session handoff - 2026-08-25 (TGR_PC): design_size fix's DSF text-hinting bug found+fixed (zoom instead), scoreboard font-size legibility fix, queue-congestion throttle fix - all committed+verified
+
+Direct continuation of 2026-08-24 below - user tested that session's
+uncommitted `design_size` diff (mip-chain crash fix) for the first time.
+
+## 1. `device_scale_factor < 1` breaks Chrome's text hinting - switched to CSS `zoom`
+
+User's first real test: no more GetData-timeout crash (good), but
+scoreboard text was **worse** than before, not better. Root cause: the
+design_size fix drove Chrome's physical capture resolution via
+`device_scale_factor` (CDP `SetDeviceMetricsOverride`). Since the
+banner is usually a small fraction of the frame, the resulting DSF is
+almost always well under 1.0 - and Chrome's font rasterizer assumes
+DSF >= 1, producing visibly broken glyph hinting below that, worse
+than a naive full-res-then-GPU-downscale would have looked.
+
+Fixed (`crates/reco-scoreboard/src/runtime.rs`): `device_scale_factor`
+now always stays at `1.0`. Scaling instead goes through CSS `zoom`
+(Blink's own page-zoom mechanism - the same one behind a real
+browser's Ctrl+-/Ctrl++), applied via a new `apply_zoom()` after each
+`set_viewport()` resizes the CDP viewport to the *physical* target
+size. `zoom` re-lays-out text (recomputes font metrics) for the final
+physical size instead of sub-sampling glyphs rasterized for a
+different one - the actual mechanism behind why real browser zoom
+stays crisp at any level, which the DSF approach never was.
+
+## 2. Team-label/period/etc CSS fonts too small at typical banner scale
+
+Second test: clock/score now genuinely crisp (zoom fix confirmed
+working), but "HOME"/"AWAY" and "1st Section" were still mush.
+Real-frame extraction + pixel measurement showed why: at a typical
+banner placement (~0.4-0.5x render scale), `.team-label`'s 18px design
+font resolves to under 10 physical pixels tall - illegible with any
+renderer, not a rendering bug. `.clock` (54px) resolves to ~29px and
+was fine. Bumped `scoreboards/football/style.css`'s smallest text
+elements (`.team-label` 18->26px, `.competition` 15->22px,
+`.added-time` 20->26px, `.period` 22->28px, `.card-badge` 16->20px) -
+package-only change, no Rust rebuild needed to test standalone
+(confirmed via a new `dump_scoreboard.rs` throwaway example that
+renders the real package at an arbitrary scale to a PNG).
+
+## 3. Stale bundled `scoreboards/` copy - a real gotcha, not a code bug
+
+Third test still showed no improvement after the CSS fix. Root cause:
+`reco-gui/build.rs` copies `scoreboards/` next to the compiled binary
+at build time (`target/{profile}/scoreboards`) so a release exe
+doesn't need the dev-only `CARGO_MANIFEST_DIR` fallback - editing the
+repo's `scoreboards/football/style.css` does nothing to an
+already-built exe until it's rebuilt. Rebuilding picked up the fix
+immediately. **Worth remembering**: any scoreboard-package-only change
+still needs a rebuild to reach a previously-built exe, unlike a truly
+filesystem-discovered debug build.
+
+## 4. "1080p perfect, 2K a ramp" - false alarm, not a real resolution bug
+
+User's next test (placement scale 0.3, 2560x1440 output) looked badly
+warped even after both fixes above - worse than the font-size mush,
+actual glyph-shape distortion ("1" reading like "7"). Investigated via
+a new opt-in `RECO_SCOREBOARD_DUMP_DIR` env var in
+`runtime.rs::capture()` (dumps every raw Chrome PNG to disk, removed
+again before committing) to separate "Chrome's own capture is wrong"
+from "something downstream (GPU compositor/encoder) corrupts it" -
+raw captures were crisp at every scale tested (0.3, 0.4, 0.533),
+proving the capture stage was never the problem. Confirmed the
+shader's contain-fit math (`rgba_overlay.wgsl`) applies one uniform
+scale to both axes - no non-uniform stretch is even possible there.
+Confirmed via the real `reco-gui.log` that the export's own pipeline
+*was* initialized at the correct 2560x1440 output size before the
+scoreboard's first frame. Then a fresh 2K test (same debug-dump build)
+came back **crisp end-to-end, matching 1080p** - the original "ramp"
+result is now believed to have been the stale-bundled-directory issue
+above (#3) or a transient stuck-scale from the queue-congestion bug
+below (#5), not a resolution-dependent rendering bug. No code changes
+resulted from this investigation beyond the throwaway debug dump
+(reverted).
+
+## 5. Queue-congestion throttle fix
+
+Surfaced by the investigations above:
+`reco-gui.log` showed repeated `"HTML renderer command queue is full"`
+warnings during live placement dragging - `apply_zoom()`'s extra JS
+eval (fix #1) made each `SetRenderScale` command slower to drain,
+and `on_changed_scoreboard_placement` called
+`apply_scoreboard_render_scale()` on every unthrottled pointer-move
+tick, overflowing the 32-slot command queue during a fast drag. Fixed
+by throttling `apply_scoreboard_render_scale()` itself (150ms, same
+pattern as the existing `push_scoreboard_replay`/
+`scoreboard_replay_last_push` throttle) - covers all 5 call sites at
+once. The always-live position/size feedback
+(`bridge.set_overlay_placement`) stays unthrottled right next to every
+call site, so dragging still feels instant; only the
+Chrome-re-render-for-quality step is debounced.
+
+## Verification
+
+`cargo fmt --all --check` clean. `cargo clippy -p reco-core -p
+reco-scoreboard -p reco-gui --features tensorrt --all-targets -D
+warnings` clean. `cargo test -p reco-scoreboard --lib` 13/13 (incl.
+the real headless-Chrome DOM test). `cargo test -p reco-gui --features
+tensorrt` 65/65. Both debug+release `reco-gui.exe` rebuilt with
+`--features tensorrt`. User confirmed both 1080p and 2K exports crisp
+end-to-end (raw capture *and* final encoded video, checked via direct
+frame extraction + pixel-level crop/zoom, not just eyeballing the
+preview) before this was committed.
+
+## Not done / next steps
+
+- 2 throwaway diagnostic examples kept in
+  `crates/reco-scoreboard/examples/` (`zoom_bench.rs`,
+  `dump_scoreboard.rs`) - same precedent as the existing `gpu_bench.rs`,
+  user's call, not deleted.
+- The design_size diff's own "Not done" items from 2026-08-24 below are
+  now superseded by this entry where they overlap (the crash fix and
+  quality fix are both confirmed working) - anything not mentioned
+  above from that list is still open.
+- 4K export still not tested (user mentioned only 1080p/2K were tried).
+- No upstream PR for any of this yet.
+
+---
+
+# Session handoff - 2026-08-24 (TGR_PC): scoreboard GetData-timeout crash root-caused + design_size fix, SESSION PAUSED before user test
+
+**SESSION PAUSED 2026-08-24, user had to stop - pick up by asking the
+user to test the fresh release build (see "Not done" below) before
+anything else.**
+
+Started by recovering from an accidentally-closed session: found 5
+unpushed commits from earlier that morning
+(`47bf6bc6`..`5b1c9e86`, continuing the PAUZE/scoreboard work from
+2026-08-23 below - overlay quality + compositor perf, scoreboard
+placement-reset, GPU-contention crash+recovery, perf benchmarks,
+export-name suffix fix) plus an uncommitted, never-tested trilinear/
+mipmap overlay-upload diff in `overlay.rs` sitting in the working tree.
+
+## 1. Rebuilt release, user hit 16fps then a real crash
+
+Rebuilt `reco-gui.exe` release w/ `--features tensorrt` to include the
+5 commits + uncommitted mip diff. User's first test used the **debug**
+exe by mistake (16fps - a red herring, debug is never used for fps
+comparisons). Second test on the real release build **crashed**:
+`Export failed - session: zero-copy: staging copy failed: GetData
+timed out (>1M polls)`, exactly at the first cut-range window
+transition (358s -> 452s), ~1 frame into the new window. GPU telemetry
+during the crash showed only moderate load (53%/19% util, well under
+the VRAM budget) - not an overload symptom, pointed at a race/resource-
+lifecycle bug tied to the transition instead.
+
+**Isolated via a controlled A/B**: stashed the uncommitted mip diff
+(`git stash` - still there, see below), rebuilt release without it,
+same export completed cleanly end-to-end (21415 frames, matching
+known-good runs from 2026-08-23). With the diff back in, it crashed at
+the same spot. **Confirmed: the mip-chain diff is the trigger**, not
+GPU overload from today's other (committed) changes.
+
+## 2. Root cause: reference_size double-duty in the overlay pipeline
+
+User noted the mip-chain's quality "wasn't great anyway" even before
+the crash, and that the scoreboard banner's *background* never changes
+- only text (clock/score) does - prompting a rethink instead of just
+debugging the mip approach.
+
+**Real strategy chosen**: let headless Chrome itself rasterize the
+scoreboard DOM at (roughly) its final on-screen physical size, via the
+CDP `device_scale_factor` in `SetDeviceMetricsOverride` (CSS viewport
+stays the package's fixed 1920x1080 design size - only the *physical*
+capture resolution shrinks). Chrome's own text rendering/anti-aliasing
+does the final-size rasterization instead of a GPU sampler minifying a
+full-resolution capture - fixes quality at the source, not just the
+crash, and needs no mip chain/GPU texture tricks at all.
+
+**Found a deeper architectural conflict before writing any of this**:
+`RgbaOverlayCompositor.reference_size` (drives the shader's contain-fit
+placement math) was, in the current code, always re-derived from the
+uploaded frame's own actual pixel dimensions on every `upload()` call -
+intentionally, so `LayeredOverlaySource`'s shared canvas (sized to the
+largest active layer, `47bf6bc6`'s own fix from that morning) can
+legitimately change size frame-to-frame. Making Chrome's actual pixel
+buffer smaller for quality would, unmodified, feed that smaller size
+back into the SAME contain-fit math as a *logical* resize, silently
+double-applying the scale-down. Flagged this to the user (bigger/
+riskier than originally scoped) before proceeding -
+**user chose "volledig doorzetten" (fully proceed)**.
+
+## 3. Fix: `OverlayFrame.design_size`, decoupled from actual pixel size
+
+New `design_size: (u32, u32)` field on `OverlayFrame`, independent of
+`width`/`height` (the actual `rgba` pixel buffer size) - placement math
+everywhere now keys off `design_size`, texture allocation/sampling off
+the real pixel dimensions. Changed, all in one uncommitted diff (not
+committed yet - see "Not done"):
+
+- `crates/reco-core/src/render/overlay.rs`: `OverlayFrame.design_size`
+  (+ `validate()` check); `RgbaOverlayCompositor` split into
+  `reference_size` (design, drives the shader uniform, tracks
+  `frame.design_size`) vs. new `texture_size` (actual GPU texture
+  pixels, tracks `frame.width/height`, drives texture recreation).
+  New `contain_fit_render_scale(design_size, output_size, placement)`
+  helper - the same contain-fit math the shader uses, exposed for a
+  producer (the scoreboard) to compute its own target render scale.
+  2 new regression tests (`placement_uses_design_size_not_actual_
+  texture_size`, `contain_fit_render_scale_*`).
+- `crates/reco-core/src/render/overlay_layers.rs`: `composite_over`
+  places using `source.design_size` but *samples* `source.width/
+  height` (previously conflated); `LayeredOverlaySource`'s canvas
+  reports `design_size` = max of layers' design sizes (independent of
+  its own actual pixel buffer = max of layers' actual sizes). 3 new
+  regression tests.
+- `crates/reco-core/src/render/pause_overlay.rs`,
+  `crates/reco-core/examples/composite_bench.rs`: `design_size` set
+  equal to `width`/`height` (unaffected, PAUZE never pre-scales).
+- `crates/reco-scoreboard/src/runtime.rs`: new
+  `ScoreboardRuntime::set_render_scale(f32)` (public API) ->
+  `RuntimeCommand::SetRenderScale` -> `set_viewport` now takes a scale
+  param, applies `device_scale_factor` via CDP, returns the resulting
+  physical capture size; `capture()` takes an explicit `design_size`
+  param (always the package's fixed manifest viewport) separate from
+  the physical `expected_size` it validates the screenshot against.
+  Scale survives a lost-connection restart the same way `state_json`
+  already does (both threaded through `run_worker`/`run_session`).
+- `crates/reco-gui/src/export.rs`: computes render scale from
+  `contain_fit_render_scale` (package viewport, export's own output
+  resolution, `scoreboard_placement`) once, right after starting the
+  export's `ScoreboardRuntime`.
+- `crates/reco-gui/src/main.rs`: new `AppState::scoreboard_design_size`
+  field (captured at runtime-start, since the runtime itself doesn't
+  expose its package after moving it into the worker thread) + new
+  `apply_scoreboard_render_scale()` helper, called from all 5 places
+  placement or preview viewport size can change (`try_init`,
+  `init_with_calibration`, `apply_scoreboard_settings`, the drag
+  handler `on_changed_scoreboard_placement`, and the adaptive preview
+  resize block).
+
+## Verification
+
+`cargo fmt --all --check` clean. `cargo clippy -p reco-core -p
+reco-scoreboard -p reco-gui --features tensorrt --all-targets -D
+warnings` clean (0 warnings). `cargo test -p reco-core --lib` 219/221
+(2 known pre-existing unrelated CUDA failures on this machine, not
+regressions - see 2026-08-20 entry below). `cargo test -p
+reco-scoreboard --lib` 13/13 (incl. the real headless-Chrome DOM
+integration test). `cargo test -p reco-gui --features tensorrt` 65/65.
+Release `reco-gui.exe` rebuilt with `--features tensorrt` at 15:10,
+includes all 5 unpushed commits + this uncommitted design_size diff.
+**Debug build is now stale** (last built 10:56, predates all of
+today's fixes) - don't use it for anything until rebuilt.
+
+## Not done / next steps
+
+- **User has not yet run a real export against this build** - session
+  paused right as this was about to happen. First thing next session:
+  ask for a test (ideally with scoreboard AND a PAUZE moment together,
+  the narrowest edge case - see the design doc comments in
+  `overlay_layers.rs` for why that combination can't be pre-scaled
+  perfectly, only correctly, so it's worth eyeballing text quality
+  there specifically) - confirm both (a) no more GetData-timeout crash
+  at a cut-range window boundary, (b) scoreboard text actually looks
+  sharp now, not just "not crashing".
+- The whole design_size diff (7 files, all committed together as one
+  change) is **still uncommitted** in the working tree - commit only
+  after the user confirms the test above.
+- Old buggy mip-chain diff still sits in `git stash@{0}` ("mipmap
+  trilinear overlay fix (isolation test)") - superseded by the
+  design_size approach, safe to `git stash drop` once the new fix is
+  confirmed and committed. Don't drop it before that in case the new
+  approach needs to fall back to it. (`stash@{1}` is an unrelated old
+  WIP stash from 2026-07-14, not touched.)
+- Debug `reco-gui.exe` needs rebuilding before any further debug-build
+  testing (see [[feedback_rebuild_gui_before_user_test]]).
+- The 5 commits from this morning are still unpushed to `github/main`
+  (`git log --oneline github/main..HEAD` shows all 5) - push once the
+  design_size fix is also committed, as one batch.
+- Untracked stray file `scripts/match-logger/Match Logger.html.txt`
+  (48KB, 21 Aug, next to the real `Match Logger.html` from 22 Aug)
+  still sits in the working tree, never investigated - low priority,
+  ask the user or just delete if confirmed to be a stale duplicate.
+
+---
+
 # Session handoff - 2026-08-23 (TGR_PC): PAUZE-overlay follow-up bug batch, committed+pushed (afc054ae)
 
 Direct continuation of the "PAUZE" dip-to-black cut-range overlay
