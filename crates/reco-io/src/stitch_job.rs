@@ -1121,14 +1121,17 @@ impl StitchJob {
         // there's more than one, since the session only has a single
         // overlay slot (calling `set_overlay_source` twice would just
         // have the second call silently replace the first). The PAUZE
-        // layer always goes in FIRST (bottom, full-frame) regardless
-        // of the order `Self::pause_overlay`/`Self::overlay_layer`
-        // were called on the builder - `overlay_layers` always ends
-        // up drawn on top of it, e.g. so a scoreboard's score/clock
-        // stays legible through a paused transition instead of
-        // dimming along with the real video underneath it.
+        // transition's two layers (see
+        // `render::pause_overlay::build_layers`'s doc comment for why
+        // it's two, not one) always go in FIRST (bottom, full-frame)
+        // regardless of the order `Self::pause_overlay`/
+        // `Self::overlay_layer` were called on the builder -
+        // `overlay_layers` always ends up drawn on top of both, e.g.
+        // so a scoreboard's score/clock stays legible through a paused
+        // transition instead of dimming along with the real video
+        // underneath it.
         //
-        // Building the PAUZE layer also extends `window_limits` in
+        // Building the PAUZE layers also extends `window_limits` in
         // place (see `cut_range::extend_for_pause_overlay`'s doc for
         // why the hold portion needs real, just visually-hidden,
         // extra frames).
@@ -1149,12 +1152,17 @@ impl StitchJob {
                 &overlay_cfg,
             );
             if !schedule.is_empty() {
+                let (fade, caption) = reco_core::render::pause_overlay::build_layers(
+                    schedule,
+                    &overlay_cfg,
+                    (out_w, out_h),
+                );
                 layers.push((
-                    Box::new(reco_core::render::pause_overlay::PauseOverlaySource::new(
-                        schedule,
-                        &overlay_cfg,
-                    ))
-                        as Box<dyn reco_core::render::overlay::OverlayFrameSource>,
+                    fade,
+                    reco_core::render::overlay::OverlayPlacement::default(),
+                ));
+                layers.push((
+                    caption,
                     reco_core::render::overlay::OverlayPlacement::default(),
                 ));
             }
@@ -1171,7 +1179,10 @@ impl StitchJob {
                 session
                     .set_overlay_placement(reco_core::render::overlay::OverlayPlacement::default());
                 session.set_overlay_source(Box::new(
-                    reco_core::render::overlay_layers::LayeredOverlaySource::new(layers),
+                    reco_core::render::overlay_layers::LayeredOverlaySource::new(
+                        layers,
+                        (out_w, out_h),
+                    ),
                 ));
             }
         }
