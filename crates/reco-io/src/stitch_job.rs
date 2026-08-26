@@ -74,6 +74,13 @@ pub struct StitchJob {
     show_seam_line: bool,
     seam_offset: f32,
     color_match_enabled: bool,
+    /// Manual per-camera gamma overrides, independently optional.
+    /// `None` leaves whatever the calibration holds - unlike
+    /// `color_match_enabled`, which has a meaningful CLI default, an
+    /// unspecified gamma must not overwrite a value the user tuned in the
+    /// GUI and saved. Per side, because overriding one camera is a normal
+    /// thing to want and must not reset the other to identity.
+    color_gamma: (Option<f32>, Option<f32>),
 
     // Callbacks
     on_progress: Option<ProgressCallback>,
@@ -310,6 +317,7 @@ impl StitchJob {
             show_seam_line: false,
             seam_offset: 0.0,
             color_match_enabled: true,
+            color_gamma: (None, None),
             on_progress: None,
             on_finalizing: None,
             session_hooks: Vec::new(),
@@ -540,6 +548,14 @@ impl StitchJob {
     /// Default: true.
     pub fn color_match_enabled(mut self, enabled: bool) -> Self {
         self.color_match_enabled = enabled;
+        self
+    }
+
+    /// Override the calibration's manual per-camera gamma, applied before
+    /// the automatic color match. See
+    /// `reco_core::calibration::Topology::color_gamma_left`.
+    pub fn color_gamma(mut self, left: Option<f32>, right: Option<f32>) -> Self {
+        self.color_gamma = (left, right);
         self
     }
 
@@ -814,6 +830,20 @@ impl StitchJob {
         cal.topology.multiband_blend_enabled = self.multiband_blend_enabled;
         cal.topology.seam_offset = self.seam_offset;
         cal.topology.color_match_enabled = self.color_match_enabled;
+        if let Some(left) = self.color_gamma.0 {
+            log::info!(
+                "color gamma left: overriding calibration value {} with {left}",
+                cal.topology.color_gamma_left
+            );
+            cal.topology.color_gamma_left = left;
+        }
+        if let Some(right) = self.color_gamma.1 {
+            log::info!(
+                "color gamma right: overriding calibration value {} with {right}",
+                cal.topology.color_gamma_right
+            );
+            cal.topology.color_gamma_right = right;
+        }
         let viewport = reco_core::render::viewport::ViewportConfig {
             width: out_w,
             height: out_h,

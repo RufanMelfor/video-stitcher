@@ -218,6 +218,38 @@ chroma correction. Left as a live user-adjustable slider rather than
 changed as the shipped default, since this is one rig's real-world
 measurement, not proof the chroma correction is harmful in general.
 
+## Auto color match is silently inactive in the default Windows export path
+
+**Status: open.** Established 2026-08-26 from the user's own
+`reco-gui.log`, which logs `SmartFileSource: D3D11VA zero-copy decode
+enabled` for every export on this machine. The zero-copy limitation above
+("the BGRA and GPU zero-copy paths ... always render with identity
+correction") reads as a corner case, but on Windows with hardware decode
+it *is* the normal export path: `render_imported_views` ->
+`render_to_target_gpu` passes `ColorCorrection::default()`.
+
+**Why that is worse than it sounds:** reco-gui's preview decodes to CPU
+`YuvPlanes` and goes through `render_to_view`, where the matching does
+run. So a consumer tunes the Color Mapping sliders against a preview that
+applies the correction, and exports a file that never had it. Nothing in
+either UI or log says so. The user spent a session concluding "auto color
+match doesn't get it quite right" while it was in fact doing nothing to
+the output at all.
+
+**Consumer-side workaround exists but is not acceptable:** `--no-zero-copy`
+forces CPU decode, trading a large amount of export speed for the
+correction.
+
+**Fix direction (reco-core, not the consumer):** measure the band on the
+GPU. The 128 sample positions can still be computed on the CPU exactly as
+now (they only change with the calibration); a compute pass samples both
+NV12 textures at those positions, and an *async* readback consumes the
+result a frame or two later - harmless, since the EMA already smooths
+measurements taken 15 frames apart. A synchronous readback would stall the
+pipeline and cost more than the feature is worth. This is a coverage fix,
+not a performance one: at 8x16 points per 15 frames the CPU measurement was
+never a bottleneck.
+
 ## `PlaneLayout::intersect` is not a safe "move the seam" control
 
 **Symptom (confirmed 2026-07-11 on real DJI Osmo Action 4 footage):**

@@ -1599,12 +1599,31 @@ impl AppState {
         }
     }
 
+    /// Manual per-camera gamma, applied before the automatic match (see
+    /// `reco_core::calibration::Topology::color_gamma_left`). Both sides
+    /// are set together because the two sliders share one callback: a
+    /// slider only ever knows its own value, and the pipeline setter
+    /// takes the pair.
+    fn set_color_gamma(&mut self, left: f32, right: f32) {
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.color_gamma_left = left;
+            cal.topology.color_gamma_right = right;
+        }
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge
+                .engine_mut()
+                .pipeline_mut()
+                .set_color_gamma(left, right);
+            self.preview_dirty = true;
+        }
+    }
+
     /// Restore all Auto Color Match tuning knobs to their engineering
     /// defaults - not the values loaded from the current calibration file,
     /// which is what `reset_calibration` does for the layout sliders.
     fn reset_color_match(&mut self) {
         use reco_core::calibration::{
-            DEFAULT_COLOR_MATCH_BAND_WIDTH, DEFAULT_COLOR_MATCH_EMA_ALPHA,
+            DEFAULT_COLOR_GAMMA, DEFAULT_COLOR_MATCH_BAND_WIDTH, DEFAULT_COLOR_MATCH_EMA_ALPHA,
             DEFAULT_COLOR_MATCH_ENABLED, DEFAULT_COLOR_MATCH_GRID_COLS,
             DEFAULT_COLOR_MATCH_GRID_ROWS, DEFAULT_COLOR_MATCH_INTERVAL_FRAMES,
             DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET, DEFAULT_COLOR_MATCH_MAX_Y_OFFSET,
@@ -1619,7 +1638,12 @@ impl AppState {
             pipeline.set_color_match_ema_alpha(DEFAULT_COLOR_MATCH_EMA_ALPHA);
             pipeline.set_color_match_max_y_offset(DEFAULT_COLOR_MATCH_MAX_Y_OFFSET);
             pipeline.set_color_match_max_chroma_offset(DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET);
+            pipeline.set_color_gamma(DEFAULT_COLOR_GAMMA, DEFAULT_COLOR_GAMMA);
             self.preview_dirty = true;
+        }
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.color_gamma_left = DEFAULT_COLOR_GAMMA;
+            cal.topology.color_gamma_right = DEFAULT_COLOR_GAMMA;
         }
     }
 
@@ -2134,7 +2158,14 @@ fn refresh_derived_cut_ranges(s: &mut AppState, app: &RecoApp) {
         s.scoreboard_import.as_ref(),
         s.scoreboard_sync_anchor.as_ref(),
     ) {
-        let derived = scoreboard_import::derived_cut_ranges(export, anchor, 2.0);
+        // Margins are user-settable (the four NumEdits under the
+        // auto-cut checkbox); they were a fixed 2.0 everywhere before.
+        let cut_lead = app.get_autocut_cut_lead_secs().max(0.0) as f64;
+        let cut_trail = app.get_autocut_cut_trail_secs().max(0.0) as f64;
+        let kickoff_lead = app.get_autocut_kickoff_lead_secs().max(0.0) as f64;
+        let match_end_trail = app.get_autocut_match_end_trail_secs().max(0.0) as f64;
+
+        let derived = scoreboard_import::derived_cut_ranges(export, anchor, cut_lead, cut_trail);
         s.cut_ranges.extend(derived.iter().copied());
         s.scoreboard_derived_cut_ranges = derived;
 
@@ -2142,7 +2173,9 @@ fn refresh_derived_cut_ranges(s: &mut AppState, app: &RecoApp) {
         // `scoreboard_import::derived_start_secs`'s doc comment for why
         // (also fixes a real bug: a cut range starting at the export's
         // own start wasn't actually being skipped).
-        if let Some(start_secs) = scoreboard_import::derived_start_secs(export, anchor, 2.0) {
+        if let Some(start_secs) =
+            scoreboard_import::derived_start_secs(export, anchor, kickoff_lead)
+        {
             let start_secs = start_secs as f32;
             app.set_export_start_secs(start_secs);
             s.scoreboard_derived_start_secs = Some(start_secs);
@@ -2150,7 +2183,8 @@ fn refresh_derived_cut_ranges(s: &mut AppState, app: &RecoApp) {
         // Post-match trim (the "signal einde wedstrijd" - a --end-time
         // seek, not a cut range, same reasoning as the pre-roll trim
         // above) - only when the log actually has a `match_end` event.
-        if let Some(end_secs) = scoreboard_import::derived_end_secs(export, anchor, 2.0) {
+        if let Some(end_secs) = scoreboard_import::derived_end_secs(export, anchor, match_end_trail)
+        {
             let end_secs = end_secs as f32;
             app.set_export_end_secs(end_secs);
             s.scoreboard_derived_end_secs = Some(end_secs);
@@ -2710,6 +2744,10 @@ fn snapshot_scoreboard_settings(
         logo_size_px: s.scoreboard_style.logo_size_px.unwrap_or(34.0),
         banner_color_name: app.get_scoreboard_banner_color_name().to_string(),
         derive_cut_ranges: app.get_scoreboard_derive_cut_ranges(),
+        cut_lead_secs: app.get_autocut_cut_lead_secs(),
+        cut_trail_secs: app.get_autocut_cut_trail_secs(),
+        kickoff_lead_secs: app.get_autocut_kickoff_lead_secs(),
+        match_end_trail_secs: app.get_autocut_match_end_trail_secs(),
     }
 }
 
@@ -2721,6 +2759,65 @@ fn snapshot_scoreboard_settings(
 fn persist_scoreboard_settings(app: &RecoApp, s: &mut AppState) {
     let sb = snapshot_scoreboard_settings(app, s);
     s.user_settings.set_scoreboard_settings(sb);
+}
+
+/// Adopt a freshly parsed Match Logger export as the current one: the
+/// `AppState` fields the replay reads, the SCOREBOARD card's summary and
+/// sync labels, and the preview's redraw flag.
+///
+/// Shared by the explicit "Load Match Logger export..." button and the
+/// implicit load "Select Match Folder" performs (see
+/// `scoreboard_import::find_export_in_folder`), so the two can't drift
+/// into leaving different amounts of state behind. Deliberately does
+/// *not* refresh derived cut ranges or persist settings - both callers
+/// do that themselves, after the rest of what each of them changed.
+fn adopt_match_logger_export(
+    app: &RecoApp,
+    s: &mut AppState,
+    path: PathBuf,
+    export: scoreboard_import::MatchLoggerExport,
+) {
+    fn team_label(name: &str, fallback: &str) -> String {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            fallback.to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+    let summary = format!(
+        "{} vs {} - {} events",
+        team_label(&export.home, "Home"),
+        team_label(&export.away, "Away"),
+        export.event_count()
+    );
+    let default_anchor = export
+        .video_start_ms()
+        .map(|event_ts_ms| scoreboard_import::SyncAnchor {
+            event_ts_ms,
+            video_seconds: 0.0,
+        });
+
+    s.scoreboard_import_path = Some(path);
+    s.scoreboard_sync_anchor = default_anchor;
+    s.scoreboard_import = Some(export);
+    // Without this, the preview only redraws while playing/seeking (see
+    // vsync_render_tick's gate), so the banner wouldn't pick up the
+    // freshly loaded data until something unrelated happened to trigger
+    // a redraw - read as a long, confusing delay after Load, even though
+    // push_scoreboard_replay itself runs within ~150ms once a tick fires
+    // at all.
+    s.preview_dirty = true;
+
+    app.set_scoreboard_match_summary(summary.into());
+    app.set_scoreboard_sync_label(if default_anchor.is_some() {
+        "Synced to video start - tap \"Set sync point\" if that's off".into()
+    } else {
+        slint::SharedString::from(
+            "No video_start event in this export - tap \"Set sync point\" once scrubbed to the matching frame",
+        )
+    });
+    app.set_scoreboard_error_text("".into());
 }
 
 /// Restore a persisted `ScoreboardSettings` onto the SCOREBOARD card and
@@ -2857,6 +2954,14 @@ fn apply_scoreboard_settings(
         scoreboard_banner_color_hex(&settings.banner_color_name).map(str::to_string);
     app.set_scoreboard_banner_color_name(settings.banner_color_name.clone().into());
 
+    // Margins first: refresh_derived_cut_ranges below reads them straight
+    // off the app properties, so restoring them after would derive this
+    // session's first ranges with the wrong (default) values.
+    app.set_autocut_cut_lead_secs(settings.cut_lead_secs);
+    app.set_autocut_cut_trail_secs(settings.cut_trail_secs);
+    app.set_autocut_kickoff_lead_secs(settings.kickoff_lead_secs);
+    app.set_autocut_match_end_trail_secs(settings.match_end_trail_secs);
+
     app.set_scoreboard_derive_cut_ranges(settings.derive_cut_ranges);
     if settings.derive_cut_ranges {
         refresh_derived_cut_ranges(&mut s, app);
@@ -2962,6 +3067,13 @@ fn main() -> anyhow::Result<()> {
         // unconditionally, not gated on autocam_defaults existing.
         app.set_export_autocam_enabled(s.user_settings.autocam_enabled);
         app.set_export_async_detect(s.user_settings.async_detect_enabled);
+
+        // PAUZE transition: app-level for the same reason (see
+        // `GuiSettings::pause_overlay_enabled`) - how a break should read
+        // on screen is a house style, not a property of one match.
+        app.set_export_pause_overlay_enabled(s.user_settings.pause_overlay_enabled);
+        app.set_export_pause_overlay_fade_secs(s.user_settings.pause_overlay_fade_secs);
+        app.set_export_pause_overlay_hold_secs(s.user_settings.pause_overlay_hold_secs);
     }
 
     // App-level SCOREBOARD card settings, same "restore before any
@@ -3479,6 +3591,57 @@ fn main() -> anyhow::Result<()> {
                     .into(),
             );
             sync_recent_paths(&s.user_settings, &app);
+        }
+
+        // Match Logger export: the operator's export lands in the match
+        // folder alongside the footage, so picking the folder loads it
+        // too instead of making them repeat the pick in the SCOREBOARD
+        // card. Any previously loaded export is dropped first - it
+        // belongs to a different match, and leaving it attached would
+        // replay the wrong score over this one's footage.
+        if let Some(app) = app_weak.upgrade() {
+            let had_previous = s.scoreboard_import.is_some();
+            s.scoreboard_import = None;
+            s.scoreboard_import_path = None;
+            s.scoreboard_sync_anchor = None;
+            app.set_scoreboard_match_summary("".into());
+            app.set_scoreboard_sync_label("".into());
+
+            match scoreboard_import::find_export_in_folder(&folder) {
+                Some((path, export)) => {
+                    let found = format!("{} vs {}", export.home.trim(), export.away.trim());
+                    let file = display_name(&path);
+                    adopt_match_logger_export(&app, &mut s, path, export);
+                    s.toasts.push(
+                        Severity::Info,
+                        "Match Logger",
+                        format!("Loaded {found} from {file}"),
+                    );
+                }
+                None if had_previous => {
+                    // Silence here would be worse than a toast: the
+                    // scoreboard card just went blank, and the reason is
+                    // not visible anywhere else.
+                    s.toasts.push(
+                        Severity::Warn,
+                        "Match Logger",
+                        "No export found in this match folder - the previous one was unloaded"
+                            .to_string(),
+                    );
+                }
+                None => log::info!(
+                    "Match folder: no Match Logger export in {}",
+                    folder.display()
+                ),
+            }
+            crate::toast::sync_to_ui(&s.toasts, &app);
+            // The derived ranges belong to whichever export is loaded
+            // now, including "none at all" - same staleness argument as
+            // in on_load_scoreboard_events.
+            if app.get_scoreboard_derive_cut_ranges() {
+                refresh_derived_cut_ranges(&mut s, &app);
+            }
+            persist_scoreboard_settings(&app, &mut s);
         }
 
         drop(s);
@@ -4437,55 +4600,15 @@ fn main() -> anyhow::Result<()> {
         };
         match scoreboard_import::load(&path) {
             Ok(export) => {
-                fn team_label(name: &str, fallback: &str) -> String {
-                    let trimmed = name.trim();
-                    if trimmed.is_empty() {
-                        fallback.to_string()
-                    } else {
-                        trimmed.to_string()
-                    }
-                }
-                let summary = format!(
-                    "{} vs {} - {} events",
-                    team_label(&export.home, "Home"),
-                    team_label(&export.away, "Away"),
-                    export.event_count()
-                );
-                let default_anchor = export.video_start_ms().map(|event_ts_ms| {
-                    scoreboard_import::SyncAnchor {
-                        event_ts_ms,
-                        video_seconds: 0.0,
-                    }
-                });
                 let mut s = state_ref.borrow_mut();
-                s.scoreboard_import_path = Some(path);
-                s.scoreboard_sync_anchor = default_anchor;
-                s.scoreboard_import = Some(export);
-                // Same fix as on_changed_scoreboard_placement below: without
-                // this, the preview only redraws while playing/seeking (see
-                // vsync_render_tick's gate), so the banner wouldn't actually
-                // pick up the freshly loaded data until something unrelated
-                // happened to trigger a redraw - read as a long, confusing
-                // delay after Load, even though push_scoreboard_replay
-                // itself runs within ~150ms once a tick fires at all.
-                s.preview_dirty = true;
-                drop(s);
-                app.set_scoreboard_match_summary(summary.into());
-                app.set_scoreboard_sync_label(
-                    if default_anchor.is_some() {
-                        "Synced to video start - tap \"Set sync point\" if that's off".into()
-                    } else {
-                        "No video_start event in this export - tap \"Set sync point\" once scrubbed to the matching frame".into()
-                    },
-                );
-                app.set_scoreboard_error_text("".into());
+                adopt_match_logger_export(&app, &mut s, path, export);
                 // Loading a different export while the toggle is already
                 // on would otherwise leave the previous file's derived
                 // ranges sitting there, silently stale.
                 if app.get_scoreboard_derive_cut_ranges() {
-                    refresh_derived_cut_ranges(&mut state_ref.borrow_mut(), &app);
+                    refresh_derived_cut_ranges(&mut s, &app);
                 }
-                persist_scoreboard_settings(&app, &mut state_ref.borrow_mut());
+                persist_scoreboard_settings(&app, &mut s);
             }
             Err(error) => {
                 app.set_scoreboard_error_text(error.to_string().into());
@@ -4552,6 +4675,39 @@ fn main() -> anyhow::Result<()> {
             return;
         }
         refresh_derived_cut_ranges(&mut s, &app);
+        persist_scoreboard_settings(&app, &mut s);
+    });
+
+    // The PAUZE checkbox or one of its two durations changed - persist
+    // app-level so they survive a restart (they used to reset to
+    // 3.0/4.0 every session).
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_pause_overlay(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        state_ref.borrow_mut().user_settings.set_pause_overlay(
+            app.get_export_pause_overlay_enabled(),
+            app.get_export_pause_overlay_fade_secs(),
+            app.get_export_pause_overlay_hold_secs(),
+        );
+    });
+
+    // One of the four auto-cut margin fields was edited. Re-derives in
+    // place so the timeline shows the new boundaries immediately - the
+    // whole point of the fields is judging the result against the
+    // preview, which needs no re-toggling to see.
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_autocut_margins(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let mut s = state_ref.borrow_mut();
+        if app.get_scoreboard_derive_cut_ranges() {
+            refresh_derived_cut_ranges(&mut s, &app);
+        }
         persist_scoreboard_settings(&app, &mut s);
     });
 
@@ -5294,6 +5450,15 @@ fn main() -> anyhow::Result<()> {
 
     let state_ref = Rc::clone(&state);
     let app_weak = app.as_weak();
+    app.on_changed_color_gamma(move |left, right| {
+        state_ref.borrow_mut().set_color_gamma(left, right);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let state_ref = Rc::clone(&state);
+    let app_weak = app.as_weak();
     app.on_changed_color_match_band_width(move |w| {
         state_ref.borrow_mut().set_color_match_band_width(w);
         if let Some(app) = app_weak.upgrade() {
@@ -5368,7 +5533,7 @@ fn main() -> anyhow::Result<()> {
         state_ref.borrow_mut().reset_color_match();
         if let Some(app) = app_weak.upgrade() {
             use reco_core::calibration::{
-                DEFAULT_COLOR_MATCH_BAND_WIDTH, DEFAULT_COLOR_MATCH_EMA_ALPHA,
+                DEFAULT_COLOR_GAMMA, DEFAULT_COLOR_MATCH_BAND_WIDTH, DEFAULT_COLOR_MATCH_EMA_ALPHA,
                 DEFAULT_COLOR_MATCH_ENABLED, DEFAULT_COLOR_MATCH_GRID_COLS,
                 DEFAULT_COLOR_MATCH_GRID_ROWS, DEFAULT_COLOR_MATCH_INTERVAL_FRAMES,
                 DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET, DEFAULT_COLOR_MATCH_MAX_Y_OFFSET,
@@ -5381,6 +5546,8 @@ fn main() -> anyhow::Result<()> {
             app.set_color_match_ema_alpha(DEFAULT_COLOR_MATCH_EMA_ALPHA);
             app.set_color_match_max_y_offset(DEFAULT_COLOR_MATCH_MAX_Y_OFFSET);
             app.set_color_match_max_chroma_offset(DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET);
+            app.set_color_gamma_left(DEFAULT_COLOR_GAMMA);
+            app.set_color_gamma_right(DEFAULT_COLOR_GAMMA);
             app.set_cal_dirty(true);
         }
     });
@@ -7390,6 +7557,10 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                     .topology
                     .color_match_max_chroma_offset
             });
+            let color_gamma = s.bridge.as_ref().map(|b| {
+                let t = &b.engine().calibration().topology;
+                (t.color_gamma_left, t.color_gamma_right)
+            });
             // Lens-correction strength came in via the loaded calibration and
             // the renderer was seeded with it at bridge creation; mirror it
             // into AppState so a later save re-persists the right value.
@@ -7436,6 +7607,10 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                         sb.font_family = app_sb.font_family;
                         sb.logo_size_px = app_sb.logo_size_px;
                         sb.derive_cut_ranges = app_sb.derive_cut_ranges;
+                        sb.cut_lead_secs = app_sb.cut_lead_secs;
+                        sb.cut_trail_secs = app_sb.cut_trail_secs;
+                        sb.kickoff_lead_secs = app_sb.kickoff_lead_secs;
+                        sb.match_end_trail_secs = app_sb.match_end_trail_secs;
                     }
                     drop(s);
                     apply_scoreboard_settings(state, &app, &sb);
@@ -7576,6 +7751,10 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 }
                 if let Some(v) = color_match_max_chroma_offset {
                     app.set_color_match_max_chroma_offset(v);
+                }
+                if let Some((left, right)) = color_gamma {
+                    app.set_color_gamma_left(left);
+                    app.set_color_gamma_right(right);
                 }
                 if let Some(lc) = lens_correction {
                     app.set_lens_correction_amount(lc);
@@ -7811,6 +7990,10 @@ fn handle_calibration_result(
                             .topology
                             .color_match_max_chroma_offset
                     });
+                    let color_gamma = state.bridge.as_ref().map(|b| {
+                        let t = &b.engine().calibration().topology;
+                        (t.color_gamma_left, t.color_gamma_right)
+                    });
                     let lens_correction =
                         state.calibration.as_ref().map(|c| c.lenses[0].correction);
                     if let Some(lc) = lens_correction {
@@ -7940,6 +8123,10 @@ fn handle_calibration_result(
                         }
                         if let Some(v) = color_match_max_chroma_offset {
                             app.set_color_match_max_chroma_offset(v);
+                        }
+                        if let Some((left, right)) = color_gamma {
+                            app.set_color_gamma_left(left);
+                            app.set_color_gamma_right(right);
                         }
                         if let Some(lc) = lens_correction {
                             app.set_lens_correction_amount(lc);

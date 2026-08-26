@@ -1,4 +1,161 @@
-# Session handoff - 2026-08-26 (TGR_PC): SCOREBOARD BLUR ROOT-CAUSED AND FIXED (user-confirmed sharp); export-speed dip during PAUZE fades remains, GPU compositing is the open follow-up
+# Session handoff - 2026-08-26 (TGR_PC): PAUZE now composites on the GPU (user-confirmed, 31fps, no dip); three match-folder/cut features written but NOT compiled; color pipeline investigated - auto color match turns out to be inactive in every export
+
+## OPEN TASKS - do these next
+
+### 1. DONE - three match-folder/cut features, built and green
+
+`cargo fmt`, `clippy --all-targets -D warnings` (workspace, reco-obs
+included via `OBS_INCLUDE_DIR`), `cargo test`: reco-core 237 passing (the
+usual 2 CUDA failures, no CUDA runtime on this box), reco-io 50/50,
+reco-gui 74/74. Release builds of reco-gui and reco-cli made with
+`--features tensorrt`. **Not yet exercised by the user in the app.**
+
+Verified against the real match folder that the export scan picks the
+right file: of the five JSONs in `03 OJC -Bergem Sport 04072026`, only the
+two Match Logger exports parse, and the most recently modified of those
+(`OJC_vs_Berghem_Sport_DEMO_1min.json`) is the one that will auto-load -
+worth knowing, since it is the 1-minute test log, not the full demo.
+
+- **Match Logger export auto-loads with the match folder.**
+  `scoreboard_import::find_export_in_folder` identifies the export by
+  *content* (every small `.json` is parsed; the one with a non-empty event
+  log wins, most recently modified breaks ties) because a match folder also
+  holds the calibration, lens profiles and `clicks.json`, and the export's
+  filename comes from the phone. `on_pick_match_folder` drops any
+  previously loaded export first (it belongs to a different match) and
+  toasts what it loaded. The Load button and the folder pick now share
+  `adopt_match_logger_export`.
+- **PAUZE "Hold" renamed to "Black"** (it always *was* the fully-black
+  duration; only the label hid that), with a tooltip explaining that fade
+  is composited over frames that were going to be encoded anyway and only
+  the black stretch lengthens the export. The checkbox and both durations
+  are now persisted app-level in `GuiSettings` - previously they reset to
+  3.0/4.0 every restart, which is what the user actually kept running into.
+- **Four auto-cut margins** (`Pause cut N s before / N s after`,
+  `Match trim N s pre-KO / N s post-FT`) replacing the hardcoded 2.0 in
+  `refresh_derived_cut_ranges`. New `ScoreboardSettings` fields, serde
+  default 2.0, so old calibrations behave exactly as before. Editing
+  re-derives immediately.
+
+### 2. DONE (untested on real footage) - manual per-camera gamma, applied *before* the auto color match
+
+Implemented as designed below. `Topology::color_gamma_left`/`_right`
+(serde default 1.0), carried to the shader in the previously-unused
+`color_scale.w` as 1/gamma, applied by `apply_gamma` in `fisheye.wgsl`
+ahead of the automatic scale+offset, and mirrored per sample point in
+`decode_transfer_yuv` so the measurement sees the same curve.
+`StitchPipeline::set_color_gamma` forces a re-measure. Two sliders in the
+Color Mapping card under "MANUAL GAMMA (BEFORE AUTO MATCH)", saved with
+the calibration; `reco stitch --color-gamma-left/--color-gamma-right`
+override per side (one flag does not reset the other camera).
+
+Tests: `manual_gamma_reaches_rendered_pixels_per_camera` is a real GPU
+render+readback proving the exponent reaches pixels **and** that a gamma
+on one camera leaves the other half untouched (the likeliest wiring bug,
+which a whole-frame brightness check would miss);
+`manual_gamma_lifts_the_measured_band_mean` and
+`manual_gamma_is_per_camera` cover the measurement side;
+`a_broken_gamma_value_falls_back_to_identity` covers 0/negative/NaN in a
+hand-edited calibration.
+
+The reasoning that produced this design, kept because it is what makes the
+ordering non-obvious: the auto stage is a **purely
+additive YUV offset on the band mean**, clamped to +/-0.06 luma
+(`color_match.rs` `tick`). It can align average brightness but cannot
+change the *shape* of a tone curve, which is exactly how two action cams
+with different AE/HDR disagree. Gamma is the missing degree of freedom.
+Second reason: a shader uniform works on every path, including the
+zero-copy export where the auto stage does nothing at all (see the finding
+below).
+
+Design, which costs almost nothing:
+
+- `fisheye.wgsl` already has a `color_scale: vec4` uniform whose `xyz` is
+  hardcoded to 1.0 and whose `w` is pure padding (`renderer.rs:2301`). The
+  gamma exponent rides in that `w`: no new uniform, no extra bandwidth, one
+  `pow()` behind a uniform branch that is skipped at gamma 1.0. Same trick
+  as the overlay `opacity` added earlier today.
+- Shader order becomes: sample -> `pow(rgb, 1/gamma)` per side ->
+  `rgb_to_yuv` -> `* scale + offset` (auto) -> back to RGB. Literally
+  "manual, before auto".
+- **The one real pitfall: the measurement must see the same gamma.**
+  `decode_transfer_yuv` (`color_match.rs:415`) already performs the exact
+  same chain as the shader (raw YUV -> RGB -> BT.709 YUV), so the same
+  `pow` goes there - **per sample point, before averaging**, since the pow
+  of a mean is not the mean of the pows. Skip this and the auto stage
+  measures a frame that no longer exists and fights the slider: the seam
+  visibly wanders while dragging.
+- Gamma on RGB, not on Y alone (a pow on luma only leaves chroma absolute
+  and shifts saturation). One exponent per side, not per channel - per
+  channel is white balance, which the chroma offset already attempts.
+- Persist next to the other color fields in `Topology`
+  (`color_gamma_left`/`_right`, serde default 1.0), two sliders at the top
+  of the Color Mapping card above the auto block, CLI flag for parity.
+  Range 0.5 - 2.0, default 1.0, step 0.05.
+
+### 3. Move the color-match *measurement* onto the GPU
+
+**Not for speed - for coverage.** The measurement is 8x16 = 128 sample
+points once per 15 frames; at 30fps that is ~256 samples/second of
+closed-form undistort plus three byte reads each. It cannot be a
+bottleneck, and applying the correction was always on the GPU (two vec4
+uniforms in a pass that exists anyway). The reason to move it is that it
+is the only way to have Auto Color Match work at all under hardware
+decode. Today the choice is color correction (CPU decode, much slower) or
+speed (zero-copy, no correction).
+
+Shape:
+
+1. The 128 sample positions stay computed on the CPU exactly as now
+   (`undistorted_to_distorted`, including the `seam_offset` and
+   `blend_flip_direction` handling that has already been got wrong twice -
+   see reco-core FRICTION.md). They only change when the calibration
+   changes, so they go into a uniform buffer once.
+2. A compute pass samples both NV12 textures at those positions and writes
+   128 values.
+3. **Async** readback (`map_async`), consumed a frame or two later.
+
+Step 3 is the trap: a synchronous readback stalls the pipeline and would
+make the export *slower*, the opposite of the intent. Async is fine because
+the EMA already smooths across measurements that are 15 frames apart.
+
+Endgame, only if it proves worth it: keep the derived offsets in a storage
+buffer and have `fisheye.wgsl` read them from there, so nothing crosses the
+bus at all. The Color Mapping status line would then need an occasional
+cosmetic readback.
+
+### Background finding that motivates 2 and 3: auto color match is inactive in every export
+
+Evidence from the user's own `target/release/reco-gui.log`, on every export
+this session: `SmartFileSource: D3D11VA zero-copy decode enabled`. On that
+path the frames never reach the CPU, and
+`render_imported_views` -> `render_to_target_gpu` (`pipeline.rs:773`)
+renders with `ColorCorrection::default()`, i.e. identity - documented in
+`color_match.rs`'s module doc as a known limitation.
+
+The GUI preview, by contrast, decodes to CPU `YuvPlanes` and goes through
+`render_to_view` (`preview.rs:155`), where the matching *does* run. So
+everything tuned in the Color Mapping panel is visible in the preview and
+absent from the file. That asymmetry is the most likely explanation for
+"Auto Color Match kreeg ik niet helemaal goed", and it means no color-match
+tuning session is trustworthy until task 3 lands.
+
+Also worth checking once it does: if the Color Mapping status line sits
+pinned at Y+0.060 / +/-0.040, the real difference exceeds what the auto
+stage is even allowed to correct, and the clamp needs raising rather than
+the measurement being made more accurate.
+
+---
+
+## Previous entry - 2026-08-26: SCOREBOARD BLUR ROOT-CAUSED AND FIXED (user-confirmed sharp); PAUZE moved to its own GPU overlay slot
+
+**Update: the GPU transition path was tested on a real export after this
+was written - 31fps, no dip during the fade ramps. The "Open: fps dips to
+~9 during fade ramps" section further down is resolved. The user also
+confirmed the scoreboard itself on that same export ("werkt tot nu toe
+helemaal top"), so the sharpness fix and the GPU transition hold together
+on real footage.**
+
 
 **User confirmed on a real 2K export (test9_long.mp4): scoreboard stays
 sharp with PAUZE enabled, fade-to-black works.** Delivering with
