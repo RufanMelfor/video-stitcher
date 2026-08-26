@@ -101,6 +101,17 @@ pub struct StitchPipeline {
     /// first overlay frame ever arrives isn't lost. Default reproduces
     /// the original centered-letterbox behavior.
     overlay_placement: super::overlay::OverlayPlacement,
+    /// Second, independent overlay slot for a *transition* - one fixed
+    /// image faded in and out via its opacity uniform alone (see
+    /// [`super::overlay::OverlayTransitionSource`]). Drawn **before**
+    /// `overlay`, so a content overlay such as a scoreboard stays
+    /// legible on top of it rather than dimming with the video.
+    ///
+    /// A separate compositor rather than another layer of `overlay`
+    /// because the two change on completely different terms: `overlay`
+    /// re-uploads a texture whenever its pixels change, while this one
+    /// uploads once and then only rewrites 32 bytes per frame.
+    transition: Option<RgbaOverlayCompositor>,
 }
 
 /// Pre-built bind groups for GPU-resident zero-copy sources.
@@ -187,6 +198,7 @@ impl StitchPipeline {
             output_format,
             overlay: None,
             overlay_placement: super::overlay::OverlayPlacement::default(),
+            transition: None,
         })
     }
 
@@ -268,6 +280,9 @@ impl StitchPipeline {
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.resize(&gpu, (width, height));
         }
+        if let Some(transition) = self.transition.as_mut() {
+            transition.resize(&gpu, (width, height));
+        }
         Some((width, height))
     }
 
@@ -304,6 +319,54 @@ impl StitchPipeline {
         self.overlay = None;
     }
 
+    /// Upload the transition overlay's fixed image, replacing any
+    /// previous one. Call once when a transition is attached - the
+    /// per-frame cost afterwards is [`Self::set_transition_opacity`]
+    /// alone.
+    pub fn set_transition_frame(&mut self, frame: &OverlayFrame) -> Result<(), PipelineError> {
+        if let Some(transition) = self.transition.as_mut() {
+            transition
+                .upload(&self.gpu, frame)
+                .map_err(|e| PipelineError::InvalidConfig {
+                    reason: e.to_string(),
+                })?;
+        } else {
+            let mut transition = RgbaOverlayCompositor::new(
+                &self.gpu,
+                self.output_format,
+                (self.viewport.width, self.viewport.height),
+                frame,
+            )
+            .map_err(|e| PipelineError::InvalidConfig {
+                reason: e.to_string(),
+            })?;
+            // A transition covers the frame on its own terms; it is not
+            // subject to the content overlay's placement.
+            transition.set_placement(&self.gpu, super::overlay::OverlayPlacement::default());
+            self.transition = Some(transition);
+        }
+        Ok(())
+    }
+
+    /// Set how visible the transition overlay is this frame, `0.0`
+    /// (nothing drawn) to `1.0` (fully opaque). One uniform write; a
+    /// no-op when the value is unchanged.
+    pub fn set_transition_opacity(&mut self, opacity: f32) {
+        if let Some(transition) = self.transition.as_mut() {
+            transition.set_opacity(&self.gpu, opacity);
+        }
+    }
+
+    /// Release the transition overlay's GPU resources.
+    pub fn clear_transition(&mut self) {
+        self.transition = None;
+    }
+
+    /// Whether a transition overlay is currently attached.
+    pub fn has_transition(&self) -> bool {
+        self.transition.is_some()
+    }
+
     /// Whether an overlay texture is currently active.
     pub fn has_overlay(&self) -> bool {
         self.overlay.is_some()
@@ -325,26 +388,41 @@ impl StitchPipeline {
         &self,
         stitch_commands: wgpu::CommandBuffer,
     ) -> wgpu::CommandBuffer {
-        let Some(overlay) = self.overlay.as_ref() else {
+        // Transition first so the content overlay draws on top of it -
+        // see the `transition` field's doc comment.
+        let passes: Vec<&RgbaOverlayCompositor> = [self.transition.as_ref(), self.overlay.as_ref()]
+            .into_iter()
+            .flatten()
+            .collect();
+        let Some((last, leading)) = passes.split_last() else {
             return stitch_commands;
         };
 
-        // The extra submission exists only while the feature is enabled.
-        // Queue ordering guarantees the overlay pass loads the completed
-        // camera frame before NV12 conversion or RGBA readback begins.
+        // The extra submissions exist only while the feature is enabled.
+        // Queue ordering guarantees each overlay pass loads the result of
+        // everything before it, and that the completed camera frame is in
+        // place before NV12 conversion or RGBA readback begins.
         self.gpu.queue().submit(std::iter::once(stitch_commands));
         let target_view = self
             .renderer
             .render_target()
             .create_view(&wgpu::TextureViewDescriptor::default());
-        overlay.encode(&self.gpu, &target_view)
+        for pass in leading {
+            self.gpu
+                .queue()
+                .submit(std::iter::once(pass.encode(&self.gpu, &target_view)));
+        }
+        last.encode(&self.gpu, &target_view)
     }
 
     fn composite_view_if_enabled(&self, target_view: &wgpu::TextureView) {
-        if let Some(overlay) = self.overlay.as_ref() {
+        for pass in [self.transition.as_ref(), self.overlay.as_ref()]
+            .into_iter()
+            .flatten()
+        {
             self.gpu
                 .queue()
-                .submit(std::iter::once(overlay.encode(&self.gpu, target_view)));
+                .submit(std::iter::once(pass.encode(&self.gpu, target_view)));
         }
     }
 

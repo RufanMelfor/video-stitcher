@@ -56,7 +56,8 @@
 use ab_glyph::{Font, FontRef, GlyphId, PxScale, ScaleFont, point};
 
 use super::overlay::{
-    OverlayFrame, OverlayFrameSource, OverlayPlacement, contain_fit_render_scale,
+    OverlayFrame, OverlayFrameSource, OverlayPlacement, OverlayTransitionSource,
+    contain_fit_render_scale,
 };
 
 /// Roboto (Google, OFL-1.1) - see `assets/fonts/Roboto-OFL.txt` and
@@ -275,6 +276,74 @@ fn rasterize_text(text: &str, canvas_width: u32, canvas_height: u32, font_px: f3
 /// to pick the caption's actual pixel resolution (see this module's
 /// doc comment); the fade never needs it, a flat color has no
 /// resolution to get right.
+/// Build the transition as a single GPU-composited card: one image,
+/// faded by its opacity uniform alone.
+///
+/// This is the path in use. `output_size` is the export's real output
+/// resolution, and the card is rasterised at exactly that size, so the
+/// caption is pixel-perfect with no resampling anywhere - affordable
+/// precisely because this happens **once**, not per frame.
+///
+/// Prefer this over [`build_layers`] whenever the session has its own
+/// transition slot ([`crate::session::StitchSession::set_overlay_transition`]).
+pub fn build_transition(
+    boundaries: Vec<PauseBoundary>,
+    config: &PauseOverlayConfig,
+    output_size: (u32, u32),
+) -> PauseTransition {
+    let (w, h) = (output_size.0.max(1), output_size.1.max(1));
+    // Same 28%-of-height caption as the pre-split card, so the text
+    // keeps its proportion of the frame at any output resolution.
+    let mask = rasterize_text(&config.text, w, h, h as f32 * 0.28);
+    // Opaque black everywhere, white where the glyphs cover - the same
+    // card the pre-2026-08-26 implementation drew. Combining them again
+    // is correct here (and was only ever a problem on the CPU path,
+    // where the card's size dictated a shared canvas): the GPU samples
+    // one texture and scales its alpha, so there is nothing to gain from
+    // keeping the fill and the caption apart.
+    let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+    for (i, &coverage) in mask.coverage.iter().enumerate() {
+        let v = (coverage.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let base = i * 4;
+        rgba[base] = v;
+        rgba[base + 1] = v;
+        rgba[base + 2] = v;
+        rgba[base + 3] = 255;
+    }
+    PauseTransition {
+        card: OverlayFrame {
+            width: w,
+            height: h,
+            design_size: (w, h),
+            rgba,
+        },
+        schedule: Schedule::new(boundaries),
+    }
+}
+
+/// The "PAUZE" transition as a single fixed card plus an alpha ramp -
+/// see [`build_transition`].
+pub struct PauseTransition {
+    card: OverlayFrame,
+    schedule: Schedule,
+}
+
+impl OverlayTransitionSource for PauseTransition {
+    fn card(&self) -> &OverlayFrame {
+        &self.card
+    }
+
+    fn advance(&mut self) -> f32 {
+        self.schedule.advance()
+    }
+}
+
+/// **Superseded by [`build_transition`]** - kept only for a session
+/// that has no transition slot of its own. Producing the fade as
+/// overlay *layers* means every frame of every ramp is composited on
+/// the CPU at output resolution and pushed to the GPU as a whole image
+/// (~14.7MB per frame at 2K), which measured ~9fps against a 30fps
+/// baseline. Nothing in this workspace uses it any more.
 pub fn build_layers(
     boundaries: Vec<PauseBoundary>,
     config: &PauseOverlayConfig,
@@ -576,6 +645,45 @@ mod tests {
             "expected exactly one emitted frame (the start of the hold) across a \
              60-frame constant-alpha hold, got {emitted}"
         );
+    }
+
+    #[test]
+    fn transition_card_is_rasterised_at_the_full_output_resolution() {
+        // Rasterising once, at output resolution, is what lets the
+        // caption be pixel-perfect: there is no resampling anywhere,
+        // and the cost is paid a single time rather than per frame.
+        for output_size in [(640u32, 360u32), (1920, 1080)] {
+            let t = build_transition(
+                vec![boundary(0, 1, 1)],
+                &PauseOverlayConfig::new(1.0, 1.0, "PAUZE").unwrap(),
+                output_size,
+            );
+            let card = t.card();
+            assert_eq!((card.width, card.height), output_size);
+            assert_eq!(card.design_size, output_size);
+            // Opaque everywhere (it is a dip to *black*), with white
+            // glyph pixels somewhere in the middle.
+            assert!(card.rgba.chunks_exact(4).all(|px| px[3] == 255));
+            assert!(card.rgba.chunks_exact(4).any(|px| px[0] > 200));
+            assert!(card.rgba.chunks_exact(4).any(|px| px[0] == 0));
+        }
+    }
+
+    /// The card never changes; only the opacity the session applies to
+    /// it does. This is the property the whole GPU path rests on - if
+    /// `advance` ever needed to rebuild pixels, the per-frame cost would
+    /// be back.
+    #[test]
+    fn transition_advances_alpha_without_touching_its_card() {
+        let mut t = build_transition(
+            vec![boundary(0, 2, 2)],
+            &PauseOverlayConfig::new(2.0, 2.0, "PAUZE").unwrap(),
+            (320, 180),
+        );
+        let before = t.card().clone();
+        let alphas: Vec<f32> = (0..7).map(|_| t.advance()).collect();
+        assert_eq!(&alphas, &[0.0, 0.5, 1.0, 1.0, 1.0, 0.5, 0.0]);
+        assert_eq!(t.card(), &before, "the card must be immutable");
     }
 
     #[test]

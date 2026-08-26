@@ -285,6 +285,7 @@ impl StitchSession {
     }
 
     fn refresh_overlay(&mut self) {
+        self.refresh_overlay_transition();
         let Some(source) = self.overlay_source.as_mut() else {
             return;
         };
@@ -301,6 +302,22 @@ impl StitchSession {
                 self.clear_overlay_source();
             }
         }
+    }
+
+    /// Advance the transition overlay by exactly one output frame and
+    /// push its new opacity. Must be called once per encoded frame, in
+    /// frame order, since the source drives itself from its own counter
+    /// (see [`crate::render::overlay::OverlayTransitionSource::advance`]).
+    ///
+    /// The whole per-frame cost of a dip-to-black is these few lines:
+    /// no image is rebuilt and nothing crosses the bus, because the card
+    /// was uploaded once when the transition was attached.
+    fn refresh_overlay_transition(&mut self) {
+        let Some(source) = self.overlay_transition.as_mut() else {
+            return;
+        };
+        let opacity = source.advance();
+        self.core.pipeline_mut().set_transition_opacity(opacity);
     }
 
     /// Render a single CPU-resident stereo frame and submit it to the encoder.

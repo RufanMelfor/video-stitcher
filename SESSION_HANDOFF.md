@@ -104,7 +104,65 @@ PAUZE both had to be active, they were merged on the CPU into a single
 image. That single design decision is the origin of everything that
 went wrong today - the blur came out of the very same construction.
 
-## NEXT STEP (agreed with the user, work starts after the restore point below)
+## DONE: PAUZE moved onto its own GPU overlay slot
+
+Implemented after the restore point (tag
+`scoreboard-sharp-cpu-composite`, commit `7eaf88dc`). The plan below was
+followed as written:
+
+- `rgba_overlay.wgsl` + `OverlayParams`: new `opacity` multiplier on the
+  sampled alpha, occupying what was already padding - a fade costs no
+  extra uniform bandwidth. `RgbaOverlayCompositor::set_opacity` writes
+  it and no-ops when unchanged.
+- New `OverlayTransitionSource` trait in `render::overlay`: `card()`
+  (one fixed image, read once) + `advance()` (this frame's opacity).
+  Deliberately separate from `OverlayFrameSource`, whose whole premise
+  is that the *pixels* change.
+- `StitchPipeline` gained a second, independent compositor
+  (`transition`), drawn **before** `overlay` so a scoreboard stays
+  legible on top of the dip rather than dimming with the video.
+  `set_transition_frame` / `set_transition_opacity` /
+  `clear_transition`, and it resizes alongside the main overlay.
+- `StitchSession::set_overlay_transition` uploads the card once on
+  attach; `refresh_overlay_transition` advances it once per encoded
+  frame and pushes only the opacity.
+- `pause_overlay::build_transition` rasterises **one** black+caption
+  card at the full output resolution (affordable exactly because it
+  happens once) and rides the existing `Schedule` for its alpha ramp.
+- `stitch_job` attaches it through the session's transition slot
+  instead of pushing layers.
+
+**The decisive consequence**: `layers` now holds only real content
+overlays, so a lone scoreboard takes the single-source path and
+`LayeredOverlaySource` is not constructed at all in a normal export.
+There is no CPU compositing left in the common case, and a fade is a
+32-byte uniform write.
+
+Tests added: `opacity_uniform_fades_the_composited_overlay_on_the_gpu`
+(a real GPU render+readback at opacity 1.0 / 0.5 / 0.0 - this is the
+mechanism the whole change rests on, so it is checked end to end, not
+just as a uniform that compiles), plus
+`transition_card_is_rasterised_at_the_full_output_resolution` and
+`transition_advances_alpha_without_touching_its_card` (the card must be
+immutable, or the per-frame cost is back).
+
+Verified: `cargo fmt --check` and `clippy -D warnings` clean for
+reco-core/reco-io/reco-cli; `cargo test -p reco-core --lib` 232 passing
+(same 2 pre-existing CUDA failures), reco-io 50/50.
+
+`pause_overlay::build_layers` and `LayeredOverlaySource` are both kept
+but no longer used in production: `build_layers` is documented as
+superseded, and `LayeredOverlaySource` remains the right mechanism if
+two *content* overlays are ever attached at once (its output-resolution
+canvas fix stays load-bearing for that case). Remove `build_layers`
+once the GPU path has been confirmed on real exports.
+
+**NOT yet user-tested.** The fade must be re-checked visually (it is now
+drawn by a different code path entirely) and the fps during a ramp
+re-measured from a fresh `events.jsonl` - the expectation is a flat
+~30fps with no dip at all.
+
+## Original plan (kept for reference)
 
 **Give the PAUZE transition its own GPU overlay slot.** Not a rebuild -
 a targeted change:
