@@ -21,6 +21,22 @@ use super::renderer::ColorCorrection;
 use crate::calibration::Lens;
 use crate::lens::undistorted_to_distorted;
 
+/// Convert a user-facing gamma into the exponent both the shader and
+/// [`decode_transfer_yuv`] actually apply (`out = in^(1/gamma)`, so a
+/// gamma above 1.0 lifts the mid-tones).
+///
+/// Non-finite or non-positive input falls back to identity: `pow` with
+/// such an exponent produces NaN or a flat frame across every pixel, and
+/// a calibration file is user-editable, so this is a real input to
+/// validate rather than an unreachable case.
+pub(crate) fn inv_gamma(gamma: f32) -> f32 {
+    if gamma.is_finite() && gamma > 0.0 {
+        1.0 / gamma
+    } else {
+        1.0
+    }
+}
+
 /// Tunable knobs for [`ColorMatchState`]. Flat fields on
 /// [`crate::render::viewport::ViewportConfig`] (`color_match_*`) hold the
 /// live values a consumer GUI lets the user adjust; this struct just bundles
@@ -68,6 +84,13 @@ pub(crate) struct ColorMatchParams {
     /// plane is fading depends on `blend_flip_direction`, hence that field
     /// below - see `seam_band_bounds`.
     pub(crate) seam_offset: f32,
+    /// Manual per-camera gamma (`Topology::color_gamma_left`/`_right`).
+    /// SYNC_WITH `fisheye.wgsl`'s `apply_gamma`: the measurement must
+    /// sample the same curve the shader renders, or the offsets derived
+    /// here describe a frame that is never displayed - the correction
+    /// then fights the gamma slider instead of complementing it.
+    pub(crate) gamma_left: f32,
+    pub(crate) gamma_right: f32,
     /// `ViewportConfig::blend_flip_direction` - SYNC_WITH
     /// `renderer.rs`'s `left_uniforms.ground_tilt[3] = if flip {1.0} else
     /// {0.0}` (and the mirrored assignment for right). Needed to know
@@ -88,6 +111,8 @@ impl Default for ColorMatchParams {
             max_chroma_offset: 0.04,
             seam_offset: 0.0,
             blend_flip_direction: false,
+            gamma_left: 1.0,
+            gamma_right: 1.0,
         }
     }
 }
@@ -343,6 +368,7 @@ fn nv12_sampler<'a>(
 /// if every sample point mapped outside the raw frame (band too close to
 /// the edge of the lens' FOV, or the shift pushed it out of `[0, 1]`
 /// entirely).
+#[allow(clippy::too_many_arguments)]
 fn measure_band_mean(
     width: u32,
     height: u32,
@@ -352,6 +378,15 @@ fn measure_band_mean(
     match_params: &ColorMatchParams,
     sample: impl Fn(u32, u32) -> Option<(u8, u8, u8)>,
 ) -> Option<[f32; 3]> {
+    // This camera's manual gamma, applied per sample point *before* the
+    // mean is taken - the shader applies it per pixel, and pow is not
+    // linear, so gamma-ing the finished mean instead would measure a
+    // different image than the one on screen.
+    let inv_g = inv_gamma(if is_right {
+        match_params.gamma_right
+    } else {
+        match_params.gamma_left
+    });
     let is_fading = is_fading_plane(is_right, match_params.blend_flip_direction);
     let seam_offset = if is_fading {
         match_params.seam_offset as f64
@@ -387,7 +422,7 @@ fn measure_band_mean(
             let Some((y_raw, u_raw, v_raw)) = sample(src_x as u32, src_y as u32) else {
                 continue;
             };
-            let yuv = decode_transfer_yuv(y_raw, u_raw, v_raw, is_full_range);
+            let yuv = decode_transfer_yuv(y_raw, u_raw, v_raw, is_full_range, inv_g);
             sum[0] += yuv[0] as f64;
             sum[1] += yuv[1] as f64;
             sum[2] += yuv[2] as f64;
@@ -412,7 +447,13 @@ fn measure_band_mean(
 /// SYNC_WITH `shaders/fisheye.wgsl`'s `sample_yuv` and `rgb_to_yuv`. This
 /// has to land in the exact same space `apply_color_transfer` applies the
 /// offset in, or the measured correction will be systematically wrong.
-fn decode_transfer_yuv(y_raw: u8, u_raw: u8, v_raw: u8, is_full_range: bool) -> [f32; 3] {
+fn decode_transfer_yuv(
+    y_raw: u8,
+    u_raw: u8,
+    v_raw: u8,
+    is_full_range: bool,
+    inv_gamma: f32,
+) -> [f32; 3] {
     let y_n = y_raw as f32 / 255.0;
     let u_n = u_raw as f32 / 255.0;
     let v_n = v_raw as f32 / 255.0;
@@ -430,6 +471,15 @@ fn decode_transfer_yuv(y_raw: u8, u_raw: u8, v_raw: u8, is_full_range: bool) -> 
     let r = (y + 1.5748 * cr).clamp(0.0, 1.0);
     let g = (y - 0.1873 * cb - 0.4681 * cr).clamp(0.0, 1.0);
     let b = (y + 1.8556 * cb).clamp(0.0, 1.0);
+
+    // SYNC_WITH `fisheye.wgsl`'s `apply_gamma`: same curve, same place in
+    // the chain (on RGB, before the YUV transfer). Identity short-circuits
+    // for the same reason it does there.
+    let (r, g, b) = if inv_gamma == 1.0 {
+        (r, g, b)
+    } else {
+        (r.powf(inv_gamma), g.powf(inv_gamma), b.powf(inv_gamma))
+    };
 
     [
         0.2126 * r + 0.7152 * g + 0.0722 * b,
@@ -473,13 +523,100 @@ mod tests {
         let mean = measure_band_mean(640, 480, &params, true, false, &match_params, sampler)
             .expect("solid band should yield samples");
 
-        let expected = decode_transfer_yuv(180, 140, 120, false);
+        let expected = decode_transfer_yuv(180, 140, 120, false, 1.0);
         for i in 0..3 {
             assert!(
                 (mean[i] - expected[i]).abs() < 1e-4,
                 "channel {i}: {mean:?} vs {expected:?}"
             );
         }
+    }
+
+    #[test]
+    fn manual_gamma_lifts_the_measured_band_mean() {
+        // The measurement has to see the gamma the shader renders. A
+        // gamma above 1.0 lifts mid-tones, so the measured luma of a
+        // mid-grey band must rise; if the exponent were ignored (or
+        // applied in the wrong direction) this is what would catch it.
+        let params = test_params();
+        let (y, u, v) = solid_yuv420p(640, 480, 128, 128, 128);
+
+        let plain = ColorMatchParams {
+            gamma_left: 1.0,
+            ..Default::default()
+        };
+        let flat = measure_band_mean(640, 480, &params, false, false, &plain, {
+            yuv420p_sampler(&y, &u, &v, 640)
+        })
+        .expect("solid band should yield samples");
+
+        let lifted_params = ColorMatchParams {
+            gamma_left: 2.0,
+            ..Default::default()
+        };
+        let lifted = measure_band_mean(640, 480, &params, false, false, &lifted_params, {
+            yuv420p_sampler(&y, &u, &v, 640)
+        })
+        .expect("solid band should yield samples");
+
+        assert!(
+            lifted[0] > flat[0] + 0.05,
+            "gamma 2.0 should visibly lift mid-grey luma: {} -> {}",
+            flat[0],
+            lifted[0]
+        );
+    }
+
+    #[test]
+    fn manual_gamma_is_per_camera() {
+        // Two identical cameras, gamma on one side only: the automatic
+        // stage must now see a real difference and correct for it. This
+        // is the whole point of the ordering - gamma first, offsets
+        // measured on the gamma'd pixels.
+        let params = test_params();
+        let (y, u, v) = solid_yuv420p(640, 480, 128, 128, 128);
+        let mut state = ColorMatchState::default();
+        let match_params = ColorMatchParams {
+            gamma_left: 2.0,
+            ..Default::default()
+        };
+
+        let correction = state.update_yuv420p(
+            (&y, &u, &v),
+            (&y, &u, &v),
+            640,
+            480,
+            &params,
+            &params,
+            false,
+            &match_params,
+        );
+
+        // Left was brightened, so it gets pushed back down and right gets
+        // pulled up by the same amount (both aim at the shared mean).
+        assert!(
+            correction.left_offset[0] < -1e-4,
+            "left (gamma-lifted) should be corrected downwards: {:?}",
+            correction.left_offset
+        );
+        assert!(
+            correction.right_offset[0] > 1e-4,
+            "right (untouched) should be corrected upwards: {:?}",
+            correction.right_offset
+        );
+    }
+
+    #[test]
+    fn a_broken_gamma_value_falls_back_to_identity() {
+        // Topology is a user-editable file. Zero, negative or NaN would
+        // make `pow` produce a flat or NaN frame everywhere, so they must
+        // land on identity instead.
+        assert_eq!(inv_gamma(1.0), 1.0);
+        assert_eq!(inv_gamma(0.0), 1.0);
+        assert_eq!(inv_gamma(-2.0), 1.0);
+        assert_eq!(inv_gamma(f32::NAN), 1.0);
+        assert_eq!(inv_gamma(f32::INFINITY), 1.0);
+        assert!((inv_gamma(2.0) - 0.5).abs() < 1e-6);
     }
 
     #[test]

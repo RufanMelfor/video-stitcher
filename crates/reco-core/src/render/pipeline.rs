@@ -566,6 +566,28 @@ impl StitchPipeline {
         self.force_color_match_remeasure();
     }
 
+    /// Manual gamma applied to one camera before the automatic match.
+    /// See [`crate::calibration::Topology::color_gamma_left`].
+    ///
+    /// Forces a re-measure like the other color setters, and for a
+    /// stronger reason than a slider feeling responsive: the automatic
+    /// offsets currently in flight were derived from the *previous*
+    /// curve, so leaving them in place would show a correction for an
+    /// image that no longer exists until the next scheduled measurement.
+    pub fn set_color_gamma(&mut self, left: f32, right: f32) {
+        self.calibration.topology.color_gamma_left = left;
+        self.calibration.topology.color_gamma_right = right;
+        self.force_color_match_remeasure();
+    }
+
+    /// Current manual per-camera gamma, as `(left, right)`.
+    pub fn color_gamma(&self) -> (f32, f32) {
+        (
+            self.calibration.topology.color_gamma_left,
+            self.calibration.topology.color_gamma_right,
+        )
+    }
+
     /// Maximum luma offset the color match may apply. See
     /// [`crate::calibration::Topology::color_match_max_y_offset`].
     pub fn set_color_match_max_y_offset(&mut self, offset: f32) {
@@ -893,6 +915,8 @@ impl StitchPipeline {
             max_chroma_offset: t.color_match_max_chroma_offset,
             seam_offset: t.seam_offset,
             blend_flip_direction: t.blend_flip_direction,
+            gamma_left: t.color_gamma_left,
+            gamma_right: t.color_gamma_right,
         }
     }
 

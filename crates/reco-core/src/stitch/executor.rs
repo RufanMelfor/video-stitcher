@@ -795,6 +795,80 @@ mod tests {
         assert!(matches!(err, StitchError::FrameSizeMismatch { .. }));
     }
 
+    /// The manual per-camera gamma actually reaches rendered pixels, and
+    /// reaches only the camera it was set on.
+    ///
+    /// This is the mechanism the whole manual-correction feature rests on
+    /// (a single `pow` in `fisheye.wgsl` driven by `color_scale.w`), and
+    /// the most likely way to wire it wrong is to write the exponent into
+    /// one plane's uniform and read it for both - which a whole-frame
+    /// brightness check alone would not catch. Color match is disabled
+    /// here on purpose: with it on, a one-sided gamma is partly corrected
+    /// away, which is the intended interaction but hides what is being
+    /// tested.
+    #[test]
+    #[cfg(feature = "gpu")]
+    fn manual_gamma_reaches_rendered_pixels_per_camera() {
+        let (cam_w, cam_h) = (192u32, 108u32);
+        let (out_w, out_h) = (160u32, 90u32);
+        // Flat mid-grey, not the usual gradient: gamma moves mid-tones
+        // most, so a known 0.5-ish input gives an unambiguous shift.
+        let grey_y = vec![128u8; (cam_w * cam_h) as usize];
+        let grey_uv = vec![128u8; (cam_w * (cam_h / 2)) as usize];
+        let planes = Nv12Planes {
+            y: &grey_y,
+            uv: &grey_uv,
+        };
+
+        let sample_at = |rgba: &[u8], frac_x: f32| -> u8 {
+            let x = (out_w as f32 * frac_x) as u32;
+            let y = out_h / 2;
+            rgba[((y * out_w + x) * 4) as usize]
+        };
+
+        let render = |gamma_left: f32, gamma_right: f32| -> (u8, u8) {
+            let Some(gpu) = gpu_or_skip() else {
+                panic!("GPU required for this test - RECO_REQUIRE_GPU or run manually");
+            };
+            let mut cal = calib(cam_w, cam_h);
+            cal.topology.color_match_enabled = false;
+            cal.topology.color_gamma_left = gamma_left;
+            cal.topology.color_gamma_right = gamma_right;
+            let mut exec = GpuExecutor::new(
+                gpu,
+                GpuExecutorConfig {
+                    viewport: ViewportConfig {
+                        width: out_w,
+                        height: out_h,
+                        ..Default::default()
+                    },
+                    ..GpuExecutorConfig::new(cal, cam_w, cam_h, InputFormat::Nv12)
+                },
+            )
+            .expect("gpu backend");
+            let rgba = exec.stitch(&planes, &planes, 0.0, 0.0).expect("stitch");
+            (sample_at(&rgba, 0.15), sample_at(&rgba, 0.85))
+        };
+
+        let (base_left, base_right) = render(1.0, 1.0);
+        let (lifted_left, lifted_right) = render(2.0, 2.0);
+        assert!(
+            lifted_left as i32 - base_left as i32 >= 20
+                && lifted_right as i32 - base_right as i32 >= 20,
+            "gamma 2.0 on both cameras should visibly brighten both halves:              left {base_left} -> {lifted_left}, right {base_right} -> {lifted_right}"
+        );
+
+        let (only_right_left, only_right_right) = render(1.0, 2.0);
+        assert!(
+            (only_right_left as i32 - base_left as i32).abs() <= 2,
+            "gamma on the right camera must leave the left half alone:              {base_left} -> {only_right_left}"
+        );
+        assert!(
+            only_right_right as i32 - base_right as i32 >= 20,
+            "gamma on the right camera must brighten the right half:              {base_right} -> {only_right_right}"
+        );
+    }
+
     /// Diagnostic for a user report: "auto color match looks broken (one
     /// whole side goes extremely bright/dark) once Seam blend is very
     /// narrow (0.01)". The measured L/R offset the user saw was tiny

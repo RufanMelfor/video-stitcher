@@ -242,6 +242,19 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         no_color_match: bool,
 
+        /// Manual gamma for the left camera, applied *before* the
+        /// automatic color match measures anything. Above 1.0 lifts the
+        /// mid-tones, below 1.0 lowers them; 1.0 is identity. Unset
+        /// leaves whatever the calibration holds. See
+        /// `reco_core::calibration::Topology::color_gamma_left`.
+        #[arg(long)]
+        color_gamma_left: Option<f32>,
+
+        /// Manual gamma for the right camera - see
+        /// `--color-gamma-left`.
+        #[arg(long)]
+        color_gamma_right: Option<f32>,
+
         /// Frame offset for temporal sync between cameras.
         /// Positive: skip N right frames (right started first).
         /// Negative: skip N left frames (left started first).
@@ -989,6 +1002,8 @@ fn main() -> anyhow::Result<()> {
             show_seam_line,
             seam_offset,
             no_color_match,
+            color_gamma_left,
+            color_gamma_right,
             sync_offset,
             model,
             detection_interval,
@@ -1025,6 +1040,8 @@ fn main() -> anyhow::Result<()> {
                 show_seam_line,
                 seam_offset,
                 no_color_match,
+                color_gamma_left,
+                color_gamma_right,
                 start_time,
                 end_time,
                 max_frames,

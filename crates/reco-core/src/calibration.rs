@@ -319,6 +319,29 @@ pub struct Topology {
     #[serde(default = "default_color_match_max_chroma_offset")]
     pub color_match_max_chroma_offset: f32,
 
+    /// Manual per-camera gamma, applied to that camera's pixels *before*
+    /// the automatic color match measures or corrects anything. `1.0` is
+    /// identity; above 1.0 lifts the mid-tones, below 1.0 lowers them.
+    ///
+    /// Exists because the automatic match is a purely additive offset on
+    /// the band *mean* (see `render::color_match`): it can align average
+    /// brightness between the two cameras but cannot change the shape of
+    /// a tone curve, which is exactly how two independently-metering
+    /// cameras usually differ. Gamma supplies that missing degree of
+    /// freedom, and unlike the automatic correction it is a plain shader
+    /// uniform, so it also applies on the zero-copy paths where the
+    /// measurement cannot run at all.
+    ///
+    /// SYNC_WITH `shaders/fisheye.wgsl`'s `apply_color_transfer` and
+    /// `render::color_match::decode_transfer_yuv`: the correction and the
+    /// measurement must apply the identical curve, or the automatic stage
+    /// derives its offsets from pixels that are never rendered.
+    #[serde(default = "default_color_gamma")]
+    pub color_gamma_left: f32,
+    /// Right camera's manual gamma - see [`Self::color_gamma_left`].
+    #[serde(default = "default_color_gamma")]
+    pub color_gamma_right: f32,
+
     /// Ground-plane tilt correction for the x-plane (`lenses[1]`'s content -
     /// see `reco_calibrate::geometry`'s module doc for the x-plane/z-plane
     /// left/right swap convention). `tan(theta)` of an additional tilt
@@ -407,6 +430,8 @@ pub const DEFAULT_COLOR_MATCH_EMA_ALPHA: f32 = 0.15;
 pub const DEFAULT_COLOR_MATCH_MAX_Y_OFFSET: f32 = 0.06;
 /// See [`DEFAULT_COLOR_MATCH_ENABLED`].
 pub const DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET: f32 = 0.04;
+/// Identity gamma - see [`Topology::color_gamma_left`].
+pub const DEFAULT_COLOR_GAMMA: f32 = 1.0;
 
 fn default_color_match_enabled() -> bool {
     DEFAULT_COLOR_MATCH_ENABLED
@@ -428,6 +453,9 @@ fn default_color_match_ema_alpha() -> f32 {
 }
 fn default_color_match_max_y_offset() -> f32 {
     DEFAULT_COLOR_MATCH_MAX_Y_OFFSET
+}
+fn default_color_gamma() -> f32 {
+    DEFAULT_COLOR_GAMMA
 }
 fn default_color_match_max_chroma_offset() -> f32 {
     DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET
@@ -688,10 +716,33 @@ pub struct ScoreboardSettings {
     /// Whether the "Auto-cut kickoff lead-in + pauses" toggle was on.
     #[serde(default)]
     pub derive_cut_ranges: bool,
+    /// Seconds of play kept *before* each derived pause cut, so the trim
+    /// doesn't clip right up against the moment play stopped.
+    #[serde(default = "default_autocut_margin_secs")]
+    pub cut_lead_secs: f32,
+    /// Seconds of play kept *after* each derived pause cut, same idea on
+    /// the resume side.
+    #[serde(default = "default_autocut_margin_secs")]
+    pub cut_trail_secs: f32,
+    /// Seconds kept before kickoff by the pre-roll trim (a `--start-time`
+    /// seek, not a cut range - see reco-gui's `derived_start_secs`).
+    #[serde(default = "default_autocut_margin_secs")]
+    pub kickoff_lead_secs: f32,
+    /// Seconds kept after the final whistle by the post-match trim (a
+    /// `--end-time` seek - see reco-gui's `derived_end_secs`).
+    #[serde(default = "default_autocut_margin_secs")]
+    pub match_end_trail_secs: f32,
 }
 
 fn default_scoreboard_logo_size_px() -> f32 {
     34.0
+}
+
+/// Default context kept at every auto-derived trim boundary. One value
+/// for all four margins: they start out symmetric and are only split so
+/// each can be tuned independently.
+fn default_autocut_margin_secs() -> f32 {
+    2.0
 }
 
 /// The calibration document: canonical, serializable source of truth.
@@ -1392,6 +1443,10 @@ mod tests {
             logo_size_px: 48.0,
             banner_color_name: "Navy".into(),
             derive_cut_ranges: true,
+            cut_lead_secs: 3.0,
+            cut_trail_secs: 1.5,
+            kickoff_lead_secs: 5.0,
+            match_end_trail_secs: 8.0,
         });
         let json = cal.to_json_pretty();
         let back: Calibration = serde_json::from_str(&json).unwrap();
@@ -1412,6 +1467,23 @@ mod tests {
         assert!((sb.logo_size_px - 48.0).abs() < 1e-6);
         assert_eq!(sb.banner_color_name, "Navy");
         assert!(sb.derive_cut_ranges);
+        assert!((sb.cut_lead_secs - 3.0).abs() < 1e-6);
+        assert!((sb.cut_trail_secs - 1.5).abs() < 1e-6);
+        assert!((sb.kickoff_lead_secs - 5.0).abs() < 1e-6);
+        assert!((sb.match_end_trail_secs - 8.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn old_scoreboard_without_autocut_margins_gets_the_previous_fixed_2s() {
+        // These four were a hardcoded 2.0 in reco-gui before they became
+        // settings - a settings file written back then must keep behaving
+        // exactly as it did, not collapse to 0s of context.
+        let json = r#"{"enabled":true,"package_id":"football"}"#;
+        let sb: ScoreboardSettings = serde_json::from_str(json).unwrap();
+        assert!((sb.cut_lead_secs - 2.0).abs() < 1e-6);
+        assert!((sb.cut_trail_secs - 2.0).abs() < 1e-6);
+        assert!((sb.kickoff_lead_secs - 2.0).abs() < 1e-6);
+        assert!((sb.match_end_trail_secs - 2.0).abs() < 1e-6);
     }
 
     #[test]
@@ -1457,6 +1529,8 @@ mod tests {
                 color_match_ema_alpha: 0.15,
                 color_match_max_y_offset: 0.06,
                 color_match_max_chroma_offset: 0.04,
+                color_gamma_left: 1.0,
+                color_gamma_right: 1.0,
                 ground_tilt_x: 0.0,
                 ground_tilt_z: 0.0,
                 top_tilt_x: 0.0,

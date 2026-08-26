@@ -131,6 +131,70 @@ pub fn load(path: &std::path::Path) -> Result<MatchLoggerExport, ImportError> {
     parse(&text)
 }
 
+/// Upper bound on a file considered as a candidate Match Logger export by
+/// [`find_export_in_folder`]. A real export is a few KB of timestamps
+/// (the largest logged match to date is under 5KB); this only exists so
+/// scanning a match folder never reads a large unrelated `.json` into
+/// memory just to find out it isn't one.
+const MAX_EXPORT_SCAN_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Find a Match Logger export sitting directly inside `dir`, for the
+/// "Select Match Folder" picker to load without a second file dialog.
+///
+/// Identified by *content*, not filename: every `.json` small enough to
+/// be one is parsed, and the first that yields a non-empty event log is
+/// a match. A match folder legitimately holds several unrelated JSON
+/// files (the per-match calibration, lens profiles, `clicks.json`), and
+/// none of them parse as an export - there is no naming convention to
+/// rely on, since the file is named by the phone that exported it.
+///
+/// With more than one export present (e.g. a re-export after fixing a
+/// mistake), the most recently modified wins - that is the one the
+/// operator produced last. Files whose modification time can't be read
+/// sort oldest rather than being dropped, so a match folder on a
+/// filesystem without mtimes still auto-loads something.
+///
+/// Returns the parsed export alongside its path: the scan has already
+/// parsed every candidate to identify it, so handing that result back
+/// keeps the caller from re-reading the file only to hit an error case
+/// that cannot happen.
+pub fn find_export_in_folder(
+    dir: &std::path::Path,
+) -> Option<(std::path::PathBuf, MatchLoggerExport)> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut found: Vec<(std::time::SystemTime, std::path::PathBuf, MatchLoggerExport)> = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let is_json = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
+        if !is_json {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() > MAX_EXPORT_SCAN_BYTES {
+            continue;
+        }
+        match load(&path) {
+            Ok(export) if export.event_count() > 0 => {
+                found.push((
+                    meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                    path,
+                    export,
+                ));
+            }
+            // Not an export (or an empty one) - the common case for every
+            // other JSON in a match folder, so not worth logging.
+            _ => {}
+        }
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found.pop().map(|(_, path, export)| (path, export))
+}
+
 /// Parse a Match Logger export from its JSON text.
 pub fn parse(json_text: &str) -> Result<MatchLoggerExport, ImportError> {
     let raw: RawExport = serde_json::from_str(json_text).map_err(ImportError::Json)?;
@@ -271,11 +335,14 @@ pub fn derived_end_secs(
 
 /// Cut ranges (in video seconds, same space as reco-gui's existing manual
 /// cut-range timeline) derived from a Match Logger export: one range per
-/// logged pause - the dead time during any in-match stoppage. `buffer_secs`
-/// of context is kept at every cut boundary (e.g. just before play stops
-/// and just after it resumes) so a hard trim doesn't clip right up
-/// against the moment of interest. Pre-roll (before kickoff) is handled
-/// separately by [`derived_start_secs`], not here.
+/// logged pause - the dead time during any in-match stoppage.
+/// `lead_secs` of play is kept before the cut starts and `trail_secs`
+/// after it ends, so a hard trim doesn't clip right up against the
+/// moment play stopped or resumed. The two are separate because they
+/// answer different questions: how much of the incident that caused the
+/// stoppage to keep, versus how long to stay on the restart. Pre-roll
+/// (before kickoff) is handled separately by [`derived_start_secs`], not
+/// here.
 ///
 /// Deliberately narrow: only derives from *explicit* `pause_start`/
 /// `pause_end` events, never inferred gaps (e.g. a half-time break the
@@ -285,7 +352,8 @@ pub fn derived_end_secs(
 pub fn derived_cut_ranges(
     export: &MatchLoggerExport,
     anchor: &SyncAnchor,
-    buffer_secs: f64,
+    lead_secs: f64,
+    trail_secs: f64,
 ) -> Vec<(f64, f64)> {
     let to_video_secs =
         |ts_ms: i64| anchor.video_seconds + (ts_ms - anchor.event_ts_ms) as f64 / 1000.0;
@@ -299,8 +367,8 @@ pub fn derived_cut_ranges(
                 // An unpaired pause_end (start missing/already consumed)
                 // has nothing to cut from - skip it rather than guessing.
                 if let Some(start_ms) = pending_pause_start_ms.take() {
-                    let start_secs = (to_video_secs(start_ms) - buffer_secs).max(0.0);
-                    let end_secs = to_video_secs(e.ts_ms) + buffer_secs;
+                    let start_secs = (to_video_secs(start_ms) - lead_secs).max(0.0);
+                    let end_secs = to_video_secs(e.ts_ms) + trail_secs;
                     if end_secs > start_secs {
                         ranges.push((start_secs, end_secs));
                     }
@@ -673,12 +741,124 @@ mod tests {
     #[test]
     fn derived_cut_ranges_trims_only_the_pause() {
         let export = fixture();
-        let ranges = derived_cut_ranges(&export, &anchor(), 2.0);
+        let ranges = derived_cut_ranges(&export, &anchor(), 2.0, 2.0);
         // pause_start/pause_end are at video_seconds 1205.0/1325.0 (see
         // the fixture's timestamps) - keep 2s of context on each side.
         // Pre-roll is no longer part of this list at all - see
         // `derived_start_secs`.
         assert_eq!(ranges, vec![(1203.0, 1327.0)]);
+    }
+
+    #[test]
+    fn derived_cut_ranges_applies_lead_and_trail_independently() {
+        let export = fixture();
+        // Same pause as above, with the two margins deliberately
+        // different: each boundary must move by its own value only.
+        let ranges = derived_cut_ranges(&export, &anchor(), 5.0, 1.0);
+        assert_eq!(ranges, vec![(1200.0, 1326.0)]);
+    }
+
+    #[test]
+    fn derived_cut_ranges_lead_is_clamped_at_the_start_of_the_video() {
+        let mut export = fixture();
+        // A pause 3s into the video with a 10s lead would start at -7s;
+        // a negative cut-range start is not representable on the
+        // timeline, so it clamps to 0 rather than wrapping or being
+        // dropped.
+        let base = parse_iso8601_ms("2026-08-21T14:00:00.000Z").unwrap();
+        export
+            .events
+            .retain(|e| e.kind != EventKind::PauseStart && e.kind != EventKind::PauseEnd);
+        export.events.push(MatchEvent {
+            kind: EventKind::PauseStart,
+            ts_ms: base + 3_000,
+            team: None,
+            period: None,
+            minutes: None,
+        });
+        export.events.push(MatchEvent {
+            kind: EventKind::PauseEnd,
+            ts_ms: base + 20_000,
+            team: None,
+            period: None,
+            minutes: None,
+        });
+        export.events.sort_by_key(|e| e.ts_ms);
+        let ranges = derived_cut_ranges(&export, &anchor(), 10.0, 1.0);
+        assert_eq!(ranges, vec![(0.0, 21.0)]);
+    }
+
+    /// Minimal but genuinely valid export text, for the folder-scan
+    /// tests below - `find_export_in_folder` decides purely on whether
+    /// `parse` accepts a file, so these have to be real.
+    fn export_text(home: &str) -> String {
+        format!(
+            r#"{{
+                "meta": {{ "home": "{home}", "away": "United", "periods": 2 }},
+                "events": [
+                    {{ "type": "video_start", "ts": "2026-08-21T14:00:00.000Z" }},
+                    {{ "type": "period_start", "ts": "2026-08-21T14:00:05.000Z", "period": 1 }}
+                ]
+            }}"#
+        )
+    }
+
+    #[test]
+    fn find_export_in_folder_ignores_the_other_json_files_a_match_folder_holds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The real shapes that sit next to an export in a match folder:
+        // the per-match calibration, a lens profile, and clicks.json.
+        std::fs::write(
+            dir.path().join("Match_calibration.json"),
+            r#"{"schema_version":2,"lenses":[],"topology":{},"framing":{}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("clicks.json"), r#"{"points":[[1,2]]}"#).unwrap();
+        std::fs::write(dir.path().join("log.json"), export_text("Sharks")).unwrap();
+
+        let (path, export) = find_export_in_folder(dir.path()).expect("finds the export");
+        assert_eq!(path.file_name().unwrap(), "log.json");
+        assert_eq!(export.home, "Sharks");
+    }
+
+    #[test]
+    fn find_export_in_folder_is_none_without_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("clicks.json"), r#"{"points":[]}"#).unwrap();
+        // An export with no events at all is not something to auto-load
+        // either - it would replace a good import with an empty replay.
+        std::fs::write(
+            dir.path().join("empty.json"),
+            r#"{"meta":{"home":"A","away":"B"},"events":[]}"#,
+        )
+        .unwrap();
+        assert!(find_export_in_folder(dir.path()).is_none());
+    }
+
+    #[test]
+    fn find_export_in_folder_prefers_the_most_recently_modified() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = dir.path().join("first_try.json");
+        let new = dir.path().join("re_export.json");
+        std::fs::write(&old, export_text("Sharks")).unwrap();
+        std::fs::write(&new, export_text("Sharks")).unwrap();
+        // Set the mtimes explicitly rather than relying on write order -
+        // both files can land in the same filesystem timestamp tick.
+        let base =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let set_mtime = |path: &std::path::Path, at: std::time::SystemTime| {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        };
+        set_mtime(&old, base);
+        set_mtime(&new, base + std::time::Duration::from_secs(600));
+
+        let (path, _) = find_export_in_folder(dir.path()).expect("finds an export");
+        assert_eq!(path.file_name().unwrap(), "re_export.json");
     }
 
     #[test]

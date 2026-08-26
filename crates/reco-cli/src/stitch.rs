@@ -38,6 +38,11 @@ pub struct StitchArgs<'a> {
     /// Disable auto exposure/color matching at the seam. See
     /// `reco_core::calibration::Topology::color_match_enabled`.
     pub no_color_match: bool,
+    /// Manual per-camera gamma applied before the automatic match.
+    /// `None` leaves the calibration's own value alone. See
+    /// `reco_core::calibration::Topology::color_gamma_left`.
+    pub color_gamma_left: Option<f32>,
+    pub color_gamma_right: Option<f32>,
     pub start_time: Option<f64>,
     pub end_time: Option<f64>,
     pub max_frames: Option<u64>,
@@ -167,6 +172,10 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
             "show_seam_line": args.show_seam_line,
             "seam_offset": args.seam_offset,
             "color_match": !args.no_color_match,
+            // Only recorded when overridden - otherwise the value in
+            // force is the calibration's, which this side doesn't read.
+            "color_gamma_left": args.color_gamma_left,
+            "color_gamma_right": args.color_gamma_right,
             "autocam": {
                 "model_path": args.model_path,
                 "tracking_mode": args.tracking_mode,
@@ -207,6 +216,9 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
     if let Some(b) = args.blend {
         job = job.blend_width(b);
     }
+    // Per side, so giving one flag without the other leaves the other
+    // camera's calibrated value alone instead of resetting it to identity.
+    job = job.color_gamma(args.color_gamma_left, args.color_gamma_right);
     if let Some(t) = args.start_time {
         job = job.start_time(t);
     }

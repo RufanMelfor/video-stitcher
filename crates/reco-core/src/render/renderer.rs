@@ -23,6 +23,7 @@
 //! reduces CPU-GPU transfer from 8.3 MB to 3.1 MB per frame (62% less
 //! bandwidth) and eliminates CPU-side swscale color conversion entirely.
 
+use super::color_match::inv_gamma;
 use super::scene::SceneGeometry;
 use super::viewport::{ResolvedViewport, ViewportConfig};
 use crate::calibration::{Calibration, Lens};
@@ -1472,6 +1473,14 @@ impl Renderer {
         right_uniforms.color_offset_blend[1] = color_correction.right_offset[1];
         right_uniforms.color_offset_blend[2] = color_correction.right_offset[2];
 
+        // Manual per-camera gamma, applied by the shader *before* the
+        // automatic offset above (see `Topology::color_gamma_left`). Sent
+        // as 1/gamma so the shader does one pow and no divide; a
+        // non-positive or non-finite value would make `pow` produce
+        // garbage across the whole frame, so it falls back to identity.
+        left_uniforms.color_scale[3] = inv_gamma(calibration.topology.color_gamma_left);
+        right_uniforms.color_scale[3] = inv_gamma(calibration.topology.color_gamma_right);
+
         // Seam blend direction: which plane fades in over the other at the
         // seam. `false` (default) = right fades over a fixed left, drawn
         // left-then-right so "over" compositing works (the fading plane
@@ -1672,6 +1681,14 @@ impl Renderer {
         right_uniforms.color_offset_blend[1] = color_correction.right_offset[1];
         right_uniforms.color_offset_blend[2] = color_correction.right_offset[2];
         right_uniforms.ground_tilt[3] = 0.0; // tex_b: hard FOV coverage, never fades.
+
+        // Manual per-camera gamma, applied by the shader *before* the
+        // automatic offset above (see `Topology::color_gamma_left`). Sent
+        // as 1/gamma so the shader does one pow and no divide; a
+        // non-positive or non-finite value would make `pow` produce
+        // garbage across the whole frame, so it falls back to identity.
+        left_uniforms.color_scale[3] = inv_gamma(calibration.topology.color_gamma_left);
+        right_uniforms.color_scale[3] = inv_gamma(calibration.topology.color_gamma_right);
 
         // Seam mask: a copy of whichever plane fades (see
         // `encode_stitch_pass`'s flip-convention comment), rendered with a
@@ -2298,7 +2315,11 @@ pub(crate) fn build_gpu_uniforms(
             camera.distortion[2] as f32,
             camera.distortion[3] as f32,
         ],
-        color_scale: [1.0, 1.0, 1.0, 0.0],
+        // xyz: per-channel YUV scale (unused so far, always identity).
+        // w: 1/gamma for the manual per-camera pre-correction - filled in
+        // per plane by the render paths below; 1.0 here so a uniform
+        // built by any other caller is identity, not a pow of zero.
+        color_scale: [1.0, 1.0, 1.0, 1.0],
         color_offset_blend: [0.0, 0.0, 0.0, blend_width],
         flags: [
             is_right as u32,
@@ -2540,6 +2561,8 @@ mod tests {
                 color_match_ema_alpha: 0.15,
                 color_match_max_y_offset: 0.06,
                 color_match_max_chroma_offset: 0.04,
+                color_gamma_left: 1.0,
+                color_gamma_right: 1.0,
                 ground_tilt_x: 0.0,
                 ground_tilt_z: 0.0,
                 top_tilt_x: 0.0,
@@ -2670,6 +2693,8 @@ mod tests {
                 color_match_ema_alpha: 0.15,
                 color_match_max_y_offset: 0.06,
                 color_match_max_chroma_offset: 0.0,
+                color_gamma_left: 1.0,
+                color_gamma_right: 1.0,
                 ground_tilt_x: -0.007000000681728125,
                 ground_tilt_z: 0.0010000000474974513,
                 top_tilt_x: 0.0,

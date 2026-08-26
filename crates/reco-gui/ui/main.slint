@@ -967,6 +967,10 @@ export component RecoApp inherits Window {
     // which has no event parameter.
     property <bool> shift-held: false;
     in-out property <float> seam-offset: 0.0;
+    // Manual per-camera gamma, applied before the automatic match (see
+    // reco-core's Topology::color_gamma_left). 1.0 = identity.
+    in-out property <float> color-gamma-left: 1.0;
+    in-out property <float> color-gamma-right: 1.0;
     in-out property <bool> color-match-enabled: true;
     in-out property <float> color-match-band-width: 0.15;
     in-out property <float> color-match-grid-cols: 8;
@@ -1156,6 +1160,16 @@ export component RecoApp inherits Window {
     // toggling adds/removes exactly those ranges from cut-ranges below,
     // any manually added/edited ranges are left alone.
     in-out property <bool> scoreboard-derive-cut-ranges: false;
+    // How much play is kept around each auto-derived boundary, in
+    // seconds. Four separate values because they answer four different
+    // questions: how much of the incident before a stoppage to keep, how
+    // long to stay on the restart after it, how much lead-in before
+    // kickoff, and how long to stay on the pitch after the final
+    // whistle. All were a fixed 2s before they became settings.
+    in-out property <float> autocut-cut-lead-secs: 2.0;
+    in-out property <float> autocut-cut-trail-secs: 2.0;
+    in-out property <float> autocut-kickoff-lead-secs: 2.0;
+    in-out property <float> autocut-match-end-trail-secs: 2.0;
 
     // Export progress (also used by the main status bar).
     in-out property <bool> export-in-progress: false;
@@ -1352,6 +1366,7 @@ export component RecoApp inherits Window {
     // it). Rust reconstructs the real (non-lens) letterbox itself from the
     // output aspect ratio.
     callback seam-hit-test(float, float, float, float) -> bool;
+    callback changed-color-gamma(float, float); // left, right
     callback changed-color-match-enabled(bool);
     callback changed-color-match-band-width(float);
     callback changed-color-match-grid-cols(float);
@@ -1562,6 +1577,8 @@ export component RecoApp inherits Window {
     callback changed-scoreboard-logo-size(float);
     callback changed-scoreboard-banner-color(string); // preset name, e.g. "Navy"
     callback toggled-scoreboard-derive-cut-ranges(bool);
+    callback changed-autocut-margins();
+    callback changed-pause-overlay();
 
     // File management: per-side segment lists and removal.
     in-out property <[string]> left-segments: [];
@@ -2141,11 +2158,87 @@ export component RecoApp inherits Window {
                                 }
 
                                 if root.scoreboard-match-summary != "": Tip {
-                                    tip: "Adds cut ranges for the dead time before kickoff and any logged pause, +/-2s of context kept at each cut. Only from period_start(1)/pause_start/pause_end events actually in the log - won't guess at a break you forgot to mark with Pause. Doesn't touch cut ranges you added or edited by hand.";
+                                    tip: "Adds cut ranges for the dead time before kickoff and any logged pause, keeping the seconds of context set below at each boundary. Only from period_start(1)/pause_start/pause_end events actually in the log - won't guess at a break you forgot to mark with Pause. Doesn't touch cut ranges you added or edited by hand.";
                                     CheckBox {
                                         text: "Auto-cut kickoff lead-in + pauses";
                                         checked <=> root.scoreboard-derive-cut-ranges;
                                         toggled => { root.toggled-scoreboard-derive-cut-ranges(self.checked); }
+                                    }
+                                }
+
+                                // How much play survives at each derived
+                                // boundary. Editing re-derives immediately,
+                                // so the result is judged against the
+                                // timeline rather than guessed at.
+                                if root.scoreboard-match-summary != "" && root.scoreboard-derive-cut-ranges: VerticalLayout {
+                                    spacing: 4px;
+
+                                    Tip {
+                                        tip: "Seconds of play kept around every cut-out pause: before it, so the incident that stopped play is still in the export, and after it, so the restart isn't cut into.";
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            Text {
+                                                text: "Pause cut";
+                                                color: root.text-dim;
+                                                font-size: 11px;
+                                                vertical-alignment: center;
+                                                horizontal-stretch: 1;
+                                            }
+                                            NumEdit {
+                                                text: root.autocut-cut-lead-secs;
+                                                width: 44px;
+                                                edited(v) => {
+                                                    root.autocut-cut-lead-secs = Math.max(v.to-float(), 0);
+                                                    root.changed-autocut-margins();
+                                                }
+                                                escaped => { self.text = root.autocut-cut-lead-secs; }
+                                            }
+                                            Text { text: "s before"; color: #888; font-size: 11px; vertical-alignment: center; }
+                                            NumEdit {
+                                                text: root.autocut-cut-trail-secs;
+                                                width: 44px;
+                                                edited(v) => {
+                                                    root.autocut-cut-trail-secs = Math.max(v.to-float(), 0);
+                                                    root.changed-autocut-margins();
+                                                }
+                                                escaped => { self.text = root.autocut-cut-trail-secs; }
+                                            }
+                                            Text { text: "s after"; color: #888; font-size: 11px; vertical-alignment: center; }
+                                        }
+                                    }
+
+                                    Tip {
+                                        tip: "Seconds kept outside the match itself: lead-in before kickoff, and how long the export stays running past the final whistle. These two move the export's start/end time, not a cut range.";
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            Text {
+                                                text: "Match trim";
+                                                color: root.text-dim;
+                                                font-size: 11px;
+                                                vertical-alignment: center;
+                                                horizontal-stretch: 1;
+                                            }
+                                            NumEdit {
+                                                text: root.autocut-kickoff-lead-secs;
+                                                width: 44px;
+                                                edited(v) => {
+                                                    root.autocut-kickoff-lead-secs = Math.max(v.to-float(), 0);
+                                                    root.changed-autocut-margins();
+                                                }
+                                                escaped => { self.text = root.autocut-kickoff-lead-secs; }
+                                            }
+                                            Text { text: "s pre-KO"; color: #888; font-size: 11px; vertical-alignment: center; }
+                                            NumEdit {
+                                                text: root.autocut-match-end-trail-secs;
+                                                width: 44px;
+                                                edited(v) => {
+                                                    root.autocut-match-end-trail-secs = Math.max(v.to-float(), 0);
+                                                    root.changed-autocut-margins();
+                                                }
+                                                escaped => { self.text = root.autocut-match-end-trail-secs; }
+                                            }
+                                            Text { text: "s post-FT"; color: #888; font-size: 11px; vertical-alignment: center; }
+                                        }
                                     }
                                 }
 
@@ -3408,8 +3501,34 @@ export component RecoApp inherits Window {
                             wrap: word-wrap;
                         }
 
+                        CalGroupBox {
+                            title: "MANUAL GAMMA (BEFORE AUTO MATCH)";
+
+                            LabeledSlider {
+                                tip: "Left camera's gamma, applied before the automatic match measures anything. Above 1.0 lifts the mid-tones, below 1.0 lowers them. Use this when the two cameras differ in contrast rather than in overall brightness - the automatic match can only shift the average, not reshape the curve. Unlike the automatic match, this also applies on hardware-decode exports. Updates live.";
+                                label: "Gamma left";
+                                minimum: 0.5;
+                                maximum: 2.0;
+                                value <=> root.color-gamma-left;
+                                decimals: 2;
+                                step: 0.05;
+                                changed(v) => { root.changed-color-gamma(v, root.color-gamma-right); }
+                            }
+
+                            LabeledSlider {
+                                tip: "Right camera's gamma. See \"Gamma left\" - set the two against each other until the two halves match in the mid-tones, then let the automatic match take care of what is left.";
+                                label: "Gamma right";
+                                minimum: 0.5;
+                                maximum: 2.0;
+                                value <=> root.color-gamma-right;
+                                decimals: 2;
+                                step: 0.05;
+                                changed(v) => { root.changed-color-gamma(root.color-gamma-left, v); }
+                            }
+                        }
+
                         Tip {
-                            tip: "Periodically measures each camera's color in the seam-adjacent band of its raw frame and nudges both toward their shared average, so an exposure/white-balance mismatch between the two cameras doesn't show up as a color step at the seam. Independent of geometric alignment. Only affects live YUV420P/NV12 decode paths.";
+                            tip: "Periodically measures each camera's color in the seam-adjacent band of its raw frame and nudges both toward their shared average, so an exposure/white-balance mismatch between the two cameras doesn't show up as a color step at the seam. Independent of geometric alignment. Only affects live YUV420P/NV12 decode paths - a hardware-decode (zero-copy) export renders without it, so tune Manual Gamma above for anything that has to survive into the exported file.";
                             CheckBox {
                                 text: "Auto color match";
                                 checked <=> root.color-match-enabled;
@@ -5160,26 +5279,35 @@ export component RecoApp inherits Window {
                         CheckBox {
                             text: "PAUZE overlay on cuts";
                             checked <=> root.export-pause-overlay-enabled;
+                            toggled => { root.changed-pause-overlay(); }
                         }
                     }
-                    if root.export-pause-overlay-enabled: HorizontalBox {
-                        padding: 0;
-                        spacing: 6px;
-                        Text { text: "Fade"; color: #888; font-size: 11px; vertical-alignment: center; }
-                        NumEdit {
-                            text: root.export-pause-overlay-fade-secs;
-                            width: 56px;
-                            edited(v) => { root.export-pause-overlay-fade-secs = Math.max(v.to-float(), 0); }
-                            escaped => { self.text = root.export-pause-overlay-fade-secs; }
+                    if root.export-pause-overlay-enabled: Tip {
+                        tip: "Fade: how long the dip to black and back takes. It is drawn over footage that was going to be encoded anyway, so it adds no length to the export. Black: how long the picture stays fully black on \"PAUZE\" - the only part that lengthens the export, and the number to raise if a pause should read as a real break.";
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text { text: "Fade"; color: #888; font-size: 11px; vertical-alignment: center; }
+                            NumEdit {
+                                text: root.export-pause-overlay-fade-secs;
+                                width: 56px;
+                                edited(v) => {
+                                    root.export-pause-overlay-fade-secs = Math.max(v.to-float(), 0);
+                                    root.changed-pause-overlay();
+                                }
+                                escaped => { self.text = root.export-pause-overlay-fade-secs; }
+                            }
+                            Text { text: "s   Black"; color: #888; font-size: 11px; vertical-alignment: center; }
+                            NumEdit {
+                                text: root.export-pause-overlay-hold-secs;
+                                width: 56px;
+                                edited(v) => {
+                                    root.export-pause-overlay-hold-secs = Math.max(v.to-float(), 0);
+                                    root.changed-pause-overlay();
+                                }
+                                escaped => { self.text = root.export-pause-overlay-hold-secs; }
+                            }
+                            Text { text: "s"; color: #888; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
                         }
-                        Text { text: "s   Hold"; color: #888; font-size: 11px; vertical-alignment: center; }
-                        NumEdit {
-                            text: root.export-pause-overlay-hold-secs;
-                            width: 56px;
-                            edited(v) => { root.export-pause-overlay-hold-secs = Math.max(v.to-float(), 0); }
-                            escaped => { self.text = root.export-pause-overlay-hold-secs; }
-                        }
-                        Text { text: "s"; color: #888; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
                     }
 
                     Tip {

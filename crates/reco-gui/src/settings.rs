@@ -162,6 +162,21 @@ pub struct GuiSettings {
     /// `autocam_defaults`/`Calibration::autocam_defaults`).
     #[serde(default)]
     pub scoreboard_settings: Option<ScoreboardSettings>,
+    /// Whether the export panel's "PAUZE overlay on cuts" checkbox was
+    /// on, and the two durations next to it. App-level (not per-match):
+    /// they express how the user wants a break to read on screen, which
+    /// doesn't change from one match to the next - and having to retype
+    /// them every session was the whole reason they were exposed.
+    #[serde(default)]
+    pub pause_overlay_enabled: bool,
+    /// Seconds of dip-to-black in *and* back out. Composited over frames
+    /// that were going to be encoded anyway, so it adds no export length.
+    #[serde(default = "default_pause_overlay_fade_secs")]
+    pub pause_overlay_fade_secs: f32,
+    /// Seconds the picture stays fully black on "PAUZE" - the only part
+    /// of the transition that lengthens the export.
+    #[serde(default = "default_pause_overlay_hold_secs")]
+    pub pause_overlay_hold_secs: f32,
 }
 
 fn default_dark_mode() -> bool {
@@ -179,6 +194,16 @@ fn default_blend_width() -> f32 {
 }
 fn default_preview_aspect() -> String {
     "auto".into()
+}
+/// Mirrors `export-pause-overlay-fade-secs`'s default in main.slint -
+/// keep the two in sync, a settings file predating these fields must
+/// restore exactly what the UI would have shown without one.
+fn default_pause_overlay_fade_secs() -> f32 {
+    3.0
+}
+/// Mirrors `export-pause-overlay-hold-secs`'s default in main.slint.
+fn default_pause_overlay_hold_secs() -> f32 {
+    4.0
 }
 
 impl Default for GuiSettings {
@@ -208,6 +233,9 @@ impl Default for GuiSettings {
             autocam_enabled: false,
             async_detect_enabled: false,
             scoreboard_settings: None,
+            pause_overlay_enabled: false,
+            pause_overlay_fade_secs: default_pause_overlay_fade_secs(),
+            pause_overlay_hold_secs: default_pause_overlay_hold_secs(),
         }
     }
 }
@@ -354,6 +382,15 @@ impl GuiSettings {
     /// `Self::scoreboard_settings`'s doc comment).
     pub fn set_scoreboard_settings(&mut self, settings: ScoreboardSettings) {
         self.scoreboard_settings = Some(settings);
+        self.save();
+    }
+
+    /// Persist the PAUZE transition's checkbox and durations (see
+    /// `Self::pause_overlay_enabled`'s doc comment).
+    pub fn set_pause_overlay(&mut self, enabled: bool, fade_secs: f32, hold_secs: f32) {
+        self.pause_overlay_enabled = enabled;
+        self.pause_overlay_fade_secs = fade_secs;
+        self.pause_overlay_hold_secs = hold_secs;
         self.save();
     }
 }
@@ -522,6 +559,10 @@ mod tests {
             logo_size_px: 40.0,
             banner_color_name: "Navy".into(),
             derive_cut_ranges: true,
+            cut_lead_secs: 4.0,
+            cut_trail_secs: 1.0,
+            kickoff_lead_secs: 6.0,
+            match_end_trail_secs: 10.0,
         };
         s.set_scoreboard_settings(sb);
         let json = serde_json::to_string(&s).unwrap();
@@ -532,6 +573,40 @@ mod tests {
         assert!((restored_sb.placement.scale - 0.4).abs() < 1e-6);
         assert_eq!(restored_sb.banner_color_name, "Navy");
         assert!(restored_sb.derive_cut_ranges);
+        assert!((restored_sb.cut_lead_secs - 4.0).abs() < 1e-6);
+        assert!((restored_sb.cut_trail_secs - 1.0).abs() < 1e-6);
+        assert!((restored_sb.kickoff_lead_secs - 6.0).abs() < 1e-6);
+        assert!((restored_sb.match_end_trail_secs - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn set_pause_overlay_roundtrips_through_json() {
+        let mut s = GuiSettings::default();
+        // Defaults first: an untouched install must match main.slint's
+        // own property defaults, not 0s (an instant, invisible cut).
+        assert!(!s.pause_overlay_enabled);
+        assert!((s.pause_overlay_fade_secs - 3.0).abs() < 1e-6);
+        assert!((s.pause_overlay_hold_secs - 4.0).abs() < 1e-6);
+
+        s.pause_overlay_enabled = true;
+        s.pause_overlay_fade_secs = 1.0;
+        s.pause_overlay_hold_secs = 2.5;
+        let json = serde_json::to_string(&s).unwrap();
+        let restored: GuiSettings = serde_json::from_str(&json).unwrap();
+        assert!(restored.pause_overlay_enabled);
+        assert!((restored.pause_overlay_fade_secs - 1.0).abs() < 1e-6);
+        assert!((restored.pause_overlay_hold_secs - 2.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn settings_json_predating_the_pause_overlay_fields_keeps_the_ui_defaults() {
+        // Same #[serde(default = "...")] contract as the autocut margins
+        // in reco-core: absent must mean 3.0/4.0, not 0.0.
+        let json = r#"{"default_codec":"h264"}"#;
+        let s: GuiSettings = serde_json::from_str(json).unwrap();
+        assert!(!s.pause_overlay_enabled);
+        assert!((s.pause_overlay_fade_secs - 3.0).abs() < 1e-6);
+        assert!((s.pause_overlay_hold_secs - 4.0).abs() < 1e-6);
     }
 
     #[test]

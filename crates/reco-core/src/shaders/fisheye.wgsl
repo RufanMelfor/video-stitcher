@@ -14,7 +14,8 @@ struct Uniforms {
     intrinsics: vec4<f32>,
     // KB4 distortion coefficients (k1, k2, k3, k4)
     dist: vec4<f32>,
-    // YUV color transfer: scale.xyz (Y, U, V), pad
+    // YUV color transfer: scale.xyz (Y, U, V), w = 1/gamma (manual
+    // per-camera pre-correction, see apply_gamma)
     color_scale: vec4<f32>,
     // YUV color transfer: offset.xyz (Y, U, V), blend_width
     color_offset_blend: vec4<f32>,
@@ -108,12 +109,35 @@ fn yuv_to_rgb(yuv: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(r, g, b);
 }
 
-fn apply_color_transfer(rgb: vec3<f32>, scale: vec3<f32>, offset: vec3<f32>) -> vec3<f32> {
-    // Skip if identity transform (scale=1, offset=0)
-    if all(scale == vec3<f32>(1.0)) && all(offset == vec3<f32>(0.0)) {
+// Manual per-camera gamma, applied BEFORE the automatic scale+offset.
+// `inv_gamma` is 1/gamma, precomputed on the CPU so this is one pow and no
+// divide. Deliberately ahead of the automatic correction: that correction
+// is derived from a measurement of these same, already-gamma'd pixels
+// (SYNC_WITH `render::color_match::decode_transfer_yuv`, which performs
+// the identical curve per sample point before averaging). Reversing the
+// order, or applying the curve in only one of the two places, would have
+// the automatic stage correcting a frame that is never rendered.
+fn apply_gamma(rgb: vec3<f32>, inv_gamma: f32) -> vec3<f32> {
+    // The branch is on a uniform, so it is coherent across the whole draw
+    // and costs nothing; the pow it skips is per pixel, per channel.
+    if inv_gamma == 1.0 {
         return rgb;
     }
-    var yuv = rgb_to_yuv(rgb);
+    return pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(inv_gamma));
+}
+
+fn apply_color_transfer(
+    rgb: vec3<f32>,
+    scale: vec3<f32>,
+    offset: vec3<f32>,
+    inv_gamma: f32,
+) -> vec3<f32> {
+    let corrected = apply_gamma(rgb, inv_gamma);
+    // Skip if identity transform (scale=1, offset=0)
+    if all(scale == vec3<f32>(1.0)) && all(offset == vec3<f32>(0.0)) {
+        return corrected;
+    }
+    var yuv = rgb_to_yuv(corrected);
     yuv = yuv * scale + offset;
     return clamp(yuv_to_rgb(yuv), vec3<f32>(0.0), vec3<f32>(1.0));
 }
@@ -354,7 +378,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var color = tex_color.rgb;
 
     // Apply YUV-space color transfer
-    color = apply_color_transfer(color, u.color_scale.xyz, u.color_offset_blend.xyz);
+    color = apply_color_transfer(
+        color,
+        u.color_scale.xyz,
+        u.color_offset_blend.xyz,
+        u.color_scale.w,
+    );
 
     // Compute alpha for seam blending. `ground_tilt.w` (otherwise unused -
     // see `Uniforms`' doc above) marks which plane fades at the seam this
