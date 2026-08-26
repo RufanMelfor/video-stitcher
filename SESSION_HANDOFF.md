@@ -171,7 +171,46 @@ is the only way to have Auto Color Match work at all under hardware
 decode. Today the choice is color correction (CPU decode, much slower) or
 speed (zero-copy, no correction).
 
-Shape:
+Refined after reading the zero-copy path (2026-08-26 late, no build -
+the machine was busy running autocam):
+
+**The GPU pass must be a dumb texel gather, not a second implementation
+of the colour maths.** Have the compute shader return the 128 raw
+`(Y, U, V)` texel values per camera and let the CPU run the existing
+`decode_transfer_yuv` - limited-range expansion, YUV to RGB, the manual
+gamma, RGB back to YUV, then the mean - byte for byte as it does today.
+Two reasons this is not a detail: the curve now lives in exactly one
+place on the CPU side (the SYNC_WITH contract with `fisheye.wgsl` stays a
+two-way contract instead of a three-way one), and the readback shrinks to
+128 x 2 x 4 bytes, about 1KB, which is nothing to move once every 15
+frames.
+
+**Where it hooks in.** Both zero-copy entry points -
+`render_imported_views` (D3D11VA, the Windows path that matters) and
+`render_imported_textures` (Metal) - set the left/right bind groups and
+then call `render_to_target_gpu`, so that one function is the single
+insertion point. It does not currently keep the texture views around
+though, only the bind groups it built from them, so either the views get
+threaded through or the pipeline holds onto the last pair. The gather
+needs its own bind group anyway (a compute layout, not the render
+pipeline's sampler layout), so threading the views through is the
+smaller change.
+
+**Sequence per measurement:** encode the gather into the same command
+encoder as the render (no extra submit), `copy_buffer_to_buffer` into a
+MAP_READ staging buffer, `map_async`, and read it on a later frame. Never
+poll for it in the same frame - that is the stall that would make the
+export slower rather than faster.
+
+**One refactor first, testable without a GPU:** `ColorMatchState::tick`
+currently takes a closure that performs the measurement inline. Split
+that into "here is a fresh (left_mean, right_mean), fold it in" so both
+the CPU sampler and the GPU readback feed the same EMA, clamp and
+logging. That is a pure CPU change with the existing tests as the guard,
+and it is what lets the GPU path reuse every bit of behaviour the CPU
+path already has.
+
+Original shape, still accurate:
 
 1. The 128 sample positions stay computed on the CPU exactly as now
    (`undistorted_to_distorted`, including the `seam_offset` and
