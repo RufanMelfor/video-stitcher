@@ -1,4 +1,4 @@
-# Session handoff - 2026-08-26 (TGR_PC): PAUZE now composites on the GPU (user-confirmed, 31fps, no dip); three match-folder/cut features written but NOT compiled; color pipeline investigated - auto color match turns out to be inactive in every export
+# Session handoff - 2026-08-26 (TGR_PC): PAUZE on the GPU confirmed at 31fps; match-folder/cut features and manual per-camera gamma shipped; a test export proves auto color match never runs in a normal export
 
 ## OPEN TASKS - do these next
 
@@ -93,6 +93,73 @@ Design, which costs almost nothing:
   of the Color Mapping card above the auto block, CLI flag for parity.
   Range 0.5 - 2.0, default 1.0, step 0.05.
 
+### Test export on the 26-08 match, and what it showed
+
+Ran on `04 Beuningse Boys Berghem Sport 26082026`, first segment of each
+side, at the user's real export settings (2560x1440, h264, balanced).
+Artifacts kept in that folder: `colortest_a..d_*.mp4`, `qualitytest_ai_2k.mp4`
+and `colortest_frames/` (full frames plus seam crops).
+
+**Video quality: good, and the softness under AI zoom is geometric, not an
+encoder problem.** 60s AI-tracked export ran at 36fps avg, 25.5 Mbps,
+h264 High, no artifacts, no dropped frames, bottleneck reported as
+readback. The fixed-pose frame is crisp. The AI-tracked frames are
+visibly softer, and the arithmetic says they have to be: the lens is
+`fx = 1457` px/rad = 25.4 px/deg, so a 2560px-wide output is 1:1 only at
+about 101 degrees of FOV. At `fov_default` 34 deg the render asks for 75
+px/deg - a 3.0x upscale; at `fov_tight` 20 deg it is 5.0x. Nothing in the
+pipeline can put back detail the sensor never resolved. If sharpness at
+full zoom matters more than framing tightness, `fov_tight` is the knob,
+not the encoder.
+
+Also checked, since it looks alarming on a still: the background slopes
+by up to 11 degrees in AI-tracked frames while the fixed-pose frame is
+level (+0.6 deg). Measured by fitting the sky/treeline boundary
+(`D:\CLAUDE\horizon_tilt.py`). It is **not** a roll bug: near field lines
+and the far treeline slope by *different* amounts in the same frame,
+which is perspective from an off-axis look direction, not a rotated
+camera - and the user's older `test10_long.mp4` shows the same pattern
+(level at t=120s, -7 deg at t=300s). Worth knowing because it gets
+stronger the wider `fov_wide` is.
+
+**Auto color match: confirmed inactive in a normal export, on the user's
+own footage.** Four 10s renders of the identical source, differing only
+in decode path and flags:
+
+| variant | decode | color match | L-R imbalance |
+|---|---|---|---|
+| A | zero-copy (default) | on (nominally) | -22.98 |
+| B | `--no-zero-copy` | on | -28.74 |
+| C | `--no-zero-copy` | `--no-color-match` | -23.11 |
+| D | `--no-zero-copy` | off, gamma 1.0 | -31.47 |
+
+A and C agree to **0.13 gray levels (sd 0.05)** across 30 sampled frames.
+The default export renders *exactly* as if color match were switched off.
+B differs from C by 5.6 levels, so the correction is real - just
+unreachable on the path every export actually takes.
+
+What the correction does when it does run, from a debug-level run: the
+seam band measures `left_mean` 0.345 vs `right_mean` 0.326 - a genuine
+but small 4.8-level luma gap - and it applies -0.0094 left / +0.0094
+right. **Not clamped** (the limit is 0.0394), so raising "Max luma offset"
+would change nothing. Chroma correction is zero because this calibration
+sets `color_match_max_chroma_offset` to 0.
+
+Column profile of B-minus-C (`D:\CLAUDE\seam_profile.py`) also pins the
+seam on screen: flat -2.9 levels left of x=1120, flat +2.9 right of
+x=1440, crossing the midpoint at **x=1271** of 2560. So the blend is
+about 320px wide on screen at this pose.
+
+**A trap the user is currently in.** Their calibration already carries
+`color_gamma_left 0.92 / color_gamma_right 0.83`, tuned tonight in the
+preview - where auto color match *is* active. The same profile measured
+against gamma 1.0 shifts the right camera 8.9 levels down relative to the
+left, i.e. it pushes the two cameras apart in exactly the axis the
+automatic stage was simultaneously pulling together by 5.9. In the export
+the automatic half is absent, so the result cannot match what the preview
+showed. **Until the GPU measurement lands, tune gamma with "Auto color
+match" switched OFF**, so the preview shows what the file will contain.
+
 ### 3. Move the color-match *measurement* onto the GPU
 
 **Not for speed - for coverage.** The measurement is 8x16 = 128 sample
@@ -123,6 +190,44 @@ Endgame, only if it proves worth it: keep the derived offsets in a storage
 buffer and have `fisheye.wgsl` read them from there, so nothing crosses the
 bus at all. The Color Mapping status line would then need an occasional
 cosmetic readback.
+
+### 4. NEW (user request, 2026-08-26 late): show what the AI zoom range actually frames
+
+User: "nu heb ik totaal geen idee wat de min en max zoom is in de AI
+parameters". They sketched it with a reference image: the full field view
+with two labelled rectangles on it, "Lowest zoom" and "Highest zoom".
+
+The sliders are `export-fov-tight` / `export-fov-wide` /
+`export-fov-default` (main.slint ~5618), in degrees, in the Export
+dialog's AI Tracking section. A number in degrees means nothing without a
+picture, which is the whole complaint.
+
+Proposed shape - draw the boxes on the existing preview rather than
+building a second renderer:
+
+- A "Show zoom range" toggle next to the three FOV sliders. While on, the
+  preview holds a fixed wide pose (so the boxes have something stable to
+  sit in) and two labelled rectangles are overlaid: `fov_wide` (widest
+  the director will ever pull out to) and `fov_tight` (tightest it will
+  push in). Dragging a slider resizes its box live - that is the whole
+  point.
+- Overlay it the way the ROI editor already overlays polygons on the
+  preview; no reco-core change is needed.
+
+**The one piece of maths to get right.** The box is *not* a linear
+fraction of the preview. For a rectilinear virtual camera the half-width
+of an inner FOV `f` inside a preview of FOV `F` is
+`tan(f/2) / tan(F/2)`. At the FOVs in play (20-48 deg inside a ~75-100
+deg preview) the linear approximation `f/F` is wrong by tens of percent,
+which would draw a confidently mislabelled box - worse than no box.
+Height follows from the output aspect ratio, not from a second FOV.
+
+Worth adding while there: label each box with its own **upscale factor**,
+computed from the lens (`fx` px/rad) and the export width -
+`upscale = (out_width / fov_deg) / (fx / 57.2958)`. At this rig that reads
+3.0x at 34 deg and 5.0x at 20 deg, and it converts "the tight shot looks
+soft" from a complaint into a number the user can steer by before
+exporting.
 
 ### Background finding that motivates 2 and 3: auto color match is inactive in every export
 
