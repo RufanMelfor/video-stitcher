@@ -86,6 +86,11 @@ pub struct StitchSession {
     pub(crate) extra_encoders: Vec<AsyncEncodeThread>,
     /// Independently rendered post-camera overlay. Polled without blocking.
     pub(crate) overlay_source: Option<Box<dyn crate::render::overlay::OverlayFrameSource>>,
+    /// Post-camera transition overlay, drawn under `overlay_source`.
+    /// Its image is uploaded once on attach; per frame only its opacity
+    /// is advanced. See
+    /// [`crate::render::overlay::OverlayTransitionSource`].
+    pub(crate) overlay_transition: Option<Box<dyn crate::render::overlay::OverlayTransitionSource>>,
     /// When true, `process_frame_any` skips detection (the produce phase
     /// already ran it and stored the WorldState in the buffer).
     pub(crate) skip_detection: bool,
@@ -273,6 +278,7 @@ impl StitchSession {
             frame_count: 0,
             extra_encoders: Vec::new(),
             overlay_source: None,
+            overlay_transition: None,
             session_start: None,
             error_policy: ErrorPolicy::default(),
             frames_dropped: 0,
@@ -377,6 +383,34 @@ impl StitchSession {
     pub fn clear_overlay_source(&mut self) {
         self.overlay_source = None;
         self.core.pipeline_mut().clear_overlay();
+    }
+
+    /// Attach a transition overlay - a fixed image faded in and out over
+    /// time, drawn underneath [`Self::set_overlay_source`]'s overlay so
+    /// a scoreboard stays legible through it.
+    ///
+    /// The image is uploaded to the GPU here, once. Each subsequent
+    /// frame advances the source and rewrites a single uniform, so a
+    /// fade costs no per-frame CPU work and no bus traffic - see
+    /// [`crate::render::overlay::OverlayTransitionSource`] for why that
+    /// distinction is the whole point of this being separate from an
+    /// [`OverlayFrameSource`](crate::render::overlay::OverlayFrameSource).
+    pub fn set_overlay_transition(
+        &mut self,
+        source: Box<dyn crate::render::overlay::OverlayTransitionSource>,
+    ) -> Result<(), SessionError> {
+        self.core
+            .pipeline_mut()
+            .set_transition_frame(source.card())
+            .map_err(SessionError::Pipeline)?;
+        self.overlay_transition = Some(source);
+        Ok(())
+    }
+
+    /// Disable the transition overlay and release its GPU resources.
+    pub fn clear_overlay_transition(&mut self) {
+        self.overlay_transition = None;
+        self.core.pipeline_mut().clear_transition();
     }
 
     /// Reposition/resize the composited overlay - see

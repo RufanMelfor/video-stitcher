@@ -94,6 +94,32 @@ pub trait OverlayFrameSource: Send {
     fn try_frame(&mut self) -> Result<Option<OverlayFrame>, String>;
 }
 
+/// A transition overlay: **one fixed image** whose visibility varies
+/// over time, composited underneath any [`OverlayFrameSource`] so a
+/// content overlay (a scoreboard) stays legible through it.
+///
+/// Deliberately separate from [`OverlayFrameSource`], which exists for
+/// overlays whose *pixels* change. A transition's pixels never do, so
+/// its image is uploaded to the GPU once and each frame costs a single
+/// uniform write - see [`RgbaOverlayCompositor::set_opacity`]. Modelling
+/// a fade as a changing image instead means rebuilding and re-uploading
+/// a full-resolution frame every time, which is what made the "PAUZE"
+/// dip-to-black cost more per frame than stitching and AI tracking
+/// combined despite being an incomparably simpler operation.
+pub trait OverlayTransitionSource: Send {
+    /// The image to composite, at full opacity. Read once, when the
+    /// transition is attached.
+    fn card(&self) -> &OverlayFrame;
+
+    /// Advance exactly one output frame and return that frame's opacity,
+    /// `0.0` (nothing drawn) to `1.0` (fully opaque).
+    ///
+    /// Called once per encoded output frame, in the same order the
+    /// session's frame counter advances, so an implementation can drive
+    /// itself from its own counter without an external timestamp.
+    fn advance(&mut self) -> f32;
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct OverlayParams {
@@ -107,8 +133,11 @@ struct OverlayParams {
     /// `output_size` - `1.0` (default) reproduces the previous
     /// letterboxed-and-centered behavior exactly.
     placement_scale: f32,
-    /// Uniform buffer size padding (28 -> 32 bytes, a multiple of 16).
-    _padding: f32,
+    /// Multiplies the sampled alpha - `1.0` (default) draws the overlay
+    /// unchanged. Occupies what used to be pure padding, so a fade
+    /// costs no extra uniform bandwidth. See
+    /// [`RgbaOverlayCompositor::set_opacity`].
+    opacity: f32,
 }
 
 /// Where and how large a composited overlay appears within the output
@@ -181,6 +210,9 @@ pub(crate) struct RgbaOverlayCompositor {
     texture_size: (u32, u32),
     output_size: (u32, u32),
     placement: OverlayPlacement,
+    /// Alpha multiplier applied to every sampled texel - see
+    /// [`Self::set_opacity`].
+    opacity: f32,
 }
 
 impl RgbaOverlayCompositor {
@@ -274,7 +306,7 @@ impl RgbaOverlayCompositor {
                 output_size: [output_size.0 as f32, output_size.1 as f32],
                 placement_offset: [0.0, 0.0],
                 placement_scale: 1.0,
-                _padding: 0.0,
+                opacity: 1.0,
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -297,6 +329,7 @@ impl RgbaOverlayCompositor {
             texture_size: (frame.width, frame.height),
             output_size,
             placement: OverlayPlacement::default(),
+            opacity: 1.0,
         };
         compositor.upload(gpu, frame)?;
         Ok(compositor)
@@ -409,6 +442,24 @@ impl RgbaOverlayCompositor {
         self.write_params(gpu);
     }
 
+    /// Scale the alpha of every texel this compositor draws, `0.0`
+    /// (invisible) to `1.0` (unchanged).
+    ///
+    /// This is what makes a fade cost nothing: the texture stays exactly
+    /// as uploaded and only a 32-byte uniform is rewritten, instead of
+    /// rebuilding a full-frame image on the CPU and pushing it across
+    /// the bus every frame (at 2560x1440 that is ~14.7MB per frame,
+    /// which is precisely why the CPU-composited PAUZE transition
+    /// dragged a 30fps export down to ~9fps during its fades).
+    pub(crate) fn set_opacity(&mut self, gpu: &GpuContext, opacity: f32) {
+        let opacity = opacity.clamp(0.0, 1.0);
+        if self.opacity == opacity {
+            return;
+        }
+        self.opacity = opacity;
+        self.write_params(gpu);
+    }
+
     fn write_params(&self, gpu: &GpuContext) {
         gpu.queue().write_buffer(
             &self.params_buffer,
@@ -418,7 +469,7 @@ impl RgbaOverlayCompositor {
                 output_size: [self.output_size.0 as f32, self.output_size.1 as f32],
                 placement_offset: [self.placement.offset.0, self.placement.offset.1],
                 placement_scale: self.placement.scale,
-                _padding: 0.0,
+                opacity: self.opacity,
             }),
         );
     }
@@ -624,6 +675,98 @@ mod tests {
         let pixels = readback.flush_pending(&gpu).unwrap().unwrap();
         let center = ((size / 2 * size + size / 2) * 4) as usize;
         assert_eq!(&pixels[center..center + 4], &[255, 0, 255, 255]);
+    }
+
+    /// The opacity uniform must actually fade the composited result on
+    /// the GPU - this is what replaces rebuilding and re-uploading a
+    /// full-frame image every frame, so it needs a real end-to-end
+    /// check, not just a uniform write that compiles.
+    #[test]
+    fn opacity_uniform_fades_the_composited_overlay_on_the_gpu() {
+        let Ok(gpu) = GpuContext::new_blocking() else {
+            eprintln!("GPU unavailable; skipping overlay compositor integration test");
+            return;
+        };
+        let size = 32;
+        let make_target = || {
+            gpu.device().create_texture(&wgpu::TextureDescriptor {
+                label: Some("opacity test target"),
+                size: wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            })
+        };
+        // Opaque white overlay over a black target: the composited
+        // centre pixel reads back as a direct measure of opacity.
+        let frame = OverlayFrame {
+            width: size,
+            height: size,
+            design_size: (size, size),
+            rgba: [255_u8, 255, 255, 255].repeat((size * size) as usize),
+        };
+
+        let mut sampled = Vec::new();
+        for opacity in [1.0_f32, 0.5, 0.0] {
+            let target = make_target();
+            let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut clear = gpu
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("opacity test clear"),
+                });
+            {
+                let _pass = clear.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("opacity test clear pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+            }
+            gpu.queue().submit(Some(clear.finish()));
+
+            let mut compositor = RgbaOverlayCompositor::new(
+                &gpu,
+                wgpu::TextureFormat::Rgba8Unorm,
+                (size, size),
+                &frame,
+            )
+            .unwrap();
+            compositor.set_opacity(&gpu, opacity);
+            let mut readback =
+                crate::gpu::rgba_readback::RgbaReadback::new(&gpu, size, size).unwrap();
+            readback
+                .readback(&gpu, &target, compositor.encode(&gpu, &view))
+                .unwrap();
+            let pixels = readback.flush_pending(&gpu).unwrap().unwrap();
+            let centre = ((size / 2 * size + size / 2) * 4) as usize;
+            sampled.push(pixels[centre]);
+        }
+
+        assert_eq!(sampled[0], 255, "opacity 1.0 must draw the overlay in full");
+        assert_eq!(sampled[2], 0, "opacity 0.0 must draw nothing at all");
+        assert!(
+            sampled[1] > 100 && sampled[1] < 155,
+            "opacity 0.5 should land near half, got {}",
+            sampled[1]
+        );
     }
 
     /// Regression test for the GetData-timeout crash traced to the

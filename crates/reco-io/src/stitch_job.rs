@@ -1152,19 +1152,28 @@ impl StitchJob {
                 &overlay_cfg,
             );
             if !schedule.is_empty() {
-                let (fade, caption) = reco_core::render::pause_overlay::build_layers(
-                    schedule,
-                    &overlay_cfg,
-                    (out_w, out_h),
-                );
-                layers.push((
-                    fade,
-                    reco_core::render::overlay::OverlayPlacement::default(),
-                ));
-                layers.push((
-                    caption,
-                    reco_core::render::overlay::OverlayPlacement::default(),
-                ));
+                // Attached to the session's dedicated transition slot
+                // rather than pushed onto `layers`: the card is uploaded
+                // to the GPU once and each frame only rewrites an
+                // opacity uniform, so the fade costs no per-frame CPU
+                // work. As a layer it would instead force every frame of
+                // every fade through a full-resolution CPU composite plus
+                // a ~14.7MB upload at 2K - measured at ~9fps against a
+                // 30fps baseline.
+                //
+                // It also keeps `layers` holding only genuine content
+                // overlays, so a lone scoreboard stays on the direct
+                // single-source path below and never goes near
+                // `LayeredOverlaySource`.
+                session
+                    .set_overlay_transition(Box::new(
+                        reco_core::render::pause_overlay::build_transition(
+                            schedule,
+                            &overlay_cfg,
+                            (out_w, out_h),
+                        ),
+                    ))
+                    .map_err(|e| StitchError::Other(format!("pause_overlay: {e}")))?;
             }
         }
         layers.extend(std::mem::take(&mut self.overlay_layers));

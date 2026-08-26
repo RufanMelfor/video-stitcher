@@ -6,7 +6,11 @@ struct OverlayParams {
     placement_offset: vec2<f32>,
     // Multiplies the auto-fit ("contain") scale; 1.0 is unchanged.
     placement_scale: f32,
-    _padding: f32,
+    // Multiplies the sampled alpha; 1.0 draws the overlay as-is. Lets a
+    // producer fade a *static* texture in and out by rewriting this one
+    // value per frame instead of re-uploading the image - see
+    // RgbaOverlayCompositor::set_opacity.
+    opacity: f32,
 };
 
 @group(0) @binding(0) var overlay_texture: texture_2d<f32>;
@@ -46,5 +50,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if (overlay_uv.x < 0.0 || overlay_uv.y < 0.0 || overlay_uv.x > 1.0 || overlay_uv.y > 1.0) {
         return vec4<f32>(0.0);
     }
-    return textureSample(overlay_texture, overlay_sampler, overlay_uv);
+    let sampled = textureSample(overlay_texture, overlay_sampler, overlay_uv);
+    // Straight alpha, so scaling alpha alone fades the overlay - the
+    // colour channels are not premultiplied and must stay untouched.
+    return vec4<f32>(sampled.rgb, sampled.a * params.opacity);
 }
