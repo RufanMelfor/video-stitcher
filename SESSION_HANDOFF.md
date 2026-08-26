@@ -1,3 +1,534 @@
+# Session handoff - 2026-08-26 (TGR_PC): SCOREBOARD BLUR ROOT-CAUSED AND FIXED (user-confirmed sharp); export-speed dip during PAUZE fades remains, GPU compositing is the open follow-up
+
+**User confirmed on a real 2K export (test9_long.mp4): scoreboard stays
+sharp with PAUZE enabled, fade-to-black works.** Delivering with
+Fade 1.0 / Hold 2.0 to keep the remaining fps dip short.
+
+## The actual root cause (after several wrong turns - read this first)
+
+`LayeredOverlaySource` sized its shared canvas **from the layers
+themselves**. First a fixed 960x540, then (2026-08-24) "the largest
+active layer's own pixel buffer". The second sounds right and is
+equally wrong, just harder to see:
+
+A producer that pre-scales its capture (the scoreboard, via
+`design_size` + `contain_fit_render_scale`) sizes that buffer to its
+**on-screen footprint** - at 2K with placement scale 0.3 that is
+768x432. The canvas then became 768x432, and `composite_over` placed
+the layer *within* that canvas at its placement scale **again**,
+squeezing 768x432 into 230x130, after which the GPU stretched it back
+up to 768x432 on screen. Crisp -> 230x130 -> crisp-sized-again.
+
+Two consequences that misled every earlier investigation:
+- The damage was there **from frame 1 of the whole export**, not only
+  during a transition - merely *registering* a second layer was enough,
+  even before it ever drew anything. That is exactly why "PAUZE on" was
+  blurry end-to-end while "PAUZE off" was sharp (test4 vs test5).
+- It got worse at higher output resolutions, which made it look like a
+  resolution bug.
+
+**Fix**: the canvas is now pinned to the session's real output
+resolution, in both actual pixels and `design_size`
+(`LayeredOverlaySource::new` takes `output_size`; `stitch_job` passes
+`(out_w, out_h)`). `composite_over` then performs, per layer, the
+*identical* contain-fit computation the GPU shader would have performed
+had that layer been attached alone - so every layer lands byte-exactly
+where it belongs and a pre-scaled capture is resampled by nothing at
+all. No derived-from-layers sizing, and no fixed constant, anywhere in
+the path any more.
+
+Regression test:
+`a_pre_scaled_layer_is_composited_pixel_for_pixel_alongside_another_layer`
+- checks a marker pixel lands on exact coordinates *and* that its
+neighbour is unblended, which fails under any resampling.
+
+## Wrong turns this session, so they are not repeated
+
+1. **Bilinear sampling in `composite_over`** (2026-08-25, kept - it is
+   independently correct, but it was never the cause; it cannot recover
+   detail a geometric downscale already discarded).
+2. **Splitting PAUZE into a 1x1 fade layer + a separate caption layer**
+   (`pause_overlay::build_layers`, kept - genuinely better, and the 1x1
+   fade can never dominate canvas sizing again, but on its own it did
+   not fix the blur either).
+3. **Capping the caption at 960x540** - reintroduced the very constant
+   we were trying to remove. User caught this directly ("ik dacht dat we
+   gestopt waren met 960x540"). The cap still exists but now only
+   bounds *render cost*, not placement; it cannot affect quality
+   because the canvas no longer derives its size from it.
+4. Sizing the caption with `contain_fit_render_scale` **uncapped** made
+   it render at full output resolution every frame - a real, live
+   export slowdown the user hit and cancelled.
+
+## Performance work that was needed alongside the fix
+
+An output-resolution canvas is far more expensive to composite, so:
+- **Duplicate-frame detection** in `LayeredOverlaySource::try_frame`:
+  `reco_scoreboard`'s runtime re-captures at 30fps while its content
+  changes ~1/sec. Compositing those duplicates collapsed a real export
+  from 22fps to 7fps. A memcmp against the cached frame skips them.
+- **`unchanged_alpha`** in `pause_overlay`: the constant-alpha hold (the
+  longest part of a transition) now emits one frame, not one per frame.
+  Confirmed working in test9 - frames 750-850 (the hold) ran at 29-31fps.
+- **Empty-canvas fast path** (`out = src` over a transparent
+  destination) and a **full-canvas flat row fill** for the fade. Both
+  have tests asserting byte-identical output to the general blend path,
+  since both are optimisations making a mathematical claim.
+- **Row-bounds clipping** via `opaque_row_bounds` so a mostly
+  transparent full-frame layer (the caption) only scans its text band.
+
+## Why a trivial fade costs more than stitching (the reasoning behind the next step)
+
+User's question, and it is the right one: "waarom wordt hij trager
+tijdens een pauze, dat is toch een super simpele actie, dat kan nooit
+zwaarder zijn dan stitchen en AI-volging."
+
+It isn't heavier - it runs in the wrong place:
+
+- Stitching and AI run entirely **on the GPU**, in VRAM. Blacking out
+  3.7M pixels there is microseconds and moves **zero bytes**: the frame
+  never leaves the card.
+- The PAUZE fade runs **on the CPU**, in `composite_over` - one core,
+  pixel by pixel - and then the finished full-frame canvas has to be
+  handed to the GPU through `RgbaOverlayCompositor::upload`'s
+  `write_texture`. At 2560x1440 that is ~14.7MB built on the CPU and
+  another ~14.7MB pushed across the bus, **every fade frame**.
+
+So the operation really is trivially simple; it is ~100x more expensive
+than the stitch only because of where it happens and because its result
+must be shipped to the GPU as a whole image each frame.
+
+The reason it grew this way: `RgbaOverlayCompositor` has exactly **one**
+overlay slot (one texture, one placement), so when a scoreboard and
+PAUZE both had to be active, they were merged on the CPU into a single
+image. That single design decision is the origin of everything that
+went wrong today - the blur came out of the very same construction.
+
+## NEXT STEP (agreed with the user, work starts after the restore point below)
+
+**Give the PAUZE transition its own GPU overlay slot.** Not a rebuild -
+a targeted change:
+
+- Add an `opacity: f32` to `OverlayParams` + `rgba_overlay.wgsl`
+  (multiply the sampled alpha by it).
+- Give the pipeline a second `RgbaOverlayCompositor` dedicated to the
+  transition, drawn over the existing one.
+- `pause_overlay` reverts to producing **one** black-with-caption card
+  (the pre-split design was right for the GPU all along; it was only
+  wrong because it went through the CPU canvas), uploaded **once**, with
+  only the per-frame alpha changing - a few bytes instead of 14.7MB.
+- `stitch_job` registers the transition through that path instead of as
+  a layer.
+
+The decisive knock-on effect: with PAUZE off the layer list, the
+scoreboard is the **only** layer, and `stitch_job` already skips
+`LayeredOverlaySource` entirely at `layers.len() == 1` - so there is
+zero CPU compositing left in a normal export, and the fade becomes free.
+
+Keep `LayeredOverlaySource` and its tests: it is still the correct
+mechanism if two *content* overlays are ever attached at once, and its
+canvas-sizing fix stays load-bearing for that case.
+
+## Open: fps dips to ~9 during fade ramps (export speed only)
+
+Measured from the user's own `test9_long.events.jsonl` (release build):
+normal 28-33fps, **fade-in frames 650-750: 9-11fps**, hold: 29-31fps
+(free, as designed), **fade-out frames 900-950: 8.4fps**, then back to
+30fps. The cliff in the earlier debug-build run began at exactly frame
+661 - the first fade frame - which is how this was pinned down.
+
+**The output video is unaffected; this is export wall-time only.**
+
+CPU optimisation is now at diminishing returns (the row fill bought
+111->102ms/frame at 2K). This is structural: at 2560x1440 any
+full-frame CPU pass costs ~10ms in memory bandwidth alone, the canvas
+allocation costs ~10ms, and the per-frame budget at 30fps is 33ms of
+which the rest of the pipeline already uses ~33ms.
+
+**The real fix is GPU compositing** - give `RgbaOverlayCompositor`
+N texture slots and draw the layers in one pass instead of blending
+them on the CPU, or (smaller) move the PAUZE fade+caption onto their
+own GPU overlay slot with an `opacity` uniform, which would leave the
+scoreboard as the only CPU layer - and with one layer `stitch_job`
+skips `LayeredOverlaySource` entirely, so the cost goes to zero.
+Deliberately **not** attempted while the user was delivering.
+
+Immediate mitigation in use: Fade 1.0 / Hold 2.0 in the export panel
+(`export-pause-overlay-fade-secs` / `-hold-secs`), which the user wanted
+for pacing anyway and shortens the expensive window ~3x.
+
+`crates/reco-core/examples/composite_bench.rs` was rewritten to measure
+the current shapes (transition-ramping vs steady, at 1080p/2K/4K) - use
+it before/after any GPU-compositing work.
+
+## "1st Section" after a pause - not a bug, missing data
+
+User reported the scoreboard stays on "1st Section" after a pause.
+Checked: `state_at`'s `current_period` advances **only** on
+`EventKind::PeriodStart` - `pause_start`/`pause_end` deliberately only
+freeze the clock within the same section (an injury stoppage is not a
+new section). Correct as designed.
+
+The cause is the demo data: every `OJC_vs_Berghem_Sport_DEMO*.json`
+declares `"periods": 4` but contains a single `period_start` (period 1).
+Those files are hand-written (including the 1min one written this
+session), so they do not reflect what the real app emits. The real
+`scripts/match-logger/Match Logger.html` is fine - `btnPeriodAction`
+("Volgende periode (n / N)") emits `period_start` with an incremented
+period and auto-closes an open pause. In a real match that button is
+pressed at each section break; pressing only Pause is what produces
+this.
+
+`OJC_vs_Berghem_Sport_DEMO_1min.json` has since been given a real
+`period_start` (period 2) right after its pause, plus a second goal, so
+the section advance can actually be verified (~40s into that export).
+
+## test10_long.mp4 measurement (release, after all fixes)
+
+19901 frames, 203.8s wall, **97.7fps average**; only 30 frames (0.15%)
+over 100ms and **no contiguous slow region at all** - a fade ramp would
+show as a block of consecutive slow frames. Unexplained: this run
+averaged 3x faster than test9 (29fps) on an identical `run_config`;
+possibly a different source/resolution, not established. If it matters,
+confirm the fade is actually visible in that file before treating the
+run as proof the fade cost is gone.
+
+## Also shipped this session: auto-cut and match-end without a scoreboard
+
+- The "Load Match Logger export..." button no longer sits behind the
+  scoreboard ON/OFF toggle, so "Auto-cut kickoff lead-in + pauses" can
+  be used with no banner rendered. The backend was already fully
+  decoupled; only the Slint gating was in the way.
+- New `scoreboard_import::derived_end_secs` + `AppState::
+  scoreboard_derived_end_secs`: a `match_end` event now sets the export
+  **End(s)** automatically, mirroring how `period_start` already set
+  Start(s) ("dit moet straks ook als signaal einde wedstrijd zijn").
+  Same "only reset what we set ourselves" behaviour.
+- Short test fixture written for fast iteration:
+  `D:\VOETBAL_VIDEO\Berghem Sport J011-1\03 OJC -Bergem Sport
+  04072026\OJC_vs_Berghem_Sport_DEMO_1min.json` (kickoff +5s, one 10s
+  pause, match_end +60s).
+
+## State
+
+All of the above is **committed nowhere yet** - still uncommitted in the
+working tree, along with the 7 unpushed commits from previous sessions.
+Both debug and release `reco-gui.exe` are built with `--features
+tensorrt` and include everything. `cargo fmt --check` /
+`clippy -D warnings` clean for reco-core + reco-io; `cargo test -p
+reco-core --lib` 227 passing (the same 2 pre-existing unrelated CUDA
+failures), `reco-io` 50/50, `reco-gui` scoreboard_import 17/17.
+
+---
+
+# Session handoff - 2026-08-26 (TGR_PC), earlier: bilinear fix alone NOT sufficient (test6_long.mp4, 2K), deeper canvas-sizing root cause found; new "auto-cut without scoreboard" toggle-decoupling shipped in Slint (not yet built)
+
+User's real test (`test6_long.mp4`, 2K, PAUZE+Cut) still showed a bad
+banner even with yesterday's bilinear `composite_over` fix in place -
+confirms the bilinear fix (still uncommitted, see below) was real but
+incomplete.
+
+## Deeper root cause (code-confirmed via the actual math, not yet fixed)
+
+`pause_overlay::CANVAS_WIDTH/HEIGHT` is a **hardcoded 960x540
+constant**, completely independent of `design_size` or the export's
+own output resolution. `LayeredOverlaySource::try_frame` sizes the
+shared canvas to the largest *actual pixel* buffer among active layers
+(`overlay_layers.rs:73-79`) - when PAUZE is active, that's always
+exactly 960x540, no matter what.
+
+Worked through the actual scale factors: `composite_over` places a
+source using its `design_size` (1920x1080 for the scoreboard) against
+the canvas's own *actual* pixel dimensions (960x540 when PAUZE is
+active) - i.e. every scoreboard frame gets forced through a **fixed
+0.5x design-to-canvas pixel ratio**, regardless of export resolution.
+But the scoreboard's own actual captured buffer (from the 2026-08-25
+`design_size`/zoom work) is deliberately sized to match its *real*
+on-screen footprint at the export's *own* output resolution - at 2K
+(2560x1440) that's `output_size/design_size = 1.333x` bigger than at
+1080p. So at 2K, the scoreboard's crisp, correctly-sized Chrome capture
+gets *downscaled* into the 960x540-capped canvas (real information
+loss, not just a filtering artifact), then the outer GPU compositor
+*upscales* that already-degraded canvas back up to the same on-screen
+footprint. Net effect: crisp capture -> lossy downsample -> lossy
+upsample = double resample that visibly softens/blurs text, and gets
+proportionally worse the higher the export resolution (2K/4K) since
+the scoreboard's true capture size scales with output resolution but
+PAUZE's fixed 960x540 canvas cap does not. This fully explains why
+2026-08-25's bilinear fix (correct as far as it went) didn't fix
+`test6_long.mp4` - bilinear filtering can't recover detail that a
+geometrically-forced downsample already discarded.
+
+**Not fixed yet.** Real fix needs the shared canvas's actual-pixel
+sizing decoupled from PAUZE's fixed constant - e.g. size the canvas
+relative to the largest layer's *design-to-output* ratio instead of a
+hardcoded 960x540, or give PAUZE itself a resolution-aware canvas size.
+Not attempted yet this session - needs more thought before touching
+`pause_overlay.rs`/`overlay_layers.rs` again.
+
+## New, shipped this session: decouple "Auto-cut kickoff lead-in + pauses" from the scoreboard ON/OFF toggle
+
+User's separate ask: use the Match-Logger-derived auto-cut feature
+without the scoreboard banner ever rendering. Traced the whole chain
+(`on_load_scoreboard_events`/`on_set_scoreboard_sync_point`/
+`on_toggled_scoreboard_derive_cut_ranges` in `main.rs`, and
+`scoreboard_package` at export time) - **the backend was already fully
+decoupled**: cut-range derivation only ever needs `scoreboard_import` +
+`scoreboard_sync_anchor`, and `scoreboard_package` (the thing that
+actually attaches a rendered overlay layer) is separately gated purely
+on `scoreboard-enabled`. The only real gate was `ui/main.slint`'s
+"Load Match Logger export..." button being hidden behind
+`if root.scoreboard-enabled`, which also hid the sync-point button and
+the auto-cut checkbox (both of which were already gated on
+`scoreboard-match-summary != ""`, not `scoreboard-enabled`, once
+reached). Fixed with a single-line condition removal on that one
+button. As a side effect, this workflow also naturally avoids the
+whole PAUZE+scoreboard canvas bug above, since no scoreboard layer
+ever gets attached.
+
+**Not yet built or tested** - user is mid-test on the existing debug
+build (the bilinear fix, see below) as of this edit; don't rebuild
+until that test finishes, then build fresh with both this change and
+the still-uncommitted bilinear fix included.
+
+## Real fix for the deeper canvas-sizing bug: split PAUZE into a fade layer + a caption layer
+
+User pushed back on the whole shared-canvas/bilinear direction ("we
+maken het te moeilijk... waarom hebben we een vaste 960x540
+constante?") - correctly. Worked through it together and landed on
+splitting `PauseOverlaySource` (previously one combined black+"PAUZE"
+card, fixed 960x540 actual pixels) into two independent
+`OverlayFrameSource`s in [pause_overlay.rs](crates/reco-core/src/render/pause_overlay.rs),
+sharing one alpha ramp but rendered/sized completely separately:
+
+- **`PauseFadeSource`** - the black dip-to-black, covering the whole
+  frame. A flat color has no detail to lose at any resolution, so its
+  actual pixel buffer is always **1x1** regardless of export
+  resolution or placement - can never again force a co-active layer's
+  shared canvas down to something too small.
+- **`PauseCaptionSource`** - just the "PAUZE" text, transparent
+  background. Its actual pixel resolution is now computed via
+  `contain_fit_render_scale` (the exact same helper
+  `reco_scoreboard::runtime` already uses for the scoreboard's own
+  Chrome capture) against the export's real output resolution, instead
+  of a fixed constant - so it scales itself the same way the scoreboard
+  already does, and stops being an oversized (or undersized) mismatch
+  next to it.
+
+Two independent `Schedule` instances (one per source) advance in
+perfect lockstep with no locking needed, because
+`LayeredOverlaySource::try_frame` calls `try_frame` on every registered
+layer exactly once per output frame, in the same order, every time -
+two counters ticking off the same external cadence never drift. New
+tests cover this lockstep property directly, plus the fade always
+being 1x1 and the caption's resolution actually scaling with output
+size (1080p vs 4K).
+
+`stitch_job.rs` now pushes both layers (`pause_overlay::build_layers`,
+takes the export's real `(out_w, out_h)`) instead of one combined
+source - always still first/bottom in `layers`, unchanged ordering
+relative to any scoreboard/other registered layer.
+
+This is believed to be the actual, complete fix for `test6_long.mp4`'s
+bug (not just a mitigation like yesterday's bilinear change, which
+stays in place too and is independently correct for any other
+layer-size mismatch) - the scoreboard's own correctly-sized capture
+should now no longer get forced through any lossy resample at all in
+the common case, since neither PAUZE layer can dominate the shared
+canvas below what the scoreboard actually needs.
+
+**Verification so far**: `cargo check`/`clippy -D warnings`/`test` all
+clean for `reco-core` and `reco-io` (223/225 reco-core, the same 2
+pre-existing unrelated CUDA failures; 50/50 + doctests reco-io).
+
+## test6/test7 real-world results: fade/caption split alone did NOT fix it - two more real bugs found
+
+Built debug+release with the fade/caption split above and asked the
+user to retest. Two real problems surfaced, in order:
+
+### Bug A: caption rendered at full OUTPUT resolution every frame - real export slowdown
+
+`build_layers`'s first version used `contain_fit_render_scale` for the
+caption's actual pixel resolution with **no upper cap** - since the
+caption's `design_size` (960x540) covers the *whole frame* at the
+default placement (unlike the scoreboard's small banner, which is what
+that helper was designed for), this scaled the caption's actual buffer
+up to the *full output resolution* (2560x1440 at 2K) - re-filling a
+~14.75MB buffer, pixel-by-pixel, every single frame of the transition,
+including the entire (possibly multi-second) constant-alpha hold. User
+caught this live ("halverwegen gaat de export superlangzaam") on a real
+2K `test6_long.mp4` export and had to cancel it.
+
+**Fixed**: capped `render_scale.min(1.0)` - the caption now never
+exceeds the pre-split, already-known-cheap 960x540 (only shrinks below
+it for a genuinely small output). New tests
+`caption_resolution_never_exceeds_the_design_canvas_size` /
+`..._shrinks_below_the_cap_for_a_small_output`.
+
+### Bug B: a layer's cache entry never expired once transparent - canvas stayed forced to the old size for the REST of the export
+
+Re-derived the exact `composite_over`/`contain_fit_render_scale` math
+by hand for a concrete 2K/p=0.3 case and found the *pre-cap* build
+(Bug A's build, still running when the user hit the slowdown) should
+actually have given a **mathematically perfect 1:1** scoreboard mapping
+- yet the user reported bad quality on that build too (`test7_long.mp4`,
+after Bug A's build had time to finish a real run). That contradiction
+pointed at a second, independent bug: `LayeredOverlaySource.cache[i]`
+is only ever *set* when a layer's `try_frame()` returns `Some` - a
+`None` return only means "no update this call" (existing, correct
+behavior for e.g. a static logo), but nothing ever clears a slot once
+a layer's producer is *permanently* done. `pause_overlay`'s
+`was_active` logic sends one final fully-transparent "clear" frame when
+a transition ends, then returns `None` forever - that final frame's
+*size* stayed in the max-size fold `LayeredOverlaySource::try_frame`
+uses for the rest of the export, forcing every subsequent scoreboard
+frame through an unnecessary resample long after the transition itself
+had ended - not just during it, which is what every earlier
+investigation this whole saga (including today's) assumed the scope
+of the bug was. This was **not** a new regression from today's split -
+the original single-`PauseOverlaySource` design had the exact same
+"cache never clears" property, just masked by always being a fixed
+960x540 regardless.
+
+**Fixed** (`overlay_layers.rs`): a newly-received frame that's fully
+transparent (`is_fully_transparent`, short-circuits on the first
+non-zero alpha byte) is dropped from the cache immediately instead of
+being stored - it draws nothing anyway (`composite_over`'s
+`src_a <= 0.0` skip), so excluding it from the max-size fold is free
+and correct. New regression test
+`layered_source_stops_sizing_the_canvas_to_a_layer_once_it_goes_fully_transparent`
+(a big layer that goes transparent + a small layer that keeps
+updating - canvas must shrink back down on the very next frame, not
+stay stuck).
+
+**Verification**: `cargo clippy -D warnings` / `fmt --check` clean for
+`reco-core` + `reco-io`. `cargo test -p reco-core --lib`: 225/227 (same
+2 pre-existing CUDA failures). Both debug+release rebuilt with
+`--features tensorrt` a third time this session, including Bug A's cap
+fix + Bug B's cache fix together (the very first build to have both).
+
+**Not yet confirmed by a real test** - `test8_long.mp4` was run against
+the build with Bug A's fix only (before Bug B was found), still showed
+"zeer slechte kwaliteit" (screenshot: clock/score digits legible, team
+labels/period text mush) - consistent with Bug B still being present in
+that specific build. **User is re-running `test8_long.mp4` now against
+the build that has both fixes** - this is the actual next real signal,
+don't assume Bug B was the final answer either without seeing it. User
+also separately reported an export stopping with an unspecified error
+code on one of the interrupted runs - not yet identified, ask for the
+exact message/log next.
+
+---
+
+# Session handoff - 2026-08-25 (TGR_PC), continued: real root cause found (PAUZE+scoreboard layering), fix applied but NOT YET committed - SESSION PAUSED before user test
+
+**SESSION PAUSED 2026-08-25 (evening), user stopping for the day -
+pick up by asking the user to test the fresh build (see "Not done"
+below) before anything else, then commit only after that's confirmed.**
+
+Direct continuation of everything below (commits `72e1307e` +
+`090860fc`, already pushed... no, NOT pushed yet either - see repo
+state at the very bottom). After those were committed and verified
+via 3 clean tests, the user ran two more real exports specifically
+comparing **PAUZE overlay on cuts**: `test4_long.mp4` (Pauze+Cut ON -
+scoreboard very bad, confirmed bad from frame 1 through to the end via
+direct frame extraction) vs `test5_long.mp4` (Cut only, Pauze OFF -
+good). This is the real, reproducible differentiator the whole
+"sometimes bad" mystery from earlier today was actually about - every
+prior "bad" 2K result this session most likely also had PAUZE active
+without our realizing it was the variable that mattered (vs. the
+stale-process theory in section 6 below, which was real but not the
+whole story).
+
+## Root cause (code-confirmed, not just suspected)
+
+`crates/reco-core/src/render/overlay_layers.rs`'s `LayeredOverlaySource`
+combines the scoreboard and PAUZE into one shared canvas (needed
+because the compositor only has one overlay texture slot). The shared
+canvas is sized to the *largest* active layer's actual pixel buffer.
+PAUZE's canvas is a fixed 960x540 (`pause_overlay::CANVAS_WIDTH/
+HEIGHT`). Before today's zoom-fix work, the scoreboard's own texture
+was always captured at full 1920x1080 - reliably *larger* than PAUZE's
+960x540, so it always "won" and drew into the shared canvas pixel-for-
+pixel with no resample (the code's own comment describes this as the
+intended fast path). Today's `apply_zoom`/`design_size` decoupling
+work (this crate's own earlier fix, same session) intentionally makes
+Chrome pre-scale the scoreboard's capture *down* to roughly match its
+real on-screen footprint - at a typical banner placement (~0.3-0.4x),
+that's now well *under* 960x540, so PAUZE's fixed canvas wins instead.
+The scoreboard's already-sharp, already-correctly-sized texture then
+has to get resampled a second time to fit into that larger shared
+canvas - and `composite_over` (the function doing that resample) used
+**nearest-neighbor** sampling, reintroducing real, visible text
+degradation - exactly the class of bug the whole zoom-fix was meant to
+eliminate, just relocated to a second resampling step this crate's
+earlier work never touched.
+
+In short: **today's own zoom-fix broke an assumption
+`overlay_layers.rs` was quietly relying on**, and this is a genuinely
+new interaction, not a pre-existing bug independent of today's work.
+
+## Fix applied (uncommitted)
+
+`composite_over` switched from nearest-neighbor to bilinear sampling
+(`crates/reco-core/src/render/overlay_layers.rs`) - resamples both
+color and alpha channels properly instead of picking one texel. New
+regression test `composite_over_bilinear_interpolates_a_downscaled_
+striped_source` (a fine vertical-stripe source, deliberately not a
+single hard edge - a single edge's exact pixel alignment turned out to
+dodge every scale value tried by pure geometric bad luck across
+several attempts, see the git history/scrollback for that whole
+detour if useful context later; a striped source with an edge on
+literally every column can't dodge). Verified: `cargo fmt --all
+--check` clean, `cargo clippy -p reco-core -p reco-scoreboard -p
+reco-gui --features tensorrt --all-targets -D warnings` clean, `cargo
+test -p reco-core --lib` 220/222 (the same 2 pre-existing unrelated
+CUDA failures, +1 new test vs. the 219 baseline). Release
+`reco-gui.exe` rebuilt and confirmed (16:55) - includes this fix.
+**Debug build was started right as the session paused - confirm it
+actually finished (check `target/debug/reco-gui.exe`'s mtime) before
+the user's next test**, and confirm no stale `reco-gui.exe` process is
+still running from an earlier test (see
+[[feedback_rebuild_gui_before_user_test]] and section 6 below - a
+stale process was a real, separate false alarm earlier today).
+
+**Deliberately NOT committed yet** - this fix is well-reasoned and
+tests pass, but has *not* been confirmed against a real PAUZE+
+scoreboard export (the exact `test4_long.mp4` scenario that surfaced
+the bug). Commit only after that confirmation, per how the rest of
+today went (multiple "this is it!" moments upstream of this one turned
+out incomplete on the very next real test) - don't repeat that
+pattern by shipping this one similarly unverified.
+
+## Not done / next steps (READ FIRST NEXT SESSION)
+
+1. Finish/verify the release build, then also build **debug** (not
+   done this round at all).
+2. Ask the user to re-run something close to `test4_long.mp4` (Pauze
+   overlay on cuts + a scoreboard) and check text quality directly via
+   frame extraction (not just eyeballing) - same rigor as every other
+   check today, since "looks fine to me" has been wrong before this
+   session.
+3. Only commit + update this file's own "committed" framing once that
+   test comes back clean. If it's *still* not fully clean, the next
+   suspect (not yet investigated) would be the **outer** compositor's
+   own GPU sampler now resampling a 960x540-dominated canvas a second
+   time on top of this - see `RgbaOverlayCompositor`'s own bilinear
+   GPU sampler in `rgba_overlay.wgsl`, unaffected by anything changed
+   today, but worth eyeballing the math once more with this specific
+   failure mode in mind if the CPU-side bilinear fix alone isn't
+   enough.
+4. **Nothing from this session has been pushed to `github/main` yet**
+   - commits `72e1307e`/`090860fc` (the zoom/font/throttle fix + its
+     handoff doc) plus the 5 commits from the day before are all still
+     local-only. Ask before pushing once everything here is confirmed
+     and committed, per usual.
+5. Sections 1-6 below (already committed) remain accurate history -
+   nothing in them needs correcting, this is a genuinely separate,
+   later finding.
+
+---
+
 # Session handoff - 2026-08-25 (TGR_PC): design_size fix's DSF text-hinting bug found+fixed (zoom instead), scoreboard font-size legibility fix, queue-congestion throttle fix - all committed+verified
 
 Direct continuation of 2026-08-24 below - user tested that session's

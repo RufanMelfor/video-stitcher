@@ -2103,8 +2103,16 @@ export component RecoApp inherits Window {
                                 // editor below for as long as it's loaded -
                                 // the scoreboard then replays real timestamped
                                 // events instead of needing someone to click
-                                // buttons live during export.
-                                if root.scoreboard-enabled: FlatButton {
+                                // buttons live during export. Deliberately NOT
+                                // gated on scoreboard-enabled: the "Auto-cut
+                                // kickoff lead-in + pauses" checkbox below only
+                                // needs the parsed export + sync anchor, not a
+                                // rendered scoreboard banner - someone who wants
+                                // the auto-cut derivation without the banner
+                                // itself (e.g. to avoid the banner entirely)
+                                // needs to reach this button with the Overlay
+                                // toggle left OFF.
+                                FlatButton {
                                     text: root.scoreboard-match-summary == "" ? "Load Match Logger export..." : "Load…";
                                     clicked => { root.load-scoreboard-events(); }
                                 }

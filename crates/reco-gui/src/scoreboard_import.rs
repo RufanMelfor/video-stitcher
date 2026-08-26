@@ -240,6 +240,35 @@ pub fn derived_start_secs(
     (start > 0.0).then_some(start)
 }
 
+/// Suggested `--end-time`/`export-end-secs` (video seconds) to trim
+/// whatever was recorded after the match actually ended, derived from
+/// the Match Logger's `match_end` event. `buffer_secs` of trailing
+/// context is kept after the final whistle so the trim doesn't cut
+/// right up against it. `None` when there's no `match_end` event -
+/// same "a range nothing in the log justified" restraint as
+/// [`derived_cut_ranges`], not a guess at where the recording happens
+/// to stop.
+///
+/// Mirrors [`derived_start_secs`]'s pre-kickoff trim; see that
+/// function's doc comment for why this is a `--end-time` seek rather
+/// than a cut range too - nothing needs a "PAUZE" dip-to-black
+/// treatment for footage past the final whistle, it just shouldn't be
+/// encoded at all.
+pub fn derived_end_secs(
+    export: &MatchLoggerExport,
+    anchor: &SyncAnchor,
+    buffer_secs: f64,
+) -> Option<f64> {
+    let match_end_ms = export
+        .events
+        .iter()
+        .find(|e| e.kind == EventKind::MatchEnd)?
+        .ts_ms;
+    let to_video_secs =
+        |ts_ms: i64| anchor.video_seconds + (ts_ms - anchor.event_ts_ms) as f64 / 1000.0;
+    Some(to_video_secs(match_end_ms) + buffer_secs)
+}
+
 /// Cut ranges (in video seconds, same space as reco-gui's existing manual
 /// cut-range timeline) derived from a Match Logger export: one range per
 /// logged pause - the dead time during any in-match stoppage. `buffer_secs`
@@ -674,6 +703,21 @@ mod tests {
         let mut export = fixture();
         export.events.retain(|e| e.kind != EventKind::PeriodStart);
         assert_eq!(derived_start_secs(&export, &anchor(), 2.0), None);
+    }
+
+    #[test]
+    fn derived_end_secs_trims_post_match() {
+        let export = fixture();
+        // match_end (15:46:05) is 6365.0 video-seconds after the anchor
+        // (video_start, 14:00:00) - keep 2s of trailing context past it.
+        assert_eq!(derived_end_secs(&export, &anchor(), 2.0), Some(6367.0));
+    }
+
+    #[test]
+    fn derived_end_secs_none_without_a_match_end_event() {
+        let mut export = fixture();
+        export.events.retain(|e| e.kind != EventKind::MatchEnd);
+        assert_eq!(derived_end_secs(&export, &anchor(), 2.0), None);
     }
 
     #[test]

@@ -314,6 +314,13 @@ struct AppState {
     /// of a list. `None` when the toggle is off or never suggested one
     /// (no `period_start` event to derive from).
     scoreboard_derived_start_secs: Option<f32>,
+    /// The `export-end-secs` value last set by that same toggle (see
+    /// `scoreboard_import::derived_end_secs`) - same "only touch what we
+    /// own" restore/reset behavior as `scoreboard_derived_start_secs`,
+    /// mirrored for the trailing (post `match_end`) trim instead of the
+    /// leading (pre-kickoff) one. `None` when the toggle is off or never
+    /// suggested one (no `match_end` event to derive from).
+    scoreboard_derived_end_secs: Option<f32>,
     recording_tx: Option<std::sync::mpsc::SyncSender<RecordingFrame>>,
     recording_thread: Option<std::thread::JoinHandle<()>>,
     recording_path: Option<PathBuf>,
@@ -672,6 +679,7 @@ impl AppState {
             scoreboard_style: scoreboard_import::ScoreboardStyle::default(),
             scoreboard_derived_cut_ranges: Vec::new(),
             scoreboard_derived_start_secs: None,
+            scoreboard_derived_end_secs: None,
             recording_tx: None,
             recording_thread: None,
             recording_path: None,
@@ -2115,6 +2123,13 @@ fn refresh_derived_cut_ranges(s: &mut AppState, app: &RecoApp) {
     {
         app.set_export_start_secs(0.0);
     }
+    // Same again for export-end-secs (see
+    // `scoreboard_derived_end_secs`'s doc comment).
+    if let Some(previous_end) = s.scoreboard_derived_end_secs.take()
+        && app.get_export_end_secs() == previous_end
+    {
+        app.set_export_end_secs(0.0);
+    }
     if let (Some(export), Some(anchor)) = (
         s.scoreboard_import.as_ref(),
         s.scoreboard_sync_anchor.as_ref(),
@@ -2131,6 +2146,14 @@ fn refresh_derived_cut_ranges(s: &mut AppState, app: &RecoApp) {
             let start_secs = start_secs as f32;
             app.set_export_start_secs(start_secs);
             s.scoreboard_derived_start_secs = Some(start_secs);
+        }
+        // Post-match trim (the "signal einde wedstrijd" - a --end-time
+        // seek, not a cut range, same reasoning as the pre-roll trim
+        // above) - only when the log actually has a `match_end` event.
+        if let Some(end_secs) = scoreboard_import::derived_end_secs(export, anchor, 2.0) {
+            let end_secs = end_secs as f32;
+            app.set_export_end_secs(end_secs);
+            s.scoreboard_derived_end_secs = Some(end_secs);
         }
     }
     sync_cut_ranges(s, app);
