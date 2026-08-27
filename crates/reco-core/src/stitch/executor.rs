@@ -795,6 +795,326 @@ mod tests {
         assert!(matches!(err, StitchError::FrameSizeMismatch { .. }));
     }
 
+    /// The zero-copy path measures and corrects color, end to end.
+    ///
+    /// This is the whole point of the GPU band gather, and it is the one
+    /// thing no CPU-side test can show: it drives `render_imported_views`
+    /// with externally-owned NV12 textures - the same entry point the
+    /// D3D11VA decoder uses - and checks that a real brightness
+    /// difference between the two cameras ends up in the smoothed
+    /// correction. Before the gather this path always rendered with
+    /// identity, which is exactly the bug the user hit on a whole
+    /// season's exports.
+    ///
+    /// Iterates a few times because the readback is deliberately
+    /// asynchronous: the measurement dispatched on one frame is consumed
+    /// one or two frames later.
+    #[test]
+    #[cfg(feature = "gpu")]
+    fn zero_copy_path_measures_and_corrects_color() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let (cam_w, cam_h) = (192u32, 108u32);
+        let (out_w, out_h) = (160u32, 90u32);
+
+        let mut cal = calib(cam_w, cam_h);
+        cal.topology.color_match_enabled = true;
+        // Converge in one measurement instead of waiting out the EMA, and
+        // keep the clamp out of the way of a deliberately large gap.
+        cal.topology.color_match_interval_frames = 1;
+        cal.topology.color_match_ema_alpha = 1.0;
+        cal.topology.color_match_max_y_offset = 0.5;
+        cal.topology.color_match_max_chroma_offset = 0.5;
+
+        let mut exec = GpuExecutor::new(
+            gpu,
+            GpuExecutorConfig {
+                viewport: ViewportConfig {
+                    width: out_w,
+                    height: out_h,
+                    ..Default::default()
+                },
+                ..GpuExecutorConfig::new(cal, cam_w, cam_h, InputFormat::Nv12)
+            },
+        )
+        .expect("gpu backend");
+
+        // Externally-owned NV12 planes, as the decoder would hand over:
+        // a flat, clearly different luma per camera, neutral chroma.
+        let make_plane = |gpu: &crate::gpu::GpuContext,
+                          w: u32,
+                          h: u32,
+                          format: wgpu::TextureFormat,
+                          bytes_per_texel: u32,
+                          fill: &[u8],
+                          label: &str| {
+            let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let row = bytes_per_texel * w;
+            let data: Vec<u8> = fill
+                .iter()
+                .copied()
+                .cycle()
+                .take((row * h) as usize)
+                .collect();
+            gpu.queue().write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(h),
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+            texture
+        };
+
+        let gpu_ref = exec.pipeline.gpu();
+        let left_y_tex = make_plane(
+            gpu_ref,
+            cam_w,
+            cam_h,
+            wgpu::TextureFormat::R8Unorm,
+            1,
+            &[160],
+            "test_left_y",
+        );
+        let right_y_tex = make_plane(
+            gpu_ref,
+            cam_w,
+            cam_h,
+            wgpu::TextureFormat::R8Unorm,
+            1,
+            &[120],
+            "test_right_y",
+        );
+        let left_uv_tex = make_plane(
+            gpu_ref,
+            cam_w / 2,
+            cam_h / 2,
+            wgpu::TextureFormat::Rg8Unorm,
+            2,
+            &[128, 128],
+            "test_left_uv",
+        );
+        let right_uv_tex = make_plane(
+            gpu_ref,
+            cam_w / 2,
+            cam_h / 2,
+            wgpu::TextureFormat::Rg8Unorm,
+            2,
+            &[128, 128],
+            "test_right_uv",
+        );
+        let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
+        let (ly, ry, luv, ruv) = (
+            view(&left_y_tex),
+            view(&right_y_tex),
+            view(&left_uv_tex),
+            view(&right_uv_tex),
+        );
+
+        for _ in 0..8 {
+            let cmd = exec
+                .pipeline
+                .render_imported_views(&ly, &luv, &ry, &ruv, 0.0, 0.0);
+            let gpu_ref = exec.pipeline.gpu();
+            gpu_ref.queue().submit(std::iter::once(cmd));
+            let _ = gpu_ref.device().poll(wgpu::PollType::wait_indefinitely());
+        }
+
+        let c = exec.pipeline.color_match_correction();
+        assert!(
+            c.left_offset[0] < -0.02,
+            "left camera is the brighter one and must be pulled down, got {:?}",
+            c.left_offset
+        );
+        assert!(
+            c.right_offset[0] > 0.02,
+            "right camera is the darker one and must be lifted, got {:?}",
+            c.right_offset
+        );
+        assert!(
+            (c.left_offset[0] + c.right_offset[0]).abs() < 1e-3,
+            "both cameras aim at their shared mean, so the offsets mirror: {:?} vs {:?}",
+            c.left_offset,
+            c.right_offset
+        );
+    }
+
+    /// A 180-degree-rotated source is measured where it is *drawn*, not
+    /// where it is stored.
+    ///
+    /// The zero-copy path renders a rotated camera by sampling at `1-uv`
+    /// rather than by reversing the buffer, so a gather that reads raw
+    /// texels has to mirror its sample positions to match. Caught on real
+    /// DJI footage, where the left camera carries `rotation=-180` and the
+    /// right does not: the correction came out about twice its true size
+    /// and jittered, because the left camera's "seam band" samples were
+    /// actually being taken from the far side of the field.
+    ///
+    /// The left plane is a horizontal ramp, so the band's own position
+    /// decides the measured mean. If the flip were ignored, both runs
+    /// below would sample identical texels and produce identical
+    /// corrections - which is exactly what this asserts against.
+    #[test]
+    #[cfg(feature = "gpu")]
+    fn a_rotated_camera_is_measured_where_it_is_drawn() {
+        let measure_with_flip = |flip_left: bool| -> [f32; 3] {
+            let Some(gpu) = gpu_or_skip() else {
+                panic!("GPU required for this test - RECO_REQUIRE_GPU or run manually");
+            };
+            let (cam_w, cam_h) = (192u32, 108u32);
+            let (out_w, out_h) = (160u32, 90u32);
+
+            let mut cal = calib(cam_w, cam_h);
+            cal.topology.color_match_enabled = true;
+            cal.topology.color_match_interval_frames = 1;
+            cal.topology.color_match_ema_alpha = 1.0;
+            cal.topology.color_match_max_y_offset = 0.5;
+            cal.topology.color_match_max_chroma_offset = 0.5;
+
+            let mut exec = GpuExecutor::new(
+                gpu,
+                GpuExecutorConfig {
+                    viewport: ViewportConfig {
+                        width: out_w,
+                        height: out_h,
+                        ..Default::default()
+                    },
+                    ..GpuExecutorConfig::new(cal, cam_w, cam_h, InputFormat::Nv12)
+                },
+            )
+            .expect("gpu backend");
+            exec.pipeline.set_flip_180(flip_left, false);
+
+            let gpu_ref = exec.pipeline.gpu();
+            let upload = |w: u32, h: u32, format, bpt: u32, data: Vec<u8>, label: &str| {
+                let texture = gpu_ref.device().create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                gpu_ref.queue().write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bpt * w),
+                        rows_per_image: Some(h),
+                    },
+                    wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                texture
+            };
+
+            // Left: dark on one side, bright on the other, so mirroring
+            // the band changes the mean by a lot.
+            let ramp: Vec<u8> = (0..cam_h)
+                .flat_map(|_| (0..cam_w).map(|x| (40 + (x * 160 / cam_w)) as u8))
+                .collect();
+            let left_y = upload(
+                cam_w,
+                cam_h,
+                wgpu::TextureFormat::R8Unorm,
+                1,
+                ramp,
+                "flip_left_y",
+            );
+            let right_y = upload(
+                cam_w,
+                cam_h,
+                wgpu::TextureFormat::R8Unorm,
+                1,
+                vec![120u8; (cam_w * cam_h) as usize],
+                "flip_right_y",
+            );
+            let neutral_uv = vec![128u8; (cam_w * cam_h / 2) as usize];
+            let left_uv = upload(
+                cam_w / 2,
+                cam_h / 2,
+                wgpu::TextureFormat::Rg8Unorm,
+                2,
+                neutral_uv.clone(),
+                "flip_left_uv",
+            );
+            let right_uv = upload(
+                cam_w / 2,
+                cam_h / 2,
+                wgpu::TextureFormat::Rg8Unorm,
+                2,
+                neutral_uv,
+                "flip_right_uv",
+            );
+            let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
+            let (ly, ry, luv, ruv) = (
+                view(&left_y),
+                view(&right_y),
+                view(&left_uv),
+                view(&right_uv),
+            );
+
+            for _ in 0..8 {
+                let cmd = exec
+                    .pipeline
+                    .render_imported_views(&ly, &luv, &ry, &ruv, 0.0, 0.0);
+                let g = exec.pipeline.gpu();
+                g.queue().submit(std::iter::once(cmd));
+                let _ = g.device().poll(wgpu::PollType::wait_indefinitely());
+            }
+            exec.pipeline.color_match_correction().left_offset
+        };
+
+        let unflipped = measure_with_flip(false);
+        let flipped = measure_with_flip(true);
+        assert!(
+            (unflipped[0] - flipped[0]).abs() > 0.01,
+            "the flip must move the sampled band; identical corrections mean the gather \
+             ignored it: {unflipped:?} vs {flipped:?}"
+        );
+    }
+
     /// The manual per-camera gamma actually reaches rendered pixels, and
     /// reaches only the camera it was set on.
     ///

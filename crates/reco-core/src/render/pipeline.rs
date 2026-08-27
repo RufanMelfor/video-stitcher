@@ -91,6 +91,12 @@ pub struct StitchPipeline {
     /// Periodic exposure/color-matching state (see [`super::color_match`]).
     /// `&self` render methods need interior mutability here.
     color_match: std::sync::Mutex<super::color_match::ColorMatchState>,
+    /// GPU seam-band sampler for the zero-copy paths, where the CPU never
+    /// sees pixel data (see [`super::band_gather`]). Created on first use
+    /// rather than at construction: the CPU-decode paths never need it,
+    /// and building a compute pipeline that nothing dispatches would cost
+    /// every consumer a shader compile.
+    band_gather: std::sync::Mutex<Option<super::band_gather::BandGather>>,
     /// Format shared by the stitch and optional overlay render passes.
     output_format: wgpu::TextureFormat,
     /// Lazily created only when a consumer enables an overlay.
@@ -195,6 +201,7 @@ impl StitchPipeline {
             input_width,
             input_height,
             color_match: std::sync::Mutex::new(super::color_match::ColorMatchState::default()),
+            band_gather: std::sync::Mutex::new(None),
             output_format,
             overlay: None,
             overlay_placement: super::overlay::OverlayPlacement::default(),
@@ -852,6 +859,11 @@ impl StitchPipeline {
             .create_bind_group_from_views(right_y, right_uv, "d3d11_right");
         self.renderer.set_left_bind_group(left_bg);
         self.renderer.set_right_bind_group(right_bg);
+        // Measure the seam band from the same textures the render is
+        // about to sample. Without this the zero-copy path has no pixel
+        // access at all and the color match is silently identity - see
+        // `super::band_gather`.
+        self.gather_band_samples(left_y, left_uv, right_y, right_uv);
         self.render_to_target_gpu(yaw, pitch)
     }
 
@@ -985,6 +997,102 @@ impl StitchPipeline {
             self.renderer.is_full_range(),
             &params,
         )
+    }
+
+    /// Drive one step of the GPU seam-band measurement for the zero-copy
+    /// path: collect whatever previous gather has finished, then start a
+    /// new one if the interval says it is due.
+    ///
+    /// Cheap on the frames in between (a state check and an atomic-free
+    /// mutex lock); the compute pass itself samples 128 texels by default
+    /// and the readback is ~1KB, once every `color_match_interval_frames`.
+    fn gather_band_samples(
+        &self,
+        left_y: &wgpu::TextureView,
+        left_uv: &wgpu::TextureView,
+        right_y: &wgpu::TextureView,
+        right_uv: &wgpu::TextureView,
+    ) {
+        if !self.calibration.topology.color_match_enabled {
+            return;
+        }
+        let params = self.color_match_params();
+        let mut gather = self.band_gather.lock().unwrap();
+        let gather = gather.get_or_insert_with(|| super::band_gather::BandGather::new(&self.gpu));
+
+        // 1. Pick up a finished measurement, if any. Runs first so a
+        //    result is consumed on the earliest possible frame.
+        if let Some((left, right)) = gather.try_take(&self.gpu) {
+            let is_full_range = self.renderer.is_full_range();
+            let left_mean = super::color_match::mean_of_normalized_samples(
+                &left,
+                is_full_range,
+                params.gamma_left,
+            );
+            let right_mean = super::color_match::mean_of_normalized_samples(
+                &right,
+                is_full_range,
+                params.gamma_right,
+            );
+            if let (Some(l), Some(r)) = (left_mean, right_mean) {
+                self.color_match
+                    .lock()
+                    .unwrap()
+                    .apply_measurement(l, r, &params);
+            }
+        }
+
+        // 2. Is another one due? Ask the same state the CPU path asks, so
+        //    both honour `measure_interval_frames` and "remeasure now"
+        //    identically.
+        let due = {
+            let mut state = self.color_match.lock().unwrap();
+            state.set_interval(params.measure_interval_frames);
+            state.measurement_due()
+        };
+        if !due || !gather.is_idle() {
+            return;
+        }
+
+        // 3. Refresh the sample positions only when the band geometry
+        //    moved - they are pure lens/parameter geometry, so on a
+        //    steady calibration this uploads once for the whole session.
+        let flip = self.renderer.flip_180();
+        let key = super::band_gather::PositionKey {
+            band_width: params.band_width,
+            grid_cols: params.grid_cols,
+            grid_rows: params.grid_rows,
+            seam_offset: params.seam_offset,
+            blend_flip_direction: params.blend_flip_direction,
+            input_width: self.input_width,
+            input_height: self.input_height,
+            flip_180: flip,
+        };
+        if !gather.positions_current(&key) {
+            let positions = |lens_index: usize, is_right: bool| {
+                let p = super::color_match::band_sample_positions(
+                    self.input_width,
+                    self.input_height,
+                    &self.calibration.lenses[lens_index],
+                    is_right,
+                    &params,
+                );
+                // The shader samples a rotated source at 1-uv instead of
+                // reversing the buffer, so the raw texel this position
+                // lands on has to be mirrored to match.
+                if flip[lens_index] {
+                    super::band_gather::mirrored_180(&p, self.input_width, self.input_height)
+                } else {
+                    p
+                }
+            };
+            let left = positions(0, false);
+            let right = positions(1, true);
+            gather.set_positions(&self.gpu, &left, &right, key);
+        }
+
+        gather.dispatch(&self.gpu, left_y, left_uv, right_y, right_uv);
+        self.color_match.lock().unwrap().measurement_issued();
     }
 
     /// Render a frame directly to a texture view (for window display).
@@ -1252,9 +1360,13 @@ impl StitchPipeline {
     /// bind groups, then use this for subsequent frames with the same
     /// textures to avoid per-frame bind group allocation.
     ///
-    /// No exposure/color matching (see [`super::color_match`]): the
-    /// zero-copy path never gives the CPU access to pixel data. Always
-    /// renders with identity color correction.
+    /// Exposure/color matching applies here too, as of the GPU band
+    /// gather (see [`super::band_gather`]): the correction is whatever
+    /// the last completed asynchronous measurement produced, identity
+    /// until the first one lands. Callers that never call
+    /// [`Self::gather_band_samples`] - anything binding textures this
+    /// pipeline cannot sample, e.g. the Bayer RGBA path - keep getting
+    /// identity, which is what they got before.
     pub fn render_to_target_gpu(&self, yaw: f32, pitch: f32) -> wgpu::CommandBuffer {
         let viewport = ResolvedViewport {
             config: self.viewport.clone(),
@@ -1265,13 +1377,19 @@ impl StitchPipeline {
             },
         };
 
+        let correction = if self.calibration.topology.color_match_enabled {
+            self.color_match.lock().unwrap().current()
+        } else {
+            super::renderer::ColorCorrection::default()
+        };
+
         self.composite_target_commands(self.renderer.render_to_target(
             &self.gpu,
             &self.scene,
             &self.calibration,
             &viewport,
             self.calibration.topology.blend_width,
-            super::renderer::ColorCorrection::default(),
+            correction,
             self.calibration.topology.multiband_blend_enabled,
             self.show_seam_line,
         ))

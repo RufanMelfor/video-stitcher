@@ -160,7 +160,41 @@ the automatic half is absent, so the result cannot match what the preview
 showed. **Until the GPU measurement lands, tune gamma with "Auto color
 match" switched OFF**, so the preview shows what the file will contain.
 
-### 3. Move the color-match *measurement* onto the GPU
+### 3. DONE 2026-08-27 - color-match measurement moved onto the GPU
+
+`render::band_gather` + `shaders/color_gather.wgsl`. The compute pass
+gathers raw texels at the CPU-computed band positions; every bit of colour
+maths stays in `color_match` (`mean_of_normalized_samples`), shared with
+the CPU sampler. Readback is asynchronous and never waits.
+`ColorMatchState` was split first (`measurement_due` /
+`measurement_issued` / `apply_measurement`) so both paths honour the same
+interval, clamp and EMA.
+
+**Verified on the user's own footage**, 10s at 2560x1440 from the 26-08
+match: the zero-copy export now lands within **0.29 gray levels** of the
+CPU-decode reference, against a 5.6-level correction - where before the
+fix it was identical to color-match-off (0.13). Cost: none measurable,
+with the measurement running on *every* frame (their
+`color_match_interval_frames = 1`): 87.6 and 99.0 fps against 82.8 and
+98.7 with color match off.
+
+**The one real trap, caught by the real-footage check and not by the unit
+tests:** the shader renders a 180-degree-rotated camera by sampling at
+`1-uv`, while the CPU path reverses the buffer. A gather reading raw
+texels has to mirror its positions to match. On this rig only the left
+camera carries `rotation=-180`, so the first attempt produced a
+correction twice its true size and jittery, rather than an obvious mirror
+image. `band_gather::mirrored_180` plus
+`a_rotated_camera_is_measured_where_it_is_drawn` cover it - that test
+asserts the flip *changes* the measurement, which is precisely what an
+ignored flip would not do.
+
+Also worth acting on: the user's saved `color_gamma_left 0.92 /
+color_gamma_right 0.83` were tuned in a preview where the automatic match
+was active and an export where it was not. Now that both agree, those
+values are worth re-checking from scratch.
+
+### Original plan, kept for the reasoning
 
 **Not for speed - for coverage.** The measurement is 8x16 = 128 sample
 points once per 15 frames; at 30fps that is ~256 samples/second of

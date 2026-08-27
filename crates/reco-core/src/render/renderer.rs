@@ -1299,6 +1299,14 @@ impl Renderer {
     ///
     /// When set, the shader flips texture coordinates before sampling,
     /// equivalent to the CPU path's buffer reversal for rotated video.
+    /// Current 180-degree flip flags, `[left, right]`. Needed by the GPU
+    /// band gather, which reads raw texels and therefore has to apply the
+    /// same flip the shader applies to its UVs - see
+    /// `band_gather::mirrored_180`.
+    pub(crate) fn flip_180(&self) -> [bool; 2] {
+        self.flip_180
+    }
+
     pub fn set_flip_180(&mut self, left: bool, right: bool) {
         self.flip_180 = [left, right];
     }

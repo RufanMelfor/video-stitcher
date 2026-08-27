@@ -123,6 +123,11 @@ pub(crate) struct ColorMatchState {
     left_offset: [f32; 3],
     right_offset: [f32; 3],
     frames_since_measure: u32,
+    /// Last known `measure_interval_frames`, so [`Self::measurement_due`]
+    /// can be asked without threading the whole parameter block through
+    /// the asynchronous path. Refreshed by `tick` and by the GPU path
+    /// before it asks.
+    interval: u32,
 }
 
 impl Default for ColorMatchState {
@@ -133,6 +138,7 @@ impl Default for ColorMatchState {
             // Due for a measurement on the very first frame regardless of
             // `measure_interval_frames`.
             frames_since_measure: u32::MAX - 1,
+            interval: 1,
         }
     }
 }
@@ -145,6 +151,13 @@ impl ColorMatchState {
     /// to `measure_interval_frames` frames.
     pub(crate) fn force_remeasure(&mut self) {
         self.frames_since_measure = u32::MAX - 1;
+    }
+
+    /// Refresh the cached `measure_interval_frames` - the asynchronous
+    /// path calls this before [`Self::measurement_due`], where `tick`
+    /// would have done it inline.
+    pub(crate) fn set_interval(&mut self, interval: u32) {
+        self.interval = interval;
     }
 
     /// The current smoothed correction, without advancing or re-measuring.
@@ -244,31 +257,66 @@ impl ColorMatchState {
         })
     }
 
+    /// Whether a measurement is due this frame, advancing the counter.
+    ///
+    /// Split out of [`Self::tick`] so a measurement that cannot be
+    /// produced synchronously - the GPU gather, whose result only arrives
+    /// a frame or two later - can ask the same question the CPU path
+    /// asks, and get the same answer under the same
+    /// `measure_interval_frames` and `force_remeasure` rules.
+    pub(crate) fn measurement_due(&mut self) -> bool {
+        // `frames_since_measure` is reset by the caller once it has
+        // actually issued a measurement, not here: an async path that
+        // fails to issue one (no textures bound yet) must stay due.
+        self.frames_since_measure += 1;
+        self.frames_since_measure >= self.interval
+    }
+
+    /// Mark a measurement as issued this frame - resets the interval
+    /// countdown. Separate from [`Self::measurement_due`] because the
+    /// asynchronous path can decide not to issue after asking.
+    pub(crate) fn measurement_issued(&mut self) {
+        self.frames_since_measure = 0;
+    }
+
+    /// Fold a fresh pair of band means into the smoothed correction.
+    /// Shared by the synchronous CPU sampler and the asynchronous GPU
+    /// gather, so both get the identical target/clamp/EMA behaviour and
+    /// the same diagnostic line.
+    pub(crate) fn apply_measurement(
+        &mut self,
+        left_mean: [f32; 3],
+        right_mean: [f32; 3],
+        params: &ColorMatchParams,
+    ) {
+        let target = [
+            (left_mean[0] + right_mean[0]) * 0.5,
+            (left_mean[1] + right_mean[1]) * 0.5,
+            (left_mean[2] + right_mean[2]) * 0.5,
+        ];
+        let new_left = clamp_offset(sub3(target, left_mean), params);
+        let new_right = clamp_offset(sub3(target, right_mean), params);
+        ema_toward(&mut self.left_offset, new_left, params.ema_alpha);
+        ema_toward(&mut self.right_offset, new_right, params.ema_alpha);
+        log::debug!(
+            "color_match measured: left_mean={left_mean:?} right_mean={right_mean:?} \
+             target={target:?} new_left={new_left:?} new_right={new_right:?} \
+             smoothed_left={:?} smoothed_right={:?}",
+            self.left_offset,
+            self.right_offset,
+        );
+    }
+
     fn tick(
         &mut self,
         params: &ColorMatchParams,
         measure: impl FnOnce() -> (Option<[f32; 3]>, Option<[f32; 3]>),
     ) -> ColorCorrection {
-        self.frames_since_measure += 1;
-        if self.frames_since_measure >= params.measure_interval_frames {
-            self.frames_since_measure = 0;
+        self.interval = params.measure_interval_frames;
+        if self.measurement_due() {
+            self.measurement_issued();
             if let (Some(left_mean), Some(right_mean)) = measure() {
-                let target = [
-                    (left_mean[0] + right_mean[0]) * 0.5,
-                    (left_mean[1] + right_mean[1]) * 0.5,
-                    (left_mean[2] + right_mean[2]) * 0.5,
-                ];
-                let new_left = clamp_offset(sub3(target, left_mean), params);
-                let new_right = clamp_offset(sub3(target, right_mean), params);
-                ema_toward(&mut self.left_offset, new_left, params.ema_alpha);
-                ema_toward(&mut self.right_offset, new_right, params.ema_alpha);
-                log::debug!(
-                    "color_match measured: left_mean={left_mean:?} right_mean={right_mean:?} \
-                     target={target:?} new_left={new_left:?} new_right={new_right:?} \
-                     smoothed_left={:?} smoothed_right={:?}",
-                    self.left_offset,
-                    self.right_offset,
-                );
+                self.apply_measurement(left_mean, right_mean, params);
             }
             // If measurement fails (band entirely out of FOV), keep
             // serving the last smoothed correction rather than snapping to
@@ -354,6 +402,97 @@ fn nv12_sampler<'a>(
     }
 }
 
+/// Texel positions, in the camera's *raw* (still distorted) frame, of the
+/// coarse grid this module samples in the seam-adjacent band.
+///
+/// Extracted from [`measure_band_mean`] so the GPU gather can sample the
+/// exact same points without duplicating the band geometry - the part
+/// that has been got wrong twice already (see this crate's FRICTION.md on
+/// `seam_offset` and `blend_flip_direction`). Positions depend only on
+/// the lens and the band parameters, never on pixel content, so a caller
+/// that uploads them to the GPU can cache them until the calibration
+/// changes.
+///
+/// Points that map outside the raw frame are dropped rather than clamped:
+/// a clamped point would silently feed the frame's edge pixel into the
+/// mean as though it were band content.
+pub(crate) fn band_sample_positions(
+    width: u32,
+    height: u32,
+    params: &Lens,
+    is_right: bool,
+    match_params: &ColorMatchParams,
+) -> Vec<[u32; 2]> {
+    let is_fading = is_fading_plane(is_right, match_params.blend_flip_direction);
+    let seam_offset = if is_fading {
+        match_params.seam_offset as f64
+    } else {
+        0.0
+    };
+    let (u0, u1) = seam_band_bounds(is_right, seam_offset, match_params.band_width as f64);
+    let grid_cols = match_params.grid_cols.max(1);
+    let grid_rows = match_params.grid_rows.max(1);
+
+    let mut out = Vec::with_capacity((grid_cols * grid_rows) as usize);
+    for row in 0..grid_rows {
+        let v_frac = (row as f64 + 0.5) / grid_rows as f64;
+        for col in 0..grid_cols {
+            let t = (col as f64 + 0.5) / grid_cols as f64;
+            let u_frac = u0 + t * (u1 - u0);
+
+            let (src_x, src_y) = undistorted_to_distorted(
+                u_frac * width as f64,
+                v_frac * height as f64,
+                width,
+                height,
+                params,
+            );
+            if src_x < 0.0
+                || src_y < 0.0
+                || src_x >= (width - 1) as f64
+                || src_y >= (height - 1) as f64
+            {
+                continue;
+            }
+            out.push([src_x as u32, src_y as u32]);
+        }
+    }
+    out
+}
+
+/// Band mean from samples that were read somewhere else - the GPU gather
+/// hands back normalized `(Y, U, V)` triples straight out of the texture,
+/// and this runs the identical decode/gamma/average the CPU sampler runs
+/// on its own bytes. Deliberately *not* a second implementation: the
+/// whole point of the gather returning raw texels is that the color maths
+/// stays defined once.
+///
+/// `None` when there is nothing to average, mirroring
+/// [`measure_band_mean`]'s empty-band case.
+pub(crate) fn mean_of_normalized_samples(
+    samples: &[[f32; 4]],
+    is_full_range: bool,
+    gamma: f32,
+) -> Option<[f32; 3]> {
+    if samples.is_empty() {
+        return None;
+    }
+    let inv_g = inv_gamma(gamma);
+    let mut sum = [0f64; 3];
+    for s in samples {
+        let yuv = decode_transfer_yuv_normalized(s[0], s[1], s[2], is_full_range, inv_g);
+        sum[0] += yuv[0] as f64;
+        sum[1] += yuv[1] as f64;
+        sum[2] += yuv[2] as f64;
+    }
+    let n = samples.len() as f64;
+    Some([
+        (sum[0] / n) as f32,
+        (sum[1] / n) as f32,
+        (sum[2] / n) as f32,
+    ])
+}
+
 /// Mean color, in the shader's color-transfer YUV space, over a coarse grid
 /// of points in one camera's seam-adjacent band.
 ///
@@ -387,47 +526,17 @@ fn measure_band_mean(
     } else {
         match_params.gamma_left
     });
-    let is_fading = is_fading_plane(is_right, match_params.blend_flip_direction);
-    let seam_offset = if is_fading {
-        match_params.seam_offset as f64
-    } else {
-        0.0
-    };
-    let (u0, u1) = seam_band_bounds(is_right, seam_offset, match_params.band_width as f64);
-    let grid_cols = match_params.grid_cols.max(1);
-    let grid_rows = match_params.grid_rows.max(1);
-
     let mut sum = [0f64; 3];
     let mut count = 0u32;
-    for row in 0..grid_rows {
-        let v_frac = (row as f64 + 0.5) / grid_rows as f64;
-        for col in 0..grid_cols {
-            let t = (col as f64 + 0.5) / grid_cols as f64;
-            let u_frac = u0 + t * (u1 - u0);
-
-            let (src_x, src_y) = undistorted_to_distorted(
-                u_frac * width as f64,
-                v_frac * height as f64,
-                width,
-                height,
-                params,
-            );
-            if src_x < 0.0
-                || src_y < 0.0
-                || src_x >= (width - 1) as f64
-                || src_y >= (height - 1) as f64
-            {
-                continue;
-            }
-            let Some((y_raw, u_raw, v_raw)) = sample(src_x as u32, src_y as u32) else {
-                continue;
-            };
-            let yuv = decode_transfer_yuv(y_raw, u_raw, v_raw, is_full_range, inv_g);
-            sum[0] += yuv[0] as f64;
-            sum[1] += yuv[1] as f64;
-            sum[2] += yuv[2] as f64;
-            count += 1;
-        }
+    for [src_x, src_y] in band_sample_positions(width, height, params, is_right, match_params) {
+        let Some((y_raw, u_raw, v_raw)) = sample(src_x, src_y) else {
+            continue;
+        };
+        let yuv = decode_transfer_yuv(y_raw, u_raw, v_raw, is_full_range, inv_g);
+        sum[0] += yuv[0] as f64;
+        sum[1] += yuv[1] as f64;
+        sum[2] += yuv[2] as f64;
+        count += 1;
     }
 
     if count == 0 {
@@ -454,10 +563,30 @@ fn decode_transfer_yuv(
     is_full_range: bool,
     inv_gamma: f32,
 ) -> [f32; 3] {
-    let y_n = y_raw as f32 / 255.0;
-    let u_n = u_raw as f32 / 255.0;
-    let v_n = v_raw as f32 / 255.0;
+    decode_transfer_yuv_normalized(
+        y_raw as f32 / 255.0,
+        u_raw as f32 / 255.0,
+        v_raw as f32 / 255.0,
+        is_full_range,
+        inv_gamma,
+    )
+}
 
+/// The decode itself, on already-normalized `[0, 1]` channel values.
+///
+/// A GPU `textureLoad` of a Unorm plane hands back exactly this form, so
+/// the gather path enters here and the byte path enters through the
+/// wrapper above. A 10-bit (P010) plane read as R16Unorm normalizes
+/// against 65535 rather than 1023<<6, a 0.1% scale error that is far
+/// below the measurement's own noise and does not warrant a second code
+/// path.
+fn decode_transfer_yuv_normalized(
+    y_n: f32,
+    u_n: f32,
+    v_n: f32,
+    is_full_range: bool,
+    inv_gamma: f32,
+) -> [f32; 3] {
     let (y, cb, cr) = if is_full_range {
         (y_n, u_n - 0.5, v_n - 0.5)
     } else {
