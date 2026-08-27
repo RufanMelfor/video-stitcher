@@ -108,6 +108,7 @@ pub fn run_calibrate(
     }
 
     // Step 2: Sync - priority: IMU > audio > manual
+    eprintln!("  {}", pipeline.imu_diagnostics().summary());
     if !no_auto_imu {
         eprintln!("Extracting IMU telemetry...");
         match pipeline.imu_sync() {
@@ -115,7 +116,7 @@ pub fn run_calibrate(
                 eprintln!("  IMU sync: {frames} frames @ {fps:.1}fps");
             }
             Ok(None) => {
-                eprintln!("  IMU telemetry available but sync failed, trying audio...");
+                eprintln!("  IMU sync unavailable (see capability line above), trying audio...");
                 try_audio_sync(&mut pipeline, left, right, fps, auto_sync, sync_offset)?;
             }
             Err(e) => {

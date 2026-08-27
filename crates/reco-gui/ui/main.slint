@@ -1004,6 +1004,10 @@ export component RecoApp inherits Window {
     in-out property <string> left-path: "";
     in-out property <string> right-path: "";
     in-out property <string> calibration-path: "";
+    // Set after Auto Calibrate/Re-calibrate - what each camera's own
+    // metadata actually offered for sync/orientation. See the Tip next
+    // to where this is displayed for the full explanation.
+    in-out property <string> imu-status-text: "";
     in-out property <string> status-text: "Load left + right videos and calibration JSON to begin";
     in-out property <float> progress: 0.0;
     in-out property <int> current-frame: 0;
@@ -1966,6 +1970,25 @@ export component RecoApp inherits Window {
                                     Text { text: "×"; color: #888; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
                                     cal-rm := TouchArea { clicked => { root.clear-calibration(); } }
                                 }
+                            }
+                        }
+
+                        // Set right after Auto Calibrate/Re-calibrate finishes -
+                        // whether the two cameras' own metadata actually had
+                        // usable gyro/accelerometer/quaternion data to sync
+                        // and orient from, or fell back to audio-only sync
+                        // with no orientation seed at all. Without this the
+                        // fallback is silent: the calibration still
+                        // "succeeds", just with less to go on, and there was
+                        // previously no way to tell the two apart from the
+                        // GUI.
+                        if root.imu-status-text != "": Tip {
+                            tip: "Whether each camera's own recording carried gyroscope/accelerometer data (used to sync the two videos and to seed the panel's rotation) or only derived orientation quaternions (DJI: sync falls back to audio, rotation can still be seeded from the quaternions) or neither (sync falls back to audio, no rotation seed at all).";
+                            Text {
+                                text: root.imu-status-text;
+                                color: #888;
+                                font-size: 10px;
+                                wrap: word-wrap;
                             }
                         }
 
