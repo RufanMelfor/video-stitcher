@@ -15,72 +15,74 @@ import { Button, VerticalBox, HorizontalBox, Slider, ProgressIndicator, LineEdit
 ///
 /// The badge is only rendered when `tip` is non-empty, so a caller that
 /// passes no tip (LabeledSlider's default) lays out exactly as before.
-component Tip inherits HorizontalLayout {
+component Tip inherits VerticalLayout {
     in property <string> tip;
+    property <bool> open: false;
 
     padding: 0px;
     spacing: 4px;
-    // Hug the content: without this the wrapped element would be
-    // stretched across the row and the badge pushed to the far edge,
-    // away from the text it belongs to.
-    alignment: start;
 
-    @children
+    HorizontalLayout {
+        padding: 0px;
+        spacing: 4px;
+        // Hug the content: without this the wrapped element would be
+        // stretched across the row and the badge pushed to the far edge,
+        // away from the text it belongs to.
+        alignment: start;
 
-    if root.tip != "": VerticalLayout {
-        // Centres the badge against a multi-line or taller neighbour
-        // instead of pinning it to the top of the row.
-        alignment: center;
+        @children
 
-        badge := Rectangle {
-            width: 14px;
-            height: 14px;
-            border-radius: 7px;
-            background: badge-touch.has-hover ? #35506e : #303030;
-            border-width: 1px;
-            border-color: badge-touch.has-hover ? #6a9fd8 : #4a4a4a;
+        if root.tip != "": VerticalLayout {
+            // Centres the badge against a taller neighbour instead of
+            // pinning it to the top of the row.
+            alignment: center;
+
+            Rectangle {
+                width: 14px;
+                height: 14px;
+                border-radius: 7px;
+                background: root.open ? #6a9fd8 : badge-touch.has-hover ? #35506e : #303030;
+                border-width: 1px;
+                border-color: root.open ? #6a9fd8 : badge-touch.has-hover ? #6a9fd8 : #4a4a4a;
+
+                Text {
+                    text: "?";
+                    color: root.open ? #10151c : badge-touch.has-hover ? #cfe3ff : #9aa3ab;
+                    font-size: 10px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: 100%;
+                    height: 100%;
+                }
+
+                badge-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.open = !root.open; }
+                }
+            }
+        }
+    }
+
+    // Inline, not a popup. A PopupWindow is positioned in window
+    // coordinates and can end up partly outside the app - which it did,
+    // clipping the first characters of every line when opened from a
+    // control near the left panel's edge. An inline panel is laid out by
+    // the same layout as the control it explains, so it is always inside
+    // the frame and always wraps to the available width.
+    if root.open && root.tip != "": Rectangle {
+        background: #23272b;
+        border-radius: 5px;
+        border-width: 1px;
+        border-color: #3a4046;
+
+        VerticalLayout {
+            padding: 7px;
 
             Text {
-                text: "?";
-                color: badge-touch.has-hover ? #cfe3ff : #9aa3ab;
-                font-size: 10px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-                width: 100%;
-                height: 100%;
-            }
-
-            badge-touch := TouchArea {
-                mouse-cursor: pointer;
-                clicked => {
-                    popup.show();
-                }
-            }
-
-            // Positioned to the right of the badge rather than below it:
-            // most callers are a short label sitting directly above the
-            // control it describes, so a popup below would land on top of
-            // the thing you are about to click.
-            popup := PopupWindow {
-                x: badge.width + 6px;
-                y: 0px;
-                Rectangle {
-                    background: #2a2a2a;
-                    border-radius: 4px;
-                    border-width: 1px;
-                    border-color: #444;
-                    width: tip-text.width + 16px;
-                    height: tip-text.height + 12px;
-                    tip-text := Text {
-                        x: 8px;
-                        y: 6px;
-                        text: root.tip;
-                        color: #eee;
-                        font-size: 13px;
-                        wrap: word-wrap;
-                        width: 200px;
-                    }
-                }
+                text: root.tip;
+                color: #dfe3e7;
+                font-size: 11px;
+                wrap: word-wrap;
             }
         }
     }
@@ -511,6 +513,14 @@ component SectionHeader inherits Rectangle {
 /// sections at a glance instead of one undifferentiated column.
 component CalGroupBox inherits Rectangle {
     in property <string> title;
+    /// Opt-in: makes the title bar a toggle that folds the card away.
+    /// Off by default so every existing usage lays out unchanged; used by
+    /// the taller cards in the narrow left panel, where a couple of open
+    /// cards otherwise push everything below them out of reach.
+    in property <bool> collapsible: false;
+    in-out property <bool> expanded: true;
+
+    property <bool> body-visible: !root.collapsible || root.expanded;
 
     border-radius: 10px;
     border-width: 1px;
@@ -519,9 +529,9 @@ component CalGroupBox inherits Rectangle {
 
     VerticalLayout {
         padding: 12px;
-        spacing: 10px;
+        spacing: root.body-visible ? 10px : 0px;
 
-        if root.title != "": Text {
+        if root.title != "" && !root.collapsible: Text {
             text: root.title;
             color: #7a8087;
             font-size: 10.5px;
@@ -529,7 +539,55 @@ component CalGroupBox inherits Rectangle {
             letter-spacing: 0.6px;
         }
 
-        @children
+        if root.title != "" && root.collapsible: Rectangle {
+            height: 14px;
+
+            HorizontalLayout {
+                spacing: 6px;
+
+                // Same open/closed marker the right panel's SectionHeader
+                // uses, so the two stacks of cards read the same way.
+                Rectangle {
+                    width: 8px;
+                    height: 8px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 2px;
+                    background: root.expanded ? #e5b84b : transparent;
+                    border-width: 1px;
+                    border-color: root.expanded ? #e5b84b : #454b52;
+                }
+
+                Text {
+                    text: root.title;
+                    color: title-touch.has-hover ? #aab1b8 : #7a8087;
+                    font-size: 10.5px;
+                    font-weight: 700;
+                    letter-spacing: 0.6px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+            }
+
+            title-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.expanded = !root.expanded; }
+            }
+        }
+
+        // `@children` cannot live inside a conditional element, so the
+        // body is always built and the wrapper clips it to zero height
+        // when collapsed.
+        Rectangle {
+            clip: true;
+            height: root.body-visible ? body.preferred-height : 0px;
+
+            body := VerticalLayout {
+                width: 100%;
+                padding: 0px;
+                spacing: 10px;
+                @children
+            }
+        }
     }
 }
 
@@ -1781,29 +1839,14 @@ export component RecoApp inherits Window {
                 background: root.bg-panel;
                 width: root.left-panel-width;
 
-                // Resize handle on the right edge
-                Rectangle {
-                    x: parent.width - 4px;
-                    width: 6px;
-                    height: parent.height;
-                    background: left-resize.has-hover || left-resize.pressed ? #555 : #333;
-
-                    left-resize := TouchArea {
-                        mouse-cursor: ew-resize;
-                        moved => {
-                            if (self.pressed) {
-                                // 240px is about what the widest
-                                // fixed-size row (the SCOREBOARD card's
-                                // checkboxes) needs; below that the panel
-                                // starts clipping its own controls rather
-                                // than just eliding filenames.
-                                root.left-panel-width = max(240px, root.left-panel-width + (self.mouse-x - self.pressed-x));
-                            }
-                        }
-                    }
-                }
-
                 ScrollView {
+                    // Stops short of the right edge, which belongs to the
+                    // resize grip below. Sharing that strip meant this
+                    // ScrollView's own vertical scrollbar sat on top of
+                    // the grip and swallowed the drag, so the panel could
+                    // not be widened at all.
+                    width: parent.width - 9px;
+                    height: parent.height;
                     horizontal-scrollbar-policy: always-off;
 
                     VerticalLayout {
@@ -2042,6 +2085,8 @@ export component RecoApp inherits Window {
 
                             CalGroupBox {
                                 title: "DETECTION ZONES";
+                                collapsible: true;
+                                expanded: false;
 
                                 HorizontalLayout {
                                     spacing: 6px;
@@ -2119,6 +2164,8 @@ export component RecoApp inherits Window {
 
                             CalGroupBox {
                                 title: "SCOREBOARD";
+                                collapsible: true;
+                                expanded: false;
 
                                 HorizontalLayout {
                                     spacing: 6px;
@@ -2377,6 +2424,43 @@ export component RecoApp inherits Window {
                                    || root.recent-right-paths.length > 0
                                    || root.recent-calibration-paths.length > 0;
                             clicked => { root.recent-dialog-open = true; }
+                        }
+                    }
+                }
+
+                // Resize grip. Declared after the ScrollView so it paints
+                // - and receives clicks - above it, and given its own
+                // column so the two never overlap.
+                Rectangle {
+                    x: parent.width - 9px;
+                    width: 9px;
+                    height: parent.height;
+                    background: left-resize.has-hover || left-resize.pressed ? #6a9fd8 : #2c3034;
+
+                    // Three dots, so the strip reads as something to grab
+                    // rather than as a border.
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 3px;
+                        for _dot in [0, 1, 2]: Rectangle {
+                            width: 3px;
+                            height: 3px;
+                            border-radius: 1px;
+                            background: left-resize.has-hover || left-resize.pressed ? #10151c : #596069;
+                        }
+                    }
+
+                    left-resize := TouchArea {
+                        mouse-cursor: ew-resize;
+                        moved => {
+                            if (self.pressed) {
+                                // 240px is about what the widest
+                                // fixed-size row (the SCOREBOARD card's
+                                // checkboxes) needs; below that the panel
+                                // starts clipping its own controls rather
+                                // than just eliding filenames.
+                                root.left-panel-width = max(240px, root.left-panel-width + (self.mouse-x - self.pressed-x));
+                            }
                         }
                     }
                 }
