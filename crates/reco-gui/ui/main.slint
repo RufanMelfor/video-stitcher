@@ -831,6 +831,14 @@ component SegmentList inherits Rectangle {
                     vertical-alignment: center;
                     overflow: elide;
                     horizontal-stretch: 1;
+                    // `overflow: elide` alone still reports the full text
+                    // width as the minimum, so a long DJI filename pushed
+                    // the whole panel's content wider than the panel and
+                    // everything to the right of it - the Clear button
+                    // included - was clipped off. Allowing this to shrink
+                    // is what makes the panel width a real minimum that
+                    // the drag handle can widen.
+                    min-width: 0px;
                 }
                 Rectangle {
                     width: 20px;
@@ -1784,7 +1792,12 @@ export component RecoApp inherits Window {
                         mouse-cursor: ew-resize;
                         moved => {
                             if (self.pressed) {
-                                root.left-panel-width = max(180px, root.left-panel-width + (self.mouse-x - self.pressed-x));
+                                // 240px is about what the widest
+                                // fixed-size row (the SCOREBOARD card's
+                                // checkboxes) needs; below that the panel
+                                // starts clipping its own controls rather
+                                // than just eliding filenames.
+                                root.left-panel-width = max(240px, root.left-panel-width + (self.mouse-x - self.pressed-x));
                             }
                         }
                     }
@@ -1881,6 +1894,7 @@ export component RecoApp inherits Window {
                                 padding-right: 4px;
                                 spacing: 4px;
                                 Text {
+                                    min-width: 0px;
                                     text: root.calibration-path;
                                     color: #ccc;
                                     font-size: 10px;
@@ -2176,7 +2190,7 @@ export component RecoApp inherits Window {
                                 if root.scoreboard-match-summary != "": Tip {
                                     tip: "Adds cut ranges for the dead time before kickoff and any logged pause, keeping the seconds of context set below at each boundary. Only from period_start(1)/pause_start/pause_end events actually in the log - won't guess at a break you forgot to mark with Pause. Doesn't touch cut ranges you added or edited by hand.";
                                     CheckBox {
-                                        text: "Auto-cut kickoff lead-in + pauses";
+                                        text: "Auto-cut lead-in + pauses";
                                         checked <=> root.scoreboard-derive-cut-ranges;
                                         toggled => { root.toggled-scoreboard-derive-cut-ranges(self.checked); }
                                     }
@@ -5720,12 +5734,26 @@ export component RecoApp inherits Window {
                                     border-width: 2px;
                                     border-color: #6a9fd8;
 
-                                    Text {
-                                        x: 4px;
-                                        y: 2px;
-                                        text: "Widest " + round(root.export-fov-wide) + " deg";
-                                        color: #6a9fd8;
-                                        font-size: 10px;
+                                    // On a filled chip, not bare text: a
+                                    // blue label on sky (or an orange one
+                                    // on grass in low light) disappears
+                                    // into the footage it labels.
+                                    Rectangle {
+                                        x: 3px;
+                                        y: 3px;
+                                        width: label-wide.width + 8px;
+                                        height: label-wide.height + 4px;
+                                        background: #6a9fd8;
+                                        border-radius: 3px;
+
+                                        label-wide := Text {
+                                            x: 4px;
+                                            y: 2px;
+                                            text: "Widest " + round(root.export-fov-wide) + " deg";
+                                            color: #101010;
+                                            font-size: 10px;
+                                            font-weight: 600;
+                                        }
                                     }
                                 }
 
@@ -5738,12 +5766,26 @@ export component RecoApp inherits Window {
                                     border-width: 2px;
                                     border-color: #e2a03f;
 
-                                    Text {
-                                        x: 4px;
-                                        y: 2px;
-                                        text: "Tightest " + round(root.export-fov-tight) + " deg";
-                                        color: #e2a03f;
-                                        font-size: 10px;
+                                    // On a filled chip, not bare text: a
+                                    // blue label on sky (or an orange one
+                                    // on grass in low light) disappears
+                                    // into the footage it labels.
+                                    Rectangle {
+                                        x: 3px;
+                                        y: 3px;
+                                        width: label-tight.width + 8px;
+                                        height: label-tight.height + 4px;
+                                        background: #e2a03f;
+                                        border-radius: 3px;
+
+                                        label-tight := Text {
+                                            x: 4px;
+                                            y: 2px;
+                                            text: "Tightest " + round(root.export-fov-tight) + " deg";
+                                            color: #101010;
+                                            font-size: 10px;
+                                            font-weight: 600;
+                                        }
                                     }
                                 }
                             }
