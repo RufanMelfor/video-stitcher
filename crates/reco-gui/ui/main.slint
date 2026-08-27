@@ -3,78 +3,89 @@
 
 import { Button, VerticalBox, HorizontalBox, Slider, ProgressIndicator, LineEdit, ComboBox, CheckBox, ScrollView, TabWidget, Palette, StyleMetrics } from "std-widgets.slint";
 
-/// Wraps a control with a hover tooltip: shows `tip` in a small popup
-/// after a brief hover delay, closes as soon as the pointer leaves.
-/// Wrapping (rather than baking hover into every control) keeps this
-/// opt-in per usage site - just wrap `Tip { tip: "..."; <control> }`.
-component Tip inherits TouchArea {
+/// A label (or checkbox, or any short control) followed by a small "?"
+/// badge that opens its explanation on click.
+///
+/// Deliberately **not** hover-triggered. It used to be: the whole wrapped
+/// element was a TouchArea and lingering on it for 5s opened the popup.
+/// That put the explanation behind an invisible, timed gesture - you had
+/// to already suspect a tooltip existed, and then hold still long enough
+/// to prove it. A visible badge says "there is an explanation here" and
+/// costs one click to read, which is what the user asked for.
+///
+/// The badge is only rendered when `tip` is non-empty, so a caller that
+/// passes no tip (LabeledSlider's default) lays out exactly as before.
+component Tip inherits HorizontalLayout {
     in property <string> tip;
 
-    // TouchArea does not auto-size to its children the way a layout
-    // does, so a bare `@children` here would collapse to zero size
-    // inside the surrounding VerticalBox/HorizontalBox. Route the
-    // wrapped content through a real layout and mirror its computed
-    // size back onto this TouchArea (same pattern Slint's own Button
-    // widget uses: binding min/preferred size from an inner layout).
-    inner := VerticalLayout {
-        padding: 0px;
-        spacing: 0px;
-        @children
-    }
-    min-width: inner.min-width;
-    min-height: inner.min-height;
-    preferred-width: inner.preferred-width;
-    preferred-height: inner.preferred-height;
+    padding: 0px;
+    spacing: 4px;
+    // Hug the content: without this the wrapped element would be
+    // stretched across the row and the badge pushed to the far edge,
+    // away from the text it belongs to.
+    alignment: start;
 
-    changed has-hover => {
-        if root.has-hover && root.tip != "" {
-            tip-timer.running = true;
-        } else {
-            tip-timer.running = false;
-            popup.close();
-        }
-    }
+    @children
 
-    tip-timer := Timer {
-        // Long delay is deliberate: a tooltip that appears while you're
-        // still moving toward a control (rather than lingering on it) just
-        // gets in the way. 5s only fires for a genuine "what does this do"
-        // pause, not a pass-through hover.
-        interval: 5000ms;
-        running: false;
-        triggered => {
-            self.running = false;
-            popup.show();
-        }
-    }
+    if root.tip != "": VerticalLayout {
+        // Centres the badge against a multi-line or taller neighbour
+        // instead of pinning it to the top of the row.
+        alignment: center;
 
-    // Positioned to the right of the wrapped element rather than below
-    // it: most Tip usages wrap a short label sitting directly above the
-    // actual slider/control it describes, so a popup below would land
-    // right on top of the thing you're about to click. To the side never
-    // covers either the label or what follows it.
-    popup := PopupWindow {
-        x: root.width + 8px;
-        y: 0px;
-        Rectangle {
-            background: #2a2a2a;
-            border-radius: 4px;
+        badge := Rectangle {
+            width: 14px;
+            height: 14px;
+            border-radius: 7px;
+            background: badge-touch.has-hover ? #35506e : #303030;
             border-width: 1px;
-            border-color: #444;
-            width: tip-text.width + 16px;
-            height: tip-text.height + 12px;
-            tip-text := Text {
-                x: 8px;
-                y: 6px;
-                text: root.tip;
-                color: #eee;
-                font-size: 13px;
-                wrap: word-wrap;
-                width: 200px;
+            border-color: badge-touch.has-hover ? #6a9fd8 : #4a4a4a;
+
+            Text {
+                text: "?";
+                color: badge-touch.has-hover ? #cfe3ff : #9aa3ab;
+                font-size: 10px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                width: 100%;
+                height: 100%;
+            }
+
+            badge-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    popup.show();
+                }
+            }
+
+            // Positioned to the right of the badge rather than below it:
+            // most callers are a short label sitting directly above the
+            // control it describes, so a popup below would land on top of
+            // the thing you are about to click.
+            popup := PopupWindow {
+                x: badge.width + 6px;
+                y: 0px;
+                Rectangle {
+                    background: #2a2a2a;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: #444;
+                    width: tip-text.width + 16px;
+                    height: tip-text.height + 12px;
+                    tip-text := Text {
+                        x: 8px;
+                        y: 6px;
+                        text: root.tip;
+                        color: #eee;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                        width: 200px;
+                    }
+                }
             }
         }
     }
 }
+
 
 /// Minimal boxed number-entry field: a bare `TextInput` in a bordered
 /// `Rectangle`, styled to match this app's existing "boxed" display
@@ -1426,6 +1437,11 @@ export component RecoApp inherits Window {
     // width/height) since Slint has no access to the decoded video's
     // dimensions otherwise.
     in-out property <float> lens-frame-aspect: 1.0;
+    // Source pixels per radian at the lens centre (the KB4 focal length in
+    // pixels). Set by Rust from the loaded calibration; drives the
+    // "upscale" readout under the zoom-range preview, which is the whole
+    // reason a tight FOV looks soft. 0 = unknown, readout hidden.
+    in-out property <float> lens-px-per-rad: 0.0;
     property <float> lens-zoom: 1.0;
     property <length> lens-pan-x: 0px;
     property <length> lens-pan-y: 0px;
@@ -5632,6 +5648,120 @@ export component RecoApp inherits Window {
                                     value <=> root.export-fov-wide;
                                     decimals: 0;
                                 }
+                            }
+
+                            // What those three numbers actually frame.
+                            // Degrees of field of view mean nothing on
+                            // their own; the two boxes show the widest and
+                            // tightest shot the director can choose, drawn
+                            // on the current preview frame.
+                            Tip {
+                                tip: "The two boxes show what the panner frames at its widest and tightest zoom, drawn on the current preview frame. Sizes are relative to the preview's own field of view, so they move if you zoom the preview itself. The upscale figure under each is how far the render is pushed past what the lens actually resolves: above roughly 1.5x the picture starts to look soft no matter which encoder settings you pick.";
+                                Text { text: "Zoom range"; color: #ccc; font-size: 12px; }
+                            }
+
+                            zoom-range := Rectangle {
+                                height: 190px;
+                                background: #101010;
+                                border-radius: 6px;
+                                border-width: 1px;
+                                border-color: root.border-mid;
+                                clip: true;
+
+                                // Letterboxed rect of the `contain`-fit
+                                // image, same reconstruction the lens
+                                // preview does (Slint does not expose it).
+                                property <float> img-aspect:
+                                    root.preview-frame.height > 0
+                                        ? root.preview-frame.width / root.preview-frame.height
+                                        : 16.0 / 9.0;
+                                property <float> box-aspect: self.width / self.height;
+                                property <length> content-w:
+                                    img-aspect > box-aspect ? self.width : self.height * img-aspect;
+                                property <length> content-h:
+                                    img-aspect > box-aspect ? self.width / img-aspect : self.height;
+
+                                // Fraction of the frame an inner field of
+                                // view covers. A rectilinear camera maps
+                                // angle through a tangent, so this is NOT
+                                // fov/preview-fov: at these angles that
+                                // approximation is off by tens of percent,
+                                // which would draw a confidently wrong box.
+                                property <float> frac-wide:
+                                    min(1.0, Math.tan(root.export-fov-wide * 0.5deg)
+                                             / Math.tan(root.fov * 0.5deg));
+                                property <float> frac-tight:
+                                    min(1.0, Math.tan(root.export-fov-tight * 0.5deg)
+                                             / Math.tan(root.fov * 0.5deg));
+
+                                Image {
+                                    source: root.preview-frame;
+                                    image-fit: contain;
+                                    width: 100%;
+                                    height: 100%;
+                                }
+
+                                if root.preview-frame.width == 0: Text {
+                                    text: "Load a match to see the zoom range";
+                                    color: #777;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    width: 100%;
+                                    height: 100%;
+                                }
+
+                                Rectangle {
+                                    width: zoom-range.content-w * zoom-range.frac-wide;
+                                    height: zoom-range.content-h * zoom-range.frac-wide;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    background: transparent;
+                                    border-width: 2px;
+                                    border-color: #6a9fd8;
+
+                                    Text {
+                                        x: 4px;
+                                        y: 2px;
+                                        text: "Widest " + round(root.export-fov-wide) + " deg";
+                                        color: #6a9fd8;
+                                        font-size: 10px;
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: zoom-range.content-w * zoom-range.frac-tight;
+                                    height: zoom-range.content-h * zoom-range.frac-tight;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    background: transparent;
+                                    border-width: 2px;
+                                    border-color: #e2a03f;
+
+                                    Text {
+                                        x: 4px;
+                                        y: 2px;
+                                        text: "Tightest " + round(root.export-fov-tight) + " deg";
+                                        color: #e2a03f;
+                                        font-size: 10px;
+                                    }
+                                }
+                            }
+
+                            // How far past the lens' own resolving power
+                            // each end of the range pushes the render.
+                            // `(out_height/2) / tan(fov/2)` is the output's
+                            // pixels per radian; the lens supplies
+                            // `lens-px-per-rad`.
+                            if root.lens-px-per-rad > 0: Text {
+                                text: "Detail: widest "
+                                    + round((root.export-height / 2 / Math.tan(root.export-fov-wide * 0.5deg)) / root.lens-px-per-rad * 10) / 10
+                                    + "x upscale, tightest "
+                                    + round((root.export-height / 2 / Math.tan(root.export-fov-tight * 0.5deg)) / root.lens-px-per-rad * 10) / 10
+                                    + "x at " + root.export-width + "x" + root.export-height;
+                                color: #888;
+                                font-size: 11px;
+                                wrap: word-wrap;
                             }
 
                             Tip {

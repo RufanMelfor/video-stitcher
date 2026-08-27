@@ -7759,6 +7759,13 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 if let Some(lc) = lens_correction {
                     app.set_lens_correction_amount(lc);
                 }
+                // Angular resolution of the source, for the zoom-range
+                // preview's "upscale" readout: a KB4 lens maps r = fx *
+                // theta, so fx is exactly the pixels per radian the sensor
+                // resolves at centre.
+                if let Some(cal) = s.calibration.as_ref() {
+                    app.set_lens_px_per_rad(cal.lenses[0].fx as f32);
+                }
                 if let Some(cal) = s.calibration.as_ref() {
                     app.set_sync_offset(cal.sync_offset as i32);
                 }
@@ -8130,6 +8137,10 @@ fn handle_calibration_result(
                         }
                         if let Some(lc) = lens_correction {
                             app.set_lens_correction_amount(lc);
+                        }
+                        // Same angular-resolution readout as above.
+                        if let Some(cal) = state.calibration.as_ref() {
+                            app.set_lens_px_per_rad(cal.lenses[0].fx as f32);
                         }
                         if let Some(cal) = state.calibration.as_ref() {
                             app.set_sync_offset(cal.sync_offset as i32);
