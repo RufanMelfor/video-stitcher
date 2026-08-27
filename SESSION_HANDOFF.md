@@ -1,6 +1,63 @@
-# Session handoff - 2026-08-27 (TGR_PC): auto color match now works under hardware decode (verified on real footage), manual per-camera gamma, AI zoom-range preview, and help badges instead of hover tooltips
+# Session handoff - 2026-08-27 (TGR_PC): auto color match works under hardware decode; UI fixes (resize grip, collapsible cards, floating help); a from-scratch calibration re-investigation plus a shipped IMU-orientation fix
 
 ## OPEN TASKS - do these next
+
+### 6. Test the IMU capability fix on real DJI footage (just shipped, unverified on real recordings)
+
+`crates/reco-calibrate/FRICTION.md`'s point 25 has the full writeup.
+Short version: `imu_sync()`'s all-or-nothing gate (skip everything
+whenever the LEFT camera alone lacked native gyro) used to also kill
+orientation seeding for DJI rigs, even though DJI's quaternions could
+supply it - a dormant `rig_tilt_from_quaternions` fallback existed but
+was unreachable, and didn't cover the two-camera differential seed
+anyway. Fixed: `gravity_vector()` itself now falls back to quaternions
+(fixing a real, separate bug in the process - the old fallback ignored
+`skip_start_secs` entirely), and the gate checks both cameras'
+capability, not just the left one's `has_native_gyro`.
+
+New: a status line under the calibration controls in reco-gui
+("IMU: DJI Osmo Action 4 / DJI Osmo Action 4 - no gyro (sync uses audio
+instead), orientation from quaternions"), and the same as a console line
+in reco-cli.
+
+**What to actually check on real footage, next session:**
+1. Run Re-calibrate on the DJI pair, confirm the new IMU status line
+   shows the expected "no gyro / orientation from quaternions" text.
+2. Check the log for `differential orientation: roll=... pitch=...
+   tilt=...`, `rig tilt: ...`, and `rig roll: left=... right=... avg=...`
+   lines - these previously never printed at all for DJI (the function
+   returned before reaching them); confirm they appear now, and that the
+   values are physically plausible for this rig (a few degrees, not
+   90-degree nonsense or NaN) - only synthetic quaternions were used in
+   this session's own tests, real footage has never exercised this path.
+3. Time the Re-calibrate run. The full telemetry parse (~76s per camera
+   per its own doc comment) now runs for DJI where it never did before -
+   expect roughly 70-150s longer than a pre-fix run. Confirm that's
+   acceptable, not a surprise.
+4. Turn on the "IMU seeds" checkbox (off by default) and compare a
+   calibration run with it on vs off - does the non-empty seed actually
+   change convergence/outcome now that it's real instead of always empty?
+5. Sanity-check the no-regression case: a camera pair with no usable
+   telemetry at all still falls back to audio sync exactly as before,
+   with the status line correctly saying so.
+
+### 7. Calibration re-investigation + alternative-relationship discussion (2026-08-27, mostly not built)
+
+User asked for a from-scratch, deliberately blind second opinion on why
+calibration parameters feel coupled, specifically to compare against
+`FRICTION.md`'s existing 22-point investigation log later - full
+independent findings are FRICTION.md's new point 23 (cam_d/intersect
+near-degeneracy, seam weighting starving the near field, a RANSAC/
+optimizer model mismatch, lens intrinsics that are looked up from a
+public database and never fitted to the actual physical unit, three
+already-built-but-unreachable more-expressive models). Followed by a
+discussion of the user's own checkerboard/grid idea and alternatives
+that need no physical target (vertical vanishing points, IMU - shipped,
+see task 6 above - a moving bright point/the ball reusing the existing
+detector) - point 24. Nothing there is built except the IMU piece;
+worth reading before deciding what (if anything) becomes a real GitHub
+issue.
+
 
 ### 1. DONE - three match-folder/cut features, built and green
 
