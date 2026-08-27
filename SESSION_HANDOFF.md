@@ -1,4 +1,4 @@
-# Session handoff - 2026-08-26 (TGR_PC): PAUZE on the GPU confirmed at 31fps; match-folder/cut features and manual per-camera gamma shipped; a test export proves auto color match never runs in a normal export
+# Session handoff - 2026-08-27 (TGR_PC): auto color match now works under hardware decode (verified on real footage), manual per-camera gamma, AI zoom-range preview, and help badges instead of hover tooltips
 
 ## OPEN TASKS - do these next
 
@@ -104,13 +104,18 @@ and `colortest_frames/` (full frames plus seam crops).
 encoder problem.** 60s AI-tracked export ran at 36fps avg, 25.5 Mbps,
 h264 High, no artifacts, no dropped frames, bottleneck reported as
 readback. The fixed-pose frame is crisp. The AI-tracked frames are
-visibly softer, and the arithmetic says they have to be: the lens is
-`fx = 1457` px/rad = 25.4 px/deg, so a 2560px-wide output is 1:1 only at
-about 101 degrees of FOV. At `fov_default` 34 deg the render asks for 75
-px/deg - a 3.0x upscale; at `fov_tight` 20 deg it is 5.0x. Nothing in the
-pipeline can put back detail the sensor never resolved. If sharpness at
-full zoom matters more than framing tightness, `fov_tight` is the knob,
-not the encoder.
+visibly softer, and the arithmetic says they have to be. **Corrected
+2026-08-27:** `fov_degrees` is the *vertical* field of view (nalgebra's
+`Perspective3` convention), which the first pass of this note got wrong
+by treating it as horizontal. The right comparison is output pixels per
+radian, `(out_height / 2) / tan(fov / 2)`, against the lens' own
+`fx = 1457` px/rad. For a 2560x1440 export that gives **1.11x** at
+`fov_wide` 48 deg, **1.62x** at `fov_default` 34, and **2.80x** at
+`fov_tight` 20. So the wide end is essentially 1:1 and the tight end is
+where the softness comes from. Nothing in the pipeline can put back
+detail the sensor never resolved; if sharpness at full zoom matters more
+than framing tightness, `fov_tight` is the knob, not the encoder. (The
+same figures are now shown live under the FOV sliders - see task 4.)
 
 Also checked, since it looks alarming on a still: the background slopes
 by up to 11 degrees in AI-tracked frames while the fixed-pose frame is
@@ -264,7 +269,28 @@ buffer and have `fisheye.wgsl` read them from there, so nothing crosses the
 bus at all. The Color Mapping status line would then need an occasional
 cosmetic readback.
 
-### 4. NEW (user request, 2026-08-26 late): show what the AI zoom range actually frames
+### 4. DONE 2026-08-27 - the AI zoom range is drawn on the preview
+
+A `zoom-range` widget sits directly under the three Field-of-view sliders
+in the export dialog: the current preview frame with the widest and
+tightest shot drawn on it as labelled boxes that resize live while the
+sliders move, plus a line reading how far past the lens' resolving power
+each end pushes the render (1.1x at wide, 2.8x at tight on this rig at
+2560x1440).
+
+Both traps called out in the plan were real and are handled: the boxes
+scale by `tan(fov/2) / tan(preview_fov/2)` rather than `fov/preview_fov`,
+and the upscale figure uses the *vertical* FOV convention. `Math.tan(x *
+0.5deg)` and `root.preview-frame.width` both work in Slint 1.15, so no
+Rust-side geometry was needed beyond one new property,
+`lens-px-per-rad`, pushed from `calibration.lenses[0].fx`.
+
+Still open, if it turns out to matter in use: the boxes are drawn
+relative to the *preview's* current FOV, so zooming the preview rescales
+them. A "hold the preview at its widest while this is open" mode would
+make them absolute, at the cost of taking over the user's view.
+
+### Original request
 
 User: "nu heb ik totaal geen idee wat de min en max zoom is in de AI
 parameters". They sketched it with a reference image: the full field view
@@ -301,6 +327,25 @@ computed from the lens (`fx` px/rad) and the export width -
 3.0x at 34 deg and 5.0x at 20 deg, and it converts "the tight shot looks
 soft" from a complaint into a number the user can steer by before
 exporting.
+
+### 5. DONE 2026-08-27 (user request) - help moved out of hover and onto a "?" badge
+
+User: "bij het hoveren over een functie krijg je een tooltip met uitleg,
+dit wil ik niet meer door het hoveren, maar door klein blokje met een
+vraagteken achter de functie text".
+
+`Tip` used to be a TouchArea wrapping the whole control, opening its
+popup after a 5-second hover. Now it lays the wrapped control out in a
+row followed by a 14px "?" badge, and opens on click. One component, so
+all 56 usages changed at once, and the badge only renders when a tip was
+actually passed - `LabeledSlider`'s default (no tip) lays out exactly as
+before.
+
+Watch for this if the panels start clipping again: the badge adds ~18px
+to a Tip's minimum width, and the left panel is 260px wide and sizes
+itself to its widest child (see the auto-cut margin fix from 2026-08-26).
+The longest tipped label in that panel is the "Auto-cut kickoff lead-in +
+pauses" checkbox.
 
 ### Background finding that motivates 2 and 3: auto color match is inactive in every export
 
