@@ -79,10 +79,168 @@ pub struct CameraMetadata {
     /// Whether the camera records native gyroscope data (not derived
     /// from quaternions). Cameras with native gyro (GoPro, Insta360,
     /// Sony) produce reliable IMU sync; cameras without (DJI) produce
-    /// low-correlation derived signals that fail sync and have
-    /// inaccurate rig tilt. Used by the pipeline to skip the expensive
-    /// full telemetry parse when the data won't be useful.
+    /// low-correlation derived signals that fail sync. Gyro is required
+    /// for [`estimate_sync_offset`] - nothing else on this struct
+    /// substitutes for it - but it is *not* required for orientation
+    /// (see [`Self::has_native_accel`] and [`quaternions_likely`]).
     pub has_native_gyro: bool,
+    /// Whether the camera records native accelerometer data. Same
+    /// gyro/quaternion split as above: DJI has no raw accelerometer
+    /// either, only derived orientation quaternions - see
+    /// [`quaternions_likely`] for the fallback [`gravity_vector`] uses
+    /// when this is `false`.
+    pub has_native_accel: bool,
+}
+
+/// Whether a camera type is expected to embed orientation quaternions,
+/// as a fallback source of gravity direction when neither
+/// [`CameraMetadata::has_native_gyro`] nor
+/// [`CameraMetadata::has_native_accel`] is available.
+///
+/// This is the one piece of IMU capability this module cannot cheaply
+/// *probe* - unlike gyro/accel presence (checked directly against
+/// `probe_only` samples in [`extract_metadata`]), confirming quaternions
+/// exist requires the full, slow parse (`extract`'s
+/// [`normalized_imu_interpolated`](telemetry_parser::util::normalized_imu_interpolated)
+/// call plus `TimeQuaternion` tag extraction - the ~76s-on-DJI cost
+/// `extract_metadata`'s `probe_only` mode exists specifically to avoid).
+/// So this is a documented *expectation* from the module's own
+/// camera-capability table above, not a guarantee for every video that
+/// claims to be from one of these brands - callers that act on it should
+/// treat a `false` result as "don't bother trying", and a `true` result
+/// as "worth attempting the full parse", not as a confirmed fact.
+pub fn quaternions_likely(camera_type: &str) -> bool {
+    let t = camera_type.to_ascii_lowercase();
+    // DJI: table above. GoPro (CORI) also embeds quaternions, but
+    // already has native gyro, so nothing currently needs to ask this
+    // for GoPro - included anyway so the answer stays true if that ever
+    // changes.
+    t.contains("dji") || t.contains("gopro")
+}
+
+/// What one camera's own metadata probe found - the input to both
+/// `CalibrationPipeline::imu_sync`'s decision of whether the full parse
+/// is worth its cost, and `CalibrationPipeline::imu_diagnostics`'s
+/// human-readable summary for a consumer GUI.
+///
+/// Deliberately per-camera (not collapsed into a single "IMU usable"
+/// bool the way the pipeline used to store it): sync needs *both*
+/// cameras to have native gyro, but orientation seeding can still work
+/// from just one side having *something* - collapsing that earlier hid
+/// exactly the asymmetric-rig case (only the left camera's probe was
+/// ever checked at all) that this type replaces.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ImuCapability {
+    pub camera_type: String,
+    pub camera_model: Option<String>,
+    pub has_native_gyro: bool,
+    pub has_native_accel: bool,
+    /// See [`quaternions_likely`] - an expectation from camera type, not
+    /// a confirmed probe result.
+    pub quaternions_expected: bool,
+}
+
+impl ImuCapability {
+    pub fn from_metadata(meta: &CameraMetadata) -> Self {
+        Self {
+            camera_type: meta.camera_type.clone(),
+            camera_model: meta.camera_model.clone(),
+            has_native_gyro: meta.has_native_gyro,
+            has_native_accel: meta.has_native_accel,
+            quaternions_expected: quaternions_likely(&meta.camera_type),
+        }
+    }
+
+    /// Whether it's worth attempting the full (slow) telemetry parse at
+    /// all for this camera - `true` when there's *some* chance of
+    /// getting sync or orientation data out of it, `false` for a camera
+    /// with literally no usable IMU signal at all (no native gyro/accel,
+    /// and not a camera type known to embed quaternions either).
+    pub fn worth_parsing(&self) -> bool {
+        self.has_native_gyro || self.has_native_accel || self.quaternions_expected
+    }
+
+    /// Whether this camera can supply a gravity direction at all (accel
+    /// directly, or quaternions as a fallback) - the input
+    /// `differential_orientation`/`rig_tilt` actually need, as opposed
+    /// to `has_native_gyro`, which only sync needs.
+    pub fn has_orientation_source(&self) -> bool {
+        self.has_native_accel || self.quaternions_expected
+    }
+
+    /// Short label for a status line: model if known, else brand, else
+    /// "unknown camera".
+    fn label(&self) -> String {
+        if let Some(model) = &self.camera_model {
+            model.clone()
+        } else if !self.camera_type.is_empty() {
+            self.camera_type.clone()
+        } else {
+            "unknown camera".to_string()
+        }
+    }
+}
+
+/// What both cameras' metadata probes found, for a consumer GUI to show
+/// what calibration actually has (or doesn't have) available to it - see
+/// `CalibrationPipeline::imu_diagnostics`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ImuDiagnostics {
+    pub left: ImuCapability,
+    pub right: ImuCapability,
+}
+
+impl ImuDiagnostics {
+    /// Whether `CalibrationPipeline::imu_sync` can produce a real sync
+    /// offset - `estimate_sync_offset` needs native gyro on *both*
+    /// sides, so one camera missing it is enough to fall back to audio.
+    pub fn sync_possible(&self) -> bool {
+        self.left.has_native_gyro && self.right.has_native_gyro
+    }
+
+    /// Whether `differential_orientation`/`rig_tilt` have something to
+    /// work with on both sides (accel or quaternions - see
+    /// `ImuCapability::has_orientation_source`). One side lacking any
+    /// source is enough for `differential_orientation` to return `None`,
+    /// since it needs a gravity vector from both cameras to take a
+    /// difference at all.
+    pub fn orientation_possible(&self) -> bool {
+        self.left.has_orientation_source() && self.right.has_orientation_source()
+    }
+
+    /// One-line, human-readable summary for a calibration status
+    /// display. Deliberately built here rather than in each consumer
+    /// (reco-gui, reco-cli) so the two can't drift into describing the
+    /// same capability differently.
+    pub fn summary(&self) -> String {
+        if self.sync_possible() {
+            return format!(
+                "IMU: {} / {} - gyro available, used for sync and orientation",
+                self.left.label(),
+                self.right.label()
+            );
+        }
+        if self.orientation_possible() {
+            return format!(
+                "IMU: {} / {} - no gyro (sync uses audio instead), orientation from \
+                 quaternions",
+                self.left.label(),
+                self.right.label()
+            );
+        }
+        if self.left.worth_parsing() || self.right.worth_parsing() {
+            return format!(
+                "IMU: {} / {} - partial telemetry only, sync uses audio",
+                self.left.label(),
+                self.right.label()
+            );
+        }
+        format!(
+            "IMU: {} / {} - no usable telemetry, sync uses audio, no orientation seed",
+            self.left.label(),
+            self.right.label()
+        )
+    }
 }
 
 /// Extract only camera metadata and lens profile (fast path).
@@ -125,6 +283,7 @@ pub fn extract_metadata(path: &Path) -> Result<CameraMetadata, TelemetryError> {
     let raw_imu =
         telemetry_parser::util::normalized_imu_interpolated(&input, None).unwrap_or_default();
     let has_native_gyro = raw_imu.iter().any(|s| s.gyro.is_some());
+    let has_native_accel = raw_imu.iter().any(|s| s.accl.is_some());
 
     let mut lens_profile = None;
     let mut lens_info = None;
@@ -169,6 +328,7 @@ pub fn extract_metadata(path: &Path) -> Result<CameraMetadata, TelemetryError> {
         lens_profile,
         lens_info,
         has_native_gyro,
+        has_native_accel,
     })
 }
 
@@ -451,7 +611,14 @@ pub fn estimate_sync_offset(left: &TelemetryData, right: &TelemetryData) -> Opti
 /// Returns `None` if no accelerometer data is available.
 pub fn gravity_vector(data: &TelemetryData, skip_secs: f64) -> Option<[f64; 3]> {
     if data.accel.is_empty() {
-        return None;
+        // No raw accelerometer (DJI: only orientation quaternions - see
+        // this module's own camera-capability table). Every caller of
+        // this function - `rig_tilt` and `differential_orientation`,
+        // and through it the seeds for x_rz/z_rx/x_rx - used to just get
+        // `None` here and silently produce nothing on a DJI rig, even
+        // though the quaternions needed to derive the same gravity
+        // vector were sitting right there in `data.quaternions`.
+        return gravity_vector_from_quaternions(data, skip_secs);
     }
 
     // Find the first sample at or after skip_secs, then average ~200 samples (~1s).
@@ -559,28 +726,18 @@ pub fn differential_orientation(
 /// Returns the tilt angle in radians, or `None` if neither accelerometer
 /// nor quaternion data is available.
 pub fn rig_tilt(data: &TelemetryData, skip_secs: f64) -> Option<f64> {
-    // Try accelerometer first (direct gravity measurement)
-    if let Some(g) = gravity_vector(data, skip_secs) {
-        // In the normalized IMU frame: X=down, Y=forward (optical axis), Z=right.
-        // Rig tilt = forward lean of the camera from vertical.
-        let tilt = g[1].atan2(g[0]);
-        log::info!(
-            "rig tilt (accel): {tilt:.4} rad ({:.1} deg)",
-            tilt.to_degrees()
-        );
-        return Some(tilt);
-    }
-
-    // Fall back to quaternions (DJI cameras have orientation but no raw accel)
-    if let Some(tilt) = rig_tilt_from_quaternions(data) {
-        log::info!(
-            "rig tilt (quaternion): {tilt:.4} rad ({:.1} deg)",
-            tilt.to_degrees()
-        );
-        return Some(tilt);
-    }
-
-    None
+    // `gravity_vector` already tries the accelerometer first and falls
+    // back to quaternions itself (see its own doc comment) - this used
+    // to duplicate that same accel-then-quaternion fallback locally,
+    // which is exactly what left `differential_orientation` (built
+    // entirely on `gravity_vector`, with no fallback of its own) without
+    // the quaternion path this function already had.
+    let g = gravity_vector(data, skip_secs)?;
+    // In the normalized IMU frame: X=down, Y=forward (optical axis), Z=right.
+    // Rig tilt = forward lean of the camera from vertical.
+    let tilt = g[1].atan2(g[0]);
+    log::info!("rig tilt: {tilt:.4} rad ({:.1} deg)", tilt.to_degrees());
+    Some(tilt)
 }
 
 /// Compute rig tilt from the average orientation quaternion.
@@ -588,20 +745,55 @@ pub fn rig_tilt(data: &TelemetryData, skip_secs: f64) -> Option<f64> {
 /// Rotates the world gravity vector [0, -1, 0] into camera space using
 /// the average quaternion, then computes tilt the same way as the
 /// accelerometer path.
-fn rig_tilt_from_quaternions(data: &TelemetryData) -> Option<f64> {
+/// Gravity direction in the camera's own frame, derived from orientation
+/// quaternions instead of raw accelerometer samples.
+///
+/// [`gravity_vector`]'s fallback for cameras with no raw accelerometer
+/// (DJI - see this module's own camera-capability table). Returns the
+/// same `[gx, gy, gz]` shape and frame convention `gravity_vector`
+/// itself does (X=down, Y=forward, Z=right), so every consumer of
+/// `gravity_vector` - `rig_tilt` and, through it,
+/// `differential_orientation`'s x_rz/z_rx/x_rx seeds - gets this for
+/// free without its own fallback logic.
+///
+/// `skip_secs` is honored the same way the accelerometer path honors
+/// it: the average starts at the first sample at or after `skip_secs`,
+/// not always at the very start of the recording. The earlier version of
+/// this function ignored `skip_secs` entirely and always averaged the
+/// first 100 quaternions from t=0 - meaning a rig that was still being
+/// handled/positioned during exactly the window `skip_start_secs` was
+/// meant to skip would have its tilt measured during that handling,
+/// silently, on any camera using this fallback.
+fn gravity_vector_from_quaternions(data: &TelemetryData, skip_secs: f64) -> Option<[f64; 3]> {
     if data.quaternions.len() < 10 {
         return None;
     }
 
-    // Average the first 100 quaternions (camera should be stationary at start)
-    let n = data.quaternions.len().min(100);
+    let start_idx = if skip_secs > 0.0 {
+        data.quaternions
+            .iter()
+            .position(|&(t, _)| t >= skip_secs)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let end_idx = (start_idx + 100).min(data.quaternions.len());
+    let window = &data.quaternions[start_idx..end_idx];
+    if window.len() < 10 {
+        return None;
+    }
+
+    // Average the quaternions in the window (camera should be roughly
+    // stationary within it).
+    let [w0, x0, y0, z0] = window[0].1;
     let mut aw = 0.0;
     let mut ax = 0.0;
     let mut ay = 0.0;
     let mut az = 0.0;
-    for &(_, [w, x, y, z]) in &data.quaternions[..n] {
-        // Flip sign if dot product with first quat is negative (hemisphere consistency)
-        let [w0, x0, y0, z0] = data.quaternions[0].1;
+    for &(_, [w, x, y, z]) in window {
+        // Flip sign if dot product with the window's first quat is
+        // negative (hemisphere consistency - q and -q represent the
+        // same rotation, but average to zero if left unaligned).
         let dot = w * w0 + x * x0 + y * y0 + z * z0;
         let sign = if dot < 0.0 { -1.0 } else { 1.0 };
         aw += w * sign;
@@ -609,7 +801,7 @@ fn rig_tilt_from_quaternions(data: &TelemetryData) -> Option<f64> {
         ay += y * sign;
         az += z * sign;
     }
-    let inv_n = 1.0 / n as f64;
+    let inv_n = 1.0 / window.len() as f64;
     aw *= inv_n;
     ax *= inv_n;
     ay *= inv_n;
@@ -621,17 +813,19 @@ fn rig_tilt_from_quaternions(data: &TelemetryData) -> Option<f64> {
         return None;
     }
     let (w, x, y, z) = (aw / len, ax / len, ay / len, az / len);
-    log::debug!("quaternion-based tilt: avg quat=[{w:.4}, {x:.4}, {y:.4}, {z:.4}] (n={n})");
+    log::debug!(
+        "quaternion-based gravity: avg quat=[{w:.4}, {x:.4}, {y:.4}, {z:.4}] (n={})",
+        window.len()
+    );
 
     // Rotate world gravity [0, -1, 0] into camera frame: g_cam = q^-1 * [0,-1,0] * q
     // For unit quaternion q^-1 = conjugate [w, -x, -y, -z]
     let gx = -2.0 * (x * y - w * z);
     let gy = -(1.0 - 2.0 * (x * x + z * z));
     let gz = -2.0 * (y * z + w * x);
-    log::debug!("gravity in camera frame: [{gx:.4}, {gy:.4}, {gz:.4}]");
+    log::debug!("gravity in camera frame (quaternion): [{gx:.4}, {gy:.4}, {gz:.4}]");
 
-    let tilt = gy.atan2(gx);
-    Some(tilt)
+    Some([gx, gy, gz])
 }
 
 // ---------------------------------------------------------------------------
@@ -815,4 +1009,237 @@ pub enum TelemetryError {
     /// Unsupported or unparseable telemetry format.
     #[error("telemetry parse error: {0}")]
     Parse(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_telemetry() -> TelemetryData {
+        TelemetryData {
+            camera_type: "Test".into(),
+            camera_model: None,
+            gyro: Vec::new(),
+            accel: Vec::new(),
+            lens_profile: None,
+            quaternions: Vec::new(),
+            lens_info: None,
+        }
+    }
+
+    // ---- quaternions_likely ----
+
+    #[test]
+    fn quaternions_likely_matches_known_brands_case_insensitively() {
+        assert!(quaternions_likely("DJI"));
+        assert!(quaternions_likely("dji osmo action 4"));
+        assert!(quaternions_likely("GoPro"));
+        assert!(!quaternions_likely("Insta360"));
+        assert!(!quaternions_likely("Sony"));
+        assert!(!quaternions_likely(""));
+    }
+
+    // ---- ImuCapability ----
+
+    #[test]
+    fn worth_parsing_is_true_whenever_any_source_exists() {
+        let none = ImuCapability::default();
+        assert!(!none.worth_parsing());
+
+        let gyro_only = ImuCapability {
+            has_native_gyro: true,
+            ..Default::default()
+        };
+        assert!(gyro_only.worth_parsing());
+
+        let quat_only = ImuCapability {
+            quaternions_expected: true,
+            ..Default::default()
+        };
+        assert!(quat_only.worth_parsing());
+    }
+
+    #[test]
+    fn has_orientation_source_ignores_gyro_and_needs_accel_or_quaternions() {
+        // Gyro alone (a camera with native gyro but, hypothetically, no
+        // accelerometer) must NOT count as an orientation source -
+        // `differential_orientation`/`rig_tilt` need a gravity vector,
+        // which gyro alone cannot provide.
+        let gyro_only = ImuCapability {
+            has_native_gyro: true,
+            ..Default::default()
+        };
+        assert!(!gyro_only.has_orientation_source());
+
+        let accel_only = ImuCapability {
+            has_native_accel: true,
+            ..Default::default()
+        };
+        assert!(accel_only.has_orientation_source());
+
+        let quat_only = ImuCapability {
+            quaternions_expected: true,
+            ..Default::default()
+        };
+        assert!(quat_only.has_orientation_source());
+    }
+
+    // ---- ImuDiagnostics ----
+
+    fn dji_capability() -> ImuCapability {
+        ImuCapability {
+            camera_type: "DJI".into(),
+            camera_model: Some("DJI Osmo Action 4".into()),
+            has_native_gyro: false,
+            has_native_accel: false,
+            quaternions_expected: true,
+        }
+    }
+
+    fn gopro_capability() -> ImuCapability {
+        ImuCapability {
+            camera_type: "GoPro".into(),
+            camera_model: Some("GoPro Hero 12".into()),
+            has_native_gyro: true,
+            has_native_accel: true,
+            quaternions_expected: true,
+        }
+    }
+
+    #[test]
+    fn sync_possible_needs_native_gyro_on_both_sides() {
+        // The bug this replaces: the pipeline used to check only the
+        // LEFT camera's probe for the whole rig. A mixed rig (one side
+        // with native gyro, one without) must not report sync as
+        // possible - estimate_sync_offset needs both.
+        let mixed = ImuDiagnostics {
+            left: gopro_capability(),
+            right: dji_capability(),
+        };
+        assert!(!mixed.sync_possible());
+
+        let both_gopro = ImuDiagnostics {
+            left: gopro_capability(),
+            right: gopro_capability(),
+        };
+        assert!(both_gopro.sync_possible());
+    }
+
+    #[test]
+    fn orientation_possible_works_from_quaternions_alone() {
+        // The actual fix: a DJI rig has no gyro on either side (sync
+        // stays audio-only, correctly), but both sides are
+        // quaternion-capable, so orientation seeding should now be
+        // reachable - it silently wasn't before this change.
+        let both_dji = ImuDiagnostics {
+            left: dji_capability(),
+            right: dji_capability(),
+        };
+        assert!(!both_dji.sync_possible());
+        assert!(both_dji.orientation_possible());
+    }
+
+    #[test]
+    fn orientation_impossible_when_either_side_has_nothing() {
+        let one_blank = ImuDiagnostics {
+            left: dji_capability(),
+            right: ImuCapability::default(),
+        };
+        assert!(!one_blank.orientation_possible());
+    }
+
+    #[test]
+    fn summary_distinguishes_all_four_capability_levels() {
+        let full = ImuDiagnostics {
+            left: gopro_capability(),
+            right: gopro_capability(),
+        };
+        assert!(full.summary().contains("used for sync and orientation"));
+
+        let quat_fallback = ImuDiagnostics {
+            left: dji_capability(),
+            right: dji_capability(),
+        };
+        assert!(quat_fallback.summary().contains("orientation from"));
+        assert!(quat_fallback.summary().contains("quaternions"));
+
+        let nothing = ImuDiagnostics {
+            left: ImuCapability::default(),
+            right: ImuCapability::default(),
+        };
+        assert!(nothing.summary().contains("no usable telemetry"));
+    }
+
+    // ---- gravity_vector_from_quaternions ----
+
+    #[test]
+    fn gravity_vector_from_quaternions_needs_at_least_ten_samples() {
+        let mut data = empty_telemetry();
+        data.quaternions = vec![(0.0, [1.0, 0.0, 0.0, 0.0]); 9];
+        assert!(gravity_vector_from_quaternions(&data, 0.0).is_none());
+    }
+
+    #[test]
+    fn gravity_vector_from_quaternions_respects_skip_secs() {
+        // Two distinct, internally-consistent quaternion windows: the
+        // first 20 samples (t < 5s) all identity, the next 20 (t >= 5s)
+        // all a 90-degree rotation about X. Before this fix, the
+        // function always averaged the first 100 samples from t=0
+        // regardless of `skip_secs` - so skip_secs=5.0 must select the
+        // *second* window's answer, not the first's.
+        let identity = [1.0, 0.0, 0.0, 0.0];
+        let half_turn_x = {
+            let half = std::f64::consts::FRAC_PI_4; // 90 deg -> half-angle for quaternion
+            [half.cos(), half.sin(), 0.0, 0.0]
+        };
+        let mut quats = Vec::new();
+        for i in 0..20 {
+            quats.push((i as f64 * 0.1, identity));
+        }
+        for i in 0..20 {
+            quats.push((5.0 + i as f64 * 0.1, half_turn_x));
+        }
+        let mut data = empty_telemetry();
+        data.quaternions = quats;
+
+        let early = gravity_vector_from_quaternions(&data, 0.0).unwrap();
+        let late = gravity_vector_from_quaternions(&data, 5.0).unwrap();
+        assert!(
+            (early[0] - late[0]).abs() > 0.1
+                || (early[1] - late[1]).abs() > 0.1
+                || (early[2] - late[2]).abs() > 0.1,
+            "skip_secs=5.0 should select the second (rotated) window, not the first: \
+             early={early:?} late={late:?}"
+        );
+    }
+
+    // ---- gravity_vector dispatch ----
+
+    #[test]
+    fn gravity_vector_prefers_accel_when_present() {
+        let mut data = empty_telemetry();
+        data.accel = vec![ImuSample {
+            t: 0.0,
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        }];
+        // No usable quaternions - if the dispatch wrongly fell through
+        // to the quaternion path this would return None instead.
+        let g = gravity_vector(&data, 0.0).expect("accel path should succeed");
+        assert!((g[0] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gravity_vector_falls_back_to_quaternions_when_accel_is_empty() {
+        let mut data = empty_telemetry();
+        data.quaternions = vec![(0.0, [1.0, 0.0, 0.0, 0.0]); 20];
+        assert!(gravity_vector(&data, 0.0).is_some());
+    }
+
+    #[test]
+    fn gravity_vector_is_none_with_neither_source() {
+        let data = empty_telemetry();
+        assert!(gravity_vector(&data, 0.0).is_none());
+    }
 }

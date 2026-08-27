@@ -522,6 +522,15 @@ pub struct CalibrationResult {
     pub right_lens_profile: Option<LensProfileInfo>,
     /// Detailed quality metrics for diagnostics.
     pub quality: Option<CalibrationQuality>,
+    /// What each camera's IMU metadata probe found - lets a consumer GUI
+    /// show whether sync/orientation actually had real telemetry to work
+    /// with, rather than silently succeeding or falling back with no
+    /// visible reason. `None` only when the calibration didn't go
+    /// through `CalibrationPipeline::calibrate_reporting` at all (e.g.
+    /// the lower-level `calibrate` free function, called directly in a
+    /// test or a custom pipeline).
+    #[serde(default)]
+    pub imu_diagnostics: Option<crate::telemetry::ImuDiagnostics>,
 }
 
 /// Detailed calibration quality metrics.

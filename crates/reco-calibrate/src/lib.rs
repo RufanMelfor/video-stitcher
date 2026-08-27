@@ -660,6 +660,10 @@ pub fn calibrate_with_reporting(
         per_frame: successful_frames,
         left_lens_profile: None,
         right_lens_profile: None,
+        // Set by `CalibrationPipeline::calibrate_reporting` afterward,
+        // same as the two lens-profile fields above - this free function
+        // doesn't have a pipeline (or its IMU probe results) to draw on.
+        imu_diagnostics: None,
         quality: Some(types::CalibrationQuality {
             mean_reprojection_error: mean_reproj,
             trimmed_reprojection_error: trimmed_err,

@@ -129,6 +129,9 @@ struct CalibrationOutput {
     total_matches: usize,
     left_lens_profile: Option<LensProfileInfo>,
     right_lens_profile: Option<LensProfileInfo>,
+    /// What each camera's metadata probe found for IMU sync/orientation.
+    /// See `reco_calibrate::telemetry::ImuDiagnostics`.
+    imu_diagnostics: Option<reco_calibrate::telemetry::ImuDiagnostics>,
 }
 
 /// Result sent from the calibration background thread. The error is
@@ -4982,6 +4985,7 @@ fn main() -> anyhow::Result<()> {
                         total_matches: r.total_matches,
                         left_lens_profile: r.left_lens_profile,
                         right_lens_profile: r.right_lens_profile,
+                        imu_diagnostics: r.imu_diagnostics,
                     })
                 }
                 Err(e) => Err(e),
@@ -7898,6 +7902,15 @@ fn handle_calibration_result(
                 .into_iter()
                 .flatten()
                 .any(|p| matches!(p.source, ProfileSource::Fallback));
+            // Surface whether the cameras' own recordings actually had
+            // gyro/accelerometer/quaternion data to sync and orient from -
+            // set unconditionally (not folded into a warning toast the
+            // way `used_fallback` is below) because audio-only sync with
+            // no rotation seed is the *normal* case on a DJI rig, not an
+            // exceptional one - see `ImuDiagnostics::summary`.
+            if let (Some(app), Some(diag)) = (app_weak.upgrade(), output.imu_diagnostics.as_ref()) {
+                app.set_imu_status_text(diag.summary().into());
+            }
             match state.init_with_calibration(output.calibration) {
                 Ok(true) => {
                     let fps = state.playback.fps();
@@ -8215,6 +8228,10 @@ fn handle_calibration_result(
             if let Some(app) = app_weak.upgrade() {
                 app.set_files_loaded(false);
                 app.set_status_text("Calibration failed".into());
+                // A failed attempt has no IMU diagnostics of its own;
+                // clear rather than leave a stale summary from whatever
+                // the last successful run was.
+                app.set_imu_status_text("".into());
                 // Toast wants a display-ready message; stringify at
                 // the UI boundary (not across the mpsc channel).
                 state

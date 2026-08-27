@@ -93,10 +93,15 @@ pub struct CalibrationPipeline {
     imu_xrx_seed: Option<f64>,
     imu_zrx_seed: Option<f64>,
     enable_x_rx: bool,
-    /// Whether the camera has native gyroscope data (set by detect_profiles).
-    /// When false, the full telemetry parse is skipped because derived
-    /// quaternion data produces unreliable sync and rig tilt.
-    has_native_gyro: bool,
+    /// What each camera's own metadata probe found (set by
+    /// detect_profiles). Drives both `imu_sync`'s decision of whether the
+    /// full telemetry parse is worth its cost, and [`Self::imu_diagnostics`]
+    /// for a consumer GUI to show what was actually detected - see that
+    /// method's doc comment for why this is kept as two full
+    /// [`telemetry::ImuCapability`] values rather than a single collapsed
+    /// bool the way it used to be.
+    left_imu: telemetry::ImuCapability,
+    right_imu: telemetry::ImuCapability,
     /// Rig tilt in radians (forward lean from vertical).
     rig_tilt: f64,
     /// Rig roll in radians (lateral lean).
@@ -121,7 +126,8 @@ impl CalibrationPipeline {
             imu_xrx_seed: None,
             imu_zrx_seed: None,
             enable_x_rx: false,
-            has_native_gyro: false,
+            left_imu: telemetry::ImuCapability::default(),
+            right_imu: telemetry::ImuCapability::default(),
             rig_tilt: 0.0,
             rig_roll: 0.0,
         }
@@ -160,7 +166,20 @@ impl CalibrationPipeline {
         let left_meta = telemetry::extract_metadata(&self.left_info.path).ok();
         let right_meta = telemetry::extract_metadata(&self.right_info.path).ok();
 
-        self.has_native_gyro = left_meta.as_ref().is_some_and(|m| m.has_native_gyro);
+        // Kept per-camera (see `ImuCapability`'s own doc comment) - the
+        // single collapsed `has_native_gyro` this used to be only ever
+        // reflected the *left* camera's probe, so a rig where only the
+        // right camera lacked native gyro looked IMU-capable right up
+        // until `estimate_sync_offset` silently failed on the right
+        // side's empty gyro vec.
+        self.left_imu = left_meta
+            .as_ref()
+            .map(telemetry::ImuCapability::from_metadata)
+            .unwrap_or_default();
+        self.right_imu = right_meta
+            .as_ref()
+            .map(telemetry::ImuCapability::from_metadata)
+            .unwrap_or_default();
 
         // Build a lightweight TelemetryData with just the metadata fields
         // that detect_profile needs (camera_type, camera_model, lens_profile, lens_info).
@@ -295,10 +314,25 @@ impl CalibrationPipeline {
     /// Returns the sync offset in frames, or `None` if telemetry is
     /// unavailable or cross-correlation fails.
     pub fn imu_sync(&mut self) -> Result<Option<i64>, CalibrateError> {
-        if !self.has_native_gyro {
+        // Two independent questions used to be collapsed into one gate:
+        // "can we sync from this?" (needs native gyro on *both* sides -
+        // estimate_sync_offset itself still enforces that, unchanged
+        // below) and "is the full parse worth attempting at all?" (also
+        // true whenever either side has an accelerometer or is a
+        // quaternion-likely camera type - DJI's case). The old gate only
+        // asked the first question but used the answer to skip *both*
+        // sync AND orientation seeding, so a DJI rig - no native gyro on
+        // either side, but quaternions on both - got neither: not just
+        // no IMU sync (correct, nothing here can fix that without real
+        // gyro data), but also no x_rz/z_rx/x_rx seed and no rig
+        // tilt/roll, despite `gravity_vector`'s quaternion fallback (see
+        // its own doc comment) being fully able to produce those once
+        // reached.
+        if !self.left_imu.worth_parsing() && !self.right_imu.worth_parsing() {
             log::info!(
-                "IMU sync skipped: camera has no native gyroscope (quaternion-derived \
-                 gyro produces unreliable sync). Falling back to audio sync."
+                "IMU sync/orientation skipped: neither camera has native gyro/accel, and \
+                 neither camera type is known to embed orientation quaternions. Falling \
+                 back to audio sync."
             );
             return Ok(None);
         }
@@ -387,6 +421,21 @@ impl CalibrationPipeline {
         }
 
         Ok(sync_computed)
+    }
+
+    /// What each camera's metadata probe found, for a consumer GUI to
+    /// show what calibration actually has available - see
+    /// [`telemetry::ImuDiagnostics`]'s own doc comment.
+    ///
+    /// Available as soon as [`Self::detect_profiles`] has run (metadata
+    /// probing, not the full parse), so a consumer can show this
+    /// immediately rather than waiting for [`Self::imu_sync`] or a full
+    /// calibration run to complete.
+    pub fn imu_diagnostics(&self) -> telemetry::ImuDiagnostics {
+        telemetry::ImuDiagnostics {
+            left: self.left_imu.clone(),
+            right: self.right_imu.clone(),
+        }
     }
 
     /// Estimate sync offset from audio cross-correlation.
@@ -515,6 +564,7 @@ impl CalibrationPipeline {
         result.calibration.sync_offset = self.sync_offset_frames;
         result.left_lens_profile = self.left_profile_info.clone();
         result.right_lens_profile = self.right_profile_info.clone();
+        result.imu_diagnostics = Some(self.imu_diagnostics());
         Ok(result)
     }
 
