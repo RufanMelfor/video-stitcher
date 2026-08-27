@@ -1435,3 +1435,255 @@ workspace-wide).
 `confidence` changes) - the GUI's `if confidence < 0.5` warning
 threshold and the telemetry field both still work unchanged, since
 they consume the same `confidence` value, now just a more honest one.
+
+## 23. Independent blind re-investigation of the near-field/coupling problem (2026-08-27)
+
+**Context.** User asked for a from-scratch re-investigation of why
+calibration parameters feel coupled ("een kleine wijziging vertroebelt
+weer een andere parameter"), explicitly *without* reading this file
+first, specifically to get an honest second opinion to compare against
+everything above. The investigator (an AI agent) had in fact read this
+file once earlier in the same session before the instruction was given,
+so a perfectly blank slate wasn't possible - flagged to the user at the
+time. Reasoning below was rebuilt from current source + first-principles
+optimization/photogrammetry reasoning, not from re-reading this file's
+conclusions. Recorded here verbatim-in-substance so the comparison the
+user wanted is possible later: does independent reasoning land on the
+same root causes as the investigation above, or somewhere genuinely
+different?
+
+**Findings, numbered independently of the list above:**
+
+1. **`cam_d` and `intersect` are close to the same knob.** The camera
+   sits at a fixed `(cam_d, 0, cam_d)` (1D, not a free 2D position), and
+   both planes translate by the same `half_offset = 0.5*(1-intersect)`.
+   `optimizer.rs`'s `lock_cam_d` option makes this exact: `cam_d :=
+   half_offset` when locked. With both free (the default,
+   `lock_cam_d: false`), the seam-weighted cost function concentrates
+   data near the seam (see finding 2), and for seam-local points, moving
+   the camera back is difficult to distinguish from moving the planes
+   closer together. A likely mechanism for "tweak one thing, another
+   drifts": on a cost surface with a long near-flat valley in exactly
+   this direction, `NelderMeadOptimizer`'s fixed 5-8 starting points
+   (`STARTS_5`/`STARTS_4`) can converge to different points along that
+   valley for near-identical inputs, with near-identical final cost.
+
+2. **`OptimizerConfig::seam_sigma_y` (default 0.08) actively starves the
+   near field of weight** - its own doc comment: "collapses the weight
+   of near-camera matches almost to zero even when they exist." That is
+   exactly the region where two physically-separated lenses see the
+   largest real parallax (disparity ~ baseline/distance), so the
+   optimizer is weighted away from precisely the data the flat-plane
+   model explains worst - a fit can score well in aggregate while still
+   looking wrong at the bottom of frame.
+
+3. **RANSAC (`ransac.rs`) filters outliers under a generic epipolar
+   fundamental-matrix model**, not the constrained two-plane/shared-camera
+   model `optimizer.rs` actually fits. The two models don't have to agree
+   on what's an inlier, which is an extra, independent source of
+   instability distinct from findings 1-2.
+
+4. **Lens intrinsics (fx, fy, cx, cy, k1-k4) are never fitted, only
+   looked up** from the embedded Gyroflow database
+   (`lens_database.rs`), matched by camera brand/model/resolution
+   metadata. `geometry.rs`'s `OptParams::k_x`/`k_z` doc comment says it
+   directly: "a known constant... not a fitted parameter, unlike every
+   other field on this struct." A profile a few percent off this
+   specific physical unit (manufacturing tolerance, FOV-mode mismatch,
+   a protective lens) gets silently absorbed into whichever extrinsic
+   parameters are least constrained (finding 1) - a plausible mechanism
+   for "I nudge one slider and something unrelated seems to compensate."
+   Smaller, concrete finding in the same function: if the right
+   camera's profile lookup fails, `detect_profiles` falls back to the
+   *left* camera's profile with only a `log::info!` - two physically
+   different camera units can end up calibrated as optically identical
+   with no visible warning.
+
+5. **Three more-expressive spatial models already exist in this crate,
+   fully implemented, none reachable from `reco-cli`/`reco-gui`'s
+   production path:** `geometry.rs`'s `ground_tilt_x`/`ground_tilt_z`
+   (own doc: "Experimental - not yet wired into the production
+   optimizer"), `row_profile.rs` (564 lines, per-row ZNCC-based vertical
+   disparity correction - see its own module doc for how it relates to
+   points 12-16 above), and `line_seam.rs`/`photometric.rs` (reachable
+   only from standalone `examples/`, confirmed via
+   `grep -rl "row_profile::\|line_seam::\|photometric::"` across the
+   workspace). Independent of what was or wasn't concluded about any of
+   these individually above, it's a plain fact from the current tree
+   that the software already agrees a single flat model isn't enough,
+   in three different ways, none of which the shipping calibrate
+   command benefits from today.
+
+6. **`confidence`/`quality` measure fit-in-model-space, not "does the
+   seam look right."** Consistent with the `## Calibration "confidence"`
+   entry above and its self-described first-pass status - re-derived
+   independently here because finding 2 gives a second, distinct reason
+   the same score can mislead: it's computed on a fit that was itself
+   biased away from the near field, so a numerically "good" score can
+   still coexist with a visibly wrong seam bottom.
+
+**Where this agrees with the investigation above:** the flat two-plane
+model's near-field/parallax limitation (points 8-17 above) and the
+"manage where the residual lives" framing. **Where it goes further:**
+the RANSAC/optimizer model mismatch (3) and the intrinsics-never-fitted
+gap (4) were not called out above as their own items - (4) in particular
+motivated the checkerboard/grid discussion in point 24 below and the
+already-shipped fix in point 25.
+
+## 24. Alternatives for establishing the two-camera relationship, considered but not built (2026-08-27)
+
+Follow-on discussion after point 23, prompted by the user's own proposal
+(project a synthetic grid through the current distortion model, use its
+corner points to visually/numerically drive convergence). Recorded for
+whenever this becomes a real feature, not started.
+
+**The user's proposal is real, established technique** ("plumb-line" /
+straight-line lens calibration - a known-straight real-world line, or a
+synthetic grid warped through the current distortion model, gives dense,
+sub-pixel-precise correspondences forward-projectable with the
+already-existing `reco_core::lens::undistorted_to_distorted`). Two
+things worth keeping separate when this gets built:
+
+- A grid/checkerboard target, photographed by **each camera
+  independently**, calibrates that camera's own **intrinsics**
+  (fx/fy/cx/cy/k1-k4) far better than the database lookup (finding 4
+  above) - dense, sharp, sub-pixel, and completely content-agnostic (the
+  user's own objection to a football-pitch-line approach: "iemand anders
+  kan het zijn dat hij natuur filmt").
+- A grid/checkerboard target seen by **both cameras simultaneously**,
+  within their shared overlap zone, additionally calibrates the
+  **extrinsic** relationship (`intersect`/`x_ty`/`x_rz`/`z_rx`) - the
+  standard OpenCV-style `stereoCalibrate` approach. This is the stronger
+  half: dense, unambiguous correspondences (no AKAZE-style matching
+  ambiguity - a checkerboard corner's topology is known) precisely in
+  the near field the model struggles with (finding 2). No such stereo
+  target step exists anywhere in this codebase today, nor does any
+  checkerboard/ArUco corner detector - would need to be built (this
+  project has deliberately avoided OpenCV/heavy C++ FFI elsewhere, e.g.
+  `ransac.rs`'s own vendored 8-point algorithm, `features.rs`'s vendored
+  AKAZE - a from-scratch or minimal-dependency Rust corner detector
+  would be the consistent choice here too).
+
+**Real cost:** requires a physical target, physically positioned in the
+overlap zone at setup time - not automatic from arbitrary match footage.
+Reframes the architecture from "calibrate every match from whatever
+scene content happens to be in it" to "calibrate the physical rig once
+(or whenever the mount is adjusted), reuse per match" - since intrinsics
+and the inter-camera relationship are properties of the rig, not of any
+one recording, this is arguably the more correct architecture regardless
+of how it's measured.
+
+**Alternatives that need no physical target at all, discussed as
+companions/interim steps, weakest to strongest:**
+
+- **Vertical vanishing points.** Goalposts, floodlight poles, corner
+  flags, fence posts are gravity-vertical in almost any outdoor footage
+  (works for the user's "nature footage" case too - tree trunks). Real
+  parallel verticals converge to a vanishing point; consistency of that
+  point between the two cameras constrains rotation (roll, partial
+  pitch) for free, fully automatically, no operator action. Doesn't
+  touch `cam_d`/translation at all.
+- **A single bright moving point instead of a whole grid.** A ball
+  (reusing the autocam's own trained detector - zero new detection work)
+  or a flashlight/laser, moved through the overlap zone for ~30s before
+  a match. Unambiguous correspondence (only one bright point, no
+  matching ambiguity - exactly what defeated AI-feature-matching against
+  players, point 4 above), dense if swept slowly, lands precisely in the
+  near field. Weaker than a full grid (one correspondence per frame
+  instead of dozens), but needs no new hardware and generalizes past
+  football the same way a laser pointer would.
+- **IMU gravity vector as a hard constraint, not just an optimizer seed.**
+  Already the cheapest option and the one built first - see point 25.
+
+**User's own recommended order, for when this is picked up again:** IMU
+hard-constraint first (cheapest, already partly done), then the
+moving-point/ball approach (reuses existing detector infrastructure),
+checkerboard/grid held in reserve for whenever full per-unit intrinsic
+precision is actually needed.
+
+## 25. DONE (2026-08-27) - IMU orientation seeding no longer silently dead on cameras without native gyro
+
+**Status: fixed and shipped**, commit `878d5425`. Follow-on from finding
+4/point 24's IMU discussion above - implemented same session.
+
+**Root cause, found while building the "show IMU availability" diagnostic
+the user asked for:** `CalibrationPipeline::imu_sync()` had a single
+all-or-nothing gate (`if !self.has_native_gyro { return Ok(None); }`)
+that skipped not just sync (`estimate_sync_offset`, which genuinely needs
+raw gyro - correct to skip) but also `differential_orientation`/
+`rig_tilt`/roll, which don't need gyro at all, only *some* gravity
+source. On a DJI rig (no raw gyro or accelerometer, only derived
+orientation quaternions - `telemetry.rs`'s own camera-capability table)
+this meant the x_rz/z_rx/x_rx seeds and rig tilt/roll were never
+computed, full stop - despite a quaternion-based tilt fallback
+(`rig_tilt_from_quaternions`) already existing in the file, unreachable
+because of the gate, and even if reached it only covered single-camera
+tilt, not the two-camera differential rotation `differential_orientation`
+needs, because that function is built entirely on `gravity_vector`,
+which had no quaternion fallback of its own.
+
+Also found and fixed in the same pass: the quaternion tilt fallback
+ignored `skip_start_secs` entirely, always averaging the first 100
+quaternions from t=0 regardless of what the caller asked to skip - so a
+rig still being handled/positioned during exactly the window
+`skip_start_secs` was meant to exclude would have had its tilt measured
+during that handling, on any camera that ever hit this fallback path.
+
+**Fix:** the quaternion fallback moved down into `gravity_vector` itself
+(`gravity_vector_from_quaternions`, `skip_secs`-aware), so every existing
+consumer - `rig_tilt` and, through it, `differential_orientation` -
+benefits with no changes to their own code. `imu_sync`'s gate now checks
+per-camera capability (new `telemetry::ImuCapability`, computed for
+*both* left and right - the old flag was set from the left camera's
+probe only, so an asymmetric rig would have been misjudged too) and only
+skips the full parse when *neither* side has anything to offer at all.
+
+**New user-facing diagnostic** (the thing actually asked for): a status
+line under the calibration controls in reco-gui, and a console line in
+reco-cli, both built from `ImuDiagnostics::summary()` - e.g. `"IMU: DJI
+Osmo Action 4 / DJI Osmo Action 4 - no gyro (sync uses audio instead),
+orientation from quaternions"`. Uses only the already-cheap
+`extract_metadata` probe (`has_native_gyro`/`has_native_accel` are
+directly probed; quaternion presence is a documented per-brand
+expectation, not cheaply probable without the ~76s full parse, so it's
+labeled as an expectation, not a confirmed fact).
+
+**Real, deliberate cost increase - not a regression, but worth knowing
+before assuming a Re-calibrate run should take the same time as before:**
+on a DJI rig, the full telemetry parse (`ensure_left_telemetry`/
+`ensure_right_telemetry`, ~76s each per this module's own doc comment)
+used to never run at all, because `has_native_gyro` was always false and
+the whole function bailed out before reaching it. It now runs whenever
+either side is quaternion-likely - true for DJI - adding roughly
+70-150s to a calibration run that didn't pay that cost before. This is
+the trade for the seeds actually being computed; not yet confirmed on
+real DJI footage whether the resulting seed *values* are physically
+sane (synthetic quaternions were used for the 12 new unit tests, not a
+real recording) - see the open item below.
+
+**Needs the "IMU seeds" checkbox on** (reco-gui, off by default -
+`CalibrationConfig::use_imu_rotation_seeds: false`) for the seeds to
+actually reach the optimizer; the diagnostic line and rig tilt/roll
+(`Framing::tilt`/`.roll`, always applied per `calibrate_reporting`'s own
+comment) work regardless of that checkbox.
+
+12 new unit tests (`telemetry::tests`), all against synthetic
+`TelemetryData` - no real footage needed. Covers `ImuCapability`/
+`ImuDiagnostics` boolean logic and summary text, `gravity_vector`'s
+accel-vs-quaternion dispatch, and `gravity_vector_from_quaternions`'s
+`skip_secs` windowing (constructs two distinct quaternion time windows
+and confirms `skip_secs` selects the later one - the exact bug being
+fixed). `cargo fmt`/`clippy -D warnings` clean workspace-wide;
+`reco-calibrate --lib` 109/109; `reco-gui --bins` 74/74.
+
+**Not done / open:**
+- Real-footage verification that the derived roll/pitch/tilt values are
+  physically plausible for an actual DJI rig, not just internally
+  consistent on synthetic input - see the test plan handed to the user
+  the same session this shipped.
+- Whether turning "IMU seeds" on measurably changes calibration
+  convergence/outcome on this rig, now that the seeds are non-empty for
+  the first time.
+- Timing confirmation: the ~70-150s cost increase above, confirmed in
+  code but not yet timed on a real Re-calibrate run.
+
