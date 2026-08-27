@@ -6,6 +6,8 @@
 //! they stay available without the `gpu` feature.
 
 #[cfg(feature = "gpu")]
+mod band_gather;
+#[cfg(feature = "gpu")]
 mod color_match;
 #[cfg(feature = "gpu")]
 pub mod lookahead_downconvert;

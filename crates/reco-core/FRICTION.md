@@ -218,9 +218,10 @@ chroma correction. Left as a live user-adjustable slider rather than
 changed as the shipped default, since this is one rig's real-world
 measurement, not proof the chroma correction is harmful in general.
 
-## Auto color match is silently inactive in the default Windows export path
+## Auto color match was silently inactive in the default Windows export path
 
-**Status: open.** Established 2026-08-26 from the user's own
+**Status: fixed 2026-08-27 (see `render/band_gather.rs`).** Established
+2026-08-26 from the user's own
 `reco-gui.log`, which logs `SmartFileSource: D3D11VA zero-copy decode
 enabled` for every export on this machine. The zero-copy limitation above
 ("the BGRA and GPU zero-copy paths ... always render with identity
@@ -240,15 +241,33 @@ the output at all.
 forces CPU decode, trading a large amount of export speed for the
 correction.
 
-**Fix direction (reco-core, not the consumer):** measure the band on the
-GPU. The 128 sample positions can still be computed on the CPU exactly as
-now (they only change with the calibration); a compute pass samples both
-NV12 textures at those positions, and an *async* readback consumes the
-result a frame or two later - harmless, since the EMA already smooths
-measurements taken 15 frames apart. A synchronous readback would stall the
-pipeline and cost more than the feature is worth. This is a coverage fix,
-not a performance one: at 8x16 points per 15 frames the CPU measurement was
-never a bottleneck.
+**Fix:** `render::band_gather` measures the band on the GPU. The sample
+positions are still computed on the CPU by
+`color_match::band_sample_positions` (they only change with the
+calibration, so they upload once); a compute pass gathers those texels
+from the bound NV12 planes, and an *async* readback consumes the result a
+frame or two later. The shader does no color maths at all - it returns
+raw texels and `color_match::mean_of_normalized_samples` runs the same
+decode, gamma and averaging the CPU sampler runs, so the curve stays
+defined once. A synchronous readback was deliberately avoided: it would
+stall the pipeline and cost more than the feature is worth.
+
+Measured on real footage (2026-08-27, 10s of a 4K DJI pair at 2560x1440):
+the zero-copy export now lands within **0.29 gray levels** of the
+CPU-decode reference render, where before it was identical to
+color-match-off. Cost: none measurable. Two runs each with the
+measurement on every frame (`color_match_interval_frames = 1`, the
+user's own setting) gave 87.6 and 99.0 fps against 82.8 and 98.7 fps with
+color match off - run-to-run variance dwarfs the difference.
+
+**Trap found while verifying, worth knowing for anything else that reads
+raw texels on this path:** the shader renders a 180-degree-rotated source
+by sampling at `1-uv`, while the CPU decode path reverses the buffer.
+A gather reading raw texels therefore has to mirror its sample positions
+(`band_gather::mirrored_180`), or it measures the diagonally opposite
+corner of the frame. On the user's rig only the left camera carries
+`rotation=-180`, so the bug showed up as a correction about twice its
+true size, and noisy - not as an obvious mirror image.
 
 ## `PlaneLayout::intersect` is not a safe "move the seam" control
 
