@@ -240,7 +240,17 @@ pub fn calibrate_videos(
 
     let mut pipeline = CalibrationPipeline::new(left_info, right_info, config);
 
-    // Lens profiles: direct params > path > auto-detect.
+    // Lens profiles: direct params > path > auto-detect. Only the last
+    // of these (`detect_profiles`) probes IMU capability as a side
+    // effect of its own lens lookup; the other two are called explicitly
+    // below so `imu_sync`/`imu_diagnostics` are correct regardless of
+    // which branch actually ran - see `CalibrationPipeline::set_profiles`'s
+    // doc comment for the real regression this fixes (a GUI
+    // "Re-calibrate" click reuses the current calibration's lens params
+    // through `set_profiles`, which used to leave IMU capability
+    // permanently at its empty default from the second calibration
+    // attempt onward).
+    let mut probed_imu = false;
     match (options.left_params.clone(), options.right_params.clone()) {
         (Some(lp), Some(rp)) => pipeline.set_profiles(lp, rp),
         (left_params, right_params) => {
@@ -265,8 +275,12 @@ pub fn calibrate_videos(
                     "Detecting lens profiles",
                 );
                 pipeline.detect_profiles()?;
+                probed_imu = true;
             }
         }
+    }
+    if !probed_imu {
+        pipeline.probe_imu_capability();
     }
 
     // Sync: manual > IMU > audio > default (0)

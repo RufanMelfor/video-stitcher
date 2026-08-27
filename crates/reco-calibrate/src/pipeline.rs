@@ -138,9 +138,65 @@ impl CalibrationPipeline {
     // ---------------------------------------------------------------
 
     /// Set lens profiles manually (loaded by the app from files, UI, etc.).
+    ///
+    /// Deliberately does **not** probe IMU capability - this is a raw
+    /// setter with no file I/O of its own, and it is the single most
+    /// common path in practice: a GUI "Re-calibrate" click reuses the
+    /// current calibration's already-known lens params through exactly
+    /// this method, specifically to *avoid* redoing profile detection.
+    /// Callers that skip [`Self::detect_profiles`] - this one and
+    /// [`Self::load_profiles`] - must call
+    /// [`Self::probe_imu_capability`] themselves if they want
+    /// [`Self::imu_sync`]/[`Self::imu_diagnostics`] to see anything. Found
+    /// the hard way: `left_imu`/`right_imu` silently stayed at their
+    /// all-`false`, empty-`camera_type` default on every calibration
+    /// after the first, since only `detect_profiles` populated them -
+    /// `imu_sync` then reported "neither camera type is known to embed
+    /// orientation quaternions" for a camera it had, minutes earlier on
+    /// the very same footage, correctly identified as quaternion-capable.
     pub fn set_profiles(&mut self, left: Lens, right: Lens) {
         self.left_params = Some(left);
         self.right_params = Some(right);
+    }
+
+    /// Probe both cameras' IMU capability without touching lens profiles
+    /// at all - the fast, `probe_only` metadata read (well under 1s per
+    /// camera), same one [`Self::detect_profiles`] already performs for
+    /// its own lens lookup.
+    ///
+    /// For [`Self::imu_sync`]/[`Self::imu_diagnostics`] to reflect
+    /// reality, *some* call in the sequence has to run this - normally
+    /// `detect_profiles` does it as a side effect of its own work, but a
+    /// caller that resolves lens profiles through [`Self::set_profiles`]
+    /// or [`Self::load_profiles`] instead must call this explicitly. See
+    /// [`Self::set_profiles`]'s doc comment for why this matters more
+    /// than it looks like it should.
+    pub fn probe_imu_capability(&mut self) {
+        let left_meta = telemetry::extract_metadata(&self.left_info.path).ok();
+        let right_meta = telemetry::extract_metadata(&self.right_info.path).ok();
+        self.set_imu_capability_from(left_meta.as_ref(), right_meta.as_ref());
+    }
+
+    /// Shared by [`Self::probe_imu_capability`] and [`Self::detect_profiles`]
+    /// (which already has `CameraMetadata` in hand for its own lens
+    /// lookup, so it passes that through here instead of probing twice).
+    fn set_imu_capability_from(
+        &mut self,
+        left_meta: Option<&telemetry::CameraMetadata>,
+        right_meta: Option<&telemetry::CameraMetadata>,
+    ) {
+        // Kept per-camera (see `ImuCapability`'s own doc comment) - the
+        // single collapsed `has_native_gyro` this used to be only ever
+        // reflected the *left* camera's probe, so a rig where only the
+        // right camera lacked native gyro looked IMU-capable right up
+        // until `estimate_sync_offset` silently failed on the right
+        // side's empty gyro vec.
+        self.left_imu = left_meta
+            .map(telemetry::ImuCapability::from_metadata)
+            .unwrap_or_default();
+        self.right_imu = right_meta
+            .map(telemetry::ImuCapability::from_metadata)
+            .unwrap_or_default();
     }
 
     /// Auto-detect lens profiles from video metadata and the embedded database.
@@ -166,20 +222,7 @@ impl CalibrationPipeline {
         let left_meta = telemetry::extract_metadata(&self.left_info.path).ok();
         let right_meta = telemetry::extract_metadata(&self.right_info.path).ok();
 
-        // Kept per-camera (see `ImuCapability`'s own doc comment) - the
-        // single collapsed `has_native_gyro` this used to be only ever
-        // reflected the *left* camera's probe, so a rig where only the
-        // right camera lacked native gyro looked IMU-capable right up
-        // until `estimate_sync_offset` silently failed on the right
-        // side's empty gyro vec.
-        self.left_imu = left_meta
-            .as_ref()
-            .map(telemetry::ImuCapability::from_metadata)
-            .unwrap_or_default();
-        self.right_imu = right_meta
-            .as_ref()
-            .map(telemetry::ImuCapability::from_metadata)
-            .unwrap_or_default();
+        self.set_imu_capability_from(left_meta.as_ref(), right_meta.as_ref());
 
         // Build a lightweight TelemetryData with just the metadata fields
         // that detect_profile needs (camera_type, camera_model, lens_profile, lens_info).
@@ -270,6 +313,11 @@ impl CalibrationPipeline {
     }
 
     /// Load lens profiles from file paths.
+    ///
+    /// Same caveat as [`Self::set_profiles`]: this never calls
+    /// [`Self::detect_profiles`], so it never probes IMU capability -
+    /// call [`Self::probe_imu_capability`] separately if that matters to
+    /// the caller.
     pub fn load_profiles(
         &mut self,
         left_path: &Path,

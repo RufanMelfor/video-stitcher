@@ -100,6 +100,11 @@ pub fn run_calibrate(
         let (lp, rp) = pipeline.load_profiles(Path::new(lp), rp)?;
         eprintln!("  left:  {}x{}", lp.width, lp.height);
         eprintln!("  right: {}x{}", rp.width, rp.height);
+        // `load_profiles` never probes IMU capability (see its own doc
+        // comment) - without this, --left-profile/--right-profile would
+        // silently report "no usable telemetry" regardless of what the
+        // cameras actually offer.
+        pipeline.probe_imu_capability();
     } else {
         eprintln!("Auto-detecting lens profiles...");
         let (lp, rp) = pipeline.detect_profiles()?;
