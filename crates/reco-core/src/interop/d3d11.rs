@@ -106,6 +106,34 @@ pub struct D3d11PlaneSource<'a> {
     pub uv_view: &'a wgpu::TextureView,
 }
 
+/// How long [`D3d11StagingPool::stage_frame`] waits for one staging copy
+/// before giving up.
+///
+/// The copy itself is ~0.2 ms, so this is not a budget for the copy - it
+/// is a budget for *GPU contention*. The copy is queued on FFmpeg's
+/// D3D11 device while the stitch pipeline saturates the DX12 queue on
+/// the same GPU, and a cut-range window boundary (both decoders
+/// respawning, a full-resolution overlay composite running) has been
+/// seen to delay it by tens of seconds on a VRAM-tight card. The
+/// previous limit was a poll *count*, which cannot tell a fast copy from
+/// a stalled one and aborted an hour-long export over what was only a
+/// slow frame. The cap survives solely to turn a genuinely hung GPU into
+/// an error instead of a permanent freeze.
+const STAGING_COPY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Polls to spin before backing off to sleeping in `stage_frame`'s wait.
+///
+/// The normal case completes far inside this, so the fast path never
+/// sleeps. Past it the wait is already pathological, and busy-spinning
+/// then only takes CPU from the decode and encode threads whose progress
+/// the copy is waiting on - while every poll takes the D3D11 device's
+/// multithread-protection lock that those same threads need.
+const STAGING_COPY_SPIN_POLLS: u64 = 10_000;
+
+/// A completed staging copy slower than this is logged, since it is the
+/// early warning for the stall that [`STAGING_COPY_TIMEOUT`] turns fatal.
+const STAGING_COPY_SLOW_WARN: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Double-buffered NV12 staging pool for D3D11VA -> wgpu zero-copy.
 ///
 /// Allocates 4 staging textures (2 per camera, ping-pong) with shared
@@ -396,7 +424,11 @@ impl D3d11StagingPool {
     /// reuse the initialized state.
     ///
     /// Performs `CopySubresourceRegion` (GPU-to-GPU, ~0.2ms) then waits
-    /// for completion via an event query before returning.
+    /// for completion via an event query before returning. The wait is
+    /// bounded by wall-clock time ([`STAGING_COPY_TIMEOUT`]), not by a
+    /// poll count: under GPU contention a healthy copy can take orders
+    /// of magnitude longer than usual, and failing it there costs the
+    /// whole export.
     ///
     /// # Safety
     ///
@@ -460,7 +492,8 @@ impl D3d11StagingPool {
 
             state.context.Flush();
             state.context.End(&state.event_query);
-            let mut spins: u32 = 0;
+            let started = std::time::Instant::now();
+            let mut polls: u64 = 0;
             loop {
                 let mut done: i32 = 0;
                 let hr = (Interface::vtable(&state.context).GetData)(
@@ -475,18 +508,35 @@ impl D3d11StagingPool {
                 }
                 if hr.is_err() {
                     return Err(D3d11InteropError::StagingCopy(format!(
-                        "GetData failed after {spins} polls: HRESULT {:#x}",
+                        "GetData failed after {polls} polls: HRESULT {:#x}",
                         hr.0
                     )));
                 }
-                // S_FALSE: not ready yet
-                spins += 1;
-                if spins > 1_000_000 {
-                    return Err(D3d11InteropError::StagingCopy(
-                        "GetData timed out (>1M polls)".into(),
-                    ));
+                // S_FALSE: not ready yet. Spin while the copy is
+                // plausibly about to land, then wait cheaply - see
+                // STAGING_COPY_SPIN_POLLS.
+                polls += 1;
+                if polls <= STAGING_COPY_SPIN_POLLS {
+                    std::hint::spin_loop();
+                    continue;
                 }
-                std::hint::spin_loop();
+                let elapsed = started.elapsed();
+                if elapsed >= STAGING_COPY_TIMEOUT {
+                    return Err(D3d11InteropError::StagingCopy(format!(
+                        "staging copy for slot {slot} did not complete within {:.1}s \
+                         ({polls} polls); the GPU is saturated or out of VRAM",
+                        elapsed.as_secs_f64()
+                    )));
+                }
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+            let elapsed = started.elapsed();
+            if elapsed > STAGING_COPY_SLOW_WARN {
+                log::warn!(
+                    "D3D11VA staging copy for slot {slot} took {:.2}s ({polls} polls) - \
+                     GPU contention or VRAM pressure",
+                    elapsed.as_secs_f64()
+                );
             }
         }
 

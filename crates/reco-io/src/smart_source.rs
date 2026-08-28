@@ -66,6 +66,9 @@ enum WindowsDecodeState {
             crate::ffmpeg::decoder::D3d11Frame,
             crate::ffmpeg::decoder::D3d11Frame,
         )>,
+        /// Decode + pairing threads, kept so
+        /// [`WindowsZeroCopyState::shutdown_decode`] can wait for them.
+        threads: Vec<std::thread::JoinHandle<()>>,
     },
 }
 
@@ -105,14 +108,47 @@ struct WindowsZeroCopyState {
 impl WindowsZeroCopyState {
     fn ensure_running(&mut self) {
         if matches!(self.decode, WindowsDecodeState::Pending) {
-            let pair_rx = crate::zero_copy::spawn_d3d11_decode_pair(
+            let pipeline = crate::zero_copy::spawn_d3d11_decode_pair(
                 &self.left,
                 &self.right,
                 self.sync_offset,
                 None,
                 self.hw_device.new_ref(),
             );
-            self.decode = WindowsDecodeState::Running { pair_rx };
+            self.decode = WindowsDecodeState::Running {
+                pair_rx: pipeline.frames,
+                threads: pipeline.threads,
+            };
+        }
+    }
+
+    /// Stop the running decode pipeline and wait for its threads to exit.
+    ///
+    /// Dropping the receiver is only the *signal*: the pairing thread
+    /// notices on its next `send()`, and the decode threads only after
+    /// the pairing thread has dropped their receivers on its way out.
+    /// Until that chain completes, the old pipeline still holds its
+    /// D3D11VA decode pool - two 4K texture arrays - so a caller that
+    /// respawns without waiting has both generations resident at once.
+    /// On a VRAM-tight card that is enough to push the driver into
+    /// eviction right as the new decoders allocate, which shows up far
+    /// away as `D3d11StagingPool::stage_frame` timing out on a copy that
+    /// normally takes 0.2 ms.
+    ///
+    /// The wait is bounded: every thread in the chain is either blocked
+    /// on a channel that is being dropped, or one decode away from it.
+    fn shutdown_decode(&mut self) {
+        let WindowsDecodeState::Running { pair_rx, threads } =
+            std::mem::replace(&mut self.decode, WindowsDecodeState::Pending)
+        else {
+            return;
+        };
+        // Frames held here pin slices of the very pool being released,
+        // so let them go before waiting on the pool's owner.
+        self.live_frame_guard = None;
+        drop(pair_rx);
+        for thread in threads {
+            let _ = thread.join();
         }
     }
 
@@ -130,15 +166,21 @@ impl WindowsZeroCopyState {
     /// the reassignment below) signals the old decode threads to exit on
     /// their next `send()` failure, same as `Drop for SmartFileSource`.
     fn seek_to_secs(&mut self, secs: f64) {
-        let pair_rx = crate::zero_copy::spawn_d3d11_decode_pair(
+        // Tear the old pipeline down *first*. Spawning before dropping
+        // overlaps two full decode pools on one device - see
+        // `shutdown_decode`.
+        self.shutdown_decode();
+        let pipeline = crate::zero_copy::spawn_d3d11_decode_pair(
             &self.left,
             &self.right,
             self.sync_offset,
             Some(secs),
             self.hw_device.new_ref(),
         );
-        self.decode = WindowsDecodeState::Running { pair_rx };
-        self.live_frame_guard = None;
+        self.decode = WindowsDecodeState::Running {
+            pair_rx: pipeline.frames,
+            threads: pipeline.threads,
+        };
     }
 }
 
@@ -806,15 +848,12 @@ impl Drop for SmartFileSource {
         // D3D11VA / Metal: dropping the pair receiver breaks the
         // channel, causing decode threads to exit when send() fails.
         // Without this, orphaned decode threads keep the process alive.
+        // `shutdown_decode` also joins them, so their decode pools are
+        // released before the caller frees anything else on the device.
         #[cfg(target_os = "windows")]
-        if let SourceMode::D3d11ZeroCopy(state) = &mut self.mode
-            && let WindowsDecodeState::Running { pair_rx } = &mut state.decode
-        {
-            drop(std::mem::replace(
-                pair_rx,
-                std::sync::mpsc::sync_channel(0).1,
-            ));
-            log::debug!("D3D11VA source dropped, decode threads signalled to exit");
+        if let SourceMode::D3d11ZeroCopy(state) = &mut self.mode {
+            state.shutdown_decode();
+            log::debug!("D3D11VA source dropped, decode threads joined");
         }
         // MetalZeroCopy: the Receiver is owned directly by the enum
         // variant and drops naturally when the mode is replaced.
