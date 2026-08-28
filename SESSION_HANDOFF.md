@@ -226,6 +226,59 @@ is the test.
 not a confirmed one. Fix 1 makes the next occurrence survivable and the
 new warning will show whether copies are merely slow or genuinely stuck.
 
+### 8. Audio now follows the cut ranges across a chained (multi-file) source
+
+**The gap:** every export of a segmented DJI recording with cut ranges
+logged `Cut ranges requested with a chained (multi-file) audio source -
+not supported yet, audio will NOT exclude the cut ranges`. Video jumped
+the cuts, audio read straight through, so sound drifted further out of
+sync after every cut. On the 65-minute export with 3 cuts that is ~13
+minutes of drift by the end.
+
+**Why it was hard:** `audio_cut_windows` and `audio_start_time` are on
+the *concatenated* timeline (what the concat demuxer gives the video
+side), while each segment file's own packet timestamps restart near
+zero. The old code compared one against the other, which is only correct
+inside the first segment.
+
+**Fix** (`ffmpeg/encoder.rs`): a virtual timeline.
+- `AudioSegment { path, start_secs }` + `probe_audio_segments` lay the
+  chain out from the per-file container durations - the same durations
+  `adapters` sums for the video side, so both clocks agree.
+- `segment_index_for` resolves any virtual position to its segment.
+- `AudioPassthrough` carries `segments` / `segment_index` /
+  `segment_start_pts`; every packet's position is `raw +
+  segment_start_pts`, so all three comparisons (start trim, window end,
+  post-seek discard) happen in the same space.
+- A cut jump now opens the segment the target lives in (`open_segment`)
+  and seeks within it on that file's own clock.
+- `first_segment` is gone, replaced by `start_segment_index` +
+  `start_trim_done`: setup opens the segment the start time falls in
+  rather than always the first, which also fixes a start time past
+  segment 1 landing on the wrong content (the old code read and
+  discarded all of file 1, then spliced file 2 in from its beginning).
+- Only remaining fallback: a chain whose durations can't be probed.
+
+**Verified end to end, not just compiled.** Release CLI, real footage,
+`--start-time 990 --cut-range 1004.6:1268.3 --max-frames 900` over two
+chained segments - the jump target (1268.8s virtual) is in segment 2,
+the exact case that was broken:
+- Log: `seeking to 45.718s in segment 1 (1268.801s on the chained
+  timeline)`. 1268.801 - 1223.083 = 45.718, correct.
+- Cross-correlated the output's audio against the two source spans
+  (`D:\CLAUDE\audio_cut_test`): window 1 r=0.913, window 2 r=0.971,
+  both aligned within 7ms of ideal. Against the *wrong* span (what the
+  old passthrough produced) r=0.024 / 0.078, i.e. noise.
+- Control run without `--cut-range`: r=0.973 at the same 6ms offset, so
+  the plain path is unchanged.
+- Unit tests for `segment_index_for` and `probe_audio_segments`.
+- `matroska_reader_sees_partial_writes` fails, but it fails identically
+  with these two files reverted - pre-existing, unrelated.
+
+**Still open:** `reco-gui.exe` could not be rebuilt (the running GUI
+holds the file). `target/release/reco.exe` has the fix; rebuild the GUI
+once it is closed.
+
 ## OPEN TASKS - do these next
 
 ### 0. IMU orientation: investigation PAUSED after 6 rounds - needs one more test recording

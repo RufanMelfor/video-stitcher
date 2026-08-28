@@ -450,12 +450,17 @@ pub struct EncoderConfig {
     ///
     /// Empty (the default) disables this entirely and falls back to a
     /// single linear read from `audio_start_time` - unchanged behavior
-    /// for every caller that doesn't set cut ranges. Only honored when
-    /// `audio_source` has exactly one file: a chained (multi-file)
-    /// audio source combined with cut ranges isn't supported yet (see
-    /// `StitchJob::cut_ranges`'s doc comment) - falls back to plain
-    /// passthrough with a logged warning rather than silently
-    /// misbehaving.
+    /// for every caller that doesn't set cut ranges.
+    ///
+    /// A chained (multi-file) `audio_source` is supported: the seconds
+    /// here are on the *concatenated* timeline, the same space the
+    /// video side's windows use, and each segment's own packet clock is
+    /// mapped onto it from the per-file container durations (see
+    /// `probe_audio_segments`). A window may therefore span a segment
+    /// boundary, and a jump may land in a different segment than the
+    /// one being read. The only case that still falls back to plain
+    /// passthrough is a chain whose durations can't be probed, which
+    /// would make every offset after the missing one a guess.
     pub audio_cut_windows: Vec<(f64, Option<f64>)>,
     /// Extra silent gap (seconds) to insert at each `audio_cut_windows`
     /// boundary, in the same order `audio_cut_windows`' internal
@@ -560,6 +565,59 @@ struct SilentAudio {
     sample_rate: u32,
 }
 
+/// One chained audio segment and where it sits on the virtual timeline.
+///
+/// A chained recording is played back-to-back, so every position the
+/// caller hands the encoder (`audio_start_time`, `audio_cut_windows`) is
+/// in that concatenated space, while each file's own packet timestamps
+/// restart near zero. `start_secs` is what bridges the two.
+struct AudioSegment {
+    path: std::path::PathBuf,
+    /// Virtual-timeline second this segment's own timestamp zero maps to.
+    start_secs: f64,
+}
+
+/// Lay out `sources` on the virtual timeline from their container
+/// durations - the same per-file durations `adapters`' own probe sums
+/// for the video side, so both clocks agree on where a segment boundary
+/// falls.
+///
+/// Returns `None` if any segment before the last has no usable duration:
+/// every offset after that point would be a guess, and a guessed offset
+/// puts audio in the wrong place rather than merely losing a feature.
+/// The last segment's duration is never needed (nothing follows it), so
+/// a single-file source always succeeds.
+fn probe_audio_segments(sources: &[std::path::PathBuf]) -> Option<Vec<AudioSegment>> {
+    let mut segments = Vec::with_capacity(sources.len());
+    let mut start_secs = 0.0f64;
+    for (i, path) in sources.iter().enumerate() {
+        segments.push(AudioSegment {
+            path: path.clone(),
+            start_secs,
+        });
+        if i + 1 == sources.len() {
+            break;
+        }
+        let duration = format::input(path).ok().map(|ictx| ictx.duration())?;
+        if duration <= 0 {
+            return None;
+        }
+        start_secs += duration as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE);
+    }
+    Some(segments)
+}
+
+/// Index of the segment containing `secs` on the virtual timeline - the
+/// last one that starts at or before it. Clamps to the final segment for
+/// a position past the end of the chain, which is what a caller asking
+/// to read "to the end" means anyway.
+fn segment_index_for(segments: &[AudioSegment], secs: f64) -> usize {
+    segments
+        .iter()
+        .rposition(|seg| seg.start_secs <= secs)
+        .unwrap_or(0)
+}
+
 /// State for copying audio from one or more input files to the output.
 ///
 /// For a chained recording the segments are copied back-to-back: when the
@@ -580,8 +638,16 @@ struct AudioPassthrough {
     start_time_secs: f64,
     /// Whether all segments have been read.
     exhausted: bool,
-    /// Remaining chained segments to copy after the current one ends.
-    remaining_segments: std::collections::VecDeque<std::path::PathBuf>,
+    /// Every chained segment with its position on the virtual timeline.
+    segments: Vec<AudioSegment>,
+    /// Index into [`Self::segments`] of the currently open file.
+    segment_index: usize,
+    /// `segments[segment_index].start_secs` in output ticks, cached
+    /// because every packet is compared against it: a packet's own
+    /// timestamp is file-relative, and adding this puts it on the
+    /// virtual timeline that `start_time_secs`, `current_end_secs` and
+    /// `pending_seek_target_secs` all live on.
+    segment_start_pts: i64,
     /// Output-timebase shift added to the current segment's timestamps so
     /// audio is continuous across chained segments. Recomputed per segment
     /// from its first packet (segments may not start at timestamp 0 - AAC
@@ -593,8 +659,13 @@ struct AudioPassthrough {
     /// When set, the next packet read is the first of a freshly opened segment;
     /// its timestamp is rebased so the segment starts at this output position.
     pending_start: Option<i64>,
-    /// True only while copying the first segment (start-time trim applies there).
-    first_segment: bool,
+    /// Index of the segment `start_time_secs` falls in - the only one
+    /// the start-time trim applies to. Segments before it are read and
+    /// discarded whole; segments after it start already trimmed.
+    start_segment_index: usize,
+    /// Cleared once a packet at or past `start_time_secs` has been seen
+    /// (or immediately, when there is no start-time trim to do).
+    start_trim_done: bool,
     /// Source-seconds boundary (same space as `start_time_secs`) where the
     /// *currently active* window ends - a cut range starts here. `None`
     /// means "no cut-range boundary in this window", i.e. read to EOF /
@@ -621,7 +692,7 @@ struct AudioPassthrough {
     /// stream ffmpeg picks internally - usually video's keyframe
     /// spacing (roughly a GOP, potentially ~1s) rather than anything
     /// audio-sample-accurate. Packets are discarded (same idea as the
-    /// `first_segment`/`start_time_secs` trim above) until one reaches
+    /// `start_time_secs` trim above) until one reaches
     /// this real target, THEN `pending_start` rebases it - without this,
     /// the rebase anchor would be whatever the seek happened to land on,
     /// silently including up to ~1s of content that was supposed to be
@@ -996,34 +1067,57 @@ impl VideoEncoder {
         cut_windows: &[(f64, Option<f64>)],
         pause_overlay_hold_secs: &[f32],
     ) -> Result<Option<AudioPassthrough>, EncodeError> {
-        let Some((source_path, rest)) = sources.split_first() else {
+        if sources.is_empty() {
             return Ok(None);
-        };
-        let mut ictx = format::input(source_path)?;
+        }
         let start_time_secs = sanitize_audio_start_time(start_time_secs);
+
+        // Map the chain onto one virtual timeline, so a window boundary
+        // can sit anywhere in it rather than only inside the first file.
+        // Without the durations that mapping is unknowable, so cut
+        // ranges are dropped rather than applied to wrong positions -
+        // see `probe_audio_segments`.
+        let probed = probe_audio_segments(sources);
+        if probed.is_none() && !cut_windows.is_empty() {
+            log::warn!(
+                "Cut ranges requested with a chained ({} segments) audio source whose \
+                 segment durations could not be probed - audio will NOT exclude the cut \
+                 ranges (video still does, so audio will drift out of sync across each \
+                 cut). See EncoderConfig::audio_cut_windows's doc comment.",
+                sources.len(),
+            );
+        }
+        let cut_windows: &[(f64, Option<f64>)] = if probed.is_some() { cut_windows } else { &[] };
+        let segments = probed.unwrap_or_else(|| {
+            // Degraded mode: every segment claims virtual zero, so each
+            // file's packets compare against their own clock exactly as
+            // they did before this timeline existed. Safe only because
+            // cut windows are disabled above in that case.
+            sources
+                .iter()
+                .map(|path| AudioSegment {
+                    path: path.clone(),
+                    start_secs: 0.0,
+                })
+                .collect()
+        });
+
+        // Open the segment the start time falls in, not blindly the
+        // first: with a chain, a start past the first segment's end
+        // would otherwise read a whole file only to discard all of it
+        // and then splice the *next* segment in from its own beginning,
+        // i.e. audio starting on the wrong content.
+        let start_segment_index = segment_index_for(&segments, start_time_secs);
+        let source_path = segments[start_segment_index].path.clone();
+        let segment_start_secs = segments[start_segment_index].start_secs;
+        let mut ictx = format::input(&source_path)?;
 
         // The first window's own start was already reached by the seek
         // below (both come from the same `start_secs` in `StitchJob`);
         // only its END boundary (where the cut range starts) and any
-        // later windows are new state to track here. Chained (multi-file)
-        // audio + cut ranges isn't supported yet - falls back to plain
-        // passthrough with a loud warning rather than silently producing
-        // misaligned audio. See `EncoderConfig::audio_cut_windows`'s doc.
+        // later windows are new state to track here.
         let (current_end_secs, remaining_windows, remaining_pause_holds) = if cut_windows.is_empty()
         {
-            (
-                None,
-                std::collections::VecDeque::new(),
-                std::collections::VecDeque::new(),
-            )
-        } else if !rest.is_empty() {
-            log::warn!(
-                "Cut ranges requested with a chained (multi-file) audio source \
-                 ({} segments) - not supported yet, audio will NOT exclude the cut \
-                 ranges (video still does, so audio will drift out of sync across \
-                 each cut). See EncoderConfig::audio_cut_windows's doc comment.",
-                sources.len(),
-            );
             (
                 None,
                 std::collections::VecDeque::new(),
@@ -1066,18 +1160,23 @@ impl VideoEncoder {
         let output_stream_index = ost.index();
         let output_time_base = ost.time_base();
 
-        if start_time_secs > 0.0 {
-            let seek_ts = (start_time_secs * f64::from(ffmpeg::ffi::AV_TIME_BASE)).round() as i64;
+        // Seek within the opened segment, so the target has to come off
+        // that file's own clock - `start_time_secs` is on the virtual
+        // one and only matches for the first segment of a chain.
+        let seek_secs = start_time_secs - segment_start_secs;
+        if seek_secs > 0.0 {
+            let seek_ts = (seek_secs * f64::from(ffmpeg::ffi::AV_TIME_BASE)).round() as i64;
             match ictx.seek(seek_ts, ..seek_ts) {
                 Ok(()) => {
                     log::info!(
-                        "Audio passthrough: seeking {} to {start_time_secs:.3}s",
+                        "Audio passthrough: seeking {} to {seek_secs:.3}s \
+                         ({start_time_secs:.3}s on the chained timeline)",
                         source_path.display()
                     );
                 }
                 Err(e) => {
                     log::warn!(
-                        "Audio passthrough seek to {start_time_secs:.3}s failed for {} ({e}); \
+                        "Audio passthrough seek to {seek_secs:.3}s failed for {} ({e}); \
                          falling back to packet filtering from the beginning",
                         source_path.display()
                     );
@@ -1102,11 +1201,14 @@ impl VideoEncoder {
             output_time_base,
             start_time_secs,
             exhausted: false,
-            remaining_segments: rest.iter().cloned().collect(),
+            segment_start_pts: seconds_to_pts(segment_start_secs, output_time_base),
+            segments,
+            segment_index: start_segment_index,
             segment_offset: 0,
             next_offset: 0,
             pending_start: None,
-            first_segment: true,
+            start_segment_index,
+            start_trim_done: start_time_secs <= 0.0,
             current_end_secs,
             remaining_windows,
             remaining_pause_holds,
@@ -1115,31 +1217,56 @@ impl VideoEncoder {
         }))
     }
 
+    /// Open segment `index` for audio copy.
+    ///
+    /// Only touches which file is being read - the output timeline
+    /// (`segment_offset`, `pending_start`, ...) is the caller's to set,
+    /// because the two callers want opposite things: a chained
+    /// continuation splices gaplessly onto what is already written,
+    /// while a cut-range jump has to discard down to its real target
+    /// first. Returns `false` for a segment with no audio stream.
+    fn open_segment(audio: &mut AudioPassthrough, index: usize) -> Result<bool, EncodeError> {
+        let segment = &audio.segments[index];
+        let ictx = format::input(&segment.path)?;
+        let Some(stream) = ictx.streams().best(ffmpeg::media::Type::Audio) else {
+            log::warn!(
+                "Chained audio: {} has no audio stream",
+                segment.path.display()
+            );
+            return Ok(false);
+        };
+        audio.input_stream_index = stream.index();
+        audio.input_time_base = stream.time_base();
+        audio.ictx = ictx;
+        audio.segment_index = index;
+        audio.segment_start_pts = seconds_to_pts(segment.start_secs, audio.output_time_base);
+        // The start-time trim belongs to exactly one segment; leaving
+        // any other one means it is done, whether it was reached by
+        // reading forward or jumped over entirely.
+        if index != audio.start_segment_index {
+            audio.start_trim_done = true;
+        }
+        Ok(true)
+    }
+
     /// Open the next chained segment for audio copy, continuing the timeline.
     ///
     /// Skips segments with no audio stream. Returns `false` when none remain.
     fn advance_segment(audio: &mut AudioPassthrough) -> Result<bool, EncodeError> {
         loop {
-            let Some(next) = audio.remaining_segments.pop_front() else {
+            let next = audio.segment_index + 1;
+            if next >= audio.segments.len() {
                 return Ok(false);
-            };
-            let ictx = format::input(&next)?;
-            let Some(stream) = ictx.streams().best(ffmpeg::media::Type::Audio) else {
-                log::warn!(
-                    "Chained audio: {} has no audio stream, skipping",
-                    next.display()
-                );
+            }
+            let path = audio.segments[next].path.clone();
+            if !Self::open_segment(audio, next)? {
                 continue;
-            };
-            audio.input_stream_index = stream.index();
-            audio.input_time_base = stream.time_base();
-            audio.ictx = ictx;
+            }
             // Rebase from this segment's first packet (computed in the loop).
             audio.pending_start = Some(audio.next_offset);
-            audio.first_segment = false;
             log::info!(
                 "Chained audio: continuing from {} at +{:.2}s",
-                next.display(),
+                path.display(),
                 audio.next_offset as f64 * f64::from(audio.output_time_base),
             );
             return Ok(true);
@@ -1242,29 +1369,36 @@ impl VideoEncoder {
                     packet.set_stream(audio.output_stream_index);
                     packet.rescale_ts(audio.input_time_base, audio.output_time_base);
 
-                    // Raw position in the CURRENT window's own file-relative
-                    // timeline - i.e. before any segment_offset rebase, same
-                    // space as start_pts/current_end_secs. Used by both the
-                    // start-trim check below and the cut-range boundary
-                    // check right after it.
+                    // Position on the VIRTUAL (chained) timeline - the
+                    // packet's own file-relative timestamp plus where
+                    // its segment starts. That is the space
+                    // `start_pts`, `current_end_secs` and
+                    // `pending_seek_target_secs` are all expressed in;
+                    // comparing a raw timestamp against them would be
+                    // right only for the first segment of a chain.
+                    // Still before any `segment_offset` rebase, which
+                    // is about the OUTPUT timeline, not the source one.
                     let packet_start = match (packet.pts(), packet.dts()) {
                         (Some(pts), Some(dts)) => Some(pts.min(dts)),
                         (Some(pts), None) => Some(pts),
                         (None, Some(dts)) => Some(dts),
                         (None, None) => None,
-                    };
+                    }
+                    .map(|ts| ts + audio.segment_start_pts);
 
-                    // The start-time trim applies to the first segment only.
-                    if audio.first_segment && start_pts > 0 {
+                    // The start-time trim: discard until the requested
+                    // start, then anchor output zero on the start
+                    // itself rather than on this packet, so the few ms
+                    // between them are preserved instead of pulling
+                    // audio early. Applied through `segment_offset`
+                    // below, which every later packet of this segment
+                    // then gets for free.
+                    if !audio.start_trim_done {
                         if packet_start.is_some_and(|ts| ts < start_pts) {
                             continue;
                         }
-                        if let Some(pts) = packet.pts() {
-                            packet.set_pts(Some(pts - start_pts));
-                        }
-                        if let Some(dts) = packet.dts() {
-                            packet.set_dts(Some(dts - start_pts));
-                        }
+                        audio.start_trim_done = true;
+                        audio.segment_offset = audio.segment_start_pts - start_pts;
                     }
 
                     // Cut-range boundary: this packet has reached the end of
@@ -1283,13 +1417,35 @@ impl VideoEncoder {
                                 audio.exhausted = true;
                                 break;
                             };
-                            let seek_ts =
-                                (seek_secs * f64::from(ffmpeg::ffi::AV_TIME_BASE)).round() as i64;
+                            // The jump target is on the virtual
+                            // timeline and may well be in a different
+                            // segment than the one being read; open
+                            // that one first, then seek within it on
+                            // its own clock.
+                            let target_index = segment_index_for(&audio.segments, seek_secs);
+                            if target_index != audio.segment_index
+                                && !Self::open_segment(audio, target_index)?
+                            {
+                                log::error!(
+                                    "Audio passthrough: segment {target_index} has no audio \
+                                     stream, stopping audio at this cut rather than \
+                                     continuing out of sync"
+                                );
+                                audio.exhausted = true;
+                                break;
+                            }
+                            let in_segment_secs =
+                                seek_secs - audio.segments[audio.segment_index].start_secs;
+                            let seek_ts = (in_segment_secs * f64::from(ffmpeg::ffi::AV_TIME_BASE))
+                                .round() as i64;
                             match audio.ictx.seek(seek_ts, ..seek_ts) {
                                 Ok(()) => {
                                     log::info!(
                                         "Audio passthrough: cut range reached, seeking to \
-                                         {seek_secs:.3}s for the next keep window"
+                                         {in_segment_secs:.3}s in segment \
+                                         {} ({seek_secs:.3}s on the chained timeline) for the \
+                                         next keep window",
+                                        audio.segment_index,
                                     );
                                     // Don't rebase off whatever packet the
                                     // seek happens to land on - it can be
@@ -1298,19 +1454,21 @@ impl VideoEncoder {
                                     // other than audio). Discard until a
                                     // packet actually reaches it instead
                                     // (checked below, mirrors the
-                                    // first_segment trim above).
+                                    // start-time trim above).
                                     audio.pending_seek_target_secs = Some(seek_secs);
                                     audio.current_end_secs = next_end;
-                                    audio.first_segment = false;
+                                    audio.start_trim_done = true;
                                     audio.pending_pause_hold_secs =
                                         audio.remaining_pause_holds.pop_front().unwrap_or(0.0);
                                     continue;
                                 }
                                 Err(e) => {
                                     log::error!(
-                                        "Audio passthrough: seek to {seek_secs:.3}s failed ({e}) \
-                                         while jumping past a cut range - stopping audio here \
-                                         rather than risk misaligned content"
+                                        "Audio passthrough: seek to {in_segment_secs:.3}s in \
+                                         segment {} failed ({e}) while jumping past a cut \
+                                         range - stopping audio here rather than risk \
+                                         misaligned content",
+                                        audio.segment_index,
                                     );
                                     audio.exhausted = true;
                                     break;
@@ -2150,6 +2308,51 @@ fn build_encoder_opts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn segments_at(starts: &[f64]) -> Vec<AudioSegment> {
+        starts
+            .iter()
+            .enumerate()
+            .map(|(i, start_secs)| AudioSegment {
+                path: std::path::PathBuf::from(format!("seg{i}.mp4")),
+                start_secs: *start_secs,
+            })
+            .collect()
+    }
+
+    /// A position on the chained timeline has to resolve to the segment
+    /// actually containing it - this is what lets a cut-range jump or a
+    /// start time land in the right file instead of always the first.
+    #[test]
+    fn segment_index_for_resolves_a_position_to_its_segment() {
+        let segments = segments_at(&[0.0, 1000.0, 2000.0, 3000.0]);
+        assert_eq!(segment_index_for(&segments, 0.0), 0);
+        assert_eq!(segment_index_for(&segments, 999.9), 0);
+        // A boundary belongs to the segment it starts, not the one it ends.
+        assert_eq!(segment_index_for(&segments, 1000.0), 1);
+        assert_eq!(segment_index_for(&segments, 2500.0), 2);
+        // Past the end of the chain clamps to the last segment, which is
+        // what "read to the end" means anyway.
+        assert_eq!(segment_index_for(&segments, 99_999.0), 3);
+    }
+
+    /// A single-file source is the common case and must never need a
+    /// probe: nothing follows it, so its duration is never used.
+    /// A missing duration anywhere else has to fail the whole mapping
+    /// rather than silently place later segments at a guessed offset.
+    #[test]
+    fn probe_audio_segments_needs_durations_only_where_an_offset_depends_on_them() {
+        let missing = std::path::PathBuf::from("no-such-file-here.mp4");
+        let single = probe_audio_segments(std::slice::from_ref(&missing))
+            .expect("a single segment needs no duration");
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].start_secs, 0.0);
+
+        assert!(
+            probe_audio_segments(&[missing.clone(), missing]).is_none(),
+            "an unprobeable segment before the last must abandon the mapping"
+        );
+    }
 
     /// Only a positive, finite start time should shift audio; anything else
     /// (default exports, garbage values) must leave the soundtrack untouched.
