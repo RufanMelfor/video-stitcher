@@ -20,6 +20,52 @@ No usernames/passwords/IP addresses in this file, ever (see
 `SESSION_HANDOFF.md`'s standing rule) - reference "see password
 manager" instead.
 
+## Publishing yolo26s_v4_imgsz1920 to Hugging Face (2026-08-28)
+
+User asked what it takes to share the trained model on their Hugging
+Face account. Prepared, not yet uploaded - staged in
+`D:\VOETBAL_VIDEO\RECO\training\hf_upload\reco-yolo26s-football\`
+(`best.pt`, `best.onnx`, `README.md`).
+
+**License: AGPL-3.0, and this is not a judgement call.** The checkpoint
+carries Ultralytics' own field verbatim -
+`license: AGPL-3.0 (https://ultralytics.com/license)` - and the ONNX
+repeats it. It is a fine-tune of stock `yolo26s.pt` (`args.yaml`:
+`model: yolo26s.pt`, `pretrained: true`) trained with the AGPL-3.0
+ultralytics package, so the weights go out under the same terms. reco is
+AGPL-3.0 too, so nothing conflicts.
+
+**Privacy: weights only, never the dataset.** The images are amateur
+youth football (minors). Also worth knowing: a run folder's
+`train_batch*.jpg` / `val_batch*_labels.jpg` are real training frames
+with recognisable children - they are NOT publishable, only `weights/`
+is.
+
+**Local paths leak by default.** Ultralytics stores absolute paths in
+three places in a `.pt` (`train_args.data`, `train_args.project`,
+`model.args.save_dir` - the last one holds the full run directory) and
+once more in an ONNX's `description` metadata ("... trained on
+D:\VOETBAL_VIDEO\..."). On a default Windows install that also exposes
+the account name. New tool for this:
+`scripts/strip_ultralytics_local_paths.py` (handles both formats,
+rewrites each path to its basename, and refuses to write if its own
+recursive sweep still finds one). Verified: predictions from the cleaned
+files are bit-identical - 48 detections compared across 5 val images at
+`imgsz=1920`, max box difference 0.000000 px, max confidence difference
+0.000000, max weight difference 0, and the ONNX outputs match to 0.0 on
+a fixed random input.
+
+**Label provenance to disclose:** pre-labels came from
+`Adit-jain/soccana` (itself a YOLO11 fine-tune), which lists **no
+license** on its HF page - checked 2026-08-28. Human-corrected
+afterwards, but credit it in the model card, and it is one more reason
+not to publish the dataset.
+
+**Not done yet:** the actual upload. The HF VS Code extension the user
+installed (`huggingface.huggingface-vscode-chat`) is a Copilot Chat
+provider and cannot upload models; use `hf auth login` + `hf upload`, or
+the web UI.
+
 ## Goal
 
 Better ball detection for `reco-autocam` (currently the weakest class -
