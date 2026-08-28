@@ -61,6 +61,41 @@ license** on its HF page - checked 2026-08-28. Human-corrected
 afterwards, but credit it in the model card, and it is one more reason
 not to publish the dataset.
 
+**Which checkpoint - corrected mid-session.** First staged
+`round4/runs/yolo26s_v4_imgsz1920` on the strength of this file's own
+"not shipping either new checkpoint" verdict. **That verdict is now out
+of date.** The user has been running
+`merged_v1_tiled_1920/runs/full_patience100/weights/best.onnx` across
+multiple real matches since and reports it works well - confirmed in
+`reco-gui.log`, where the 2026-08-28 full-match export loaded exactly
+that file. Their field experience over full matches outweighs the single
+30-second regression clip, so the merged tiled checkpoint is what gets
+published.
+
+**Corrected a wrong claim while doing so:** this file says the tiled
+checkpoint "needs tiled L/R inference (doesn't exist in production
+yet)". It does not. `reco-detect`/`reco-autocam` contain no tiling at
+all - the model is fed the whole panorama in a single pass, letterboxed
+to 1920x1920, and that is how the user has been running it. Tiling was
+a *training-data* decision, never an inference requirement. Do not
+repeat the old claim.
+
+Per-class val of that checkpoint (120 held-out tiles, measured fresh
+rather than taken from the training log):
+
+```
+class      P       R      mAP50   mAP50-95
+all      0.883   0.817   0.865    0.648
+person   0.956   0.929   0.965    0.730
+ball     0.844   0.612   0.724    0.500
+referee  0.849   0.910   0.905    0.713
+```
+
+Ball recall 0.612 here vs round4's 0.444 is **not** a like-for-like
+comparison - this val set is tiles, where the ball covers relatively
+more pixels than in a full letterboxed panorama. The model card says so
+explicitly.
+
 **Not done yet:** the actual upload. The HF VS Code extension the user
 installed (`huggingface.huggingface-vscode-chat`) is a Copilot Chat
 provider and cannot upload models; use `hf auth login` + `hf upload`, or
