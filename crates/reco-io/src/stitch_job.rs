@@ -453,10 +453,11 @@ impl StitchJob {
     /// autocam panner/trackers are reset at each window boundary so
     /// they react to fresh data instead of smoothing/coasting across a
     /// gap. Audio: excluded ranges are skipped from the passthrough
-    /// track too, rebased so it stays gapless (single, non-chained
-    /// audio source only in this first version - a chained/multi-file
-    /// audio source combined with cut ranges falls back to plain
-    /// passthrough with a logged warning).
+    /// track too, rebased so it stays gapless. A chained/multi-file
+    /// audio source works as well: the windows are mapped onto each
+    /// segment's own clock from the per-file durations, so a window may
+    /// span a segment boundary and a jump may land in another segment
+    /// (see [`crate::ffmpeg::encoder::EncoderConfig::audio_cut_windows`]).
     ///
     /// [`Self::run`] returns an error if any range is invalid
     /// (non-finite, negative, zero/negative duration) or if two ranges
