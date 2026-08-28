@@ -306,12 +306,15 @@ fn spawn_d3d11_decode_thread_shared(
     label: &'static str,
     shared_device: crate::ffmpeg::decoder::SharedHwDevice,
     start_secs: Option<f64>,
-) -> std::sync::mpsc::Receiver<crate::ffmpeg::decoder::D3d11Frame> {
+) -> (
+    std::sync::mpsc::Receiver<crate::ffmpeg::decoder::D3d11Frame>,
+    std::thread::JoinHandle<()>,
+) {
     use crate::ffmpeg::decoder::{D3d11Frame, VideoDecoder};
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<D3d11Frame>(4);
 
-    std::thread::Builder::new()
+    let handle = std::thread::Builder::new()
         .name(format!("d3d11_decode_{label}"))
         .spawn(move || {
             let mut dec = match VideoDecoder::open_input_with_shared_device(&input, &shared_device)
@@ -383,7 +386,30 @@ fn spawn_d3d11_decode_thread_shared(
         })
         .expect("spawn D3D11VA decode thread");
 
-    rx
+    (rx, handle)
+}
+
+/// A running D3D11VA decode pipeline.
+///
+/// Bundles the paired-frame receiver with the handles of the three
+/// threads behind it, so a caller that replaces the pipeline (a
+/// mid-stream seek) can wait for the old one to actually be gone before
+/// the new one allocates. Without the handles, teardown is only
+/// *signalled* by dropping `frames` and the two generations' decode
+/// pools - two 4K D3D11VA texture arrays each - overlap for as long as
+/// the old threads take to notice, which on a VRAM-tight card is enough
+/// to stall the staging copy that reads from them.
+#[cfg(target_os = "windows")]
+pub struct D3d11DecodePipeline {
+    /// Paired frames, left and right, in decode order.
+    pub frames: std::sync::mpsc::Receiver<(
+        crate::ffmpeg::decoder::D3d11Frame,
+        crate::ffmpeg::decoder::D3d11Frame,
+    )>,
+    /// Pairing thread first, then the two decode threads - join order.
+    /// The decode threads only exit once the pairing thread has dropped
+    /// their receivers, which it does on its way out.
+    pub threads: Vec<std::thread::JoinHandle<()>>,
 }
 
 /// Spawn paired D3D11VA decode threads and return the pair receiver.
@@ -418,15 +444,12 @@ pub fn spawn_d3d11_decode_pair(
     sync_offset: i64,
     start_secs: Option<f64>,
     shared_device: crate::ffmpeg::decoder::SharedHwDevice,
-) -> std::sync::mpsc::Receiver<(
-    crate::ffmpeg::decoder::D3d11Frame,
-    crate::ffmpeg::decoder::D3d11Frame,
-)> {
+) -> D3d11DecodePipeline {
     use crate::ffmpeg::decoder::D3d11Frame;
 
-    let left_rx =
+    let (left_rx, left_thread) =
         spawn_d3d11_decode_thread_shared(left.clone(), "left", shared_device.new_ref(), start_secs);
-    let right_rx = spawn_d3d11_decode_thread_shared(
+    let (right_rx, right_thread) = spawn_d3d11_decode_thread_shared(
         right.clone(),
         "right",
         shared_device.new_ref(),
@@ -434,7 +457,7 @@ pub fn spawn_d3d11_decode_pair(
     );
 
     let (pair_tx, pair_rx) = std::sync::mpsc::sync_channel::<(D3d11Frame, D3d11Frame)>(4);
-    std::thread::Builder::new()
+    let pair_thread = std::thread::Builder::new()
         .name("d3d11_pair".into())
         .spawn(move || {
             if sync_offset > 0 {
@@ -462,5 +485,8 @@ pub fn spawn_d3d11_decode_pair(
         })
         .expect("spawn D3D11VA pairing thread");
 
-    pair_rx
+    D3d11DecodePipeline {
+        frames: pair_rx,
+        threads: vec![pair_thread, left_thread, right_thread],
+    }
 }

@@ -1,6 +1,284 @@
-# Session handoff - 2026-08-27 (TGR_PC): auto color match works under hardware decode; UI fixes (resize grip, collapsible cards, floating help); a from-scratch calibration re-investigation plus a shipped IMU-orientation fix
+# Session handoff - 2026-08-28 (TGR_PC): auto color match fixed on the lookahead export path; IMU investigation rounds 3-6 (measured, then refuted); Match Logger clock; several GUI changes
+
+## REPO STATE AT END OF SESSION (2026-08-28, before a PC restart)
+
+- Branch `main`, **265 unpushed commits** (normal for this working repo).
+- **Everything below is UNCOMMITTED in the working tree.** `git fsck
+  --full` clean (only dangling blobs, which are harmless) - checked
+  before the restart per the known loose-object corruption risk on this
+  machine.
+- Modified: `Cargo.lock`, `SESSION_HANDOFF.md`,
+  `crates/reco-calibrate/FRICTION.md`,
+  `crates/reco-core/src/render/pipeline.rs`,
+  `crates/reco-core/src/session/frame_processing.rs`,
+  `crates/reco-core/src/session/vram_pool.rs`,
+  `crates/reco-core/src/stitch/executor.rs`,
+  `crates/reco-core/src/interop/d3d11.rs`,
+  `crates/reco-io/src/{smart_source.rs,zero_copy.rs}`,
+  `crates/reco-gui/{Cargo.toml,build.rs,src/main.rs,ui/main.slint}`,
+  `scripts/match-logger/Match Logger.html`.
+- New/untracked: four `crates/reco-calibrate/examples/*.rs` IMU
+  diagnostics, `crates/reco-gui/assets/` + `crates/reco-gui/ui/assets/`
+  (app icon), `scripts/match-logger/Match Logger.html.txt` (a stray
+  copy that was already there, not written this session).
+- Binaries: **release rebuilt 17:20** (`--features tensorrt`) with the
+  cut-boundary fixes in item 7 below - it also picked up the "Advanced
+  panner expanded" change. The **debug build (15:26) is stale**: it
+  predates both. Rebuild it before testing anything in debug.
+
+## IN THE TREE, NOT YET IN A BUILT BINARY
+
+Nothing - the 17:20 release build covers the whole tree. (The 15:53
+build did not; the "Advanced panner" section now starting expanded,
+`ui/main.slint`'s `panner-advanced`, landed after it. User's request:
+it holds the settings actually being tuned per match, so collapsing it
+by default just costs a click every session.)
+
+## DONE THIS SESSION (2026-08-28)
+
+### 1. Auto color match was dead in exports again - root-caused and fixed
+
+**User report:** preview showed correct color matching, the exported
+file did not. Same symptom as the original hardware-decode bug that was
+fixed 2026-08-27, but that fix was verified and is genuinely in place.
+
+**Root cause:** the 08-27 fix put `gather_band_samples` in
+`StitchPipeline::render_imported_views` (the *immediate* D3D11VA path).
+Windows' `D3d11Resident` handling in
+`session/frame_processing.rs` has **two** branches: immediate, and a
+buffered one taken whenever lookahead/AI tracking is on
+(`current_vram_slot` set, `run_loop.rs`). The buffered branch renders
+via `render_with_bind_groups` from the VRAM pool - bind groups cannot
+be sampled, so the gather never ran and the correction stayed identity.
+The preview uses the immediate path, hence the asymmetry the user saw.
+Confirmed against their export log (`Lookahead bit depth: Reduced8Bit`,
+`AI tracking: active`).
+
+**Fix:**
+- `VramPool` now also keeps per-slot plane views (built once at pool
+  construction, not per frame) + a `plane_views()` accessor.
+- New `StitchPipeline::render_with_bind_groups_measured()` - gathers,
+  then renders. The plain `render_with_bind_groups` is kept but its doc
+  comment now states explicitly that it does not measure.
+- Both buffered paths (Windows `D3d11Resident`, Linux
+  `render_gpu_resident`) switched to the measuring variant. The Linux
+  one had the identical bug and was fixed in the same pass, untested
+  (no Linux here).
+
+**Test:** `the_buffered_bind_group_path_measures_the_seam_band`
+(`stitch/executor.rs`, `#[cfg(feature = "gpu")]`) asserts *both* halves:
+the plain form stays identity, the measured form produces a real
+correction. **Mutation-checked** - the gather was temporarily removed
+and the test failed with `got [0.0, 0.0, 0.0]`, then restored, so it is
+not vacuous.
+
+**Known gap, deliberately not covered:** the test exercises the pipeline
+methods, not `frame_processing`'s choice between them - that would need
+a full session with a VRAM pool. The doc comments on both methods are
+the guard against a third recurrence.
+
+**Verified:** user confirmed color match now works in a debug export.
+`fmt`/`clippy -D warnings` clean; reco-core 240/242 (the usual 2 CUDA
+failures, no CUDA runtime here); reco-gui 78/78.
+
+**Follow-up the user should try:** they reported ~20fps on that debug
+export. Debug is 5-10x slower than release, so that number says little -
+but their calibration also has `color_match_interval_frames = 1`
+(default 15), so the measurement now runs every single frame where
+before it never ran at all. Suggested: set Measure interval to 15 in
+Color Mapping and re-compare on the release build. Not yet done.
+
+### 2. GUI changes
+
+- **App icon**: `icon.jpeg` converted to `ui/assets/icon.png` (Slint
+  window icon) + `assets/icon.ico` (multi-size 16-256, embedded in the
+  .exe via a new `winresource` build-dependency in `build.rs`).
+  Verified by extracting the icon back out of both built exes.
+- **Transport buttons**: tooltips removed from all six; the play button
+  no longer uses the `emphasized` (blue, wider) style - `emphasized` was
+  deleted from `TransportButton` entirely. The play glyph is now a drawn
+  `Path` triangle instead of "\u{25B6}", because Windows font
+  substitution rendered that character as a *color* emoji regardless of
+  the Text color, which is what made it look blue.
+- **FOV Tight slider max 40 -> 50** (user request).
+- **FOV persistence**: already worked (app-level `autocam_defaults` in
+  `gui.json`, and `do_save_calibration` writes current FOV into the
+  calibration). The real gap was that changing FOV did **not** mark the
+  calibration dirty, so the user got no hint that Save Calibration was
+  needed - and on next load the calibration's older values won, looking
+  like "settings are not remembered". Now flags dirty, but only when the
+  snapshot actually differs from the calibration's stored values (an
+  unconditional flag would mark every freshly-loaded calibration dirty,
+  since `apply_autocam_defaults` fires the same callback).
+- **Calibration progress popup**: modal showing step, detail, a progress
+  bar (only `FeatureMatching` reports a real fraction), a scrolling log,
+  and a working **Cancel** (the `interrupted` flag existed but was never
+  wired to any UI). Cancelling no longer tears down the loaded session
+  the way a real calibration failure does.
+
+### 3. Calibration sampling: anchor frame + sample window
+
+Replaced the "Skip end" slider with:
+- **Anchor frame** (text field + "Use current" button) - an exact frame
+  number to centre sampling on; empty falls back to the playhead.
+- **Sample window (s)** - keeps all sampled frames within that many
+  seconds *centred* on the anchor. 0 = off (sample from the anchor
+  onward, the old behaviour).
+
+**Bug found and fixed in this same feature:** the first version computed
+the window against the *preview timeline's* duration, which spans all
+chained segments, while `calibrate_videos` only ever reads the **first**
+segment. That produced a `skip_end_secs` larger than the actual file,
+which `select_frame_indices` saturates to an empty range - silently
+collapsing a requested 6 frames to 1 (`extracting 1 frames` in the log,
+which is how it was caught). Now probes the real single-file duration
+via `reco_io::ffmpeg::calibration_io::probe_video`, and warns loudly if
+the anchor is past that file's end.
+
+### 4. New calibration auto-saves to the match folder, not `LEFT/`
+
+`suggested_calibration_path()`: when the left video sits directly inside
+a folder named `left` (case-insensitive), the auto-saved calibration now
+goes one level up - the match folder that also holds `LEFT/` and
+`RIGHT/` - instead of inside `LEFT/`. An already-known location (match
+folder pick, or a previously loaded calibration) always wins over this
+derivation. 4 unit tests.
+
+### 5. Match Logger: clock now pauses
+
+`scripts/match-logger/Match Logger.html`'s header clock was
+`Date.now() - kickoff`, so it ran straight through a pause and stayed
+permanently ahead afterward by the total paused time. New
+`liveElapsedMs()` walks the event log with proper per-period pause
+bookkeeping - mirrors `reco-gui`'s `scoreboard_import::state_at` so the
+phone app and the burned-in scoreboard agree. "Volgende periode" needed
+no special handling (`btnPeriodAction` already auto-closes an open
+pause). Tested by replaying three constructed event sequences in Node
+(freeze during pause / resume excludes pause / period advance) - all
+correct. No build needed, it is a standalone HTML file.
+
+### 6. Calibration target images (in `D:\CLAUDE\`, not in the repo)
+
+- `akaze_calibration_checkerboard_5120x1400_300dpi.png` - plain
+  checkerboard, 200px squares.
+- `akaze_calibration_coded_dots_grid_5120x1400_300dpi.png` - current
+  one: black dots on white (max grayscale contrast - AKAZE here is
+  grayscale-only, so colour helps it not at all), asymmetric row offsets
+  and cycling dot sizes to break the repeating-pattern ambiguity, a
+  black grid for extra corner features, plus per-row colour rings purely
+  as a human reference when comparing left/right frames.
+
+### 7. Export died at a cut-window boundary: `GetData timed out (>1M polls)`
+
+**User report (release build, 16:15 export of the full match, 4 keep
+windows):** `Export failed - session: zero-copy: staging copy failed:
+GetData timed out (>1M polls)`. Note the GUI does *not* log export
+failures (only a toast, see `main.rs`'s `ExportOutcome::Failed`), so the
+run has to be reconstructed from the surrounding log lines.
+
+**What the log shows** (`target/release/reco-gui.log`):
+- Window 1 (78.59-1004.63s) rendered fine: 27753 frames in ~843s,
+  ~33 fps.
+- 16:29:47 `Cut range: seeking to 1268.34s`, decoders respawned,
+  lookahead pre-fill of 29 frames succeeded, 16:29:50 `starting render`.
+- ~196 more frames written (6.5s of video), then 82 seconds of nothing,
+  then the timeout. `Encoder finished: 27949 frames written` is the
+  teardown, not a success.
+
+**Not the cause:** the auto color match change from earlier this session.
+The same binary did 27753 frames at 33 fps in window 1, the TEST4 export
+completed, and the calibration is on `color_match_interval_frames: 15`.
+
+**Also not the cause (a wrong turn, user caught it):** the PAUZE
+transition. It sits in the session's dedicated GPU transition slot
+(`set_overlay_transition`), so a fade only rewrites an opacity uniform;
+and because it is not a layer, the scoreboard stays the *only* layer and
+`LayeredOverlaySource`'s CPU composite never runs. That was fixed
+2026-08-26 - do not re-blame it.
+
+**Fixed (both uncommitted, in the tree):**
+1. `interop/d3d11.rs` `stage_frame`: the wait was a *poll count*
+   (1M spins), which cannot tell a fast copy from a stalled one - here
+   1M contended `GetData` calls took ~82s. Now a wall-clock deadline
+   (`STAGING_COPY_TIMEOUT`, 30s) with a short spin phase
+   (`STAGING_COPY_SPIN_POLLS`, 10k) then 200us sleeps, so a slow frame
+   stays a slow frame instead of killing an hour-long export, and the
+   poll loop stops taking the device's multithread lock from the very
+   threads it waits on. A copy slower than 250ms now logs a warning -
+   that is the diagnostic that was missing this time.
+2. `smart_source.rs` `seek_to_secs` spawned the new decode pair
+   *before* dropping the old one, so two full 4K D3D11VA decode pools
+   (two texture arrays each) overlapped on one device at exactly the
+   moment the new decoders allocate - on an 8GB card that reported
+   ~2.9GB free at export start. Teardown was also only *signalled*, never
+   waited on. `spawn_d3d11_decode_pair` now returns a
+   `D3d11DecodePipeline` (receiver + the three join handles) and the new
+   `WindowsZeroCopyState::shutdown_decode` drops the receiver and joins,
+   used by both `seek_to_secs` and `Drop`.
+
+**Verified:** fmt + clippy clean on reco-core/reco-io; reco-core 240/242
+(the usual 2 CUDA failures), reco-io 56/56. Release reco-gui rebuilt
+17:20 with `--features tensorrt`. **Not yet re-tested against a real
+export** - the failing run was the full match with 3 cut ranges, so that
+is the test.
+
+**Still unproven:** the VRAM-overlap story is the best-fitting mechanism,
+not a confirmed one. Fix 1 makes the next occurrence survivable and the
+new warning will show whether copies are merely slow or genuinely stuck.
 
 ## OPEN TASKS - do these next
+
+### 0. IMU orientation: investigation PAUSED after 6 rounds - needs one more test recording
+
+Full detail in `crates/reco-calibrate/FRICTION.md` point 26 (rounds
+1-6). Short version of where 2026-08-28 left it:
+
+- **Round 3 (measured):** user recorded a genuinely level, stationary
+  rig (`D:\VOETBAL_VIDEO\TEST VIDEO\Waterpas Test met raster\`). The
+  real `rig_tilt` reads **-129.93 deg (left) / 172.21 deg (right)**
+  where both should be ~0. Stable to 2 decimals across three different
+  `skip_secs`. Both cameras are wrong *independently*, which rules out
+  per-camera mount asymmetry as the whole story.
+- **Round 4:** solved a per-camera correction against that (conjugate
+  for left, a 180-deg composition for right) - drove the level test to
+  ~-3 / ~-8 deg.
+- **Round 5:** user supplied the rig CAD - the cameras are **84 deg
+  apart** (42 deg each from centre), which is modelled *nowhere* in the
+  IMU math. A rig pitch of `theta` therefore reads as
+  `theta*cos(42)` pitch **and** `theta*sin(42)` roll (opposite sign L/R)
+  per camera.
+- **Round 6:** cross-validated round 4 against real match footage using
+  those splay-corrected expectations - **refuted**. Measured 61.31 /
+  -162.56 deg pitch against an expected ~14.9. Round 4 had overfitted to
+  a single pose.
+- **Sign convention (user-corrected):** the rig points *downward* in
+  deployment, so its real tilt is **-20 deg, not +20**.
+
+**Guess-and-check is exhausted (~40 candidates over 6 rounds) - do not
+continue enumerating.** The problem has at least four entangled
+multiplicative unknowns (sandwich order, telemetry-parser's own
+unconditional 180-deg DJI transform, left's physical 180-deg mount, the
+42-deg splay) and one pose cannot constrain them.
+
+**The actual next step:** record the rig stationary at its real
+**~-20 deg** deployment pose, spirit-level-verified, as a companion to
+the existing flat footage. Two known, different poses give enough
+independent equations to solve the rotation chain outright and verify
+against both at once. User agreed to record this "another time".
+
+Four throwaway diagnostics are in the tree (untracked) and reusable:
+`crates/reco-calibrate/examples/{measure_level_imu_baseline,
+check_imu_mount_rotation, solve_imu_correction,
+verify_splay_corrected_imu}.rs`.
+
+### 0b. Deferred GUI request: default Rig Tilt
+
+User asked to auto-fill reco-gui's manual "Rig Tilt" slider
+(`ui/main.slint`, `rig-tilt`, always starts at 0.0, no persistence).
+Two options were offered - a persisted "Default Rig Tilt" preference vs.
+remembering the last-used value (mirroring the autocam app-level
+persist) - and the user deferred with "doen we later wel". **Correct
+default value is -20** (see the sign note above).
 
 ### 6. Test the IMU capability fix on real DJI footage (just shipped, unverified on real recordings)
 
