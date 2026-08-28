@@ -21,14 +21,15 @@
   diagnostics, `crates/reco-gui/assets/` + `crates/reco-gui/ui/assets/`
   (app icon), `scripts/match-logger/Match Logger.html.txt` (a stray
   copy that was already there, not written this session).
-- Binaries: **release rebuilt 17:20** (`--features tensorrt`) with the
-  cut-boundary fixes in item 7 below - it also picked up the "Advanced
-  panner expanded" change. The **debug build (15:26) is stale**: it
-  predates both. Rebuild it before testing anything in debug.
+- Binaries: **release rebuilt 20:08** (`reco-gui.exe`) and **19:57**
+  (`reco.exe`), both `--features tensorrt`, carrying items 7 and 8
+  below plus the "Advanced panner expanded" change. The **debug build
+  (15:26) is stale** - it predates all of it. Rebuild it before testing
+  anything in debug.
 
 ## IN THE TREE, NOT YET IN A BUILT BINARY
 
-Nothing - the 17:20 release build covers the whole tree. (The 15:53
+Nothing - the 20:08 release build covers the whole tree. (The 15:53
 build did not; the "Advanced panner" section now starting expanded,
 `ui/main.slint`'s `panner-advanced`, landed after it. User's request:
 it holds the settings actually being tuned per match, so collapsing it
@@ -275,9 +276,10 @@ the exact case that was broken:
 - `matroska_reader_sees_partial_writes` fails, but it fails identically
   with these two files reverted - pre-existing, unrelated.
 
-**Still open:** `reco-gui.exe` could not be rebuilt (the running GUI
-holds the file). `target/release/reco.exe` has the fix; rebuild the GUI
-once it is closed.
+Both release binaries carry the fix: `reco.exe` (19:57) and
+`reco-gui.exe` (20:08, `--features tensorrt`). **Not yet exercised
+through the GUI** - the natural test is the same full-match export with
+its 3 cut ranges, listening at each cut.
 
 ## OPEN TASKS - do these next
 
