@@ -96,10 +96,27 @@ comparison - this val set is tiles, where the ball covers relatively
 more pixels than in a full letterboxed panorama. The model card says so
 explicitly.
 
-**Not done yet:** the actual upload. The HF VS Code extension the user
-installed (`huggingface.huggingface-vscode-chat`) is a Copilot Chat
-provider and cannot upload models; use `hf auth login` + `hf upload`, or
-the web UI.
+**Published 2026-08-29:**
+<https://huggingface.co/Dura-S/reco-yolo26s-football> (public, commit
+`2fabada`) - `best.pt`, `best.onnx` and the model card, nothing else.
+Verified after upload: the byte counts reported by the Hub match the
+local staged files exactly, and the repo is not private.
+
+How it was done, for the next update: the HF VS Code extension
+(`huggingface.huggingface-vscode-chat`) is a Copilot Chat provider and
+cannot upload models. Use the CLI instead - `pip install --user
+huggingface_hub` puts `hf.exe` in
+`%APPDATA%\Python\Python314\Scripts` (not on PATH by default), then
+`hf auth login` with a **Write** token, then from the staging dir:
+
+```
+hf upload Dura-S/reco-yolo26s-football . --repo-type model
+```
+
+Re-run the same command to push a new checkpoint; it commits only what
+changed. Always run `strip_ultralytics_local_paths.py` first, and sweep the
+result for the strings `VOETBAL_VIDEO`, `Users\Rufan` and a drive-letter
+prefix before uploading - that sweep was clean for this release.
 
 ## Goal
 
