@@ -75,10 +75,32 @@ published.
 **Corrected a wrong claim while doing so:** this file says the tiled
 checkpoint "needs tiled L/R inference (doesn't exist in production
 yet)". It does not. `reco-detect`/`reco-autocam` contain no tiling at
-all - the model is fed the whole panorama in a single pass, letterboxed
-to 1920x1920, and that is how the user has been running it. Tiling was
-a *training-data* decision, never an inference requirement. Do not
-repeat the old claim.
+all - the model is fed the whole frame in a single pass, letterboxed to
+1920x1920, and that is how the user has been running it. Tiling was a
+*training-data* decision, never an inference requirement. Do not repeat
+the old claim.
+
+**And a second wrong word, found 2026-08-29 and worth fixing everywhere
+it appears:** that "whole frame" is **one camera's own 3840x2880
+frame, not a stitched panorama**. `session/detection_dispatch.rs`
+dispatches detection twice per processed frame, once as
+`CameraId::Left` and once as `CameraId::Right`, each on the raw decoded
+camera image before any stitching - which is also why the ball-tracker
+log lines carry `cam=Left` / `cam=Right`. Stitching happens for the
+exported video only. The 3840x2880 source being 4:3 gives it away: a
+stitched panorama would be far wider. Consequences that matter:
+
+- **Training data must be raw per-camera frames.** Feeding stitched
+  panoramas (or worse, the exported 2560x1440 virtual-camera video)
+  would train for an input that never occurs at runtime - reprojected
+  geometry, dewarped lens distortion, different aspect, different
+  object scale. That last one is the failure mode this project has
+  already measured once, in the merged-dataset ball-size regression.
+- Detecting on the stitched panorama instead would halve the inference
+  count (one pass instead of two), but letterboxing a wide panorama
+  into a 1920 square gives the ball *fewer* pixels. That is an
+  architecture trade-off, not a dataset choice, and nobody has measured
+  it.
 
 Per-class val of that checkpoint (120 held-out tiles, measured fresh
 rather than taken from the training log):
