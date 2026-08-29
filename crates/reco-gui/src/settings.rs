@@ -563,6 +563,8 @@ mod tests {
             cut_trail_secs: 1.0,
             kickoff_lead_secs: 6.0,
             match_end_trail_secs: 10.0,
+            highlight_lead_secs: 18.0,
+            highlight_trail_secs: 8.0,
         };
         s.set_scoreboard_settings(sb);
         let json = serde_json::to_string(&s).unwrap();
@@ -577,6 +579,8 @@ mod tests {
         assert!((restored_sb.cut_trail_secs - 1.0).abs() < 1e-6);
         assert!((restored_sb.kickoff_lead_secs - 6.0).abs() < 1e-6);
         assert!((restored_sb.match_end_trail_secs - 10.0).abs() < 1e-6);
+        assert!((restored_sb.highlight_lead_secs - 18.0).abs() < 1e-6);
+        assert!((restored_sb.highlight_trail_secs - 8.0).abs() < 1e-6);
     }
 
     #[test]

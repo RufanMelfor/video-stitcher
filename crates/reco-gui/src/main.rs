@@ -324,6 +324,11 @@ struct AppState {
     /// leading (pre-kickoff) one. `None` when the toggle is off or never
     /// suggested one (no `match_end` event to derive from).
     scoreboard_derived_end_secs: Option<f32>,
+    /// Output path the highlights toggle last suggested (see
+    /// `refresh_derived_cut_ranges`) - same "only touch what we own"
+    /// contract as the two fields above, so a path the user typed
+    /// themselves survives toggling highlights back off.
+    scoreboard_derived_output_path: Option<String>,
     recording_tx: Option<std::sync::mpsc::SyncSender<RecordingFrame>>,
     recording_thread: Option<std::thread::JoinHandle<()>>,
     recording_path: Option<PathBuf>,
@@ -408,6 +413,11 @@ struct AppState {
     /// Interrupt flag for a running export. Set to true when the user
     /// clicks Cancel; StitchJob checks it between frames and aborts.
     export_interrupted: Arc<AtomicBool>,
+    /// Interrupt flag for a running Auto-Calibrate. Set to true by the
+    /// progress popup's Cancel button; `calibrate_videos` checks it
+    /// between steps (`check_interrupted` in `reco_calibrate::video`)
+    /// and aborts with `CalibrateVideosError::Cancelled`.
+    calibration_interrupted: Arc<AtomicBool>,
     /// Timestamp of the last time `run_export`'s progress callback
     /// fired. Used by the playback timer to detect when the encoder is
     /// in its post-last-frame finalization phase (av_write_trailer +
@@ -683,6 +693,7 @@ impl AppState {
             scoreboard_derived_cut_ranges: Vec::new(),
             scoreboard_derived_start_secs: None,
             scoreboard_derived_end_secs: None,
+            scoreboard_derived_output_path: None,
             recording_tx: None,
             recording_thread: None,
             recording_path: None,
@@ -728,6 +739,7 @@ impl AppState {
             preview_dirty: false,
             color_match_remeasure_pending: false,
             export_interrupted: Arc::new(AtomicBool::new(false)),
+            calibration_interrupted: Arc::new(AtomicBool::new(false)),
             export_last_progress_at: Arc::new(Mutex::new(None)),
             export_thread: None,
             export_rx: None,
@@ -2056,6 +2068,34 @@ fn suggested_export_path(
     Some(candidate)
 }
 
+/// Default calibration save location for a fresh Auto-Calibrate with no
+/// location known yet (no match folder picked, no calibration ever
+/// loaded or saved this session). Recordings follow the fixed
+/// `<match>/Left/`, `<match>/Right/` convention (see the `match_folder`
+/// module doc) - when the left video sits directly inside a folder
+/// literally named "left" (case-insensitive), save one level up, in the
+/// match folder that also holds Left/ and Right/, instead of inside
+/// Left/ itself. Falls back to the left video's own folder when that
+/// convention doesn't apply (e.g. two loose files with no Left/Right
+/// structure).
+fn suggested_calibration_path(left_path: Option<&std::path::Path>) -> Option<PathBuf> {
+    let left = left_path?;
+    let left_dir = left.parent()?;
+    let base_dir = if left_dir
+        .file_name()
+        .is_some_and(|n| n.eq_ignore_ascii_case("left"))
+    {
+        left_dir.parent().unwrap_or(left_dir)
+    } else {
+        left_dir
+    };
+    let stem = left
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "reco".into());
+    Some(base_dir.join(format!("{stem}_calibration.json")))
+}
+
 /// Build the `InputPath` for a camera slot from freshly picked file(s),
 /// optionally appending to an already-selected chain (multi-segment
 /// recordings, e.g. DJI 4GB splits, get picked a few files at a time).
@@ -2133,9 +2173,19 @@ fn sync_cut_ranges(state: &AppState, app: &RecoApp) {
 /// cut ranges from the current Match Logger export + sync anchor,
 /// replacing whatever this toggle previously added (see
 /// `AppState::scoreboard_derived_cut_ranges`'s doc comment) without
-/// touching any manually added/edited range. A no-op push of an empty set
-/// when the toggle is on but the export/anchor aren't available - callers
-/// check that before turning the toggle on in the first place.
+/// touching any manually added/edited range.
+///
+/// Self-guarding: with both derive toggles off this only *removes* what
+/// it previously added, which is exactly what every caller wants after
+/// the export, the anchor, or a margin changed. Callers therefore do not
+/// check the toggles themselves - they used to, in five places, and a
+/// sixth condition would have had to be remembered in each of them the
+/// moment a second derivation mode existed.
+///
+/// The two modes are mutually exclusive by construction: highlights
+/// already excludes everything that is not a goal, so layering the
+/// pause cuts underneath it could only ever subtract from a clip that
+/// was deliberately chosen. Highlights wins if both are somehow set.
 fn refresh_derived_cut_ranges(s: &mut AppState, app: &RecoApp) {
     let previous = std::mem::take(&mut s.scoreboard_derived_cut_ranges);
     if !previous.is_empty() {
@@ -2157,10 +2207,60 @@ fn refresh_derived_cut_ranges(s: &mut AppState, app: &RecoApp) {
     {
         app.set_export_end_secs(0.0);
     }
-    if let (Some(export), Some(anchor)) = (
+    // And for the "_highlights" output filename.
+    if let Some(previous_output) = s.scoreboard_derived_output_path.take()
+        && app.get_export_output_path() == previous_output.as_str()
+    {
+        app.set_export_output_path(strip_highlights_suffix(&previous_output).into());
+    }
+
+    let (Some(export), Some(anchor)) = (
         s.scoreboard_import.as_ref(),
         s.scoreboard_sync_anchor.as_ref(),
-    ) {
+    ) else {
+        sync_cut_ranges(s, app);
+        return;
+    };
+
+    if app.get_scoreboard_derive_highlights() {
+        let lead = app.get_highlights_lead_secs().max(0.0) as f64;
+        let trail = app.get_highlights_trail_secs().max(0.0) as f64;
+        let windows = reco_io::cut_range::merge_windows(scoreboard_import::derived_goal_windows(
+            export, anchor, lead, trail,
+        ));
+        // No goals logged means no reel. Leaving the export untouched is
+        // the honest outcome - silently exporting the whole match under
+        // a "_highlights" name would be worse than doing nothing.
+        if let (Some(first), Some(last)) = (windows.first(), windows.last()) {
+            let derived = reco_io::cut_range::gaps_between(&windows);
+            s.cut_ranges.extend(derived.iter().copied());
+            s.scoreboard_derived_cut_ranges = derived;
+
+            // The reel's outer edges are start/end times, not cuts - same
+            // reasoning as the pre-roll trim below.
+            let start_secs = first.0 as f32;
+            app.set_export_start_secs(start_secs);
+            s.scoreboard_derived_start_secs = Some(start_secs);
+            let end_secs = last.1 as f32;
+            app.set_export_end_secs(end_secs);
+            s.scoreboard_derived_end_secs = Some(end_secs);
+
+            // Rename the output so a two-minute reel cannot land on top
+            // of the full match export, which on this project is a
+            // multi-gigabyte file that took an hour to produce. Done here
+            // rather than at export time so the user can see and edit it.
+            let output = app.get_export_output_path().to_string();
+            if !output.is_empty() {
+                let renamed = add_highlights_suffix(&output);
+                app.set_export_output_path(renamed.clone().into());
+                s.scoreboard_derived_output_path = Some(renamed);
+            }
+        }
+        sync_cut_ranges(s, app);
+        return;
+    }
+
+    if app.get_scoreboard_derive_cut_ranges() {
         // Margins are user-settable (the four NumEdits under the
         // auto-cut checkbox); they were a fixed 2.0 everywhere before.
         let cut_lead = app.get_autocut_cut_lead_secs().max(0.0) as f64;
@@ -2194,6 +2294,39 @@ fn refresh_derived_cut_ranges(s: &mut AppState, app: &RecoApp) {
         }
     }
     sync_cut_ranges(s, app);
+}
+
+/// Marker inserted into a highlights export's filename.
+const HIGHLIGHTS_SUFFIX: &str = "_highlights";
+
+/// `match.mp4` -> `match_highlights.mp4`, idempotent.
+///
+/// Operates on the string rather than a `PathBuf` because that is what
+/// the UI property holds, and round-tripping through a path would
+/// normalise separators the user typed.
+fn add_highlights_suffix(output: &str) -> String {
+    let (stem, extension) = match output.rfind('.') {
+        // A dot in a directory name is not an extension.
+        Some(dot) if !output[dot..].contains(['/', '\\']) => output.split_at(dot),
+        _ => (output, ""),
+    };
+    if stem.ends_with(HIGHLIGHTS_SUFFIX) {
+        return output.to_string();
+    }
+    format!("{stem}{HIGHLIGHTS_SUFFIX}{extension}")
+}
+
+/// Inverse of [`add_highlights_suffix`], for reverting a path this
+/// suggested. Leaves anything it did not produce alone.
+fn strip_highlights_suffix(output: &str) -> String {
+    let (stem, extension) = match output.rfind('.') {
+        Some(dot) if !output[dot..].contains(['/', '\\']) => output.split_at(dot),
+        _ => (output, ""),
+    };
+    match stem.strip_suffix(HIGHLIGHTS_SUFFIX) {
+        Some(base) => format!("{base}{extension}"),
+        None => output.to_string(),
+    }
 }
 
 /// Push the per-side segment filenames into the Slint left/right-segments
@@ -2751,6 +2884,10 @@ fn snapshot_scoreboard_settings(
         cut_trail_secs: app.get_autocut_cut_trail_secs(),
         kickoff_lead_secs: app.get_autocut_kickoff_lead_secs(),
         match_end_trail_secs: app.get_autocut_match_end_trail_secs(),
+        // The margins persist; the highlights toggle itself deliberately
+        // does not - see `ScoreboardSettings::highlight_lead_secs`.
+        highlight_lead_secs: app.get_highlights_lead_secs(),
+        highlight_trail_secs: app.get_highlights_trail_secs(),
     }
 }
 
@@ -2964,11 +3101,11 @@ fn apply_scoreboard_settings(
     app.set_autocut_cut_trail_secs(settings.cut_trail_secs);
     app.set_autocut_kickoff_lead_secs(settings.kickoff_lead_secs);
     app.set_autocut_match_end_trail_secs(settings.match_end_trail_secs);
+    app.set_highlights_lead_secs(settings.highlight_lead_secs);
+    app.set_highlights_trail_secs(settings.highlight_trail_secs);
 
     app.set_scoreboard_derive_cut_ranges(settings.derive_cut_ranges);
-    if settings.derive_cut_ranges {
-        refresh_derived_cut_ranges(&mut s, app);
-    }
+    refresh_derived_cut_ranges(&mut s, app);
 
     s.preview_dirty = true;
 
@@ -3641,9 +3778,7 @@ fn main() -> anyhow::Result<()> {
             // The derived ranges belong to whichever export is loaded
             // now, including "none at all" - same staleness argument as
             // in on_load_scoreboard_events.
-            if app.get_scoreboard_derive_cut_ranges() {
-                refresh_derived_cut_ranges(&mut s, &app);
-            }
+            refresh_derived_cut_ranges(&mut s, &app);
             persist_scoreboard_settings(&app, &mut s);
         }
 
@@ -4605,12 +4740,10 @@ fn main() -> anyhow::Result<()> {
             Ok(export) => {
                 let mut s = state_ref.borrow_mut();
                 adopt_match_logger_export(&app, &mut s, path, export);
-                // Loading a different export while the toggle is already
+                // Loading a different export while a toggle is already
                 // on would otherwise leave the previous file's derived
                 // ranges sitting there, silently stale.
-                if app.get_scoreboard_derive_cut_ranges() {
-                    refresh_derived_cut_ranges(&mut s, &app);
-                }
+                refresh_derived_cut_ranges(&mut s, &app);
                 persist_scoreboard_settings(&app, &mut s);
             }
             Err(error) => {
@@ -4648,9 +4781,7 @@ fn main() -> anyhow::Result<()> {
         );
         // Keep the derived cut ranges in step with a corrected sync point
         // instead of leaving them stale from the old anchor.
-        if app.get_scoreboard_derive_cut_ranges() {
-            refresh_derived_cut_ranges(&mut s, &app);
-        }
+        refresh_derived_cut_ranges(&mut s, &app);
         persist_scoreboard_settings(&app, &mut s);
     });
 
@@ -4677,6 +4808,8 @@ fn main() -> anyhow::Result<()> {
             app.set_scoreboard_derive_cut_ranges(false);
             return;
         }
+        // Mutually exclusive with highlights, from the other side.
+        app.set_scoreboard_derive_highlights(false);
         refresh_derived_cut_ranges(&mut s, &app);
         persist_scoreboard_settings(&app, &mut s);
     });
@@ -4708,8 +4841,54 @@ fn main() -> anyhow::Result<()> {
             return;
         };
         let mut s = state_ref.borrow_mut();
-        if app.get_scoreboard_derive_cut_ranges() {
-            refresh_derived_cut_ranges(&mut s, &app);
+        refresh_derived_cut_ranges(&mut s, &app);
+        persist_scoreboard_settings(&app, &mut s);
+    });
+
+    // Same for the two highlight margins. Kept a separate callback from
+    // the auto-cut one so each set of fields reads as belonging to its
+    // own checkbox, even though both end in the same re-derive.
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_highlights_margins(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let mut s = state_ref.borrow_mut();
+        refresh_derived_cut_ranges(&mut s, &app);
+        persist_scoreboard_settings(&app, &mut s);
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_toggled_scoreboard_derive_highlights(move |enabled| {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let mut s = state_ref.borrow_mut();
+        if enabled {
+            if s.scoreboard_import.is_none() || s.scoreboard_sync_anchor.is_none() {
+                app.set_scoreboard_error_text(
+                    "Load a Match Logger export and set its sync point first".into(),
+                );
+                app.set_scoreboard_derive_highlights(false);
+                return;
+            }
+            // The two modes are mutually exclusive - see
+            // `refresh_derived_cut_ranges`. Clearing the other checkbox
+            // rather than silently ignoring it keeps the UI honest about
+            // which one is in effect.
+            app.set_scoreboard_derive_cut_ranges(false);
+        }
+        refresh_derived_cut_ranges(&mut s, &app);
+        if enabled && s.scoreboard_derived_cut_ranges.is_empty() {
+            // Nothing was derived, so nothing changed - the log has no
+            // goals to build a reel from. Say so instead of leaving a
+            // ticked box that did nothing.
+            app.set_scoreboard_derive_highlights(false);
+            app.set_scoreboard_error_text(
+                "No goals in this Match Logger export - nothing to make highlights from".into(),
+            );
         }
         persist_scoreboard_settings(&app, &mut s);
     });
@@ -4842,9 +5021,11 @@ fn main() -> anyhow::Result<()> {
             (Some(l), Some(r)) => (l.clone(), r.clone()),
             _ => return,
         };
-        // Capture current playback position as calibration start time
-        let current_time_secs = if s.playback.fps() > 0.0 {
-            s.playback.frame_index() as f64 / s.playback.fps()
+        let fps = s.playback.fps();
+        // Fallback anchor: current playback position, in case the user
+        // hasn't typed an explicit "Anchor frame".
+        let current_time_secs = if fps > 0.0 {
+            s.playback.frame_index() as f64 / fps
         } else {
             0.0
         };
@@ -4856,7 +5037,8 @@ fn main() -> anyhow::Result<()> {
             akaze_threshold,
             detect_y_min,
             detect_y_max,
-            skip_end,
+            anchor_frame_text,
+            sample_window,
             force_x_rx,
             force_z_rz,
             full_res_features,
@@ -4869,21 +5051,63 @@ fn main() -> anyhow::Result<()> {
                     a.get_cal_akaze_threshold() as f64,
                     a.get_cal_detect_y_min() as f64,
                     a.get_cal_detect_y_max() as f64,
-                    a.get_cal_skip_end_secs() as f64,
+                    a.get_cal_anchor_frame_text().to_string(),
+                    a.get_cal_sample_window_secs() as f64,
                     a.get_force_x_rx(),
                     a.get_force_z_rz(),
                     a.get_cal_full_res_features(),
                 )
             })
-            .unwrap_or((false, 4, 0.0001, 0.05, 0.95, 0.0, false, false, false));
+            .unwrap_or((
+                false,
+                4,
+                0.0001,
+                0.05,
+                0.95,
+                String::new(),
+                0.0,
+                false,
+                false,
+                false,
+            ));
+
+        // The anchor is a manually typed frame number when set (an exact,
+        // reproducible point - "work around frame 1000" - rather than
+        // wherever the timeline happens to be scrubbed to); an empty or
+        // unparseable field falls back to the current playback position,
+        // same as before this field existed.
+        //
+        // Deliberately computed from the GUI's own `fps`/current-frame
+        // only, NOT from a total-duration bound here - see the comment
+        // in the background thread below for why that bound has to come
+        // from the single file `calibrate_videos` will actually read,
+        // not from the (possibly multi-segment, much longer) preview
+        // timeline this callback would otherwise reach for.
+        let anchor_secs = anchor_frame_text
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|_| fps > 0.0)
+            .map(|frame| frame as f64 / fps)
+            .unwrap_or(current_time_secs);
 
         if let Some(app) = app_weak.upgrade() {
             app.set_calibrating(true);
             app.set_calibration_step("Starting...".into());
+            app.set_calibration_detail("".into());
+            app.set_calibration_progress(0.0);
+            app.set_calibration_log(slint::ModelRc::new(slint::VecModel::from(Vec::<
+                slint::SharedString,
+            >::new(
+            ))));
             app.set_status_text("Auto-calibrating...".into());
         }
 
-        let interrupted = Arc::new(AtomicBool::new(false));
+        let interrupted = {
+            let s = state_ref.borrow();
+            s.calibration_interrupted.store(false, Ordering::Relaxed);
+            Arc::clone(&s.calibration_interrupted)
+        };
         let (tx, rx) = std::sync::mpsc::channel();
 
         // Preserve the user's current lens (a picked profile or slider edits)
@@ -4922,19 +5146,86 @@ fn main() -> anyhow::Result<()> {
         let app_weak_bg = app_weak.clone();
         std::thread::spawn(move || {
             let app_weak_progress = app_weak_bg.clone();
+
+            // The anchor/window math needs the true duration of the
+            // single file `calibrate_videos` below will actually read -
+            // NOT the GUI preview's playback duration, which spans every
+            // segment of a multi-segment (chained) recording while
+            // `calibrate_videos` only ever gets the *first* segment
+            // (`left`/`right` here, see `try_init`'s "left_path/right_path
+            // stay single" comment). Using the preview's much longer
+            // total duration to bound `skip_end_secs` produced a
+            // `skip_end_secs` far bigger than the actual file, which
+            // `select_frame_indices` saturates to an empty usable range -
+            // silently collapsing "6 frames" down to 1, sampled from
+            // wherever that leaves it, not from the requested window at
+            // all. Root-caused from a real failed run's log
+            // (`extracting 1 frames` despite `cal_frames` frames
+            // requested) - see FRICTION.md point 26's follow-up.
+            let probed_duration_secs = match (
+                reco_io::ffmpeg::calibration_io::probe_video(&left),
+                reco_io::ffmpeg::calibration_io::probe_video(&right),
+            ) {
+                (Ok(l), Ok(r)) if l.fps > 0.0 => {
+                    Some(l.total_frames.min(r.total_frames) as f64 / l.fps)
+                }
+                (l, r) => {
+                    log::warn!(
+                        "Auto-calibrate: could not probe true video duration for the \
+                         anchor/sample-window bound (left: {l:?}, right: {r:?}); \
+                         sampling from the anchor onward with no end bound"
+                    );
+                    None
+                }
+            };
+            // Anchor beyond the actual single file's own duration means
+            // the user scrubbed/typed a frame number past the end of the
+            // first segment `calibrate_videos` reads - sampling would
+            // start past the end of the file and find nothing. Clamp
+            // with a loud warning rather than silently produce another
+            // empty range.
+            let anchor_secs = match probed_duration_secs {
+                Some(d) if anchor_secs >= d => {
+                    log::warn!(
+                        "Auto-calibrate: anchor {anchor_secs:.1}s is past the first \
+                         segment's own duration ({d:.1}s) - clamping. If this recording \
+                         has multiple segments, only the first is ever sampled."
+                    );
+                    (d - 1.0).max(0.0)
+                }
+                _ => anchor_secs,
+            };
+            // "Sample window" (0 = off) centers calibration sampling on
+            // the anchor: every sample frame stays within
+            // `sample_window / 2` seconds either side of it, instead of
+            // `select_frame_indices` spreading them across the rest of
+            // the clip. Off (0) samples from the anchor onward through
+            // the rest of the video, as Auto-Calibrate always did before
+            // either field existed.
+            let (skip_start, skip_end) = match probed_duration_secs {
+                Some(d) if sample_window > 0.0 && d > 0.0 => {
+                    let half = sample_window / 2.0;
+                    let window_start = (anchor_secs - half).max(0.0);
+                    let window_end = (anchor_secs + half).min(d);
+                    (window_start, (d - window_end).max(0.0))
+                }
+                _ => (anchor_secs, 0.0),
+            };
+
             // Bump frame-pair count above the reco-core default of 2.
             // More frames give the bundle adjustment more constraints
             // to settle on, which especially helps at 4K where AKAZE
             // feature matches are noisier per frame.
             log::info!(
-                "Auto-calibrate: {cal_frames} frames, skip=[{current_time_secs:.1}s, -{skip_end:.0}s], \
+                "Auto-calibrate: {cal_frames} frames, anchor={anchor_secs:.1}s, \
+                 sample_window={sample_window:.0}s, skip=[{skip_start:.1}s, -{skip_end:.1}s], \
                  imu_seeds={use_imu_seeds}, force_x_rx={force_x_rx}, force_z_rz={force_z_rz}, \
                  akaze={akaze_threshold}, detect_y=[{detect_y_min:.2}, {detect_y_max:.2}], \
                  full_res_features={full_res_features}"
             );
             let mut config = reco_calibrate::CalibrationConfig {
                 num_frames: cal_frames,
-                skip_start_secs: current_time_secs,
+                skip_start_secs: skip_start,
                 skip_end_secs: skip_end,
                 use_imu_rotation_seeds: use_imu_seeds,
                 ..Default::default()
@@ -4952,6 +5243,11 @@ fn main() -> anyhow::Result<()> {
             if existing_left_params.is_some() {
                 log::info!("Re-calibrating with user-picked lens profiles");
             }
+            // Accumulated across every progress tick, on this same
+            // background thread - each tick sends the whole log so far
+            // (not just the new line) since a Slint model property is
+            // replaced wholesale, not appended to, from here.
+            let mut log_lines: Vec<String> = Vec::new();
             let result = reco_calibrate::video::calibrate_videos(
                 &left,
                 &right,
@@ -4964,10 +5260,23 @@ fn main() -> anyhow::Result<()> {
                 &mut |progress| {
                     let step_name = format!("{:?}", progress.step);
                     let detail = progress.detail.clone();
+                    let fraction = progress.fraction.unwrap_or(0.0).clamp(0.0, 1.0);
+                    log_lines.push(if detail.is_empty() {
+                        step_name.clone()
+                    } else {
+                        format!("{step_name}: {detail}")
+                    });
+                    let log_model: Vec<slint::SharedString> =
+                        log_lines.iter().map(|l| l.as_str().into()).collect();
                     let weak = app_weak_progress.clone();
                     slint::invoke_from_event_loop(move || {
                         if let Some(app) = weak.upgrade() {
                             app.set_calibration_step(step_name.into());
+                            app.set_calibration_detail(detail.clone().into());
+                            app.set_calibration_progress(fraction);
+                            app.set_calibration_log(slint::ModelRc::new(slint::VecModel::from(
+                                log_model,
+                            )));
                             app.set_status_text(format!("Calibrating: {detail}").into());
                         }
                     })
@@ -4992,6 +5301,18 @@ fn main() -> anyhow::Result<()> {
             };
             tx.send(cal_result).ok();
         });
+    });
+
+    // Cancel button on the calibration progress popup. `calibrate_videos`
+    // only checks this flag between steps (`check_interrupted` in
+    // `reco_calibrate::video`), so a click can take up to one full
+    // step's duration (e.g. a DJI telemetry parse) to actually stop.
+    let state_ref = Rc::clone(&state);
+    app.on_cancel_calibration(move || {
+        state_ref
+            .borrow()
+            .calibration_interrupted
+            .store(true, Ordering::Relaxed);
     });
 
     // Live AKAZE detection preview: fires on every AKAZE tuning-slider
@@ -6381,6 +6702,29 @@ fn main() -> anyhow::Result<()> {
         if let Some(app) = app_weak.upgrade() {
             let ac = snapshot_autocam_defaults(&app);
             let mut s = state_ref.borrow_mut();
+            // These are persisted app-level below, but a loaded
+            // calibration's own `autocam_defaults` still wins on the
+            // next load - so an edit made now is silently lost for this
+            // match unless the calibration is saved too. Flag it dirty
+            // so the Save Calibration button appears instead of leaving
+            // the user to guess: changing e.g. FOV Tight otherwise
+            // looked like "settings are not remembered" (app-level had
+            // the new value, the calibration still had the old one, and
+            // reloading restored the old one with no visible cue).
+            //
+            // Compared against the calibration's *stored* values rather
+            // than set unconditionally: `apply_autocam_defaults` writes
+            // these same properties when a calibration loads, which
+            // fires this very callback - an unconditional flag would
+            // mark every freshly-loaded calibration dirty before the
+            // user touched anything.
+            let differs_from_calibration = s
+                .calibration
+                .as_ref()
+                .is_some_and(|c| c.autocam_defaults.as_ref() != Some(&ac));
+            if differs_from_calibration {
+                app.set_cal_dirty(true);
+            }
             s.user_settings.set_autocam_defaults(ac);
             // "AI Tracking"/"Async Detect" checkboxes: app-level only,
             // deliberately not part of `AutocamDefaults` - see
@@ -8020,33 +8364,35 @@ fn handle_calibration_result(
                         state.lens_correction_amount = lc;
                     }
 
-                    // Auto-save calibration next to the left video so
-                    // it appears in Recent and can be reloaded.
-                    if let Some(left) = state.left_path.as_ref() {
-                        let cal_path = left.with_file_name(format!(
-                            "{}_calibration.json",
-                            left.file_stem()
-                                .map(|s| s.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| "reco".into())
-                        ));
-                        if let Some(cal) = state.calibration.as_ref() {
-                            match serde_json::to_string_pretty(cal) {
-                                Ok(json) => match std::fs::write(&cal_path, json) {
-                                    Ok(()) => {
-                                        log::info!(
-                                            "Auto-saved calibration to {}",
-                                            cal_path.display()
-                                        );
-                                        state.calibration_path = Some(cal_path.clone());
-                                        state.user_settings.push_calibration(cal_path.clone());
-                                    }
-                                    Err(e) => {
-                                        log::warn!("Failed to auto-save calibration: {e}");
-                                    }
-                                },
-                                Err(e) => {
-                                    log::warn!("Failed to serialize calibration: {e}");
+                    // Auto-save calibration so it appears in Recent and
+                    // can be reloaded. Keep an already-known location
+                    // (the match folder's calibration path set by
+                    // "Select Match Folder", or wherever a calibration
+                    // was already loaded from) rather than deriving a
+                    // fresh one and clobbering it - this used to always
+                    // save next to the left video regardless, which put
+                    // a new calibration inside .../Left/ instead of the
+                    // match folder that also holds Left/ and Right/.
+                    let cal_path = state
+                        .calibration_path
+                        .clone()
+                        .or_else(|| suggested_calibration_path(state.left_path.as_deref()));
+                    if let Some(cal_path) = cal_path
+                        && let Some(cal) = state.calibration.as_ref()
+                    {
+                        match serde_json::to_string_pretty(cal) {
+                            Ok(json) => match std::fs::write(&cal_path, json) {
+                                Ok(()) => {
+                                    log::info!("Auto-saved calibration to {}", cal_path.display());
+                                    state.calibration_path = Some(cal_path.clone());
+                                    state.user_settings.push_calibration(cal_path.clone());
                                 }
+                                Err(e) => {
+                                    log::warn!("Failed to auto-save calibration: {e}");
+                                }
+                            },
+                            Err(e) => {
+                                log::warn!("Failed to serialize calibration: {e}");
                             }
                         }
                     }
@@ -8213,6 +8559,17 @@ fn handle_calibration_result(
             }
         }
         Err(e) => {
+            // Cancel (the progress popup's Cancel button) surfaces as a
+            // plain error like any other failure - but unlike a real
+            // one, the user's already-loaded session is still good and
+            // shouldn't be torn down for a deliberate stop.
+            if matches!(e, reco_calibrate::video::CalibrateVideosError::Cancelled) {
+                log::info!("Auto-calibration cancelled");
+                if let Some(app) = app_weak.upgrade() {
+                    app.set_status_text("Calibration cancelled".into());
+                }
+                return;
+            }
             log::error!("Auto-calibration failed: {e}");
             if let Some(ref t) = state.telemetry {
                 t.calibration_error(&e.to_string());
@@ -8326,5 +8683,103 @@ mod suggested_export_path_tests {
     #[test]
     fn none_when_nothing_loaded_yet() {
         assert_eq!(suggested_export_path(None, None), None);
+    }
+}
+
+#[cfg(test)]
+mod highlights_suffix_tests {
+    use super::{add_highlights_suffix, strip_highlights_suffix};
+
+    #[test]
+    fn suffix_goes_before_the_extension() {
+        assert_eq!(
+            add_highlights_suffix(r"D:\Matches\TeamA - TeamB.mp4"),
+            r"D:\Matches\TeamA - TeamB_highlights.mp4"
+        );
+        assert_eq!(
+            add_highlights_suffix("/home/someone/match.mkv"),
+            "/home/someone/match_highlights.mkv"
+        );
+    }
+
+    /// Toggling the checkbox twice must not stack suffixes - the
+    /// derived path is recomputed from whatever is in the field, which
+    /// after one toggle already carries it.
+    #[test]
+    fn adding_the_suffix_twice_changes_nothing() {
+        let once = add_highlights_suffix("match.mp4");
+        assert_eq!(add_highlights_suffix(&once), once);
+    }
+
+    /// A dot in a directory name is not an extension - inserting there
+    /// would produce a path in a folder that does not exist.
+    #[test]
+    fn a_dot_in_a_folder_name_is_not_an_extension() {
+        assert_eq!(
+            add_highlights_suffix(r"D:\v1.2\match"),
+            r"D:\v1.2\match_highlights"
+        );
+        assert_eq!(
+            add_highlights_suffix("/srv/2026.08/match"),
+            "/srv/2026.08/match_highlights"
+        );
+    }
+
+    #[test]
+    fn stripping_reverses_adding_and_leaves_anything_else_alone() {
+        let path = r"D:\Matches\TeamA - TeamB.mp4";
+        assert_eq!(strip_highlights_suffix(&add_highlights_suffix(path)), path);
+        // Never produced by add_highlights_suffix, so never touched.
+        assert_eq!(strip_highlights_suffix(path), path);
+        assert_eq!(
+            strip_highlights_suffix("my_highlights_reel.mp4"),
+            "my_highlights_reel.mp4"
+        );
+    }
+}
+
+#[cfg(test)]
+mod suggested_calibration_path_tests {
+    use super::suggested_calibration_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn saves_one_level_up_from_a_left_folder() {
+        // The fixed <match>/Left/, <match>/Right/ layout (`match_folder`
+        // module doc) - this is the case a bare Auto-Calibrate (no
+        // "Select Match Folder" pick, no calibration ever loaded) used
+        // to get wrong, saving inside Left/ instead of the match folder.
+        let left = Path::new("D:/Matches/TeamA - TeamB 2026-08-22/Left/DJI_0001.mp4");
+        assert_eq!(
+            suggested_calibration_path(Some(left)),
+            Some(PathBuf::from(
+                "D:/Matches/TeamA - TeamB 2026-08-22/DJI_0001_calibration.json"
+            ))
+        );
+    }
+
+    #[test]
+    fn case_insensitive_left_folder_name() {
+        let left = Path::new("D:/Matches/TeamA - TeamB/LEFT/DJI_0001.mp4");
+        assert_eq!(
+            suggested_calibration_path(Some(left)),
+            Some(PathBuf::from(
+                "D:/Matches/TeamA - TeamB/DJI_0001_calibration.json"
+            ))
+        );
+    }
+
+    #[test]
+    fn falls_back_to_left_videos_own_folder_without_the_left_right_layout() {
+        let left = Path::new("D:/Recordings/DJI_0001.mp4");
+        assert_eq!(
+            suggested_calibration_path(Some(left)),
+            Some(PathBuf::from("D:/Recordings/DJI_0001_calibration.json"))
+        );
+    }
+
+    #[test]
+    fn none_when_nothing_loaded_yet() {
+        assert_eq!(suggested_calibration_path(None), None);
     }
 }

@@ -216,6 +216,52 @@ pub fn output_frame_to_source_secs(
     0.0 // keep_windows/window_limits empty - nothing to map.
 }
 
+/// Merge overlapping or touching `[start, end)` windows into the
+/// smallest set covering the same time, sorted by start.
+///
+/// Windows come from event logs, so two of them can easily overlap: two
+/// goals twenty seconds apart, each asking for fifteen seconds of
+/// lead-in, describe one continuous stretch of play and not two clips
+/// with a negative gap between them. [`gaps_between`] assumes this has
+/// already run.
+pub fn merge_windows(mut windows: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+    windows.retain(|(start, end)| start.is_finite() && end.is_finite() && end > start);
+    windows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut merged: Vec<(f64, f64)> = Vec::with_capacity(windows.len());
+    for (start, end) in windows {
+        match merged.last_mut() {
+            // Touching counts as overlapping: a zero-length gap is not a
+            // cut anyone can see, and emitting it would make the export
+            // seek to the position it is already at.
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+
+/// The gaps between consecutive windows, as the `[start, end)` ranges to
+/// exclude so only the windows survive.
+///
+/// This is what turns "keep these moments" into the cut ranges the rest
+/// of this module already understands - a highlight reel is an ordinary
+/// cut-range export whose cuts happen to be everything that is not a
+/// highlight. Nothing is emitted before the first window or after the
+/// last: those two edges are the export's own start and end times, and
+/// expressing them as cuts instead would decode content only to throw it
+/// away.
+///
+/// Expects [`merge_windows`]' output. Non-positive gaps are skipped, so
+/// unmerged input degrades to a correct-but-larger result rather than an
+/// inverted range that [`validate_cut_ranges`] would reject.
+pub fn gaps_between(windows: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    windows
+        .windows(2)
+        .filter(|pair| pair[1].0 > pair[0].1)
+        .map(|pair| (pair[0].1, pair[1].0))
+        .collect()
+}
+
 /// Per-boundary silent-gap seconds for `EncoderConfig::pause_overlay_hold_secs`,
 /// the audio counterpart of [`extend_for_pause_overlay`]'s video-side
 /// frame schedule, computed independently and earlier (audio setup runs
@@ -662,5 +708,73 @@ mod tests {
         let cuts = vec![CutRange::new(90.0, 150.0).unwrap()];
         let windows = keep_windows(10.0, Some(100.0), &cuts);
         assert_eq!(windows, vec![(10.0, Some(90.0))]);
+    }
+
+    /// Two highlights close enough to overlap describe one continuous
+    /// stretch of play, not two clips with a negative gap between them.
+    #[test]
+    fn merge_windows_folds_overlapping_and_touching_ones_together() {
+        // Overlapping, and deliberately out of order on input.
+        assert_eq!(
+            merge_windows(vec![(100.0, 130.0), (20.0, 50.0), (40.0, 70.0)]),
+            vec![(20.0, 70.0), (100.0, 130.0)]
+        );
+        // Exactly touching: a zero-length gap is not a visible cut, and
+        // emitting it would seek to the position playback already holds.
+        assert_eq!(
+            merge_windows(vec![(0.0, 10.0), (10.0, 20.0)]),
+            vec![(0.0, 20.0)]
+        );
+        // One window swallowed whole by another.
+        assert_eq!(
+            merge_windows(vec![(0.0, 100.0), (30.0, 40.0)]),
+            vec![(0.0, 100.0)]
+        );
+        // Degenerate and non-finite input is dropped, not propagated
+        // into a cut range that validate_cut_ranges would reject.
+        assert_eq!(
+            merge_windows(vec![(50.0, 50.0), (10.0, 5.0), (f64::NAN, 1.0), (1.0, 2.0)]),
+            vec![(1.0, 2.0)]
+        );
+    }
+
+    /// The complement of the kept windows, and only the interior of it:
+    /// the two outer edges are the export's start/end times.
+    #[test]
+    fn gaps_between_returns_only_the_interior_gaps() {
+        let windows = vec![(100.0, 130.0), (400.0, 440.0), (900.0, 930.0)];
+        assert_eq!(gaps_between(&windows), vec![(130.0, 400.0), (440.0, 900.0)]);
+        // A single window needs no cuts at all - start/end cover it.
+        assert!(gaps_between(&[(100.0, 130.0)]).is_empty());
+        assert!(gaps_between(&[]).is_empty());
+    }
+
+    /// The round trip the highlights export actually performs: windows
+    /// -> cut ranges -> keep_windows must give the windows back.
+    #[test]
+    fn highlight_windows_survive_the_trip_through_cut_ranges() {
+        let windows = merge_windows(vec![(400.0, 440.0), (100.0, 130.0), (900.0, 930.0)]);
+        let cuts: Vec<CutRange> = gaps_between(&windows)
+            .into_iter()
+            .map(|(s, e)| CutRange::new(s, e).expect("gaps are positive by construction"))
+            .collect();
+        let cuts = validate_cut_ranges(cuts).expect("gaps never overlap");
+
+        let start = windows.first().expect("non-empty").0;
+        let end = windows.last().expect("non-empty").1;
+        let kept = keep_windows(start, Some(end), &cuts);
+
+        assert_eq!(
+            kept,
+            vec![
+                (100.0, Some(130.0)),
+                (400.0, Some(440.0)),
+                (900.0, Some(930.0))
+            ]
+        );
+        // And the reel is exactly the summed window durations - no
+        // silent extra content sneaking in between highlights.
+        let total: f64 = kept.iter().map(|(s, e)| e.expect("bounded") - s).sum();
+        assert!((total - 100.0).abs() < 1e-9, "got {total}s");
     }
 }

@@ -168,6 +168,19 @@ enum Commands {
         #[arg(long = "cut-range", value_name = "START:END", value_parser = parse_cut_range)]
         cut_range: Vec<reco_io::cut_range::CutRange>,
 
+        /// Keep ONLY these time ranges, splicing them together - the
+        /// inverse of --cut-range, for building a highlight reel.
+        /// Repeat for multiple clips; overlapping ones merge into one.
+        /// Sets the export's start and end times, so it cannot be
+        /// combined with --start-time, --end-time or --cut-range.
+        #[arg(
+            long = "keep-range",
+            value_name = "START:END",
+            value_parser = parse_cut_range,
+            conflicts_with_all = ["cut_range", "start_time", "end_time"],
+        )]
+        keep_range: Vec<reco_io::cut_range::CutRange>,
+
         /// Show a "PAUZE" dip-to-black transition at every --cut-range
         /// boundary instead of an instant content jump. No effect
         /// without --cut-range.
@@ -990,6 +1003,7 @@ fn main() -> anyhow::Result<()> {
             end_time,
             max_frames,
             cut_range,
+            keep_range,
             pause_overlay,
             pause_overlay_fade,
             pause_overlay_hold,
@@ -1046,6 +1060,7 @@ fn main() -> anyhow::Result<()> {
                 end_time,
                 max_frames,
                 cut_ranges: cut_range,
+                keep_ranges: keep_range,
                 pause_overlay: pause_overlay.then_some((pause_overlay_fade, pause_overlay_hold)),
                 encoder_name: encoder,
                 codec: &codec,
