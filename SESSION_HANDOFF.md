@@ -1,4 +1,107 @@
-# Session handoff - 2026-08-28 (TGR_PC): auto color match fixed on the lookahead export path; IMU investigation rounds 3-6 (measured, then refuted); Match Logger clock; several GUI changes
+# Session handoff - 2026-08-29 (TGR_PC): Roll/Skew calibration sliders; model published to Hugging Face; round-5 training frames selected and uploaded to Label Studio
+
+## REPO STATE AT END OF SESSION (2026-08-29)
+
+- Branch `main`. **Four commits made and pushed to `github/main` today**
+  (note: `origin` is the upstream project and is not writable - push to
+  the `github` remote, which is what `main` tracks):
+  - `5cc64c29` reco-gui: split the per-camera Rotation slider into Roll and Skew
+  - `5dd41eb2` docs: record the published Hugging Face model repo
+  - `5c85c585` docs: detection runs per camera, not on a stitched panorama
+  - `604de7ec` scripts: select training frames by model failure, not by volume
+- `git fsck --full` clean before pushing (only dangling blobs).
+- **Everything listed in the 2026-08-28 entry below is still
+  UNCOMMITTED** and was deliberately left alone this session: the
+  `pipeline.rs` / `vram_pool.rs` / `executor.rs` / `frame_processing.rs`
+  changes, the reco-gui build files, `FRICTION.md`, the Match Logger
+  HTML, the four IMU example programs and the two `assets/` dirs.
+- Binaries: reco-gui release + debug rebuilt 2026-08-29 (13:28 / 13:33),
+  both `--features tensorrt`, carrying the Roll/Skew sliders.
+
+## DONE THIS SESSION (2026-08-29)
+
+1. **Roll/Skew sliders (committed, user-confirmed working).** The single
+   per-camera "Rotation" slider drove `x_rx` (right) / `z_rz` (left),
+   which rotate the plane around its own horizontal axis - under the
+   oblique L-shape view that reads as a skew, so it could not correct a
+   camera physically rolled in the rig. Each camera now has `Roll`
+   (`x_rz` right / `z_rx` left, the rotation around the plane normal)
+   and `Skew` (the previous behaviour, unchanged). The "ROTATION FIT"
+   group is renamed "SKEW FIT" because its checkboxes force-fit the skew
+   angles. `Topology`'s doc comments had `z_rx`/`z_rz` labelled the
+   wrong way round versus the matrices in `render/scene.rs`; corrected.
+   - **Not done, deliberately:** the left plane's rotation pivot is
+     applied along world X, which for that plane is its *normal* rather
+     than its width axis, so `z_rz` also shifts vertically and `z_rx`
+     pivots at the plane centre instead of the seam edge (the right
+     camera pivots correctly on the seam). Fixing it would move every
+     existing calibration with a non-zero `z_rx`, which auto-calibrate
+     fills in by default. Ask the user before touching it.
+
+2. **Model published to Hugging Face.** <https://huggingface.co/Dura-S/reco-yolo26s-football>,
+   public, weights + model card only. The user's HF account is `Dura-S`.
+   `hf.exe` now lives in the user's roaming Python Scripts dir, which was
+   added to the user PATH this session (backup of the old PATH:
+   `D:\CLAUDE\user_path_backup_2026-08-29_1448.txt`). Re-uploading is
+   `hf upload Dura-S/reco-yolo26s-football . --repo-type model`; its
+   "0.00B transferred" output is a wrong progress bar, verify with
+   `HfApi().model_info(..., files_metadata=True)` instead.
+
+3. **Corrected a wrong claim that had already been published.** The
+   model card and `YOLO26_Training.md` both said detection runs on a
+   stitched panorama. It does not: `session/detection_dispatch.rs`
+   dispatches `CameraId::Left` and `CameraId::Right` separately, each on
+   that camera's own raw 3840x2880 frame, before any stitching. Both
+   texts fixed, HF re-uploaded and verified live. **Training data must be
+   raw per-camera frames** - not stitched panoramas, and certainly not
+   the exported virtual-camera video.
+
+4. **Round-5 training frames: 60 selected and uploaded.** Two new
+   committed scripts, `scripts/pick_training_frames.py` and
+   `scripts/upload_to_labelstudio.py`, replace the old ad-hoc drivers.
+   Label Studio project 24 ("Ai Learning - yolo26s") went from 100 to
+   160 tasks, each with the current model's boxes as editable
+   predictions. Half the batch is a `blind_spot` group - frames where
+   the model finds **no ball at all** while 15-21 players are on the
+   pitch - which no earlier round contained. Full rationale and the
+   exact commands are in `YOLO26_Training.md`'s round-5 section. The 720
+   extracted candidates and all their detections are cached under
+   `D:\CLAUDE\frame_pick\`, so a different selection costs no GPU time.
+
+5. **Export performance investigated, not solved.** Measured on two
+   identical full-match exports (same range, same cuts, 110577 frames
+   each): 0.8s lookahead gave 27.86 fps, 1.2s gave 27.39 fps. More
+   lookahead does nothing, so detection is **not** what holds the loop
+   back - the async detect thread was already on, TensorRT confirmed
+   active, detection interval already 3. Nothing is saturated (GPU
+   63-69%, CPU 12-14%, disk 22%), which is the signature of a serialised
+   pipeline. Two hypotheses were tested and refuted (the D: HDD, and the
+   NV12 readback path - the latter is already double-buffered). A faster
+   GPU alone will not reach 50 fps: with GPU work at ~63% of wall time
+   the ceiling is ~81 fps and a 2.5x card lands near 48. **Next step is a
+   `--features profiling` run** (`--max-frames 300`, then read
+   `reco-trace.json`); the user declined it twice this session, so ask
+   first.
+
+## OPEN / WAITING ON THE USER
+
+- Review the 60 new tasks in Label Studio project 24. The 28 blind-spot
+  frames have **no ball in their suggestions on purpose**. The teacher
+  over-predicts `referee`, and at the 0.05 confidence floor some
+  suggested balls are noise - removing a wrong ball matters as much as
+  adding a missed one, because a small ball left unlabelled teaches the
+  model that there is no ball there.
+- Forum post announcing the model is written but **not posted**:
+  `D:\CLAUDE\forum_post_yolo26s_football.md` (128 words). Plan agreed: a
+  new topic in General on <https://forum.reco.cam> (the README's
+  `forum.reco-project.org` 301-redirects there), tag `ball-tracking`,
+  then short cross-links from topics 134, 114 and 104.
+- The user's Label Studio API token was pasted into that session's chat;
+  they were advised to rotate it.
+- Lookahead should go back to 0.8s in the GUI - 1.2s costs 540 MB VRAM
+  and buys nothing.
+
+## Previous entry - 2026-08-28 (TGR_PC): auto color match fixed on the lookahead export path; IMU investigation rounds 3-6 (measured, then refuted); Match Logger clock; several GUI changes
 
 ## REPO STATE AT END OF SESSION (2026-08-28, before a PC restart)
 
