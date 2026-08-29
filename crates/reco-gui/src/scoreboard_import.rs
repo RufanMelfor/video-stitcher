@@ -333,6 +333,48 @@ pub fn derived_end_secs(
     Some(to_video_secs(match_end_ms) + buffer_secs)
 }
 
+/// Highlight windows (in video seconds, same space as reco-gui's manual
+/// cut-range timeline) derived from a Match Logger export: one
+/// `[start, end)` window per logged goal.
+///
+/// `lead_secs` before the logged moment and `trail_secs` after it. The
+/// lead wants to be generous and is not symmetric with the trail: the
+/// operator taps the goal button *after* seeing the ball go in, so the
+/// logged timestamp already trails the event by a few seconds, and the
+/// build-up worth watching started well before that. The trail only has
+/// to cover the celebration.
+///
+/// Windows are returned in log order and may overlap - two goals in
+/// quick succession are one continuous stretch of play, which
+/// [`reco_io::cut_range::merge_windows`] is what resolves, not this
+/// function. Negative starts are clamped to zero; nothing else is
+/// clamped here, because this function has no idea how long the video
+/// is - the export's own end time handles a window that runs past it.
+///
+/// Deliberately narrow, same as [`derived_cut_ranges`]: only `goal`
+/// events. A highlight this misses is exactly a moment nothing in the
+/// log justified keeping automatically.
+pub fn derived_goal_windows(
+    export: &MatchLoggerExport,
+    anchor: &SyncAnchor,
+    lead_secs: f64,
+    trail_secs: f64,
+) -> Vec<(f64, f64)> {
+    let to_video_secs =
+        |ts_ms: i64| anchor.video_seconds + (ts_ms - anchor.event_ts_ms) as f64 / 1000.0;
+    export
+        .events
+        .iter()
+        .filter(|e| e.kind == EventKind::Goal)
+        .filter_map(|e| {
+            let scored_at = to_video_secs(e.ts_ms);
+            let start = (scored_at - lead_secs).max(0.0);
+            let end = scored_at + trail_secs;
+            (end > start).then_some((start, end))
+        })
+        .collect()
+}
+
 /// Cut ranges (in video seconds, same space as reco-gui's existing manual
 /// cut-range timeline) derived from a Match Logger export: one range per
 /// logged pause - the dead time during any in-match stoppage.
@@ -735,6 +777,64 @@ mod tests {
         assert_eq!(
             export.video_start_ms(),
             Some(parse_iso8601_ms("2026-08-21T14:00:00.000Z").unwrap())
+        );
+    }
+
+    #[test]
+    fn derived_goal_windows_covers_each_goal_and_nothing_else() {
+        let export = fixture();
+        // The fixture's two goals sit at video_seconds 305.0 and 6005.0
+        // (14:05:05 and 15:40:05, against a 14:00:00 anchor at video 0).
+        // Every other event in it - kickoffs, a card, a pause, added
+        // time, match end - must contribute no window at all.
+        let windows = derived_goal_windows(&export, &anchor(), 15.0, 10.0);
+        assert_eq!(windows, vec![(290.0, 315.0), (5990.0, 6015.0)]);
+    }
+
+    #[test]
+    fn derived_goal_windows_lead_is_clamped_at_the_start_of_the_video() {
+        let export = fixture();
+        // A 400s lead on the 305s goal would start at -95s. A negative
+        // start is not representable on the timeline, so it clamps to 0
+        // rather than wrapping or dropping the highlight entirely.
+        let windows = derived_goal_windows(&export, &anchor(), 400.0, 10.0);
+        assert_eq!(windows[0], (0.0, 315.0));
+    }
+
+    /// The whole point of the asymmetric default: the operator taps the
+    /// button after the ball is in, so the window has to reach back
+    /// further than it reaches forward.
+    #[test]
+    fn derived_goal_windows_applies_lead_and_trail_independently() {
+        let export = fixture();
+        let windows = derived_goal_windows(&export, &anchor(), 20.0, 5.0);
+        assert_eq!(windows[0], (285.0, 310.0));
+    }
+
+    /// End to end, in the shape the export actually uses it: two goals
+    /// close enough to overlap must come out as one continuous clip,
+    /// with no cut range in the middle of it.
+    #[test]
+    fn overlapping_goal_windows_become_one_highlight() {
+        let mut export = fixture();
+        let base = parse_iso8601_ms("2026-08-21T14:00:00.000Z").unwrap();
+        // A second goal 20s after the first, with a 15s lead each.
+        export.events.push(MatchEvent {
+            kind: EventKind::Goal,
+            ts_ms: base + 325_000,
+            team: Some(Team::Home),
+            period: None,
+            minutes: None,
+        });
+        export.events.sort_by_key(|e| e.ts_ms);
+
+        let windows =
+            reco_io::cut_range::merge_windows(derived_goal_windows(&export, &anchor(), 15.0, 10.0));
+        assert_eq!(windows, vec![(290.0, 335.0), (5990.0, 6015.0)]);
+        assert_eq!(
+            reco_io::cut_range::gaps_between(&windows),
+            vec![(335.0, 5990.0)],
+            "one cut between the two highlights, none inside the merged one"
         );
     }
 

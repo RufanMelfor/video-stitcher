@@ -21,15 +21,15 @@
   diagnostics, `crates/reco-gui/assets/` + `crates/reco-gui/ui/assets/`
   (app icon), `scripts/match-logger/Match Logger.html.txt` (a stray
   copy that was already there, not written this session).
-- Binaries: **release rebuilt 20:08** (`reco-gui.exe`) and **19:57**
-  (`reco.exe`), both `--features tensorrt`, carrying items 7 and 8
-  below plus the "Advanced panner expanded" change. The **debug build
-  (15:26) is stale** - it predates all of it. Rebuild it before testing
-  anything in debug.
+- Binaries: **release rebuilt 2026-08-29 08:51** (`reco-gui.exe`) and
+  **08:46** (`reco.exe`), both `--features tensorrt`, carrying items 7,
+  8 and 9 below plus the "Advanced panner expanded" change. The **debug
+  build (08-28 15:26) is stale** - it predates all of it. Rebuild it
+  before testing anything in debug.
 
 ## IN THE TREE, NOT YET IN A BUILT BINARY
 
-Nothing - the 20:08 release build covers the whole tree. (The 15:53
+Nothing - the 08-29 08:51 release build covers the whole tree. (The 15:53
 build did not; the "Advanced panner" section now starting expanded,
 `ui/main.slint`'s `panner-advanced`, landed after it. User's request:
 it holds the settings actually being tuned per match, so collapsing it
@@ -280,6 +280,75 @@ Both release binaries carry the fix: `reco.exe` (19:57) and
 `reco-gui.exe` (20:08, `--features tensorrt`). **Not yet exercised
 through the GUI** - the natural test is the same full-match export with
 its 3 cut ranges, listening at each cut.
+
+### 9. Goal highlights export (2026-08-29)
+
+User asked whether goal highlights for YouTube were possible. They are,
+and the video engine needed **no** new capability: a highlight reel is an
+ordinary cut-range export whose cuts happen to be everything between the
+clips. Built, verified on real footage, not yet tried through the GUI.
+
+**What was already there** (worth knowing before touching this again):
+- `scoreboard_import.rs` already parses `EventKind::Goal` with a
+  `SyncAnchor` giving video seconds, and `derived_cut_ranges` was an
+  exact template for deriving windows from events.
+- The decoder *seeks* past excluded ranges, so a reel decodes only its
+  clips - the 2026-08-28 test reel took 26s wall clock, against 65
+  minutes for the full match.
+- `cut_range::output_frame_to_source_secs` already maps output frames
+  back to source time for the scoreboard replay, so the clock shows real
+  match time inside a reel with no extra work.
+- Audio splicing across cuts *and* across chained segment files works as
+  of item 8 above. Without that this feature would have shipped broken.
+
+**Not viable: automatic goal detection.** `reco-autocam/src/goal_events.rs`
+exists but has no call site, and its own doc explains why it is only a
+primitive - a ball inside the goal-mouth polygon is not proof of a goal
+(corner deliveries and shots over the bar pass through the same region),
+and confirming needs kickoff detection that does not exist. The Match
+Logger route is the one that works.
+
+**Built:**
+- `cut_range::merge_windows` + `gaps_between` - overlapping goal windows
+  fold into one clip, and the interior gaps become the cut ranges. The
+  outer edges are start/end times, never cuts, so nothing is decoded to
+  be thrown away.
+- `scoreboard_import::derived_goal_windows` - one window per `goal`
+  event, asymmetric margins (15s lead / 10s trail by default) because
+  the operator taps the button *after* the ball is in.
+- reco-gui: "Highlights only (goals)" checkbox + two margin fields,
+  mutually exclusive with auto-cut. Sets export start/end + cut ranges,
+  and renames the output to `..._highlights.mp4` so a two-minute reel
+  cannot land on top of the multi-gigabyte full export.
+- reco-cli: `--keep-range START:END`, repeatable, the inverse of
+  `--cut-range`. Conflicts with `--cut-range`/`--start-time`/`--end-time`
+  via clap.
+- `ScoreboardSettings` persists the two margins but **deliberately not
+  the toggle** - restoring "highlights on" would silently turn the next
+  session's ordinary export into a two-minute reel.
+
+**Verified on real footage** (release CLI, two clips spanning a segment
+boundary, `--keep-range 990:1010 --keep-range 1268:1288
+--pause-overlay`): clip 1 cross-correlates at r=0.913 exactly on time,
+clip 2 at r=1.000 within 16ms (AAC packet granularity), the PAUZE gap is
+exactly 0 RMS for exactly 4s, and audio and video both run 43.98s. The
+identical scenario written the old way (`--start-time 990 --end-time 1288
+--cut-range 1010:1268`) produces the same 1318 frames, so `--keep-range`
+is a pure convenience over the existing mechanism.
+
+**Two measurement traps, recorded so the next session does not fall in:**
+extracting the audio to WAV without `aresample=async=1` silently drops
+the PAUZE gap and makes everything after it look 4s early; and a
+reference span cut with `-ss` must be compared against the *right*
+expected lag, which changes with the cut boundary.
+
+**Not done:** YouTube chapters remapped from match time to reel time
+(Match Logger already exports `youtubeChaptersText`, but those timestamps
+are match time - `output_frame_to_source_secs` inverted is what maps
+them). And upload is manual: the 2026-07-16 quota research called the
+shared 10,000 units/day the showstopper, which is true for distributing
+the app but not for one club on its own Google Cloud project - 6 uploads
+a day is plenty there.
 
 ## OPEN TASKS - do these next
 

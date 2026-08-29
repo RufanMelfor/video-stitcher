@@ -49,6 +49,12 @@ pub struct StitchArgs<'a> {
     /// Time ranges to exclude from the export (e.g. a halftime pause).
     /// See `reco_io::cut_range` and `--cut-range`'s help text.
     pub cut_ranges: Vec<reco_io::cut_range::CutRange>,
+    /// Time ranges to keep, everything else excluded - the inverse of
+    /// `cut_ranges`, for a highlight reel. Turned into a start time, an
+    /// end time and the cut ranges between the clips; the engine has no
+    /// separate notion of a keep range. Mutually exclusive with
+    /// `cut_ranges`/`start_time`/`end_time` (enforced by clap).
+    pub keep_ranges: Vec<reco_io::cut_range::CutRange>,
     /// `Some((fade_secs, hold_secs))` shows a "PAUZE" dip-to-black
     /// transition at every cut-range boundary. See
     /// `--pause-overlay`/`--pause-overlay-fade`/`--pause-overlay-hold`'s
@@ -230,6 +236,33 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
     }
     if !args.cut_ranges.is_empty() {
         job = job.cut_ranges(args.cut_ranges.clone());
+    }
+    // A highlight reel is an ordinary cut-range export whose cuts are
+    // everything between the clips, so this converts rather than adding
+    // a second mechanism the engine would have to understand.
+    if !args.keep_ranges.is_empty() {
+        let windows = reco_io::cut_range::merge_windows(
+            args.keep_ranges
+                .iter()
+                .map(|r| (r.start_secs, r.end_secs))
+                .collect(),
+        );
+        let (Some(first), Some(last)) = (windows.first(), windows.last()) else {
+            anyhow::bail!("--keep-range: no usable ranges after merging");
+        };
+        let gaps: Result<Vec<_>, String> = reco_io::cut_range::gaps_between(&windows)
+            .into_iter()
+            .map(|(start, end)| reco_io::cut_range::CutRange::new(start, end))
+            .collect();
+        let gaps = gaps.map_err(|e| anyhow::anyhow!("--keep-range: {e}"))?;
+        log::info!(
+            "Keep ranges: {} clip(s) totalling {:.1}s, spanning {:.2}-{:.2}s",
+            windows.len(),
+            windows.iter().map(|(s, e)| e - s).sum::<f64>(),
+            first.0,
+            last.1,
+        );
+        job = job.start_time(first.0).end_time(last.1).cut_ranges(gaps);
     }
     if let Some((fade_secs, hold_secs)) = args.pause_overlay {
         job = job.pause_overlay(fade_secs, hold_secs);

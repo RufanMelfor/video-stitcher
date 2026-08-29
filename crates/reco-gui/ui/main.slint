@@ -610,20 +610,24 @@ component CalGroupBox inherits Rectangle {
 component TransportButton inherits Rectangle {
     in property <string> text;
     in property <bool> enabled: true;
-    // The play/pause button in the cluster is emphasized (accent-tinted,
-    // slightly wider) so the primary transport action reads at a glance.
-    in property <bool> emphasized: false;
+    // Draws a plain filled triangle instead of `text` - used for the
+    // play icon. The Unicode "▶" glyph is a media-control character
+    // that Windows' emoji font substitution can render in full color
+    // (a blue triangle) regardless of the Text `color` set below,
+    // which is exactly what made the play button look like a
+    // different *kind* of icon than its plain-ASCII siblings
+    // ("|<", "<", ">", "■", ">|" - none of those have a color-glyph
+    // fallback). A vector shape can't be font-substituted.
+    in property <bool> play-triangle: false;
     callback clicked();
 
-    width: root.emphasized ? 34px : 28px;
+    width: 28px;
     height: 24px;
     border-radius: 6px;
     background: !root.enabled ? #1c1f22
-        : root.emphasized
-            ? (touch.has-hover ? #2c4a56 : #263842)
-            : (touch.pressed ? #1f2226 : touch.has-hover ? #2e333a : #24282c);
+        : (touch.pressed ? #1f2226 : touch.has-hover ? #2e333a : #24282c);
     border-width: 1px;
-    border-color: !root.enabled ? #2a2e33 : root.emphasized ? #33505e : #34393f;
+    border-color: !root.enabled ? #2a2e33 : #34393f;
 
     touch := TouchArea {
         enabled: root.enabled;
@@ -631,14 +635,25 @@ component TransportButton inherits Rectangle {
         clicked => { root.clicked(); }
     }
 
-    Text {
+    if !root.play-triangle: Text {
         text: root.text;
-        color: !root.enabled ? #565b61 : root.emphasized ? #6fd0fa : #d8d8d8;
+        color: !root.enabled ? #565b61 : #d8d8d8;
         font-size: 11px;
         horizontal-alignment: center;
         vertical-alignment: center;
         width: 100%;
         height: 100%;
+    }
+
+    if root.play-triangle: Path {
+        width: 9px;
+        height: 10px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        viewbox-width: 9;
+        viewbox-height: 10;
+        fill: !root.enabled ? #565b61 : #d8d8d8;
+        commands: "M 0 0 L 9 5 L 0 10 Z";
     }
 }
 
@@ -946,6 +961,7 @@ component SegmentList inherits Rectangle {
 
 export component RecoApp inherits Window {
     title: "Reco Video Stitcher";
+    icon: @image-url("assets/icon.png");
     preferred-width: 1280px;
     preferred-height: 820px;
     min-width: 720px;
@@ -1032,6 +1048,17 @@ export component RecoApp inherits Window {
     in-out property <float> audio-window-frames: 5.0;
     in-out property <float> audio-waveform-height-px: 300.0;
     in-out property <string> calibration-step: "";
+    // Detail text for the current step (e.g. "captured 3/20 pairs") and
+    // fractional progress within it (0..1) - only `FeatureMatching`
+    // reports a real fraction, other steps stay at 0. Shown together
+    // with `calibration-step` and `calibration-log` in the progress
+    // popup while `calibrating` is true.
+    in-out property <string> calibration-detail: "";
+    in-out property <float> calibration-progress: 0.0;
+    // Every step/detail message seen so far this run, oldest first -
+    // reset to empty each time a new Auto-Calibrate starts.
+    in-out property <[string]> calibration-log: [];
+    callback cancel-calibration();
     // Set once the background update-check thread finds a newer GitHub
     // release; drives the toolbar's "Update available" button instead of
     // auto-opening a browser tab (see `open-update-page` below).
@@ -1260,6 +1287,13 @@ export component RecoApp inherits Window {
     // long to stay on the restart after it, how much lead-in before
     // kickoff, and how long to stay on the pitch after the final
     // whistle. All were a fixed 2s before they became settings.
+    // Highlights export: keep only the logged goals. Separate margins
+    // from the auto-cut ones above - a goal window answers a different
+    // question (how much build-up and celebration to show) than a pause
+    // trim does, and wants much larger values.
+    in-out property <bool> scoreboard-derive-highlights: false;
+    in-out property <float> highlights-lead-secs: 15.0;
+    in-out property <float> highlights-trail-secs: 10.0;
     in-out property <float> autocut-cut-lead-secs: 2.0;
     in-out property <float> autocut-cut-trail-secs: 2.0;
     in-out property <float> autocut-kickoff-lead-secs: 2.0;
@@ -1320,7 +1354,17 @@ export component RecoApp inherits Window {
     in-out property <float> cal-akaze-threshold: 0.0001;
     in-out property <float> cal-detect-y-min: 0.05;
     in-out property <float> cal-detect-y-max: 0.95;
-    in-out property <float> cal-skip-end-secs: 0.0;
+    // Manually typed frame number to center calibration sampling on
+    // (e.g. a moment with lots of texture on the field). Empty = use
+    // the current playback position instead - the "Use current" button
+    // fills this from `current-frame`.
+    in-out property <string> cal-anchor-frame-text: "";
+    // Seconds of video, centered on the anchor frame above, to keep
+    // every calibration sample frame within - so they cluster near a
+    // chosen moment instead of spreading out across the rest of the
+    // clip. 0 = off: sample from the anchor position onward across the
+    // whole rest of the video, same as before this control existed.
+    in-out property <float> cal-sample-window-secs: 0.0;
 
     // When true (default), pan/zoom is clamped to the coverage boundary
     // so the viewport never shows black margins. Users can disable it
@@ -1677,6 +1721,8 @@ export component RecoApp inherits Window {
     callback changed-scoreboard-banner-color(string); // preset name, e.g. "Navy"
     callback toggled-scoreboard-derive-cut-ranges(bool);
     callback changed-autocut-margins();
+    callback toggled-scoreboard-derive-highlights(bool);
+    callback changed-highlights-margins();
     callback changed-pause-overlay();
 
     // File management: per-side segment lists and removal.
@@ -2355,6 +2401,51 @@ export component RecoApp inherits Window {
                                             escaped => { self.text = root.autocut-match-end-trail-secs; }
                                         }
                                         Text { text: "s post-FT"; color: #888; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
+                                    }
+                                }
+
+                                if root.scoreboard-match-summary != "": Tip {
+                                    tip: "Export only the goals: one clip per logged goal, spliced together. Sets the export start, end and cut ranges for you, and renames the output so it cannot overwrite the full match. Turning this on turns auto-cut off - it already excludes everything that is not a goal.";
+                                    CheckBox {
+                                        text: "Highlights only (goals)";
+                                        checked <=> root.scoreboard-derive-highlights;
+                                        toggled => { root.toggled-scoreboard-derive-highlights(self.checked); }
+                                    }
+                                }
+
+                                if root.scoreboard-match-summary != "" && root.scoreboard-derive-highlights: VerticalLayout {
+                                    spacing: 4px;
+
+                                    Tip {
+                                        tip: "How much of each goal to keep. The lead reaches back further than the trail on purpose: the goal is logged after the ball is in, so the build-up sits before the logged moment while only the celebration follows it.";
+                                        Text {
+                                            text: "Goal clip";
+                                            color: root.text-dim;
+                                            font-size: 11px;
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        NumEdit {
+                                            text: root.highlights-lead-secs;
+                                            width: 44px;
+                                            edited(v) => {
+                                                root.highlights-lead-secs = Math.max(v.to-float(), 0);
+                                                root.changed-highlights-margins();
+                                            }
+                                            escaped => { self.text = root.highlights-lead-secs; }
+                                        }
+                                        Text { text: "s before"; color: #888; font-size: 11px; vertical-alignment: center; }
+                                        NumEdit {
+                                            text: root.highlights-trail-secs;
+                                            width: 44px;
+                                            edited(v) => {
+                                                root.highlights-trail-secs = Math.max(v.to-float(), 0);
+                                                root.changed-highlights-margins();
+                                            }
+                                            escaped => { self.text = root.highlights-trail-secs; }
+                                        }
+                                        Text { text: "s after"; color: #888; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
                                     }
                                 }
 
@@ -3826,12 +3917,32 @@ export component RecoApp inherits Window {
                                     }
                                 }
 
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Tip {
+                                        tip: "Frame number to center calibration sampling on. Leave empty to use the current playback position instead.";
+                                        Text { text: "Anchor frame:"; color: #888; font-size: 11px; vertical-alignment: center; }
+                                    }
+                                    NumEdit {
+                                        text <=> root.cal-anchor-frame-text;
+                                        width: 64px;
+                                        height: 22px;
+                                        placeholder-text: "current";
+                                        enabled: !root.calibrating;
+                                    }
+                                    FlatButton {
+                                        text: "Use current";
+                                        enabled: !root.calibrating;
+                                        clicked => { root.cal-anchor-frame-text = root.current-frame; }
+                                    }
+                                }
+
                                 LabeledSlider {
-                                    tip: "Seconds to skip at the end of the clip when sampling calibration frames.";
-                                    label: "Skip end";
+                                    tip: "Keep all calibration sample frames within this many seconds of the anchor frame above (or the current playback position, if it's empty), instead of spreading them across the rest of the clip. Use it to point Re-calibrate at a moment with lots of texture on the field (people, cones, ...). 0 = off.";
+                                    label: "Sample window";
                                     minimum: 0;
-                                    maximum: 60;
-                                    value <=> root.cal-skip-end-secs;
+                                    maximum: 120;
+                                    value <=> root.cal-sample-window-secs;
                                     suffix: "s";
                                     decimals: 0;
                                     step: 1;
@@ -4338,12 +4449,12 @@ export component RecoApp inherits Window {
                         width: self.preferred-width;
                         height: parent.height;
                         spacing: 2px;
-                        Tip { tip: "Jump to first frame."; TransportButton { text: "|<"; enabled: root.files-loaded; clicked => { root.seek(0.0); } } }
-                        Tip { tip: "Step back one frame."; TransportButton { text: "<"; enabled: root.files-loaded; clicked => { root.step-backward(); } } }
-                        Tip { tip: "Play or pause."; TransportButton { text: root.playing ? "||" : "▶"; emphasized: true; enabled: root.files-loaded; clicked => { root.toggle-playback(); } } }
-                        Tip { tip: "Step forward one frame."; TransportButton { text: ">"; enabled: root.files-loaded; clicked => { root.step-forward(); } } }
-                        Tip { tip: "Stop (pause in place)."; TransportButton { text: "■"; enabled: root.files-loaded; clicked => { root.pause-playback(); } } }
-                        Tip { tip: "Jump to last frame."; TransportButton { text: ">|"; enabled: root.files-loaded; clicked => { root.seek(1.0); } } }
+                        TransportButton { text: "|<"; enabled: root.files-loaded; clicked => { root.seek(0.0); } }
+                        TransportButton { text: "<"; enabled: root.files-loaded; clicked => { root.step-backward(); } }
+                        TransportButton { text: root.playing ? "||" : ""; play-triangle: !root.playing; enabled: root.files-loaded; clicked => { root.toggle-playback(); } }
+                        TransportButton { text: ">"; enabled: root.files-loaded; clicked => { root.step-forward(); } }
+                        TransportButton { text: "■"; enabled: root.files-loaded; clicked => { root.pause-playback(); } }
+                        TransportButton { text: ">|"; enabled: root.files-loaded; clicked => { root.seek(1.0); } }
                     }
 
                     // Divider between the transport buttons and the
@@ -4804,6 +4915,90 @@ export component RecoApp inherits Window {
                         FlatButton {
                             text: "Close";
                             clicked => { root.recent-dialog-open = false; }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Calibration progress (modal) ──
+        //
+        // Step name, per-step detail text, a progress bar (only
+        // FeatureMatching reports a real fraction - other steps sit at
+        // 0, which reads fine since the step name itself is already
+        // moving), a scrolling log of every step/detail seen so far,
+        // and Cancel. No click-outside-to-close - calibration keeps
+        // running regardless, so Cancel is the only way out.
+        if root.calibrating: Rectangle {
+            background: root.bg-scrim;
+            TouchArea {}
+
+            Rectangle {
+                width: 440px;
+                height: 420px;
+                background: root.bg-surface;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: root.border-mid;
+                TouchArea {}
+
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 10px;
+
+                    Text {
+                        text: "Calibrating";
+                        color: root.text-heading;
+                        font-size: 16px;
+                        font-weight: 600;
+                    }
+
+                    Text {
+                        text: root.calibration-step;
+                        color: #8ab4f8;
+                        font-size: 13px;
+                        font-weight: 600;
+                    }
+
+                    Text {
+                        text: root.calibration-detail;
+                        color: #ccc;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                        min-height: 16px;
+                    }
+
+                    ProgressIndicator {
+                        progress: root.calibration-progress;
+                        height: 6px;
+                    }
+
+                    Rectangle { height: 1px; background: root.border-subtle; }
+
+                    Text { text: "Log"; color: #888; font-size: 11px; }
+
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            alignment: end;
+                            spacing: 2px;
+                            for line in root.calibration-log: Text {
+                                text: line;
+                                color: #999;
+                                font-size: 11px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    Rectangle { height: 1px; background: root.border-subtle; }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle { horizontal-stretch: 1; }
+                        FlatButton {
+                            text: "Cancel";
+                            clicked => { root.cancel-calibration(); }
                         }
                     }
                 }
@@ -5688,7 +5883,11 @@ export component RecoApp inherits Window {
 
                         panner-advanced := SectionHeader {
                             title: "Advanced panner";
-                            expanded: false;
+                            // Open by default: these are the settings
+                            // actually being tuned per match right now
+                            // (ball reach, FOV, smoothing), so starting
+                            // collapsed just costs a click every session.
+                            expanded: true;
                         }
 
                         if panner-advanced.expanded: VerticalLayout {
@@ -5764,7 +5963,7 @@ export component RecoApp inherits Window {
                                 LabeledSlider {
                                     label: "Tight";
                                     minimum: 10.0;
-                                    maximum: 40.0;
+                                    maximum: 50.0;
                                     value <=> root.export-fov-tight;
                                     decimals: 0;
                                 }

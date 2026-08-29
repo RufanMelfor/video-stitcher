@@ -732,6 +732,24 @@ pub struct ScoreboardSettings {
     /// `--end-time` seek - see reco-gui's `derived_end_secs`).
     #[serde(default = "default_autocut_margin_secs")]
     pub match_end_trail_secs: f32,
+    /// Seconds of build-up kept *before* each logged goal by the
+    /// highlights export (reco-gui's `derived_goal_windows`).
+    ///
+    /// Deliberately larger than its trail counterpart: the operator taps
+    /// the goal button after seeing the ball go in, so the logged
+    /// timestamp already trails the moment, and the move worth watching
+    /// started before that.
+    ///
+    /// Note that the highlights *toggle* itself is not stored here, only
+    /// its margins. Restoring it as "on" would turn the next session's
+    /// ordinary export into a two-minute reel without anyone asking for
+    /// it - a far worse surprise than re-ticking a checkbox.
+    #[serde(default = "default_highlight_lead_secs")]
+    pub highlight_lead_secs: f32,
+    /// Seconds kept *after* each logged goal - long enough for the
+    /// celebration, which is all that follows.
+    #[serde(default = "default_highlight_trail_secs")]
+    pub highlight_trail_secs: f32,
 }
 
 fn default_scoreboard_logo_size_px() -> f32 {
@@ -743,6 +761,18 @@ fn default_scoreboard_logo_size_px() -> f32 {
 /// each can be tuned independently.
 fn default_autocut_margin_secs() -> f32 {
     2.0
+}
+
+/// Default build-up kept before a logged goal. See
+/// [`ScoreboardSettings::highlight_lead_secs`] for why it is not
+/// symmetric with the trail.
+fn default_highlight_lead_secs() -> f32 {
+    15.0
+}
+
+/// Default celebration kept after a logged goal.
+fn default_highlight_trail_secs() -> f32 {
+    10.0
 }
 
 /// The calibration document: canonical, serializable source of truth.
@@ -1447,6 +1477,8 @@ mod tests {
             cut_trail_secs: 1.5,
             kickoff_lead_secs: 5.0,
             match_end_trail_secs: 8.0,
+            highlight_lead_secs: 15.0,
+            highlight_trail_secs: 10.0,
         });
         let json = cal.to_json_pretty();
         let back: Calibration = serde_json::from_str(&json).unwrap();
