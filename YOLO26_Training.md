@@ -140,6 +140,72 @@ changed. Always run `strip_ultralytics_local_paths.py` first, and sweep the
 result for the strings `VOETBAL_VIDEO`, `Users\Rufan` and a drive-letter
 prefix before uploading - that sweep was clean for this release.
 
+## Round 5 candidate batch: selecting for failures, not volume (2026-08-29)
+
+Added 60 frames from two new matches (`04 Beuningse Boys Berghem Sport
+26082026`, `05 BMC20 -Berghem Sport`) to Label Studio project 24
+("Ai Learning - yolo26s"), taking it from 100 to 160 tasks. Two new
+committed scripts do the whole thing:
+
+- `scripts/pick_training_frames.py` - candidate extraction + selection
+- `scripts/upload_to_labelstudio.py` - upload + pre-labels as predictions
+
+Exact commands used:
+
+```
+python scripts/pick_training_frames.py     --match-dir "<...>/04 Beuningse Boys Berghem Sport 26082026"     --match-dir "<...>/05 BMC20 -Berghem Sport"     --model "<...>/merged_v1_tiled_1920/runs/full_patience100/weights/best.pt"     --out "<...>/training/round5_candidates" --per-camera 15
+
+python scripts/upload_to_labelstudio.py     --dataset "<...>/training/round5_candidates" --project 24     --url http://<host>:8080 --token-file <...>/ls_token.txt     --model-version "merged_v1_tiled_1920/full_patience100"
+```
+
+**Selection rationale, which is the whole point of this round.** The
+merged-round regression was caused by adding *easier* data, so this batch
+deliberately targets failures instead:
+
+- `uncertain_ball` (32 of 60): a plausibly sized ball the model is unsure
+  about. 18 of them under 15 px tall, confidences down to 0.05.
+- `blind_spot` (28 of 60): **no ball detected at all** while 15-21 players
+  are on the pitch, so play is happening and a ball is almost certainly in
+  frame. Their pre-labels contain no ball by design - the reviewer has to
+  find it, or confirm there is none. These are the only frames that can
+  teach the model about its own misses, and no previous round contained
+  any.
+
+Ranking is by player count, not by ball richness. `select_ball_rich_frames.py`
+ranks by the teacher's ball score, which selects for large, clearly visible
+balls by construction - the documented cause of the regression. Person
+detection is reliable (P 0.956 / R 0.929), so it is the safer ranking signal.
+
+**A ball-size sanity cap is required, not optional.** The first run of this
+selection stratified over ball size without one, and 14 of 60 frames were
+picked on the strength of a "ball" over 40 px tall - up to 170 px, at
+confidence 0.64. A real ball is ~18 px at 3840x2880. Without the cap the
+large-ball bin fills with false positives. Default is now 5-30 px.
+
+**Cost.** Keyframe-seeking one frame per candidate takes minutes for a full
+match; `select_ball_rich_frames.py`-style linear decoding of the same
+footage is ~1.4x realtime, i.e. 3.5 hours for 4 videos of ~75 min. 720
+candidates (180 per camera) and every detection are cached, so re-selecting
+with different parameters costs nothing - do that rather than re-extracting.
+
+**Label Studio quirks hit (both now handled in the script).** The known
+"import response has no `task_ids`" one recurred, worked around by matching
+tasks back on filename. New one: `GET /api/tasks` returns **404 past the
+last page** instead of an empty list, which crashes a naive pagination loop.
+
+**Reviewer notes for this batch.** The teacher over-predicts `referee` (one
+frame had 22 person + 10 referee boxes), and the low 0.05 confidence floor
+means some suggested balls are noise. Removing a wrong ball matters as much
+as adding a missed one: a small ball left unlabelled actively teaches the
+model that there is no ball there.
+
+**Does more data help by itself? No.** Two counts to keep in view: the set
+holds roughly 7900 person boxes against 580 ball boxes, and every added
+frame contributes ~20 persons and at most 1 ball, so uniform sampling makes
+the ball *relatively rarer* every round. Keep the validation set frozen
+across rounds, and keep using the same real-footage clip, or improvements
+cannot be measured against anything.
+
 ## Goal
 
 Better ball detection for `reco-autocam` (currently the weakest class -
