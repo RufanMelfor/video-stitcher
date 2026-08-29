@@ -232,13 +232,19 @@ pub struct Topology {
     /// Z-axis rotation of the right plane, radians (roll).
     #[serde(default)]
     pub x_rz: f64,
-    /// X-axis rotation of the left plane, radians (tilt).
+    /// X-axis rotation of the left plane, radians (roll around its normal -
+    /// the left plane faces along +X, so this turns the image in its own
+    /// plane rather than skewing it).
     #[serde(default)]
     pub z_rx: f64,
-    /// X-axis rotation of the right plane, radians (pitch).
+    /// X-axis rotation of the right plane, radians (pitch around its own
+    /// horizontal axis - the right plane faces along +Z, so this tips it
+    /// forward/backward and reads on screen as a skew, not a roll).
     #[serde(default)]
     pub x_rx: f64,
-    /// Z-axis rotation of the left plane, radians (pitch).
+    /// Z-axis rotation of the left plane, radians (pitch around its own
+    /// horizontal axis - the left plane's width runs along Z, so this tips
+    /// it forward/backward and reads on screen as a skew, not a roll).
     #[serde(default)]
     pub z_rz: f64,
     /// Seam blend width as a fraction of the plane overlap. `0.0` = hard seam.

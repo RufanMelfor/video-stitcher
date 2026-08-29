@@ -1115,6 +1115,8 @@ export component RecoApp inherits Window {
     in-out property <float> cal-x-ty: 0.0;
     in-out property <float> cal-x-rx: 0.0;
     in-out property <float> cal-z-rz: 0.0;
+    in-out property <float> cal-x-rz: 0.0;
+    in-out property <float> cal-z-rx: 0.0;
     in-out property <float> cal-ground-tilt-x: 0.0;
     in-out property <float> cal-ground-tilt-z: 0.0;
     in-out property <float> cal-top-tilt-x: 0.0;
@@ -1527,6 +1529,8 @@ export component RecoApp inherits Window {
     callback changed-cal-x-ty(float);
     callback changed-cal-x-rx(float);
     callback changed-cal-z-rz(float);
+    callback changed-cal-x-rz(float);
+    callback changed-cal-z-rx(float);
     callback changed-cal-ground-tilt-x(float);
     callback changed-cal-ground-tilt-z(float);
     callback changed-cal-top-tilt-x(float);
@@ -3608,8 +3612,19 @@ export component RecoApp inherits Window {
                             title: "LEFT CAMERA";
 
                             LabeledSlider {
-                                tip: "Independent rotation of the left camera's content. Manual control for the same angle the \"Force extra rotation fit (z_rz)\" checkbox below lets auto-calibrate solve for - use this to fine-tune by hand instead of (or after) re-running auto-calibrate.";
-                                label: "Rotation";
+                                tip: "In-plane roll of the left camera's content (z_rx): the image turns around its own viewing axis, like rotating a picture frame, without skewing. This is the roll auto-calibrate solves by default - use this to fine-tune by hand instead of (or after) re-running auto-calibrate.";
+                                label: "Roll";
+                                minimum: -0.3;
+                                maximum: 0.3;
+                                value <=> root.cal-z-rx;
+                                decimals: 5;
+                                step: 0.001;
+                                changed(v) => { root.changed-cal-z-rx(v); }
+                            }
+
+                            LabeledSlider {
+                                tip: "Tips the left camera's plane forward/backward around its own horizontal axis (z_rz). Because you view that plane at an angle, this reads on screen as a skew/keystone, not as a turn. Manual control for the same angle the \"Force extra skew fit (z_rz)\" checkbox below lets auto-calibrate solve for.";
+                                label: "Skew";
                                 minimum: -0.3;
                                 maximum: 0.3;
                                 value <=> root.cal-z-rz;
@@ -3656,8 +3671,19 @@ export component RecoApp inherits Window {
                             }
 
                             LabeledSlider {
-                                tip: "Independent rotation of the right camera's content. Manual control for the same angle the \"Force extra rotation fit (x_rx)\" checkbox below lets auto-calibrate solve for - use this to fine-tune by hand instead of (or after) re-running auto-calibrate.";
-                                label: "Rotation";
+                                tip: "In-plane roll of the right camera's content (x_rz): the image turns around its own viewing axis, like rotating a picture frame, without skewing. It pivots on the seam edge, so the seam stays put. This is the roll auto-calibrate solves by default - use this to fine-tune by hand instead of (or after) re-running auto-calibrate.";
+                                label: "Roll";
+                                minimum: -0.3;
+                                maximum: 0.3;
+                                value <=> root.cal-x-rz;
+                                decimals: 5;
+                                step: 0.001;
+                                changed(v) => { root.changed-cal-x-rz(v); }
+                            }
+
+                            LabeledSlider {
+                                tip: "Tips the right camera's plane forward/backward around its own horizontal axis (x_rx). Because you view that plane at an angle, this reads on screen as a skew/keystone, not as a turn. Manual control for the same angle the \"Force extra skew fit (x_rx)\" checkbox below lets auto-calibrate solve for.";
+                                label: "Skew";
                                 minimum: -0.3;
                                 maximum: 0.3;
                                 value <=> root.cal-x-rx;
@@ -3997,20 +4023,20 @@ export component RecoApp inherits Window {
                             }
 
                             CalGroupBox {
-                                title: "ROTATION FIT";
+                                title: "SKEW FIT";
 
                                 Tip {
-                                    tip: "Solve the right camera's independent pitch (x_rx), even without IMU data. Normally only auto-enabled when the IMU detects >2 deg differential pitch - cameras without a native gyro never get that seed. Try this if the two images still look rotated relative to each other after calibrating.";
+                                    tip: "Solve the right camera's independent skew (x_rx, the \"Skew\" slider above), even without IMU data. Normally only auto-enabled when the IMU detects >2 deg differential pitch - cameras without a native gyro never get that seed. Try this if the two images still look rotated relative to each other after calibrating.";
                                     CheckBox {
-                                        text: "Force extra rotation fit (x_rx)";
+                                        text: "Force extra skew fit (x_rx)";
                                         checked <=> root.force-x-rx;
                                         enabled: !root.calibrating;
                                     }
                                 }
                                 Tip {
-                                    tip: "Solve the left camera's independent roll (z_rz). There's no IMU signal for this angle, so it's always off unless checked here. Try this if the stitch still looks rotated after enabling Force extra rotation fit (x_rx).";
+                                    tip: "Solve the left camera's independent skew (z_rz, the \"Skew\" slider above). There's no IMU signal for this angle, so it's always off unless checked here. Try this if the stitch still looks skewed after enabling Force extra skew fit (x_rx).";
                                     CheckBox {
-                                        text: "Force extra rotation fit (z_rz)";
+                                        text: "Force extra skew fit (z_rz)";
                                         checked <=> root.force-z-rz;
                                         enabled: !root.calibrating;
                                     }

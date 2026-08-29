@@ -6028,6 +6028,34 @@ fn main() -> anyhow::Result<()> {
 
     let app_weak = app.as_weak();
     let state_ref = Rc::clone(&state);
+    app.on_changed_cal_x_rz(move |v| {
+        let mut s = state_ref.borrow_mut();
+        let Some(mut layout) = s.calibration.as_ref().map(|c| c.topology.clone()) else {
+            return;
+        };
+        layout.x_rz = v as f64;
+        s.apply_layout(layout);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_cal_z_rx(move |v| {
+        let mut s = state_ref.borrow_mut();
+        let Some(mut layout) = s.calibration.as_ref().map(|c| c.topology.clone()) else {
+            return;
+        };
+        layout.z_rx = v as f64;
+        s.apply_layout(layout);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
     app.on_changed_cal_ground_tilt_x(move |v| {
         let mut s = state_ref.borrow_mut();
         let Some(mut layout) = s.calibration.as_ref().map(|c| c.topology.clone()) else {
@@ -6184,6 +6212,8 @@ fn main() -> anyhow::Result<()> {
             app.set_cal_x_ty(layout.topology.x_ty as f32);
             app.set_cal_x_rx(layout.topology.x_rx as f32);
             app.set_cal_z_rz(layout.topology.z_rz as f32);
+            app.set_cal_x_rz(layout.topology.x_rz as f32);
+            app.set_cal_z_rx(layout.topology.z_rx as f32);
             app.set_cal_ground_tilt_x(layout.topology.ground_tilt_x as f32);
             app.set_cal_ground_tilt_z(layout.topology.ground_tilt_z as f32);
             app.set_cal_top_tilt_x(layout.topology.top_tilt_x as f32);
@@ -8048,6 +8078,8 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                     app.set_cal_x_ty(layout.topology.x_ty as f32);
                     app.set_cal_x_rx(layout.topology.x_rx as f32);
                     app.set_cal_z_rz(layout.topology.z_rz as f32);
+                    app.set_cal_x_rz(layout.topology.x_rz as f32);
+                    app.set_cal_z_rx(layout.topology.z_rx as f32);
                     app.set_cal_ground_tilt_x(layout.topology.ground_tilt_x as f32);
                     app.set_cal_ground_tilt_z(layout.topology.ground_tilt_z as f32);
                     app.set_cal_top_tilt_x(layout.topology.top_tilt_x as f32);
@@ -8436,6 +8468,8 @@ fn handle_calibration_result(
                             app.set_cal_x_ty(layout.topology.x_ty as f32);
                             app.set_cal_x_rx(layout.topology.x_rx as f32);
                             app.set_cal_z_rz(layout.topology.z_rz as f32);
+                            app.set_cal_x_rz(layout.topology.x_rz as f32);
+                            app.set_cal_z_rx(layout.topology.z_rx as f32);
                             app.set_cal_ground_tilt_x(layout.topology.ground_tilt_x as f32);
                             app.set_cal_ground_tilt_z(layout.topology.ground_tilt_z as f32);
                             app.set_cal_top_tilt_x(layout.topology.top_tilt_x as f32);
