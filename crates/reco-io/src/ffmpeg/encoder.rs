@@ -430,6 +430,17 @@ pub struct EncoderConfig {
     pub quality: Option<u8>,
     /// Override the encoder preset string (passed through to the encoder).
     pub preset: Option<String>,
+    /// Bitrate ceiling override, in Mbps. When set, replaces both the
+    /// target (`b:v`) and peak (`maxrate`) bitrate the quality preset/
+    /// [`Self::quality`] would otherwise pick, so a high `quality` value
+    /// (which lowers CQ/CRF, asking the encoder to spend more bits) isn't
+    /// silently capped by the preset tier's own ceiling - see
+    /// `build_encoder_opts`'s "quality >= 75 still clamps to the High
+    /// tier's maxrate" note. No effect on pure-CRF software encoders
+    /// (libx264/libx265/libaom/libsvtav1), which have no bitrate cap by
+    /// design - only encoders that already set `b:v`/`maxrate` (NVENC,
+    /// QSV, VideoToolbox) pick this up.
+    pub max_bitrate_mbps: Option<u32>,
     /// Source files to copy audio from, in order (stream copy, no re-encoding).
     /// For a chained recording, list every segment so audio spans the whole
     /// output; passing a single file copies just that one. The first audio
@@ -853,9 +864,29 @@ impl VideoEncoder {
                     // A concurrent reader can then parse the file
                     // mid-write; plain MP4 would park the `moov`
                     // until `write_trailer` and break replay.
+                    //
+                    // Plain MP4 gets `+faststart` instead: the muxer
+                    // still parks `moov` until `write_trailer` (same
+                    // "final-file-only" behavior, no change to replay
+                    // semantics), but then rewrites the file so `moov`
+                    // ends up before `mdat` - a second pass over the
+                    // already-written data, done once at close, not a
+                    // streaming concern. Without it every plain-MP4
+                    // export puts `moov` at the very end (confirmed via
+                    // `ffprobe -v trace` on a real export: `mdat` at
+                    // offset 44, `moov` at the last few KB of a 797MB
+                    // file) - YouTube's own recommended-upload-settings
+                    // page asks for `moov` first ("Fast Start") so a
+                    // player/ingest pipeline can begin before the whole
+                    // file downloads; Matroska has no such atom-order
+                    // concept so it's unaffected either way.
                     if config.container == Container::Mp4Fragmented {
                         let mut opts = ffmpeg::Dictionary::new();
                         opts.set("movflags", "empty_moov+frag_keyframe");
+                        let _ = octx.write_header_with(opts)?;
+                    } else if config.container == Container::Mp4 {
+                        let mut opts = ffmpeg::Dictionary::new();
+                        opts.set("movflags", "faststart");
                         let _ = octx.write_header_with(opts)?;
                     } else {
                         octx.write_header()?;
@@ -993,6 +1024,7 @@ impl VideoEncoder {
             config.quality_preset,
             config.quality,
             config.preset.as_deref(),
+            config.max_bitrate_mbps,
             width,
             height,
         );
@@ -2043,6 +2075,7 @@ fn build_encoder_opts(
     quality_preset: Quality,
     quality_override: Option<u8>,
     preset_override: Option<&str>,
+    max_bitrate_override: Option<u32>,
     width: u32,
     height: u32,
 ) -> ffmpeg::Dictionary<'static> {
@@ -2082,6 +2115,16 @@ fn build_encoder_opts(
             opts.set("profile", "high");
             opts.set("spatial-aq", "1");
             opts.set("temporal-aq", "1");
+            // NVENC's hardware-native equivalent of the "VBR 2-pass"
+            // advice found in most YouTube-upload guides: `fullres` runs
+            // a full-resolution analysis pass before the real encode
+            // pass, both inside the same single ffmpeg/NVENC call - no
+            // second decode+encode of the whole video needed, so it
+            // fits the real-time single-pass render loop unchanged.
+            // `-2pass` (a separate boolean NVENC also exposes) is the
+            // older/coarser on-off switch for roughly the same thing;
+            // `multipass` picks the specific mode directly.
+            opts.set("multipass", "fullres");
         }
         "hevc_nvenc" => {
             // HEVC ~30% more efficient than H264, so ceilings scale down.
@@ -2099,6 +2142,8 @@ fn build_encoder_opts(
             opts.set("profile", "main");
             opts.set("spatial-aq", "1");
             opts.set("temporal-aq", "1");
+            // See h264_nvenc's identical option above for why.
+            opts.set("multipass", "fullres");
         }
         "av1_nvenc" => {
             // AV1 another ~20% tighter than HEVC.
@@ -2300,6 +2345,37 @@ fn build_encoder_opts(
     // Apply preset override.
     if let Some(preset) = preset_override {
         opts.set("preset", preset);
+    }
+
+    // Apply bitrate ceiling override. Replaces both the target and peak
+    // bitrate outright (a hard cap: the encoder still spends less than
+    // this if the CQ/CRF target is already met) - takes priority over
+    // whatever the quality tier or `quality_override` picked, since
+    // otherwise a high quality_override asking for more bits than the
+    // tier's own ceiling allows would be silently rate-capped (found via
+    // `--quality-value 95 --preset p7` measuring *identical* output to
+    // plain "high": the tier's maxrate was the actual bottleneck, not
+    // the CQ value). Only touches keys the encoder already set - a
+    // no-op for pure-CRF software encoders that never set a bitrate cap.
+    if let Some(mbps) = max_bitrate_override {
+        let val = format!("{mbps}M");
+        let mut applied = false;
+        if opts.get("maxrate").is_some() {
+            opts.set("maxrate", &val);
+            applied = true;
+        }
+        if opts.get("b:v").is_some() {
+            opts.set("b:v", &val);
+            applied = true;
+        }
+        if applied {
+            log::info!("Encoder max bitrate: {mbps}M -> {name} b:v/maxrate={val}");
+        } else {
+            log::info!(
+                "Encoder max bitrate override ({mbps}M) ignored: {name} has no bitrate \
+                 ceiling to override (pure-CRF software encoder)"
+            );
+        }
     }
 
     opts
