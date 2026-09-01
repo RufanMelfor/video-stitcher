@@ -2606,6 +2606,25 @@ impl std::io::Write for DebugLogWriter {
     }
 }
 
+/// Mirrors every log/tracing event into the currently-active per-export
+/// sidecar log file ([`reco_io::export_log`]), when one is open - a
+/// no-op otherwise. Deliberately just a thin adapter: the actual
+/// formatting/writing lives in `reco_io::export_log::record_event` so
+/// `reco-io` doesn't need a `tracing-subscriber` dependency (see that
+/// module's doc) - this `Layer` impl is the only part that has to live
+/// here, next to the rest of this binary's own tracing setup.
+struct ExportLogLayer;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ExportLogLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        reco_io::export_log::record_event(event);
+    }
+}
+
 /// Install the standard tracing subscriber + log bridge.
 ///
 /// Replaces the previous `env_logger::init()`. Bridges `log::*` calls
@@ -2683,6 +2702,7 @@ fn init_tracing() {
                             .with_writer(file),
                     )
                     .with(debug_panel_layer())
+                    .with(ExportLogLayer)
                     .try_init();
                 eprintln!("Log file: {}", log_path.display());
                 return;
@@ -2706,6 +2726,7 @@ fn init_tracing() {
                             .with_writer(std::io::stderr),
                     )
                     .with(debug_panel_layer())
+                    .with(ExportLogLayer)
                     .try_init();
                 eprintln!("Log file: {}", log_path.display());
                 return;
@@ -2717,6 +2738,7 @@ fn init_tracing() {
         .with(filter)
         .with(fmt::layer().with_target(true).with_level(true))
         .with(debug_panel_layer())
+        .with(ExportLogLayer)
         .try_init();
 }
 
@@ -2805,6 +2827,7 @@ fn snapshot_autocam_defaults(app: &RecoApp) -> reco_core::calibration::AutocamDe
         fov_default: app.get_export_fov_default(),
         fov_alpha: app.get_export_fov_alpha(),
         cluster_alpha: app.get_export_cluster_alpha(),
+        confidence_threshold: app.get_export_confidence_threshold(),
     }
 }
 
@@ -2833,6 +2856,7 @@ fn apply_autocam_defaults(app: &RecoApp, ac: &reco_core::calibration::AutocamDef
     app.set_export_fov_default(ac.fov_default);
     app.set_export_fov_alpha(ac.fov_alpha);
     app.set_export_cluster_alpha(ac.cluster_alpha);
+    app.set_export_confidence_threshold(ac.confidence_threshold);
 }
 
 /// Curated banner-color presets shown in the SCOREBOARD card's ComboBox -
@@ -6894,6 +6918,7 @@ fn main() -> anyhow::Result<()> {
             detection_interval: app.get_export_detection_interval() as u32,
             player_anchor_rad: app.get_export_player_anchor_rad(),
             ball_coast_secs: app.get_export_ball_coast_secs(),
+            confidence_threshold: app.get_export_confidence_threshold(),
             lookahead_secs: app.get_export_lookahead_secs() as f64,
             lookahead_reduced_bit_depth: app.get_export_lookahead_reduced_bit_depth(),
             async_detect: app.get_export_async_detect(),

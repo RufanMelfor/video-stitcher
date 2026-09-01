@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+use crate::export_log;
 use crate::output::{AudioMode, Bitrate, Codec, Format, Quality};
 use reco_core::session::StitchSession;
 use reco_core::session::types::FrameProgress;
@@ -47,6 +48,7 @@ pub struct StitchJob {
     encoder_name: Option<String>,
     quality_value: Option<u8>,
     preset: Option<String>,
+    max_bitrate_mbps: Option<u32>,
 
     // Processing window
     start_time: Option<f64>,
@@ -204,6 +206,37 @@ fn audio_sync_skip_frames(audio: &AudioMode, sync_offset: i64) -> u64 {
     }
 }
 
+/// Formats an [`InputPath`] for the export log header - a chained
+/// (multi-segment) input names every segment, not just the first.
+fn describe_input(input: &InputPath) -> String {
+    match input {
+        InputPath::Single(path) => path.display().to_string(),
+        InputPath::Chained(paths) => paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" + "),
+    }
+}
+
+/// `Some(v)` -> "v (override)", `None` -> "not set", for the export log
+/// header's optional scalar overrides.
+fn describe_opt<T: std::fmt::Display>(value: &Option<T>) -> String {
+    match value {
+        Some(v) => format!("{v} (override)"),
+        None => "not set".to_string(),
+    }
+}
+
+/// Same as [`describe_opt`] but for an optional path, where "override"
+/// doesn't apply - just present/absent.
+fn describe_path_opt(value: &Option<PathBuf>) -> String {
+    match value {
+        Some(p) => p.display().to_string(),
+        None => "disabled".to_string(),
+    }
+}
+
 impl From<&str> for InputPath {
     fn from(s: &str) -> Self {
         Self::Single(PathBuf::from(s))
@@ -304,6 +337,7 @@ impl StitchJob {
             encoder_name: None,
             quality_value: None,
             preset: None,
+            max_bitrate_mbps: None,
             start_time: None,
             end_time: None,
             max_frames: None,
@@ -410,6 +444,18 @@ impl StitchJob {
     /// Override the encoder preset string (passed through to the encoder).
     pub fn preset(mut self, preset: impl Into<String>) -> Self {
         self.preset = Some(preset.into());
+        self
+    }
+
+    /// Override the bitrate ceiling (both target and peak), in Mbps.
+    /// Takes priority over whatever [`Self::quality`]/[`Self::quality_value`]
+    /// would otherwise pick - without this, a `quality_value` above the
+    /// "High" tier's threshold still clamps to that tier's own bitrate
+    /// ceiling, so the encoder can't actually spend the extra bits a
+    /// lower CQ/CRF asks for. See
+    /// [`crate::ffmpeg::encoder::EncoderConfig::max_bitrate_mbps`].
+    pub fn max_bitrate_mbps(mut self, mbps: u32) -> Self {
+        self.max_bitrate_mbps = Some(mbps);
         self
     }
 
@@ -771,12 +817,54 @@ impl StitchJob {
     ///
     /// This is a blocking call that processes all frames (or until the
     /// interrupt flag is set). Returns a [`StitchResult`] with statistics.
+    ///
+    /// Also opens a human-readable sidecar log next to the output file
+    /// (same folder, same name, `.log` extension - see
+    /// [`crate::export_log`]) recording the settings this call was
+    /// configured with, followed by a mirrored timeline of everything
+    /// the run logs on any thread and a result/error footer - closed
+    /// before this returns, success or failure. Skipped for a streaming
+    /// output ([`Format::is_streaming`]), which has no sensible local
+    /// directory to put a log file next to; a log file that can't be
+    /// created for any other reason is a warning, not a failure - see
+    /// [`crate::export_log::begin`].
     pub fn run(mut self, interrupted: &AtomicBool) -> Result<StitchResult, StitchError> {
         crate::init();
+        let header = self.describe_settings();
+        let log_active = if self.format.is_streaming() {
+            false
+        } else {
+            crate::export_log::begin(&self.output, &header).is_some()
+        };
         let start = std::time::Instant::now();
+        let result = self.run_inner(interrupted, start);
+        if log_active {
+            crate::export_log::finish(&Self::describe_result(&result, start.elapsed()));
+        }
+        result
+    }
 
-        // Load calibration
-        let mut cal = match self.calibration {
+    /// The actual stitching pipeline - see [`Self::run`]'s doc comment.
+    /// Split out so `run` can wrap it with the export-log open/close
+    /// while this stays the single early-return-heavy body it always
+    /// was (every `?` in here now returns through `run`, which still
+    /// closes the log with the right footer either way).
+    fn run_inner(
+        &mut self,
+        interrupted: &AtomicBool,
+        start: std::time::Instant,
+    ) -> Result<StitchResult, StitchError> {
+        // Load calibration. Taken by `mem::replace` rather than matched
+        // on `self.calibration` directly - the `Memory` arm below moves
+        // the boxed calibration out, which an owned `self` (the old
+        // signature) allowed as a partial move but `&mut self` (needed
+        // so `run` above can still read `self` afterwards, for nothing
+        // in particular today but see the header/footer split) does not.
+        let calibration_source = std::mem::replace(
+            &mut self.calibration,
+            CalibrationSource::File(PathBuf::new()),
+        );
+        let mut cal = match calibration_source {
             CalibrationSource::File(ref path) => {
                 reco_core::calibration::Calibration::from_file(path)
                     .map_err(|e| StitchError::Calibration(format!("{e}")))?
@@ -1056,12 +1144,27 @@ impl StitchJob {
             quality_preset: quality,
             quality: self.quality_value,
             preset: self.preset.clone(),
+            max_bitrate_mbps: self.max_bitrate_mbps,
             audio_source,
             audio_start_time,
             audio_cut_windows,
             pause_overlay_hold_secs,
             container: self.format.into(),
-            gop_size: None,
+            // 2 seconds' worth of frames: the de-facto standard keyframe
+            // interval for VOD/streaming platforms (HLS/DASH segment
+            // boundaries, adaptive-bitrate quality switches, and - the
+            // motivating case - YouTube's own transcode pipeline, which
+            // works from keyframe-aligned segments). Left unset, NVENC's
+            // own default is 250 frames (~8.3s at 30fps - confirmed via
+            // `ffprobe -skip_frame nokey` on a real export), a long GOP
+            // that forces the encoder to predict from an increasingly
+            // stale reference for many seconds under this app's
+            // constantly-panning camera, and gives a downstream
+            // transcoder coarser, less frequent points to re-segment or
+            // switch quality at. A short reference-implementation
+            // export from a competitor product measured exactly 2.0s
+            // (60 frames @ 30fps) - this matches that.
+            gop_size: Some((fps * 2.0).round() as u32),
             stream_url: None,
             metadata_comment: self.metadata_comment.clone(),
         };
@@ -1463,6 +1566,290 @@ impl StitchJob {
             decode_mode,
             telemetry: Some(telemetry_snap),
         })
+    }
+
+    /// Human-readable "settings used" header for the export log (see
+    /// [`Self::run`]). Built from the builder's own fields *before*
+    /// `run_inner` resolves anything against the calibration - e.g. this
+    /// says whether the seam blend width was overridden or left to the
+    /// calibration, not the resulting number, because the resulting
+    /// number (and every other resolved/effective value) already gets
+    /// logged as an ordinary `log::info!` inside `run_inner` and shows
+    /// up in the timeline section that follows this header, once the
+    /// export log is open. Duplicating that math here would just be a
+    /// second place for the two to drift apart.
+    fn describe_settings(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+
+        let _ = writeln!(out, "=== Reco export log ===");
+        let _ = writeln!(out, "Started:      {}", export_log::format_utc_now());
+        let _ = writeln!(out, "Output file:  {}", self.output.display());
+        let _ = writeln!(out, "Left input:   {}", describe_input(&self.left));
+        let _ = writeln!(out, "Right input:  {}", describe_input(&self.right));
+        let _ = writeln!(
+            out,
+            "Calibration:  {}",
+            match &self.calibration {
+                CalibrationSource::File(path) => path.display().to_string(),
+                CalibrationSource::Memory(_) => "in-memory (no file)".to_string(),
+            }
+        );
+        let _ = writeln!(
+            out,
+            "Sync offset:  {}",
+            match self.sync_offset {
+                Some(f) => format!("{f} frames (explicit override)"),
+                None => "not set (uses the calibration's saved value)".to_string(),
+            }
+        );
+        let _ = writeln!(out, "\nRequested settings follow; resolved values plus any");
+        let _ = writeln!(
+            out,
+            "warnings/errors from the run itself are in the timeline below."
+        );
+
+        let _ = writeln!(out, "\n--- Output ---");
+        let _ = writeln!(out, "Codec:            {}", self.codec);
+        let _ = writeln!(
+            out,
+            "Bitrate/quality:  {}",
+            match &self.bitrate {
+                Bitrate::Crf(v) => format!("CRF {v}"),
+                Bitrate::Quality(q) => format!("quality preset: {q}"),
+            }
+        );
+        let _ = writeln!(
+            out,
+            "Quality override: {}",
+            describe_opt(&self.quality_value)
+        );
+        let _ = writeln!(out, "Encoder preset:   {}", describe_opt(&self.preset));
+        let _ = writeln!(
+            out,
+            "Max bitrate:      {}",
+            self.max_bitrate_mbps
+                .map(|v| format!("{v} Mbps (override)"))
+                .unwrap_or_else(|| "not set (uses the quality preset's ceiling)".to_string())
+        );
+        let _ = writeln!(
+            out,
+            "Encoder override: {}",
+            describe_opt(&self.encoder_name)
+        );
+        let _ = writeln!(out, "Container format: {:?}", self.format);
+        let _ = writeln!(
+            out,
+            "Resolution:       {}",
+            match self.resolution {
+                Some((w, h)) => format!("{w}x{h}"),
+                None => "not set (defaults to 1920x1080)".to_string(),
+            }
+        );
+        let _ = writeln!(
+            out,
+            "Audio:            {}",
+            match &self.audio {
+                AudioMode::CopyFrom(0) => "copied from left input".to_string(),
+                AudioMode::CopyFrom(1) => "copied from right input".to_string(),
+                AudioMode::CopyFrom(n) => format!("copied from input {n} (invalid: only 0/1)"),
+                AudioMode::Disabled => "disabled".to_string(),
+            }
+        );
+
+        let _ = writeln!(out, "\n--- Rendering ---");
+        let _ = writeln!(
+            out,
+            "Seam blend width:     {}",
+            match self.blend_width {
+                Some(v) => format!("{v} (override)"),
+                None => "not set (uses calibration value)".to_string(),
+            }
+        );
+        let _ = writeln!(out, "Blend flip direction: {}", self.blend_flip_direction);
+        let _ = writeln!(
+            out,
+            "Multiband blend:      {}",
+            self.multiband_blend_enabled
+        );
+        let _ = writeln!(out, "Seam offset:          {}", self.seam_offset);
+        let _ = writeln!(out, "Color match enabled:  {}", self.color_match_enabled);
+        let _ = writeln!(
+            out,
+            "Color gamma left:     {}",
+            match self.color_gamma.0 {
+                Some(v) => format!("{v} (override)"),
+                None => "not set (uses calibration value)".to_string(),
+            }
+        );
+        let _ = writeln!(
+            out,
+            "Color gamma right:    {}",
+            match self.color_gamma.1 {
+                Some(v) => format!("{v} (override)"),
+                None => "not set (uses calibration value)".to_string(),
+            }
+        );
+        let _ = writeln!(out, "Show seam line (debug): {}", self.show_seam_line);
+
+        let _ = writeln!(out, "\n--- Processing window ---");
+        let _ = writeln!(
+            out,
+            "Start time:    {}",
+            self.start_time
+                .map_or("from the beginning".to_string(), |s| format!("{s}s"))
+        );
+        let _ = writeln!(
+            out,
+            "End time:      {}",
+            self.end_time
+                .map_or("to the end".to_string(), |s| format!("{s}s"))
+        );
+        let _ = writeln!(
+            out,
+            "Max frames:    {}",
+            self.max_frames
+                .map_or("unlimited".to_string(), |n| n.to_string())
+        );
+        let _ = writeln!(
+            out,
+            "Cut ranges:    {}",
+            if self.cut_ranges.is_empty() {
+                "none".to_string()
+            } else {
+                self.cut_ranges
+                    .iter()
+                    .map(|r| format!("{:.1}-{:.1}s", r.start_secs, r.end_secs))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        );
+        let _ = writeln!(
+            out,
+            "Pause overlay: {}",
+            match self.pause_overlay {
+                Some((fade, hold)) => format!("PAUZE card, fade {fade}s, hold {hold}s"),
+                None => "disabled".to_string(),
+            }
+        );
+
+        let _ = writeln!(out, "\n--- AI tracking / autocam ---");
+        out.push_str(&self.describe_autocam_snapshot());
+        let _ = writeln!(
+            out,
+            "Lookahead buffer: {}",
+            if self.lookahead_secs > 0.0 {
+                format!(
+                    "{:.1}s{}",
+                    self.lookahead_secs,
+                    if self.lookahead_reduced_bit_depth {
+                        " (reduced to 8-bit)"
+                    } else {
+                        ""
+                    }
+                )
+            } else {
+                "disabled".to_string()
+            }
+        );
+        let _ = writeln!(out, "Force CPU decode: {}", self.force_cpu_decode);
+
+        let _ = writeln!(out, "\n--- Extras ---");
+        #[cfg(feature = "stacked-output")]
+        let _ = writeln!(
+            out,
+            "Replay recording: {}",
+            self.replay_recording
+                .as_ref()
+                .map_or("disabled".to_string(), |c| c.path.display().to_string())
+        );
+        #[cfg(not(feature = "stacked-output"))]
+        let _ = writeln!(
+            out,
+            "Replay recording: disabled (not built with stacked-output)"
+        );
+        let _ = writeln!(
+            out,
+            "Pipeline events JSONL: {}",
+            describe_path_opt(&self.events_path)
+        );
+        let _ = writeln!(
+            out,
+            "Overlay layers registered: {}",
+            self.overlay_layers.len()
+        );
+        if let Some(comment) = &self.metadata_comment {
+            let _ = writeln!(
+                out,
+                "\nRun-settings snapshot (raw JSON, as embedded in the output file's metadata):"
+            );
+            let _ = writeln!(out, "{comment}");
+        }
+
+        let _ = writeln!(out, "\n=== Timeline ===");
+        out
+    }
+
+    /// Pretty-prints the `autocam` object from [`Self::metadata_comment`]
+    /// (the one JSON snapshot both reco-cli and reco-gui already build
+    /// with the resolved AI/panner knobs - see their `run_stitch`/
+    /// `run_export`) as `key: value` lines. This is the only place that
+    /// carries those knobs at all: [`Self::ai_run_config`] is only ever
+    /// set when [`Self::events`] is also used, so it can't be relied on
+    /// here.
+    fn describe_autocam_snapshot(&self) -> String {
+        let Some(raw) = &self.metadata_comment else {
+            return "  (no run-settings snapshot was attached to this export)\n".to_string();
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+            return "  (run-settings snapshot could not be parsed as JSON)\n".to_string();
+        };
+        let Some(autocam) = value
+            .pointer("/reco_export/autocam")
+            .and_then(|v| v.as_object())
+        else {
+            return "  (no autocam block in the run-settings snapshot)\n".to_string();
+        };
+        let mut out = String::new();
+        for (key, val) in autocam {
+            let shown = match val {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => "not set".to_string(),
+                other => other.to_string(),
+            };
+            out.push_str(&format!("  {key}: {shown}\n"));
+        }
+        out
+    }
+
+    /// Result/error footer appended to the export log once [`Self::run`]
+    /// returns.
+    fn describe_result(result: &Result<StitchResult, StitchError>, elapsed: Duration) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        let _ = writeln!(out, "\n=== Export finished ===");
+        let _ = writeln!(out, "Finished: {}", export_log::format_utc_now());
+        match result {
+            Ok(r) => {
+                let _ = writeln!(out, "Result: SUCCESS");
+                let _ = writeln!(out, "Frames processed: {}", r.frames_processed);
+                let _ = writeln!(out, "Elapsed: {}", export_log::format_duration(r.elapsed));
+                let _ = writeln!(out, "Average speed: {:.2} fps", r.fps());
+                let _ = writeln!(out, "GPU: {}", r.gpu_name);
+                let _ = writeln!(out, "Encoder: {}", r.encoder_name);
+                let _ = writeln!(out, "Decode mode: {}", r.decode_mode);
+            }
+            Err(e) => {
+                let _ = writeln!(out, "Result: FAILED");
+                let _ = writeln!(
+                    out,
+                    "Elapsed before failure: {}",
+                    export_log::format_duration(elapsed)
+                );
+                let _ = writeln!(out, "Error: {e}");
+            }
+        }
+        out
     }
 
     /// Run the session across each keep-window in turn, seeking past

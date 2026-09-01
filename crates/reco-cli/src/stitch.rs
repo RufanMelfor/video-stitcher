@@ -73,6 +73,8 @@ pub struct StitchArgs<'a> {
     pub tracking_mode: &'a str,
     pub quality_value: Option<u8>,
     pub preset: Option<String>,
+    /// Bitrate ceiling override, in Mbps. See `--max-bitrate`'s help text.
+    pub max_bitrate: Option<u32>,
     /// Output container selector (`mp4` / `fmp4` / `mkv`). None
     /// means default (plain MP4, finalized at close). `mkv` or
     /// `fmp4` for streamable tee use.
@@ -115,6 +117,9 @@ pub struct StitchArgs<'a> {
     /// Cluster-position smoothing rate override. See
     /// `reco_autocam::panners::FieldPannerConfig::cluster_alpha`.
     pub cluster_alpha: Option<f32>,
+    /// Detector confidence floor override `[0,1]`. See
+    /// `reco_autocam::AutocamConfig::confidence_threshold`.
+    pub confidence_threshold: Option<f32>,
 }
 
 /// Run the stitch subcommand.
@@ -171,6 +176,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
             "codec": args.codec,
             "quality": args.quality,
             "quality_value": args.quality_value,
+            "max_bitrate_mbps": args.max_bitrate,
             "resolution": format!("{}x{}", args.width, args.height),
             "blend_width": args.blend,
             "blend_flip_direction": args.blend_flip_direction,
@@ -192,6 +198,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                 "panner_config_path": args.panner_config_path,
                 "player_anchor_rad": args.player_anchor_rad,
                 "ball_coast_secs": args.ball_coast_secs,
+                "confidence_threshold": args.confidence_threshold,
             }
         }
     })
@@ -311,6 +318,9 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
     if let Some(ref preset) = args.preset {
         job = job.preset(preset);
     }
+    if let Some(mbps) = args.max_bitrate {
+        job = job.max_bitrate_mbps(mbps);
+    }
     if let Some(container) = args.container {
         let fmt: reco_io::output::Format = container
             .parse()
@@ -396,6 +406,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         let allow_fallback = args.allow_no_tracking;
         let player_anchor_rad = args.player_anchor_rad;
         let ball_coast_secs = args.ball_coast_secs;
+        let confidence_threshold = args.confidence_threshold;
         let async_detect = args.async_detect;
         let lookahead_secs = args.lookahead;
         let tracking_failed = Arc::clone(&tracking_failed);
@@ -500,6 +511,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                     fov_default: fp.fov_default,
                     fov_alpha: fp.fov_alpha,
                     cluster_alpha: fp.cluster_alpha,
+                    confidence_threshold: confidence_threshold.unwrap_or(0.10),
                 },
             );
         }
@@ -517,9 +529,11 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                 .with_tracking_mode(mode)
                 .with_detection_interval(interval)
                 .with_10bit(is_10bit);
-            if mode == reco_autocam::TrackingMode::Ball {
-                autocam_config.confidence_threshold = Some(0.25);
-            }
+            // `None` leaves reco-autocam's own per-call-site default
+            // (0.10) - Ball mode no longer silently forces 0.25, this
+            // flag is now the only place that number comes from. See
+            // `--confidence-threshold`'s help text.
+            autocam_config.confidence_threshold = confidence_threshold;
             if let Some(ref cfg) = panner_cfg {
                 autocam_config.field_panner_config = Some(cfg.clone());
             }

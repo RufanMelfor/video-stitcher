@@ -15,7 +15,7 @@ rpi = ["ffmpeg", "ffmpeg-next/rpi"]
 gstreamer = ["dep:gstreamer", "dep:gstreamer-app"]
 libcamera = []
 v4l2 = ["dep:libc"]
-profiling = ["tracing", "reco-core/profiling"]
+profiling = ["reco-core/profiling"]
 # Opt-in user-preference persistence for consumers. Serde +
 # serde_json are unconditional (JsonlSink uses them); this flag
 # only gates the `directories` crate and the config plumbing.
@@ -30,7 +30,14 @@ stacked-output = ["ffmpeg"]
 reco-core = { path = "../reco-core" }
 log = "0.4"
 thiserror = "2"
-tracing = { workspace = true, optional = true }
+
+# Always on (not just under `profiling`): the export-log layer
+# (`export_log::record_event`) needs `tracing::Event`/`Visit` to mirror
+# log/tracing output into the per-export sidecar log regardless of
+# whether the profiling instrumentation is compiled in. Adds no
+# runtime cost when nothing is subscribed - see `export_log`'s module
+# doc.
+tracing = { workspace = true }
 
 # FFmpeg backend
 ffmpeg-next = { version = "8", default-features = false, features = ["codec", "format", "software-scaling"], optional = true }

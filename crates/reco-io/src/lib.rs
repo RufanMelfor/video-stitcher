@@ -29,6 +29,10 @@ pub mod adapters;
 /// Excluding a mid-source time range from a stitch export (e.g. a
 /// halftime pause) - see [`cut_range::CutRange`].
 pub mod cut_range;
+/// Per-export human-readable sidecar log file (settings + a mirrored
+/// timeline of log/tracing output) - see the module doc for how it's
+/// wired into the app's tracing subscriber.
+pub mod export_log;
 /// Default shipping [`reco_core::detect::pipeline_event::PipelineEventSink`]:
 /// writes each event as one JSON line. Wrap in `BackpressuredSink`
 /// to keep serialization off the render thread.

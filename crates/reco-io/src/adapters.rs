@@ -562,6 +562,11 @@ pub fn create_encoder(
         quality_preset: out_quality.into(),
         quality: quality_value,
         preset,
+        // `create_encoder` is the live-capture (Camera/Libcamera) path,
+        // which has no `--max-bitrate`-equivalent flag yet - only
+        // `stitch` (via `StitchJob`, which builds `EncoderConfig`
+        // directly) exposes the override today.
+        max_bitrate_mbps: None,
         audio_source: None,
         audio_start_time: 0.0,
         audio_cut_windows: Vec::new(),

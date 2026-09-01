@@ -19,6 +19,25 @@ use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Mirrors every log/tracing event into the currently-active per-export
+/// sidecar log file ([`reco_io::export_log`]), when one is open - a
+/// no-op otherwise. Deliberately just a thin adapter: the actual
+/// formatting/writing lives in `reco_io::export_log::record_event` so
+/// `reco-io` doesn't need a `tracing-subscriber` dependency (see that
+/// module's doc) - this `Layer` impl is the only part that has to live
+/// here, next to the rest of this binary's own tracing setup.
+struct ExportLogLayer;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ExportLogLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        reco_io::export_log::record_event(event);
+    }
+}
+
 /// Initialize the tracing profiler. Returns a guard that must be held
 /// until the end of `main()` — the trace file is written on drop.
 #[cfg(feature = "profiling")]
@@ -28,7 +47,10 @@ fn init_profiling() -> tracing_chrome::FlushGuard {
         .file("reco-trace.json")
         .include_args(true)
         .build();
-    tracing_subscriber::registry().with(chrome_layer).init();
+    tracing_subscriber::registry()
+        .with(chrome_layer)
+        .with(ExportLogLayer)
+        .init();
     eprintln!("Profiling enabled — trace will be written to reco-trace.json");
     guard
 }
@@ -56,6 +78,7 @@ fn init_tracing() {
     let _ = tracing_subscriber::registry()
         .with(filter)
         .with(fmt_layer)
+        .with(ExportLogLayer)
         .try_init();
 }
 
@@ -344,6 +367,18 @@ enum Commands {
         #[arg(long)]
         preset: Option<String>,
 
+        /// Bitrate ceiling override in Mbps (target and peak both set to
+        /// this value). Without it, --quality-value above the "high"
+        /// preset's threshold still gets capped at that preset's own
+        /// bitrate ceiling - the encoder wants to spend more bits for a
+        /// lower CQ/CRF but isn't allowed to, so quality stops improving
+        /// past a point (measured: --quality-value 95 --preset p7 produced
+        /// output identical to plain --quality high without this flag).
+        /// No effect on pure-CRF software encoders (libx264/libx265/
+        /// libaom/libsvtav1), which have no bitrate cap by design.
+        #[arg(long = "max-bitrate")]
+        max_bitrate: Option<u32>,
+
         /// Output container format. One of: `mp4` (default,
         /// finalized at close), `fmp4` (fragmented MP4, readable
         /// mid-write), `mkv` (Matroska, crash-safe + streamable).
@@ -445,6 +480,18 @@ enum Commands {
         /// --panner-config if both set.
         #[arg(long = "cluster-alpha")]
         cluster_alpha: Option<f32>,
+
+        /// Detector confidence floor `[0,1]` - a raw detection (any
+        /// class: person/ball/referee) below this score never reaches
+        /// the tracker. Default 0.10 for Field/Sweep tracking; Ball
+        /// tracking used to silently force 0.25 regardless of this
+        /// flag and no longer does, so pass this explicitly for Ball
+        /// mode too if the old floor is still wanted. Raise it if a
+        /// weak, noisy detection (e.g. a stray low-confidence "ball"
+        /// on background clutter) is visibly yanking the aim; lower it
+        /// if the model is missing a real, faint detection.
+        #[arg(long = "confidence-threshold")]
+        confidence_threshold: Option<f32>,
     },
 
     /// Open an interactive preview window to debug the stitch.
@@ -1027,6 +1074,7 @@ fn main() -> anyhow::Result<()> {
             tracking,
             quality_value,
             preset,
+            max_bitrate,
             container,
             replay,
             replay_scale,
@@ -1040,6 +1088,7 @@ fn main() -> anyhow::Result<()> {
             ball_coast_secs,
             fov_alpha,
             cluster_alpha,
+            confidence_threshold,
         } => stitch::run_stitch(
             stitch::StitchArgs {
                 left: &left,
@@ -1074,6 +1123,7 @@ fn main() -> anyhow::Result<()> {
                 tracking_mode: &tracking,
                 quality_value,
                 preset,
+                max_bitrate,
                 container: container.as_deref(),
                 replay_path: replay.as_deref(),
                 replay_scale,
@@ -1087,6 +1137,7 @@ fn main() -> anyhow::Result<()> {
                 ball_coast_secs,
                 fov_alpha,
                 cluster_alpha,
+                confidence_threshold,
             },
             &interrupted,
         ),
