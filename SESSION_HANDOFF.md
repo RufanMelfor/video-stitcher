@@ -1,4 +1,101 @@
-# Session handoff - 2026-08-29 (TGR_PC): Roll/Skew calibration sliders; model published to Hugging Face; round-5 training frames selected and uploaded to Label Studio
+# Session handoff - 2026-09-01 (TGR_PC): color-match band sky-exclusion fix + dynamic auto-gamma; big backlog of prior-session work finally committed
+
+## FIRST THING NEXT SESSION - user explicitly asked to be reminded
+
+**Do a proper wide-shot on/off A/B of the new "Auto gamma (dynamic)"
+checkbox** (Color Mapping card, MANUAL GAMMA section). This session's own
+CLI tests (fixed pose, full panorama visible) showed a big win (17-18%
+seam gap down to 5.0%/2.3%), but when the user exported two real matches
+with AI tracking on to compare, the difference looked small. Pulled the
+exact same frame from both real exports and found a real but small
+difference (~4-4.6/255) - almost certainly because that AI-tracked moment
+was a tight zoomed crop on players, not a wide shot showing the seam, so
+it wasn't a fair test. Need either: a real export moment where the AI
+camera is wide (dead ball/stoppage), or the GUI preview at a wide FOV with
+"Show seam line" on, toggling the checkbox live. Full detail:
+`project_color_match_sky_exclusion_autogamma` memory.
+
+## REPO STATE AT END OF SESSION (2026-09-01)
+
+- Branch `main`. **10 commits made and pushed to `github/main` today**,
+  clearing out a large multi-session backlog of uncommitted work plus
+  today's own new fixes:
+  - `5c179e86` `7a98c209` `8037d991` `bb12ab6a` `19847ebc` `d9776140`
+    `190da5de` `6782312b` - the 2026-08-28/29 backlog (Label Studio
+    model_version fix, Match Logger clock, coverage-clamp corner-leak
+    diagnostic, IMU rounds 3-6 docs, export-quality controls + per-export
+    log, detection-confidence slider, buffered-path color-match fix, app
+    icon) - see each commit message for detail, nothing new to add here.
+  - `de59b4a7` **color-match band no longer averages in the sky** - see
+    `project_color_match_sky_exclusion_autogamma` memory and
+    `crates/reco-core/FRICTION.md` for the full root-cause writeup.
+  - `3c35e0ec` **dynamic auto-gamma + "Remeasure now" actually snaps now**
+    - same memory.
+- `git fsck --full` clean before every push today.
+- Working tree clean except one pre-existing untracked stray file
+  (`scripts/match-logger/Match Logger.html.txt`, not written this
+  session, left alone as always).
+- Binaries: reco-gui release + debug **rebuilt 2026-09-01 ~13:33/13:38**,
+  both `--features tensorrt`, carrying everything through the auto-gamma
+  fix (the runaway-bug fix landed *after* an earlier rebuild today, so
+  that earlier build was stale - rebuilt again after; the current
+  binaries are the correct, final ones). Release `reco-cli` also rebuilt.
+
+## DONE THIS SESSION (2026-09-01)
+
+1. **Cleared the entire multi-session uncommitted backlog** (see commit
+   list above) - this was most of the session's first half. Nothing
+   further to say here; see each commit's own message.
+
+2. **Color-match band sky-exclusion fix + dynamic auto-gamma** - the
+   session's main investigation, starting from a user-reported "extreme"
+   seam at raw-file frame 31850. Full writeup in the
+   `project_color_match_sky_exclusion_autogamma` memory and
+   `crates/reco-core/FRICTION.md` (two new entries). Short version:
+   - Root cause: the seam-band measurement sampled the sky half of each
+     camera's frame too, which on this tilted rig can move in the
+     *opposite* direction from the ground (a passing storm cloud gave one
+     camera a darker sky and brighter grass, the other the reverse),
+     letting a real ground-level mismatch cancel against sky noise in the
+     mean. Fixed: ground-half-only sampling.
+   - This calibration's own `color_match_band_width` was also a stale
+     0.874 (default 0.15); reset, then empirically retuned to 0.5 - wider
+     than default, but safe now that sky is excluded, and needed because
+     narrow bands near the seam edge fragment badly on this lens (KB4
+     corner-FOV-coverage gap).
+   - Found "Remeasure now" never actually delivered a fresh measurement
+     (just a ~15% EMA nudge) - fixed to snap.
+   - Built a new "Auto gamma (dynamic)" toggle so gamma correction
+     tracks lighting changes through a match instead of staying at
+     whatever a user tuned it to for one moment - found and fixed a real
+     divergent-feedback bug in the first working version before shipping.
+   - **Verified strongly via CLI wide-shot tests** (17-18% seam gap down
+     to 5.0%/2.3%, both directions correct, no reversal). **NOT yet
+     confirmed via a fair real-export test** - see "FIRST THING NEXT
+     SESSION" above.
+
+## OPEN / WAITING ON THE USER
+
+- The wide-shot auto-gamma A/B, see top of this file.
+- Everything from the 2026-08-30 coverage-clamp/corner-leak todo list is
+  **still fully untouched**: the black-wedge corner leak (root-caused,
+  fix not designed), video-not-centered (root-caused, fix not designed),
+  and a new third item raised this session but not investigated at all -
+  image stabilization against wind-shake (the whole physical camera
+  moving in hard wind - a different class of problem, needs gyro- or
+  feature-based stabilization, not an autocam/panner fix). See
+  `project_coverage_clamp_corner_leak` memory.
+- Background research this session, not part of the delivered fix:
+  real per-frame ISO/shutter/white-balance can be pulled straight out of
+  a DJI Osmo Action 4's own metadata track (no extra dependency needed).
+  Found a real but partial correlation (r=0.71) with the actual pixel
+  mismatch - breaks down at scene-content-driven moments (different sky
+  in each lens), which is exactly why pixel measurement (now fixed)
+  remains the right primary signal. Scripts are session-scratchpad only,
+  not committed - not needed again unless this line of investigation
+  gets revisited specifically.
+
+## Previous entry - 2026-08-29 (TGR_PC): Roll/Skew calibration sliders; model published to Hugging Face; round-5 training frames selected and uploaded to Label Studio
 
 ## REPO STATE AT END OF SESSION (2026-08-29)
 
