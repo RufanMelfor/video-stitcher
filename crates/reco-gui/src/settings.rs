@@ -647,6 +647,7 @@ mod tests {
             fov_default: 34.0,
             fov_alpha: 0.06,
             cluster_alpha: 0.05,
+            confidence_threshold: 0.2,
         };
         s.autocam_defaults = Some(ac);
         let json = serde_json::to_string(&s).unwrap();

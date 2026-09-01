@@ -647,6 +647,18 @@ pub struct AutocamDefaults {
     /// (which would mean "never coast").
     #[serde(default = "default_ball_coast_secs")]
     pub ball_coast_secs: f32,
+    /// Detector confidence floor - see
+    /// `reco_autocam::AutocamConfig::confidence_threshold`. A raw
+    /// detection (any class) below this score never reaches the
+    /// tracker. Was previously a hidden, hardcoded value (0.10 for
+    /// Field/Sweep tracking, silently forced to 0.25 for Ball tracking
+    /// regardless of this slider) - now always this one visible,
+    /// user-controlled number for every mode; the old Ball-mode forcing
+    /// is gone. Defaults to the old Field-mode floor (0.10) when absent
+    /// from older saved data, not `0.0` (which would mean "accept
+    /// every detection, however weak").
+    #[serde(default = "default_confidence_threshold")]
+    pub confidence_threshold: f32,
 }
 
 /// `FieldPannerConfig::default().fov_alpha` - kept in sync manually
@@ -667,6 +679,13 @@ fn default_ball_coast_secs() -> f32 {
     // direction in the crate graph), so this is a literal mirror - keep
     // in sync if that constant ever changes.
     20.0 / 30.0
+}
+
+/// The old Field/Sweep-mode hardcoded floor (see the doc comment on
+/// `AutocamDefaults::confidence_threshold` for why this - not `0.0` -
+/// is the right value for data saved before this field existed).
+fn default_confidence_threshold() -> f32 {
+    0.10
 }
 
 /// Scoreboard overlay settings saved alongside a calibration, so opening
@@ -1426,6 +1445,7 @@ mod tests {
             fov_default: 34.0,
             fov_alpha: 0.05,
             cluster_alpha: 0.05,
+            confidence_threshold: 0.3,
         });
         let json = cal.to_json_pretty();
         let back: Calibration = serde_json::from_str(&json).unwrap();
@@ -1438,6 +1458,7 @@ mod tests {
         assert!(ac.lookahead_reduced_bit_depth);
         assert!((ac.fov_alpha - 0.05).abs() < 1e-6);
         assert!((ac.cluster_alpha - 0.05).abs() < 1e-6);
+        assert!((ac.confidence_threshold - 0.3).abs() < 1e-6);
     }
 
     #[test]
@@ -1450,6 +1471,10 @@ mod tests {
         let ac: AutocamDefaults = serde_json::from_str(json).unwrap();
         assert!((ac.fov_alpha - 0.01).abs() < 1e-9);
         assert!((ac.cluster_alpha - 0.012).abs() < 1e-9);
+        // Same backward-compat requirement for the confidence floor -
+        // must fall back to the old Field-mode literal (0.10), not 0.0
+        // ("accept every detection, however weak").
+        assert!((ac.confidence_threshold - 0.10).abs() < 1e-9);
     }
 
     #[test]

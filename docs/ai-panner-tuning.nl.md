@@ -194,6 +194,32 @@ in plaats van een gok. Begin bij `2,5s`; bevestig via `--events` dat de
 `state` van de bal `Coasting` blijft in plaats van naar `Lost` te
 springen tijdens de overgang als je verder wilt tunen.
 
+**Detection confidence** (`[0,1]`, `confidence_threshold`) - een ruwe
+detectie van elke klasse (persoon, bal, scheidsrechter) onder deze score
+bereikt de tracker helemaal nooit - het is de bodemgrens die de detector
+zelf toepast voordat iets stroomafwaarts (Ball anchor range, de panner,
+...) een kandidaat ooit ziet. Standaard `0,10`. Toegevoegd 2026-08-29
+nadat het per-export logbestand (`.log` naast de output, zie
+`reco_io::export_log`) een echt patroon zichtbaar maakte in de timeline:
+tientallen `BallTracker: acquired ... conf=0,10-0,20`-momenten in één
+export, elk een verse, grotendeels ongesmoothte ruwe bal-positie die
+rechtstreeks in de aim-blend terechtkomt (`ball_weight`) - een
+aannemelijke, andere bron van zichtbare camera-wobble dan de
+smoothing-snelheid-oorzaken hierboven. Concurrentie-referentie: een
+lokaal geïnstalleerd concurrerend product heeft in zijn eigen runtime-log
+`detectorConfidenceThreshold=0.55` staan, 5,5x deze standaard - geen
+bewijs dat 0,55 hier ook klopt (ander model/andere pipeline), maar wel
+een echt datapunt als je dit optrekt. **Vervangt verborgen, hardcoded
+gedrag**: Ball-tracking-modus dwong dit voorheen stilletjes af naar
+`0,25`, ongeacht wat dan ook - dat gebeurt niet meer, en de oude
+Field/Sweep-waarde `0,10` is nu gewoon de standaard van deze ene slider
+voor elke modus. Als je op de oude, impliciete 0,25-bodemgrens van
+Ball-modus vertrouwde, zet 'm nu expliciet. Nog niet A/B-gevalideerd op
+echte beelden - trek 'm een stapje op (bv. `0,2-0,3`) en check de
+`BallTracker: acquired`-regels in het exportlog op minder momenten met
+zeer lage confidence, en let op of een echt zwakke bal daardoor juist
+gemist wordt - dat is de afweging.
+
 **Style preset** - een eenmalige actie die elke slider hieronder
 overschrijft (framing, cluster mode, lock-pitch, cluster bandwidth,
 dead-zone, ball weight, ball reach, FOV) met een afgestemde set waarden.
@@ -350,6 +376,35 @@ Bron: `FieldPannerConfig::{broadcast, action, frame_all}` in
 - **Beeld voelt onrustig/schokkerig bij statisch spel**: verhoog
   `dead-zone`, of verhoog `lookahead` voor meer vooruitlopende
   soepelheid.
+- **Beeld schommelt/hopt omdat de AI zo gefocust lijkt op de bal - elke
+  kleine bal-beweging trekt het beeld mee** (gemeld 2026-08-29, **nog
+  niet A/B-gevalideerd** - onderstaand advies is afgeleid uit de code,
+  nog niet bevestigd op echte beelden): in tegenstelling tot de
+  spelerscluster, die via `cluster_alpha` wordt gesmooth vóórdat hij het
+  aim-doel bereikt, wordt de bal-positie zelf **rauw, zonder eigen
+  smoothing** in het aim-doel gemengd - `doel = cluster * (1 - w) +
+  laatste_bal_positie * w`, met `w = ball_weight * ball_presence` (zie
+  [`FieldPanner::decide_with_lookahead`](../crates/reco-autocam/src/panners/field.rs)).
+  Zodra de bal betrouwbaar gevolgd wordt (`ball_presence` bijna 1), komt
+  dus de ruwe detectie-ruis van elke losse frame - of een echt
+  stuiterende bal - direct door in waar de camera op richt, pas daarna
+  afgezwakt door `dead-zone`/de snelheidslimiet. Twee dingen om te
+  proberen, minst ingrijpend eerst:
+  1. **Verhoog `dead-zone`** (bv. 0,05 -> 0,09-0,10 rad) - vangt kleine
+     bal-jiggles op zonder dat een echte, grotere bal-beweging minder
+     hard aan de aim mag trekken. Dit is precies waarvoor deze
+     instelling al bestaat; lookahead staat al aan, dus de extra
+     latency wordt al opgevangen.
+  2. **Als dat niet genoeg is: verlaag `ball weight`** (bv. 0,5 -> 0,35)
+     - vermindert direct hoeveel de rauwe, ongesmoothte bal-positie mag
+     trekken. Afweging: 0,5 is precies de waarde die deze pagina verderop
+     (hoek-uitbraak-checklist) aanraadt te *verhogen*, specifiek om te
+     voorkomen dat de bal bij een verticale uitbraak uit beeld drijft -
+     verlagen kan dat probleem terugbrengen.
+  Een structureel schonere oplossing, als deze twee sliders het niet
+  volledig oplossen zonder de bal-volgkracht op te geven, zou een eigen
+  smoothing-snelheid voor de bal-bijdrage zijn (naast `cluster_alpha`) -
+  nog niet gebouwd, want deze sliders zijn nog niet geprobeerd.
 - **Camera zoomt verder in/uit dan gewenst in een specifieke situatie**:
   pas de FOV Tight/Wide-grenzen direct aan - het zijn grenzen, geen
   doelwaarden, dus verbreden/versmallen ervan verandert het *bereik*

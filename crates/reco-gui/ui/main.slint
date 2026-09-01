@@ -1171,6 +1171,12 @@ export component RecoApp inherits Window {
     // own equivalent (kept as the slider's own literal default, same
     // convention as export-player-anchor-rad above).
     in-out property <float> export-ball-coast-secs: 0.67;
+    // A raw detection (any class) below this score never reaches the
+    // tracker. 0.10 was the old hardcoded Field/Sweep floor - kept as
+    // the slider's own literal default for the same reason as
+    // export-player-anchor-rad above. Ball tracking mode used to
+    // silently force 0.25 regardless of this slider; it no longer does.
+    in-out property <float> export-confidence-threshold: 0.10;
     in-out property <bool> export-autocam-enabled: false;
     // Panner tuning (mapped onto FieldPannerConfig in export.rs). Defaults
     // mirror the validated football defaults; lookahead defaults on because
@@ -1227,6 +1233,7 @@ export component RecoApp inherits Window {
     changed export-detection-interval => { root.autocam-settings-changed(); }
     changed export-player-anchor-rad => { root.autocam-settings-changed(); }
     changed export-ball-coast-secs => { root.autocam-settings-changed(); }
+    changed export-confidence-threshold => { root.autocam-settings-changed(); }
     changed export-panner-preset => { root.autocam-settings-changed(); }
     changed export-lookahead-secs => { root.autocam-settings-changed(); }
     changed export-lookahead-reduced-bit-depth => { root.autocam-settings-changed(); }
@@ -5820,6 +5827,15 @@ export component RecoApp inherits Window {
                             maximum: 5.0;
                             value <=> root.export-ball-coast-secs;
                             suffix: " s";
+                            decimals: 2;
+                        }
+
+                        LabeledSlider {
+                            label: "Detection confidence";
+                            tip: "A raw detection - person, ball, or referee - below this score never reaches the tracker at all. Raise it if a weak, noisy detection (e.g. a stray low-confidence \"ball\" on background clutter) visibly yanks the camera; lower it if the model is missing a real but faint detection. Applies to every class and every tracking mode alike - Ball tracking mode no longer silently uses a higher floor of its own.";
+                            minimum: 0.05;
+                            maximum: 0.9;
+                            value <=> root.export-confidence-threshold;
                             decimals: 2;
                         }
 

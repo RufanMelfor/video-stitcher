@@ -497,6 +497,7 @@ mod tests {
                 fov_default: 34.0,
                 fov_alpha: 0.05,
                 cluster_alpha: 0.05,
+                confidence_threshold: 0.3,
             },
         };
         assert_eq!(ev.frame_index(), 0);
