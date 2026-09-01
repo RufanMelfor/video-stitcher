@@ -2,6 +2,8 @@ fn main() {
     let config = slint_build::CompilerConfiguration::new().with_style("fluent-dark".to_string());
     slint_build::compile_with_config("ui/main.slint", config).unwrap();
 
+    embed_windows_icon();
+
     if let Ok(output) = std::process::Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()
@@ -49,6 +51,26 @@ fn bundle_scoreboards() {
         );
     }
 }
+
+/// Set `assets/icon.ico` as the compiled .exe's Windows resource icon -
+/// what Explorer, the taskbar, and Alt-Tab show for the file itself.
+/// Separate from (and in addition to) `Window.icon` in `main.slint`,
+/// which only sets the icon of the running window, not the .exe.
+/// No-op on non-Windows targets; `winresource` is only pulled in as a
+/// build-dependency under `[target.'cfg(windows)']` in Cargo.toml.
+#[cfg(windows)]
+fn embed_windows_icon() {
+    println!("cargo:rerun-if-changed=assets/icon.ico");
+    if let Err(error) = winresource::WindowsResource::new()
+        .set_icon("assets/icon.ico")
+        .compile()
+    {
+        println!("cargo:warning=failed to embed Windows exe icon: {error}");
+    }
+}
+
+#[cfg(not(windows))]
+fn embed_windows_icon() {}
 
 fn copy_dir_all(source: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dest)?;
