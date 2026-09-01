@@ -447,6 +447,7 @@ impl Optimizer for NelderMeadOptimizer {
                 reco_core::calibration::DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET,
             color_gamma_left: 1.0,
             color_gamma_right: 1.0,
+            color_match_auto_gamma: false,
             // Not fitted by this optimizer - see fit_ground_tilt_manual.rs
             // and FRICTION.md points 18-20 for the separate manual-line
             // workflow that fits these.

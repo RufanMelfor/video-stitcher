@@ -88,9 +88,19 @@ pub(crate) struct ColorMatchParams {
     /// SYNC_WITH `fisheye.wgsl`'s `apply_gamma`: the measurement must
     /// sample the same curve the shader renders, or the offsets derived
     /// here describe a frame that is never displayed - the correction
-    /// then fights the gamma slider instead of complementing it.
+    /// then fights the gamma slider instead of complementing it. Ignored
+    /// (as an *input*) once [`Self::auto_gamma`] is on - see that field's
+    /// doc - but still the value `set_color_gamma` writes to the
+    /// calibration, so turning auto off again resumes from it.
     pub(crate) gamma_left: f32,
     pub(crate) gamma_right: f32,
+    /// `Topology::color_match_auto_gamma`. When on, [`ColorMatchState`]
+    /// re-fits `gamma_left`/`gamma_right` itself from each measurement
+    /// instead of using the values above verbatim - see
+    /// [`ColorMatchState`]'s struct doc for why a flat additive offset
+    /// alone can't correct a real sensor-gain (ISO) mismatch between the
+    /// two cameras, which is what motivates this at all.
+    pub(crate) auto_gamma: bool,
     /// `ViewportConfig::blend_flip_direction` - SYNC_WITH
     /// `renderer.rs`'s `left_uniforms.ground_tilt[3] = if flip {1.0} else
     /// {0.0}` (and the mirrored assignment for right). Needed to know
@@ -113,6 +123,7 @@ impl Default for ColorMatchParams {
             blend_flip_direction: false,
             gamma_left: 1.0,
             gamma_right: 1.0,
+            auto_gamma: false,
         }
     }
 }
@@ -128,6 +139,23 @@ pub(crate) struct ColorMatchState {
     /// the asynchronous path. Refreshed by `tick` and by the GPU path
     /// before it asks.
     interval: u32,
+    /// Set by [`Self::force_remeasure`] - the next [`Self::apply_measurement`]
+    /// snaps straight to the fresh measurement (`alpha = 1.0`) instead of
+    /// taking one `params.ema_alpha`-sized step toward it, then clears
+    /// itself. See `force_remeasure`'s doc for why a partial step isn't
+    /// good enough for this case.
+    snap_next: bool,
+    /// Effective per-camera gamma currently in force - either mirrored
+    /// from `params.gamma_left`/`_right` verbatim (`params.auto_gamma ==
+    /// false`) or fitted from the measurement (`true`) - see
+    /// [`Self::apply_measurement`]. Read by
+    /// [`crate::render::pipeline::StitchPipeline`] into every
+    /// [`ColorCorrection`] it builds, since manual gamma has always
+    /// applied unconditionally, independent of whether the additive
+    /// match is even enabled - there is no "identity" case to fall back
+    /// on blindly.
+    left_gamma: f32,
+    right_gamma: f32,
 }
 
 impl Default for ColorMatchState {
@@ -139,18 +167,41 @@ impl Default for ColorMatchState {
             // `measure_interval_frames`.
             frames_since_measure: u32::MAX - 1,
             interval: 1,
+            // The very first measurement should also snap rather than EMA
+            // from the [0,0,0] default - there's no prior *measured* state
+            // to blend with, so easing in from identity would just be a
+            // slower way of reaching the same answer.
+            snap_next: true,
+            left_gamma: 1.0,
+            right_gamma: 1.0,
         }
     }
 }
 
 impl ColorMatchState {
     /// Force the next `update_yuv420p`/`update_nv12` call to re-measure
-    /// immediately, bypassing `measure_interval_frames`. Called whenever a
-    /// consumer GUI changes any `ColorMatchParams` field, so a slider drag
-    /// is reflected on the very next rendered frame instead of waiting up
-    /// to `measure_interval_frames` frames.
+    /// immediately, bypassing `measure_interval_frames`, *and* to snap the
+    /// smoothed correction straight to that fresh measurement rather than
+    /// taking one `params.ema_alpha`-sized step toward it.
+    ///
+    /// Called whenever a consumer GUI changes any `ColorMatchParams` field
+    /// (so a slider drag shows the *exact* effect of its new value, not a
+    /// blend with whatever was showing before) and by the explicit
+    /// "Remeasure now" GUI action. The snap matters most for the latter:
+    /// clicking it right after seeking to a frame with very different
+    /// lighting than wherever the correction last converged - the
+    /// documented use case - previously still only moved the correction
+    /// `ema_alpha` (15% by default) of the way there per click, so it
+    /// stayed dominated by the stale prior average instead of reflecting
+    /// the frame actually on screen. Confirmed on real footage: seeking
+    /// from an extreme storm-cloud moment (a large, converged correction)
+    /// to a calm one and clicking "Remeasure now" produced a visibly
+    /// *worse*, reversed-looking mismatch - the stale correction plus a
+    /// static manual-gamma correction pointed the same way, overshooting a
+    /// scene that barely needed correcting at all.
     pub(crate) fn force_remeasure(&mut self) {
         self.frames_since_measure = u32::MAX - 1;
+        self.snap_next = true;
     }
 
     /// Refresh the cached `measure_interval_frames` - the asynchronous
@@ -170,6 +221,8 @@ impl ColorMatchState {
         ColorCorrection {
             left_offset: self.left_offset,
             right_offset: self.right_offset,
+            left_gamma: self.left_gamma,
+            right_gamma: self.right_gamma,
         }
     }
 
@@ -296,8 +349,51 @@ impl ColorMatchState {
         ];
         let new_left = clamp_offset(sub3(target, left_mean), params);
         let new_right = clamp_offset(sub3(target, right_mean), params);
-        ema_toward(&mut self.left_offset, new_left, params.ema_alpha);
-        ema_toward(&mut self.right_offset, new_right, params.ema_alpha);
+        // See ColorMatchState::snap_next's doc: a forced remeasure (a
+        // slider change, or the explicit "Remeasure now" action) snaps
+        // straight to the fresh reading instead of blending it in.
+        let alpha = if self.snap_next {
+            self.snap_next = false;
+            1.0
+        } else {
+            params.ema_alpha
+        };
+        ema_toward(&mut self.left_offset, new_left, alpha);
+        ema_toward(&mut self.right_offset, new_right, alpha);
+
+        if params.auto_gamma {
+            // Undo whichever gamma was actually in force when this
+            // measurement was taken (this state's own last value, not
+            // params.gamma_left/_right - those are only consulted in the
+            // `else` branch below) to recover an estimate of the *raw*
+            // luma, then re-solve the exponent that would have carried
+            // that raw value to the shared raw target instead. Runs every
+            // measurement, so it re-converges on its own estimate the
+            // same iterative way the additive offset does - it does not
+            // need a separate gamma-neutral sampling pass.
+            let raw_left = undo_gamma(left_mean[0], self.left_gamma);
+            let raw_right = undo_gamma(right_mean[0], self.right_gamma);
+            let raw_target = (raw_left + raw_right) * 0.5;
+            let fitted_left = fit_gamma(raw_left, raw_target);
+            let fitted_right = fit_gamma(raw_right, raw_target);
+            self.left_gamma += alpha * (fitted_left - self.left_gamma);
+            self.right_gamma += alpha * (fitted_right - self.right_gamma);
+            log::debug!(
+                "color_match auto_gamma: raw_left={raw_left:.4} raw_right={raw_right:.4} \
+                 raw_target={raw_target:.4} fitted_left={fitted_left:.3} \
+                 fitted_right={fitted_right:.3} smoothed_left={:.3} smoothed_right={:.3}",
+                self.left_gamma,
+                self.right_gamma,
+            );
+        } else {
+            // Not fitting - mirror the manual value verbatim so `current()`
+            // (and every ColorCorrection built from it) always reflects
+            // whatever should actually be applied right now, with no
+            // separate "which mode am I in" check needed at any call site.
+            self.left_gamma = params.gamma_left;
+            self.right_gamma = params.gamma_right;
+        }
+
         log::debug!(
             "color_match measured: left_mean={left_mean:?} right_mean={right_mean:?} \
              target={target:?} new_left={new_left:?} new_right={new_right:?} \
@@ -322,10 +418,7 @@ impl ColorMatchState {
             // serving the last smoothed correction rather than snapping to
             // identity.
         }
-        ColorCorrection {
-            left_offset: self.left_offset,
-            right_offset: self.right_offset,
-        }
+        self.current()
     }
 }
 
@@ -371,6 +464,45 @@ fn ema_toward(current: &mut [f32; 3], target: [f32; 3], alpha: f32) {
     for (c, t) in current.iter_mut().zip(target) {
         *c += alpha * (t - *c);
     }
+}
+
+/// Smallest/largest luma this module will ever treat as meaningful for a
+/// `ln()` - keeps every gamma-fit calculation away from the `ln(0)`/`ln`-
+/// near-zero singularities a genuinely black or blown-out band could hit.
+const GAMMA_FIT_EPS: f32 = 1e-3;
+
+/// Recover an estimate of a camera's *raw* (pre-gamma) luma from its
+/// gamma-corrected measured value, by inverting `apply_gamma`'s own
+/// `pow(x, 1/gamma)`: if `measured = raw^(1/gamma)`, then
+/// `raw = measured^gamma`. An approximation - gamma is really applied
+/// per-RGB-channel before the YUV transform, not to luma directly - but
+/// grass's fairly narrow, consistent chroma makes luma a reasonable
+/// stand-in, and [`ColorMatchState::apply_measurement`]'s auto-gamma fit
+/// re-runs every measurement interval, so it self-corrects the same
+/// iterative way the additive offset already does rather than needing to
+/// be exact in one shot.
+fn undo_gamma(measured_luma: f32, gamma: f32) -> f32 {
+    measured_luma
+        .clamp(GAMMA_FIT_EPS, 1.0 - GAMMA_FIT_EPS)
+        .powf(gamma)
+        .clamp(GAMMA_FIT_EPS, 1.0 - GAMMA_FIT_EPS)
+}
+
+/// Solve the gamma exponent that would carry `raw` to `target` under
+/// `raw^(1/gamma) = target`, i.e. `gamma = ln(raw) / ln(target)`. Clamped
+/// to `[0.5, 2.0]` - the same range the manual gamma sliders expose - so a
+/// noisy or near-degenerate measurement can't send the shader a pathological
+/// exponent; falls back to identity (`1.0`) if `target` is too close to
+/// `1.0` for its `ln` to be a stable denominator (both cameras already
+/// agree almost exactly - nothing to fit).
+fn fit_gamma(raw: f32, target: f32) -> f32 {
+    let raw = raw.clamp(GAMMA_FIT_EPS, 1.0 - GAMMA_FIT_EPS);
+    let target = target.clamp(GAMMA_FIT_EPS, 1.0 - GAMMA_FIT_EPS);
+    let ln_target = target.ln();
+    if ln_target.abs() < 1e-4 {
+        return 1.0;
+    }
+    (raw.ln() / ln_target).clamp(0.5, 2.0)
 }
 
 /// Build a raw-byte sampler closure for tightly-packed YUV420P planes.
@@ -886,6 +1018,113 @@ mod tests {
     }
 
     #[test]
+    fn auto_gamma_off_mirrors_the_manual_value() {
+        // With auto_gamma false (the default), ColorCorrection.left_gamma/
+        // right_gamma must track params.gamma_left/_right exactly, on every
+        // tick - this is what every render call site relies on instead of
+        // reading Topology directly (see ColorCorrection's doc).
+        let params = test_params();
+        let (y, u, v) = solid_yuv420p(640, 480, 150, 128, 128);
+        let mut state = ColorMatchState::default();
+        let match_params = ColorMatchParams {
+            gamma_left: 0.85,
+            gamma_right: 1.2,
+            auto_gamma: false,
+            ..Default::default()
+        };
+
+        let correction = state.update_yuv420p(
+            (&y, &u, &v),
+            (&y, &u, &v),
+            640,
+            480,
+            &params,
+            &params,
+            false,
+            &match_params,
+        );
+
+        assert!(
+            (correction.left_gamma - 0.85).abs() < 1e-6,
+            "{correction:?}"
+        );
+        assert!(
+            (correction.right_gamma - 1.2).abs() < 1e-6,
+            "{correction:?}"
+        );
+    }
+
+    #[test]
+    fn auto_gamma_fits_toward_the_camera_that_needs_it() {
+        // Left is brighter (raw ~0.6) than right (raw ~0.4) - a gain
+        // mismatch, not just a mean offset. auto_gamma should pull left's
+        // fitted gamma below 1.0 (darken) and right's above 1.0 (lighten),
+        // converging both raw estimates toward their shared mean.
+        //
+        // Real callers (`StitchPipeline::color_match_params`) rebuild
+        // `gamma_left`/`gamma_right` from the state's own last-fitted
+        // value every tick when auto_gamma is on - this loop mirrors that,
+        // since skipping it reproduces a real bug this test would
+        // otherwise miss: `apply_measurement`'s `undo_gamma` assumes
+        // `params.gamma_left`/`_right` is what was actually applied to
+        // the pixels it just measured. Leave `match_params.gamma_left`/
+        // `_right` frozen at their initial value instead (as an earlier,
+        // buggy version of this test did) and the fit doesn't converge at
+        // all - it runs away to the `[0.5, 2.0]` clamp and pins there,
+        // which this test's tolerance below would fail on.
+        let params = test_params();
+        let (ly, lu, lv) = solid_yuv420p(640, 480, 153, 128, 128); // ~0.6
+        let (ry, ru, rv) = solid_yuv420p(640, 480, 102, 128, 128); // ~0.4
+        let mut state = ColorMatchState::default();
+
+        let mut correction = ColorCorrection::default();
+        for _ in 0..100 {
+            let match_params = ColorMatchParams {
+                measure_interval_frames: 1,
+                auto_gamma: true,
+                gamma_left: correction.left_gamma,
+                gamma_right: correction.right_gamma,
+                ..Default::default()
+            };
+            correction = state.update_yuv420p(
+                (&ly, &lu, &lv),
+                (&ry, &ru, &rv),
+                640,
+                480,
+                &params,
+                &params,
+                false,
+                &match_params,
+            );
+        }
+
+        assert!(
+            correction.left_gamma < 0.95,
+            "brighter left camera should be fitted below identity: {}",
+            correction.left_gamma
+        );
+        assert!(
+            correction.right_gamma > 1.05,
+            "darker right camera should be fitted above identity: {}",
+            correction.right_gamma
+        );
+        // Converges to a stable value, not pinned at the clamp - this
+        // mismatch (raw ~0.6 vs ~0.4) is well within what a gamma in
+        // [0.5, 2.0] can reconcile, so landing exactly on either bound
+        // would mean the fit is running away, not settling.
+        assert!(
+            correction.left_gamma > 0.55,
+            "should settle above the clamp floor, not run away to it: {}",
+            correction.left_gamma
+        );
+        assert!(
+            correction.right_gamma < 1.95,
+            "should settle below the clamp ceiling, not run away to it: {}",
+            correction.right_gamma
+        );
+    }
+
+    #[test]
     fn is_fading_plane_matches_renderer_convention() {
         // Default (blend_flip_direction = false): right fades, left is
         // fixed - matches `left_uniforms.ground_tilt[3] = if flip {1.0}
@@ -1000,6 +1239,67 @@ mod tests {
             second.left_offset[0] <= 0.01 + 1e-6,
             "tightened clamp should apply on the very next call: {}",
             second.left_offset[0]
+        );
+    }
+
+    #[test]
+    fn force_remeasure_snaps_instead_of_taking_one_ema_step() {
+        // Reproduces the real bug: a correction converged on one extreme
+        // scene (a wide left/right gap - like the storm-cloud footage this
+        // was diagnosed on), then the user seeks to a very different scene
+        // (cameras nearly identical) and clicks "Remeasure now". Before
+        // this fix, force_remeasure only made the next tick *due* - the
+        // actual blend still used the configured ema_alpha, so one click
+        // only moved 15% of the way to the new (near-zero) answer, leaving
+        // the correction still dominated by the stale, wide-gap value.
+        let params = test_params();
+        let low_alpha = ColorMatchParams {
+            ema_alpha: 0.15,
+            measure_interval_frames: 1,
+            ..Default::default()
+        };
+        let (wide_ly, wide_lu, wide_lv) = solid_yuv420p(640, 480, 220, 128, 128);
+        let (wide_ry, wide_ru, wide_rv) = solid_yuv420p(640, 480, 40, 128, 128);
+        let mut state = ColorMatchState::default();
+
+        // Converge fully on the wide-gap scene first.
+        for _ in 0..200 {
+            state.update_yuv420p(
+                (&wide_ly, &wide_lu, &wide_lv),
+                (&wide_ry, &wide_ru, &wide_rv),
+                640,
+                480,
+                &params,
+                &params,
+                false,
+                &low_alpha,
+            );
+        }
+        let converged = state.current();
+        assert!(
+            converged.left_offset[0] < -0.05,
+            "should have converged on a large (clamped) correction first: {converged:?}"
+        );
+
+        // "Seek" to a scene where the two cameras already agree, and force
+        // a remeasure - the one and only tick that follows.
+        let (flat_y, flat_u, flat_v) = solid_yuv420p(640, 480, 128, 128, 128);
+        state.force_remeasure();
+        let after = state.update_yuv420p(
+            (&flat_y, &flat_u, &flat_v),
+            (&flat_y, &flat_u, &flat_v),
+            640,
+            480,
+            &params,
+            &params,
+            false,
+            &low_alpha,
+        );
+
+        assert!(
+            after.left_offset[0].abs() < 1e-4,
+            "a forced remeasure must snap straight to the fresh (here: zero) \
+             correction, not blend 15% of it into the stale {converged:?}: got {after:?}"
         );
     }
 }

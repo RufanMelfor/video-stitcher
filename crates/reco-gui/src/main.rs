@@ -1501,6 +1501,25 @@ impl AppState {
         }
     }
 
+    /// Enable/disable automatic per-camera gamma fitting - see
+    /// `StitchPipeline::set_color_match_auto_gamma`'s doc for why this
+    /// exists (a static manual gamma tuned for one moment can visibly
+    /// overshoot at another once lighting changes through a match).
+    fn set_color_match_auto_gamma(&mut self, enabled: bool) {
+        // See `set_color_match_enabled`'s comment on why this also has to
+        // be mirrored into `self.calibration`.
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.color_match_auto_gamma = enabled;
+        }
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge
+                .engine_mut()
+                .pipeline_mut()
+                .set_color_match_auto_gamma(enabled);
+            self.preview_dirty = true;
+        }
+    }
+
     /// Force an immediate color-match remeasure against the current frame,
     /// without waiting for the periodic interval (which only advances while
     /// rendering) or requiring a calibration change to trigger it.
@@ -1638,10 +1657,11 @@ impl AppState {
     /// which is what `reset_calibration` does for the layout sliders.
     fn reset_color_match(&mut self) {
         use reco_core::calibration::{
-            DEFAULT_COLOR_GAMMA, DEFAULT_COLOR_MATCH_BAND_WIDTH, DEFAULT_COLOR_MATCH_EMA_ALPHA,
-            DEFAULT_COLOR_MATCH_ENABLED, DEFAULT_COLOR_MATCH_GRID_COLS,
-            DEFAULT_COLOR_MATCH_GRID_ROWS, DEFAULT_COLOR_MATCH_INTERVAL_FRAMES,
-            DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET, DEFAULT_COLOR_MATCH_MAX_Y_OFFSET,
+            DEFAULT_COLOR_GAMMA, DEFAULT_COLOR_MATCH_AUTO_GAMMA, DEFAULT_COLOR_MATCH_BAND_WIDTH,
+            DEFAULT_COLOR_MATCH_EMA_ALPHA, DEFAULT_COLOR_MATCH_ENABLED,
+            DEFAULT_COLOR_MATCH_GRID_COLS, DEFAULT_COLOR_MATCH_GRID_ROWS,
+            DEFAULT_COLOR_MATCH_INTERVAL_FRAMES, DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET,
+            DEFAULT_COLOR_MATCH_MAX_Y_OFFSET,
         };
         if let Some(bridge) = self.bridge.as_mut() {
             let pipeline = bridge.engine_mut().pipeline_mut();
@@ -1654,11 +1674,13 @@ impl AppState {
             pipeline.set_color_match_max_y_offset(DEFAULT_COLOR_MATCH_MAX_Y_OFFSET);
             pipeline.set_color_match_max_chroma_offset(DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET);
             pipeline.set_color_gamma(DEFAULT_COLOR_GAMMA, DEFAULT_COLOR_GAMMA);
+            pipeline.set_color_match_auto_gamma(DEFAULT_COLOR_MATCH_AUTO_GAMMA);
             self.preview_dirty = true;
         }
         if let Some(cal) = self.calibration.as_mut() {
             cal.topology.color_gamma_left = DEFAULT_COLOR_GAMMA;
             cal.topology.color_gamma_right = DEFAULT_COLOR_GAMMA;
+            cal.topology.color_match_auto_gamma = DEFAULT_COLOR_MATCH_AUTO_GAMMA;
         }
     }
 
@@ -5808,6 +5830,15 @@ fn main() -> anyhow::Result<()> {
 
     let state_ref = Rc::clone(&state);
     let app_weak = app.as_weak();
+    app.on_changed_color_match_auto_gamma(move |enabled| {
+        state_ref.borrow_mut().set_color_match_auto_gamma(enabled);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let state_ref = Rc::clone(&state);
+    let app_weak = app.as_weak();
     app.on_changed_color_match_band_width(move |w| {
         state_ref.borrow_mut().set_color_match_band_width(w);
         if let Some(app) = app_weak.upgrade() {
@@ -5882,7 +5913,8 @@ fn main() -> anyhow::Result<()> {
         state_ref.borrow_mut().reset_color_match();
         if let Some(app) = app_weak.upgrade() {
             use reco_core::calibration::{
-                DEFAULT_COLOR_GAMMA, DEFAULT_COLOR_MATCH_BAND_WIDTH, DEFAULT_COLOR_MATCH_EMA_ALPHA,
+                DEFAULT_COLOR_GAMMA, DEFAULT_COLOR_MATCH_AUTO_GAMMA,
+                DEFAULT_COLOR_MATCH_BAND_WIDTH, DEFAULT_COLOR_MATCH_EMA_ALPHA,
                 DEFAULT_COLOR_MATCH_ENABLED, DEFAULT_COLOR_MATCH_GRID_COLS,
                 DEFAULT_COLOR_MATCH_GRID_ROWS, DEFAULT_COLOR_MATCH_INTERVAL_FRAMES,
                 DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET, DEFAULT_COLOR_MATCH_MAX_Y_OFFSET,
@@ -5897,6 +5929,7 @@ fn main() -> anyhow::Result<()> {
             app.set_color_match_max_chroma_offset(DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET);
             app.set_color_gamma_left(DEFAULT_COLOR_GAMMA);
             app.set_color_gamma_right(DEFAULT_COLOR_GAMMA);
+            app.set_color_match_auto_gamma(DEFAULT_COLOR_MATCH_AUTO_GAMMA);
             app.set_cal_dirty(true);
         }
     });
@@ -7964,6 +7997,10 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 let t = &b.engine().calibration().topology;
                 (t.color_gamma_left, t.color_gamma_right)
             });
+            let color_match_auto_gamma = s
+                .bridge
+                .as_ref()
+                .map(|b| b.engine().calibration().topology.color_match_auto_gamma);
             // Lens-correction strength came in via the loaded calibration and
             // the renderer was seeded with it at bridge creation; mirror it
             // into AppState so a later save re-persists the right value.
@@ -8160,6 +8197,9 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 if let Some((left, right)) = color_gamma {
                     app.set_color_gamma_left(left);
                     app.set_color_gamma_right(right);
+                }
+                if let Some(v) = color_match_auto_gamma {
+                    app.set_color_match_auto_gamma(v);
                 }
                 if let Some(lc) = lens_correction {
                     app.set_lens_correction_amount(lc);
@@ -8415,6 +8455,10 @@ fn handle_calibration_result(
                         let t = &b.engine().calibration().topology;
                         (t.color_gamma_left, t.color_gamma_right)
                     });
+                    let color_match_auto_gamma = state
+                        .bridge
+                        .as_ref()
+                        .map(|b| b.engine().calibration().topology.color_match_auto_gamma);
                     let lens_correction =
                         state.calibration.as_ref().map(|c| c.lenses[0].correction);
                     if let Some(lc) = lens_correction {
@@ -8552,6 +8596,9 @@ fn handle_calibration_result(
                         if let Some((left, right)) = color_gamma {
                             app.set_color_gamma_left(left);
                             app.set_color_gamma_right(right);
+                        }
+                        if let Some(v) = color_match_auto_gamma {
+                            app.set_color_match_auto_gamma(v);
                         }
                         if let Some(lc) = lens_correction {
                             app.set_lens_correction_amount(lc);

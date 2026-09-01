@@ -587,12 +587,45 @@ impl StitchPipeline {
         self.force_color_match_remeasure();
     }
 
-    /// Current manual per-camera gamma, as `(left, right)`.
+    /// Current manual per-camera gamma, as `(left, right)`. The value the
+    /// manual sliders show and write to - **not** affected by
+    /// `color_match_auto_gamma`, which overrides what's actually rendered
+    /// without touching this stored value, so switching auto off again
+    /// resumes from whatever was here before. See
+    /// [`Self::color_match_correction`] for the value actually in effect
+    /// right now.
     pub fn color_gamma(&self) -> (f32, f32) {
         (
             self.calibration.topology.color_gamma_left,
             self.calibration.topology.color_gamma_right,
         )
+    }
+
+    /// Enable/disable automatic per-camera gamma fitting, re-measured
+    /// alongside the additive offset on the same
+    /// `color_match_interval_frames` schedule instead of using the manual
+    /// `color_gamma_left`/`_right` value verbatim. See
+    /// [`crate::calibration::Topology::color_match_auto_gamma`].
+    ///
+    /// A flat additive YUV offset alone cannot correct a real sensor-gain
+    /// (ISO) mismatch between two independently-metering cameras - it can
+    /// only shift the average, not reshape the tone curve a gain
+    /// difference actually produces. Manual gamma (`set_color_gamma`) was
+    /// added for exactly this reason; this lets the same correction track
+    /// the mismatch automatically as it changes through a match (cloud
+    /// cover, sun angle) instead of staying fixed at whatever a user
+    /// tuned it to for one moment - a fixed value tuned on an extreme
+    /// moment measurably *overshot* (visibly reversed the mismatch) at a
+    /// calmer point in the same real match footage this was diagnosed on.
+    pub fn set_color_match_auto_gamma(&mut self, enabled: bool) {
+        self.calibration.topology.color_match_auto_gamma = enabled;
+        self.force_color_match_remeasure();
+    }
+
+    /// Whether automatic gamma fitting is currently on. See
+    /// [`Self::set_color_match_auto_gamma`].
+    pub fn color_match_auto_gamma(&self) -> bool {
+        self.calibration.topology.color_match_auto_gamma
     }
 
     /// Maximum luma offset the color match may apply. See
@@ -958,8 +991,26 @@ impl StitchPipeline {
 
     /// Bundle the live `topology.color_match_*` fields into the internal
     /// params struct `ColorMatchState` expects.
+    ///
+    /// `gamma_left`/`gamma_right`: when `color_match_auto_gamma` is off,
+    /// the static calibration value, exactly as every other field here.
+    /// When it's on, the *live fitted* value from `ColorMatchState` itself
+    /// instead - this is what `measure_band_mean`/`decode_transfer_yuv`
+    /// actually decode the band with, and it has to agree with what
+    /// `ColorMatchState::apply_measurement`'s `undo_gamma` step assumes
+    /// was applied (its own last-fitted `self.left_gamma`/`right_gamma`),
+    /// or the two disagree about which gamma produced the pixels just
+    /// measured and the fit runs away rather than converging - caught by
+    /// a real run pinning both cameras at the `[0.5, 2.0]` clamp instead
+    /// of settling on a stable value.
     fn color_match_params(&self) -> super::color_match::ColorMatchParams {
         let t = &self.calibration.topology;
+        let (gamma_left, gamma_right) = if t.color_match_auto_gamma {
+            let c = self.color_match.lock().unwrap().current();
+            (c.left_gamma, c.right_gamma)
+        } else {
+            (t.color_gamma_left, t.color_gamma_right)
+        };
         super::color_match::ColorMatchParams {
             band_width: t.color_match_band_width,
             grid_cols: t.color_match_grid_cols,
@@ -970,8 +1021,24 @@ impl StitchPipeline {
             max_chroma_offset: t.color_match_max_chroma_offset,
             seam_offset: t.seam_offset,
             blend_flip_direction: t.blend_flip_direction,
-            gamma_left: t.color_gamma_left,
-            gamma_right: t.color_gamma_right,
+            gamma_left,
+            gamma_right,
+            auto_gamma: t.color_match_auto_gamma,
+        }
+    }
+
+    /// `ColorCorrection` for whenever the automatic measurement did not
+    /// run this frame (color match disabled, or a path - BGRA - that never
+    /// measures at all): zero additive offset, but gamma still resolved
+    /// from the calibration's static `color_gamma_left`/`_right`, because
+    /// manual gamma has always applied unconditionally, independent of
+    /// the additive match - see `ColorCorrection`'s own doc for why
+    /// `ColorCorrection::default()` alone is never the right call here.
+    fn identity_correction_with_static_gamma(&self) -> super::renderer::ColorCorrection {
+        super::renderer::ColorCorrection {
+            left_gamma: self.calibration.topology.color_gamma_left,
+            right_gamma: self.calibration.topology.color_gamma_right,
+            ..Default::default()
         }
     }
 
@@ -1005,7 +1072,7 @@ impl StitchPipeline {
         right: &YuvPlanes<'_>,
     ) -> super::renderer::ColorCorrection {
         if !self.calibration.topology.color_match_enabled {
-            return super::renderer::ColorCorrection::default();
+            return self.identity_correction_with_static_gamma();
         }
         let params = self.color_match_params();
         self.color_match.lock().unwrap().update_yuv420p(
@@ -1027,7 +1094,7 @@ impl StitchPipeline {
         right: &Nv12Planes<'_>,
     ) -> super::renderer::ColorCorrection {
         if !self.calibration.topology.color_match_enabled {
-            return super::renderer::ColorCorrection::default();
+            return self.identity_correction_with_static_gamma();
         }
         let params = self.color_match_params();
         self.color_match.lock().unwrap().update_nv12(
@@ -1351,7 +1418,7 @@ impl StitchPipeline {
                 &self.calibration,
                 &viewport,
                 self.calibration.topology.blend_width,
-                super::renderer::ColorCorrection::default(),
+                self.identity_correction_with_static_gamma(),
                 self.calibration.topology.multiband_blend_enabled,
                 self.show_seam_line,
             )),
@@ -1423,7 +1490,7 @@ impl StitchPipeline {
         let correction = if self.calibration.topology.color_match_enabled {
             self.color_match.lock().unwrap().current()
         } else {
-            super::renderer::ColorCorrection::default()
+            self.identity_correction_with_static_gamma()
         };
 
         self.composite_target_commands(self.renderer.render_to_target(

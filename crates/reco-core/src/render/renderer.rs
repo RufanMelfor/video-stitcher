@@ -106,15 +106,40 @@ pub struct TopTilt {
 /// computed by [`super::color_match`] from a seam-adjacent band of each
 /// camera's raw frame. Nudges both cameras toward a shared mean color so an
 /// exposure/white-balance mismatch between the two cameras doesn't show up
-/// as a visible seam independent of geometric alignment. `Default` (both
-/// zero) is a no-op - `apply_color_transfer` has an explicit identity
-/// fast-path for `scale == 1 && offset == 0`. `pub` (not `pub(crate)`):
-/// [`super::stitch_renderer::StitchRenderer::color_match_correction`]
+/// as a visible seam independent of geometric alignment. The offsets'
+/// `Default` (both zero) is a no-op - `apply_color_transfer` has an explicit
+/// identity fast-path for `scale == 1 && offset == 0`. `pub` (not
+/// `pub(crate)`): [`super::stitch_renderer::StitchRenderer::color_match_correction`]
 /// surfaces this to other crates (e.g. a GUI's live diagnostic readout).
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+///
+/// Also carries the effective per-camera gamma (`Topology::color_gamma_left`/
+/// `_right`, or the auto-fitted value when `color_match_auto_gamma` is on -
+/// see [`super::color_match::ColorMatchState`]'s doc) applied *before* the
+/// offset above. Unlike the offset, gamma's `Default` is **not** a
+/// meaningful "identity" sentinel to fall back on casually: every render
+/// path applies *some* gamma unconditionally (manual gamma has never been
+/// gated behind color-match being enabled), so every construction site of
+/// this struct must set `left_gamma`/`right_gamma` explicitly from the
+/// right source for that path - `Default::default()`'s `1.0` exists only so
+/// the struct can derive `Default` at all, not as a implying "no gamma
+/// needed here".
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ColorCorrection {
     pub left_offset: [f32; 3],
     pub right_offset: [f32; 3],
+    pub left_gamma: f32,
+    pub right_gamma: f32,
+}
+
+impl Default for ColorCorrection {
+    fn default() -> Self {
+        Self {
+            left_offset: [0.0; 3],
+            right_offset: [0.0; 3],
+            left_gamma: 1.0,
+            right_gamma: 1.0,
+        }
+    }
 }
 
 // ---- Multi-band (2-band) spatial seam blur ----
@@ -1481,13 +1506,16 @@ impl Renderer {
         right_uniforms.color_offset_blend[1] = color_correction.right_offset[1];
         right_uniforms.color_offset_blend[2] = color_correction.right_offset[2];
 
-        // Manual per-camera gamma, applied by the shader *before* the
-        // automatic offset above (see `Topology::color_gamma_left`). Sent
-        // as 1/gamma so the shader does one pow and no divide; a
+        // Per-camera gamma, applied by the shader *before* the automatic
+        // offset above - manual (`Topology::color_gamma_left`/`_right`) or
+        // auto-fitted (`color_match_auto_gamma`), whichever `color_correction`
+        // already resolved to (see `ColorCorrection`'s doc - every caller
+        // must set these explicitly, there is no meaningful blind default).
+        // Sent as 1/gamma so the shader does one pow and no divide; a
         // non-positive or non-finite value would make `pow` produce
         // garbage across the whole frame, so it falls back to identity.
-        left_uniforms.color_scale[3] = inv_gamma(calibration.topology.color_gamma_left);
-        right_uniforms.color_scale[3] = inv_gamma(calibration.topology.color_gamma_right);
+        left_uniforms.color_scale[3] = inv_gamma(color_correction.left_gamma);
+        right_uniforms.color_scale[3] = inv_gamma(color_correction.right_gamma);
 
         // Seam blend direction: which plane fades in over the other at the
         // seam. `false` (default) = right fades over a fixed left, drawn
@@ -1690,13 +1718,16 @@ impl Renderer {
         right_uniforms.color_offset_blend[2] = color_correction.right_offset[2];
         right_uniforms.ground_tilt[3] = 0.0; // tex_b: hard FOV coverage, never fades.
 
-        // Manual per-camera gamma, applied by the shader *before* the
-        // automatic offset above (see `Topology::color_gamma_left`). Sent
-        // as 1/gamma so the shader does one pow and no divide; a
+        // Per-camera gamma, applied by the shader *before* the automatic
+        // offset above - manual (`Topology::color_gamma_left`/`_right`) or
+        // auto-fitted (`color_match_auto_gamma`), whichever `color_correction`
+        // already resolved to (see `ColorCorrection`'s doc - every caller
+        // must set these explicitly, there is no meaningful blind default).
+        // Sent as 1/gamma so the shader does one pow and no divide; a
         // non-positive or non-finite value would make `pow` produce
         // garbage across the whole frame, so it falls back to identity.
-        left_uniforms.color_scale[3] = inv_gamma(calibration.topology.color_gamma_left);
-        right_uniforms.color_scale[3] = inv_gamma(calibration.topology.color_gamma_right);
+        left_uniforms.color_scale[3] = inv_gamma(color_correction.left_gamma);
+        right_uniforms.color_scale[3] = inv_gamma(color_correction.right_gamma);
 
         // Seam mask: a copy of whichever plane fades (see
         // `encode_stitch_pass`'s flip-convention comment), rendered with a
@@ -2571,6 +2602,7 @@ mod tests {
                 color_match_max_chroma_offset: 0.04,
                 color_gamma_left: 1.0,
                 color_gamma_right: 1.0,
+                color_match_auto_gamma: false,
                 ground_tilt_x: 0.0,
                 ground_tilt_z: 0.0,
                 top_tilt_x: 0.0,
@@ -2703,6 +2735,7 @@ mod tests {
                 color_match_max_chroma_offset: 0.0,
                 color_gamma_left: 1.0,
                 color_gamma_right: 1.0,
+                color_match_auto_gamma: false,
                 ground_tilt_x: -0.007000000681728125,
                 ground_tilt_z: 0.0010000000474974513,
                 top_tilt_x: 0.0,
