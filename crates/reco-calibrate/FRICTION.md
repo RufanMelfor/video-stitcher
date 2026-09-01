@@ -1680,10 +1680,387 @@ fixed). `cargo fmt`/`clippy -D warnings` clean workspace-wide;
 - Real-footage verification that the derived roll/pitch/tilt values are
   physically plausible for an actual DJI rig, not just internally
   consistent on synthetic input - see the test plan handed to the user
-  the same session this shipped.
+  the same session this shipped. **Update: run, and the values are not
+  plausible - see point 26.**
 - Whether turning "IMU seeds" on measurably changes calibration
   convergence/outcome on this rig, now that the seeds are non-empty for
-  the first time.
+  the first time. **Update (2026-08-28): user tested - no, it doesn't
+  measurably change the outcome.** Consistent with point 23's diagnosis
+  (the multi-start Nelder-Mead grid already covers the plausible range
+  without a seed; a seed only adds one more starting point among many)
+  rather than proof the seed itself is harmless - see point 26, its
+  *values* are not trustworthy regardless.
 - Timing confirmation: the ~70-150s cost increase above, confirmed in
   code but not yet timed on a real Re-calibrate run.
+
+## 26. OPEN (2026-08-28) - point 25's real-footage check found implausible values; likely cause identified, NOT fixed, NOT fully verified
+
+**Status: investigation only. Nothing in this section has been changed
+in code.** Real DJI Osmo Action 4 footage (the same rig as points 1-22),
+`use_imu_rotation_seeds` still off by default, so nothing here reached
+the optimizer this run - but the diagnostic-only numbers it logged are
+the actual finding:
+
+```
+differential orientation: roll=-2.2385 rad (-128.3 deg), pitch=-2.4527 rad (-140.5 deg), tilt_diff=1.1192 rad (64.1 deg)
+rig tilt: 2.1482 rad (123.1 deg)
+rig tilt 123.1 deg exceeds 25 deg threshold, ignoring
+rig roll: left=154.9 deg, right=26.6 deg, avg=64.1 deg
+rig roll 64.1 deg exceeds 25 deg threshold, ignoring
+```
+
+`rig_tilt`/`rig_roll` have a 25-degree sanity cap (`pipeline.rs:438-469`)
+and correctly rejected these; `differential_orientation`'s roll/pitch/
+tilt_diff (which seed `imu_xrz_seed`/`imu_zrx_seed`/`imu_xrx_seed`, and
+gate `enable_x_rx`) have **no such cap** and would have reached the
+optimizer had the checkbox been on.
+
+**First reaction (retracted) was "the values are garbage/implausible,
+add a sanity check."** User pushed back, correctly: a number looking
+wrong is not evidence the *camera* is wrong - it could just as easily be
+our own interpretation of otherwise-valid sensor data. A capped-off
+sanity threshold would hide that distinction, not resolve it. Re-did
+this as an actual investigation instead of a quick patch.
+
+**Independent sanity baseline, from *production* (non-IMU) calibration
+data on this exact camera model:** `optimizer.rs:55-57`'s own comment -
+`z_rx` (left plane tilt, the geometry parameter `tilt_diff` is meant to
+seed) fits to **~-0.14 rad (~-8 deg)** for "DJI Action 4 with
+rotation-corrected left video," from real feature-matched, RANSAC'd
+calibration runs, not IMU. That is the actual, trustworthy scale of this
+rig's mounting misalignment. `tilt_diff` here is 64.1 deg - roughly 8x
+too large and the wrong order of magnitude entirely. This is stronger
+evidence than "it looks like a big number": the true answer for this
+exact hardware is already known, independently, from a different code
+path.
+
+**Most concrete lead found so far, not yet proven:** this rig's left
+camera carries `rotation=-180` (today's own log: `Stream has
+rotation=180 degrees`; confirmed per-camera-asymmetric earlier this
+session via the color-match GPU band-gather work, which had to mirror
+its sample positions for exactly this camera). A physically upside-down-
+mounted camera's IMU is upside-down too - gravity, a world-frame vector,
+would read as roughly inverted in that camera's own body frame relative
+to a normally-mounted one. `gravity_vector`/`differential_orientation`
+(`telemetry.rs:612-717`) compare the two cameras' raw gravity-frame
+angles directly, with **no reference anywhere to either camera's mount
+rotation** (grepped `telemetry.rs` and `pipeline.rs` for `rotation` -
+nothing outside comments/unrelated matches). If that 180-degree mount
+difference is real and uncorrected, comparing the two cameras' raw
+readings without accounting for it would plausibly produce exactly this
+class of wild-looking result from two internally-correct sensors.
+
+**Second, weaker lead, likely not the main cause:** `differential_orientation`'s
+own doc comment states its axis convention (`X=down, Y=forward, Z=right`)
+"holds for GoPro (HERO5+) after ORIN/ORIO matrix application" - verified
+for GoPro specifically. Checked telemetry-parser's DJI backend (vendored
+git checkout, `dji/mod.rs:207-215`): DJI quaternions go through a
+completely different transform - multiply by a fixed correction
+quaternion `(0.5, -0.5, -0.5, 0.5)`, then an explicit "Rotate Y axis 180
+deg for horizon lock" step - with no shared code path or stated
+equivalence to GoPro's ORIN/ORIO/MTRX route. Not proven to land in a
+different final frame than what `gravity_vector_from_quaternions`
+assumes, just never verified that it doesn't. Flagged for completeness;
+the rotation=-180 mount-mismatch lead above is more concrete and more
+directly testable.
+
+**Deliberately not fixed yet.** Composing a 180-degree rotation with a
+gravity vector and re-deriving roll/pitch via `atan2` is not a simple
+subtract-180-from-the-answer operation - the actual relationship between
+"true small tilt" and "observed large angle" depends on which axis the
+mount flip is around, and guessing at a correction without checking it
+against a known answer would be the same mistake as the sanity-threshold
+idea, just with extra steps.
+
+**Diagnostic built and run (2026-08-28):**
+`crates/reco-calibrate/examples/check_imu_mount_rotation.rs` - loads
+real telemetry for a given left/right pair, re-derives
+`differential_orientation`'s exact roll/pitch/tilt_diff formulas
+(duplicated, not called, so candidates can be tried freely), and prints
+every 180-degree axis-negation of the left camera's gravity vector next
+to the unmodified result. Run against this rig's actual footage (`04
+Beuningse Boys Berghem Sport 26082026`, left/right first segments):
+correctly reproduced today's exact logged numbers first
+(roll=-128.26, pitch=-140.53, tilt_diff=64.13 - confirms the script
+matches the real code path), then tested all 7 non-identity
+X/Y/Z-negation combinations:
+
+```
+candidate                                      roll      pitch    tilt_diff
+negate X only                                 1.55°    -74.36°       -0.78°
+negate Y only                              -128.26°    105.64°       64.13°
+negate Z only                               181.55°   -140.53°      -90.78°
+negate X & Y (180 deg about Z/lateral)        1.55°     39.47°       -0.78°
+negate X & Z (180 deg about Y/optical)       51.74°    -74.36°      -25.87°
+negate Y & Z (180 deg about X/down)         181.55°    105.64°      -90.78°
+negate X, Y & Z (point inversion)            51.74°     39.47°      -25.87°
+```
+
+**Result: the simple hypothesis is not confirmed.** No candidate lands
+near the known-true ~-8 deg. `tilt_diff`/`roll` only ever depend on
+`lg[0]`/`lg[2]` (both formulas are `atan2(gz, gx)`), so `negate Y only`
+leaves them completely unchanged (still 64.13 deg) - Y-axis negation
+alone cannot be the fix, whatever it turns out to be.
+
+**But not a dead end either.** `negate X only` drops tilt_diff from
+64 deg to -0.78 deg - the right order of magnitude (single-digit
+degrees, same rough sign) as the true -8 deg, even though not an exact
+match. That implicates the X axis (the "down"/gravity axis in this
+convention) specifically, without confirming a plain sign-flip is the
+whole answer. Most likely explanation: telemetry-parser's DJI backend
+already bakes its own "rotate Y 180 deg for horizon lock" step into the
+quaternion (point above) before we ever compute a gravity vector from
+it - post-hoc negating vector *components* doesn't necessarily compose
+correctly with a rotation that already happened upstream, at the
+quaternion stage. A correction applied to the *quaternion itself*
+(before `gravity_vector_from_quaternions`'s world-gravity rotation),
+rather than to its already-derived output vector, is the more promising
+next thing to try with this same script - not yet done.
+
+### Round 2 (2026-08-28, same session): quaternion-level corrections - also inconclusive; guessing exhausted
+
+Extended `check_imu_mount_rotation.rs` to duplicate the quaternion
+*averaging* too (not just the final gravity vector), so corrections can
+be applied to the quaternion itself before the world-gravity rotation.
+Two independent leads went into this round:
+
+1. **A real code/comment mismatch, found by hand-deriving the formula.**
+   `gravity_vector_from_quaternions`'s comment claims
+   `g_cam = q^-1 * v_world * q`, but the coded `gx`/`gy`/`gz` formula,
+   checked component-by-component against the standard quaternion
+   rotation matrix, actually computes `q * v_world * q^-1` - the other
+   sandwich order. Given `TelemetryData`'s own doc ("rotation from
+   camera frame to gravity-aligned world frame" - a camera-to-world
+   quaternion), converting a *world* vector into camera frame needs the
+   order the comment describes, not the one implemented. If real, this
+   would be a global bug affecting both cameras identically, not a
+   per-camera mount gap.
+2. telemetry-parser's DJI backend already composes its own 180-degree
+   rotation into the quaternion (round 1) - a mount correction plausibly
+   belongs composed with the quaternion too, not with its derived output
+   vector.
+
+19 combinations tested (conjugate-sandwich-order on left/right/both;
+180-degree quaternions about X/Y/Z, both multiplication orders, both
+sandwich orders) against the same real footage. Full table and script
+are in `check_imu_mount_rotation.rs` (kept - useful either way).
+
+**Result: still not confirmed, and the sandwich-order lead is now
+essentially ruled out** - applying it made things worse (33 to 150
+degrees off), not better. Two combinations from the 180-degree set land
+closest to the true magnitude without matching: `180 about Z, lq*qc,
+conjugate sandwich` gives tilt_diff=**+4.68 deg** (right order of
+magnitude, wrong sign) and `180 about Z, qc*lq, normal sandwich` gives
+**-0.78 deg** (right sign, too small). Neither is a confident answer.
+
+**Stopping the guessing here, deliberately.** Two rounds, 26 total
+hand-picked candidates (7 vector-level + 19 quaternion-level), no clean
+match. Continuing to enumerate more axis/order/sign combinations without
+a principled way to narrow the search is exactly the kind of guessing
+this investigation started by explicitly rejecting (see
+[[feedback_verify_before_concluding]] in memory) - it would just be
+doing it with more steps in between.
+
+**Real next step, not guessing: measure the error directly instead of
+deriving it.** Record both cameras, mounted on the rig, stationary and
+genuinely level (a spirit level, not "looks about right"), for a few
+seconds. Whatever `gravity_vector`/`rig_tilt` computes for each camera
+under those conditions *is* each camera's raw IMU zero-point error -
+directly measured, no formula-guessing required, and it separates "IMU
+mount/interpretation offset" from "real physical rig tilt" cleanly,
+which no amount of staring at quaternion algebra can substitute for.
+
+### Round 3 (2026-08-28): measured, not derived - real level-test footage
+
+User recorded `D:\VOETBAL_VIDEO\TEST VIDEO\Waterpas Test met raster\`
+(both cameras on the rig, genuinely level via spirit level, stationary).
+New `crates/reco-calibrate/examples/measure_level_imu_baseline.rs` calls
+the real, unmodified `telemetry::rig_tilt` and
+`telemetry::differential_orientation` (not a duplicated/candidate
+formula - this round is about what production code actually outputs)
+against this footage. Checked at `skip_secs` 0, 5, and 15 - **identical
+to two decimal places every time**, confirming the rig was genuinely
+stationary throughout and the measurement is fully reproducible:
+
+```
+rig_tilt(left)  = -129.93 deg
+rig_tilt(right) =  172.21 deg
+differential_orientation: roll=-235.14 deg, pitch=302.14 deg, tilt_diff=117.57 deg
+```
+
+Ground truth: every one of these should read ~0 deg for a level,
+stationary rig. None does.
+
+**This is the most important finding of the whole investigation: both
+cameras are wrong *independently*, each on its own, with no
+differential/comparison between them involved.** `rig_tilt` takes a
+single camera's telemetry and returns one angle - there is no
+"per-camera mount asymmetry" explanation available for a single-camera
+number being this far off. Whatever is wrong is in
+`gravity_vector`/`rig_tilt`/`gravity_vector_from_quaternions` itself,
+for any DJI camera, mounted any way.
+
+**Which camera is physically rotated - confirmed, not assumed.** Cross-
+checked three ways after an initial mix-up mid-session (the user first
+recalled it the other way round, then physically opened the rig to
+check): `ffprobe` shows `rotation=-180` side-data on the LEFT stream
+only, RIGHT has none; the user then opened the rig itself and confirmed
+directly - **left camera is mounted rotated 180 degrees, right is
+normal.** Matches the original assumption this investigation started
+from.
+
+**One concrete, intriguing correlation, not yet explained:** the right
+camera (normally mounted, confirmed above) reads 172.21 deg. `180 -
+172.21 = 7.79 deg` - close
+to the independently-known-real ~8 deg mounting angle from point 23's
+feature-matched calibration data. This hints that a roughly-180-degree
+systematic error may be baked into the base computation for *any* DJI
+camera in this convention, with the right camera's reading showing the
+"pure" residual and the left camera's very different -129.93 deg
+reflecting that *same* base error compounding with the left camera's
+*actual* `rotation=-180` mount difference - not a clean subtraction,
+because (as round 2 already established) composing two rotations isn't
+linear in their angles. Not confirmed, but now backed by a real,
+stable, repeated measurement rather than a single derived number.
+
+**Not yet acted on.** These two concrete target numbers
+(-129.93 deg, 172.21 deg -> both should be ~0) are now a far better-
+constrained problem than round 2's single indirect ~-8 deg estimate -
+enough to actually *solve for* a candidate quaternion correction rather
+than guess-and-check one, if the user wants that pursued next.
+
+### Round 4 (2026-08-28): solved per-camera on the level test, but did not cross-validate
+
+`crates/reco-calibrate/examples/solve_imu_correction.rs` - same
+duplicated formulas as round 2, but searches 14 candidates (identity,
+conjugate, and 180-deg-about-X/Y/Z composed on either side of `q` or
+`conj(q)`) against round 3's *per-camera* level-test target (~0 deg
+each), instead of round 2's indirect differential target.
+
+**Found, on the level-test footage:** `conjugate` (the sandwich-order
+fix) alone brings **left to -3.35 deg** (from -129.93); a 180-deg
+composition (several equivalent forms, e.g. `180Y * q`) brings **right
+to -7.79 deg** (from 172.21). Neither single correction fixes both -
+each camera needs a *different* one.
+
+**A coherent story for why, not just numerology:** telemetry-parser's
+DJI backend applies its own "rotate Y 180 deg for horizon lock" to
+*every* DJI quaternion unconditionally (round 2), independent of which
+physical camera it is. For the camera that's *actually* mounted rotated
+180 deg (left), that real physical rotation and telemetry-parser's own
+built-in 180 largely cancel each other out, leaving just the sandwich-
+order bug to fix (conjugate alone). For the normally-mounted camera
+(right), telemetry-parser's 180 is never cancelled, so an explicit 180
+composition is still needed on top. Residuals (-3.35, -7.79 deg) are
+small enough to plausibly be real leveling/measurement imprecision
+rather than remaining bug.
+
+**Cross-validation against real (non-level) match footage failed to
+confirm this - target was wrong, not necessarily the fix.** Re-ran the
+same 14 candidates against the `04 Beuningse Boys` match footage
+(rig in its normal operating pose, not flat) expecting values near the
+known ~-8 deg. `identity` (no correction at all) already read right ≈
+-17.44 deg there, deceptively close to what turned out to be the wrong
+target - see round 5 below for why 3-axis rig geometry means neither -8
+deg nor -20 deg was ever the right number to check against per camera.
+Round 4's fix was never actually disproven; the check against it was
+invalid.
+
+### Round 5 (2026-08-28): the two cameras are splayed 84 degrees apart - nothing accounts for this anywhere
+
+User supplied the rig's CAD drawing: the two cameras sit **84 degrees
+apart** (42 deg each, yawed outward from the rig's own center) inside
+the housing - a normal wide-stitch panoramic design, but a fact that is
+**not present anywhere** in `telemetry.rs`/`pipeline.rs`'s IMU math (same
+grep as before, nothing).
+
+**Why this invalidates round 4's cross-validation, not round 4's fix
+itself.** `rig_tilt` measures a single camera's own forward pitch
+relative to vertical - fine on its own. But the *expected* per-camera
+value when the whole rig pitches forward by some angle `θ` is **not**
+`θ` for both cameras. Each camera's own body frame is pre-yawed by
++/-42 deg from rig-center, so a pure rig-forward pitch decomposes,
+*in each camera's own frame*, into a mix of that camera's own pitch and
+roll:
+
+```
+camera_pitch ≈ θ * cos(42°) ≈ 0.743 * θ
+camera_roll  ≈ θ * sin(42°) ≈ 0.669 * θ   (opposite sign, left vs. right)
+```
+
+For the match rig's real ~20 deg forward tilt: expected per-camera
+pitch ≈ **14.9 deg**, not 20 - and each camera should also show a real
+~13.4 deg roll, of *opposite sign* between left and right, that is a
+pure artifact of the mounting geometry, not the rig leaning sideways at
+all. `rig_roll` (`(left_roll - right_roll) / 2`, meant to "cancel common
+IMU bias") has no awareness of the 84-degree splay either - a
+systematic geometry effect could easily be getting read as IMU noise/
+bias today.
+
+**Confirmed not to apply to round 3's level test.** The waterpas rig was
+genuinely flat in *every* axis (user confirmed), and yaw around a
+vertical axis contributes nothing to pitch/roll on a level base
+regardless of splay - so round 3's "~0 deg for both cameras" ground
+truth, and therefore round 4's derived per-camera correction, both
+still stand. What breaks is only *checking that correction against
+non-flat (real match) footage* using a naive single expected number -
+the right comparison there needs the cos(42°)/sin(42°) decomposition
+above applied first, not a flat -8 or -20 deg target.
+
+**Not yet done:** redo round 4's cross-validation against the match
+footage using the geometrically-correct expected values (~14.9 deg
+pitch, ~13.4 deg roll of opposite sign) instead of a flat target -
+paused at the user's request before this was attempted.
+
+### Round 6 (2026-08-28): cross-validation done properly - round 4's fix is REFUTED
+
+`crates/reco-calibrate/examples/verify_splay_corrected_imu.rs` applies
+round 4's per-camera fix (`conjugate` on left, `180Y * q` on right) to
+the real `04 Beuningse Boys` match footage and reads off both pitch
+(`atan2(gy,gx)`) and lateral roll (`atan2(gz,gx)`) per camera, against
+round 5's splay-decomposed expectations:
+
+```
+                 measured        expected (|magnitude|)
+left  pitch       61.31 deg        ~14.9
+right pitch     -162.56 deg        ~14.9
+left  roll       -40.48 deg        ~13.4  (opposite sign L vs R)
+right roll      -153.35 deg        ~13.4
+```
+
+**Nowhere close, and not off by any consistent offset.** Round 4's
+correction is refuted: it drove the level test to ~0 but does not
+survive contact with a second, differently-posed dataset.
+
+**Sign convention, user-corrected:** the rig points *downward* in
+match deployment, so its real tilt is **-20 deg, not +20**. Expected
+values above therefore flip sign (pitch ~-14.9, roll ~-13.4/+13.4).
+This does **not** rescue round 4 - the measured magnitudes (61, 163
+deg) are nowhere near 14.9 regardless of sign. Worth recording anyway:
+any eventual real fix has to reproduce the negative sign, and the
+deferred reco-gui "Rig Tilt" default (see below) should be **-20**.
+
+**Why this failed, and why it was worth doing:** round 3's level test
+gives only *two* numbers (left ~0, right ~0). Many different 3D
+rotation corrections satisfy "reads zero on a flat rig" while diverging
+completely once the rig is tilted - round 4 overfitted to a single
+pose. Catching that here, rather than after shipping it into
+`telemetry.rs`, is exactly the value of the cross-check.
+
+**Guess-and-check is now definitively exhausted** - roughly 40
+candidates across 6 rounds. The problem has at least four entangled,
+multiplicative unknowns: the sandwich-order/conjugate question,
+telemetry-parser's own unconditional 180-deg DJI transform, left's
+physical 180-deg mount rotation, and the 42-deg-per-camera splay. One
+pose cannot constrain all of them.
+
+**The actual next step, if this is ever picked up again: a second
+known-pose recording.** Record the rig stationary at its real
+deployment pose (~-20 deg forward, spirit-level-verified, ideally with
+the measured angle noted) as a companion to the existing flat
+`Waterpas Test met raster` footage. Two known, *different* poses give
+enough independent equations to solve the rotation chain outright
+instead of guessing at it, and to verify the solution against both
+poses at once. Until that exists, further candidate-testing is not
+worth the time.
 
