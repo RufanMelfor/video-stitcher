@@ -229,10 +229,16 @@ impl StitchSession {
                         .expect("vram_pool must exist when current_vram_slot is set");
                     let left_bg = pool.left_bind_group(vram_idx);
                     let right_bg = pool.right_bind_group(vram_idx);
-                    let render_buf = self
-                        .core
-                        .pipeline_mut()
-                        .render_with_bind_groups(left_bg, right_bg, pos.yaw, pos.pitch);
+                    // Measure the seam band from the same pool textures
+                    // the bind groups render from - `_measured` rather
+                    // than the plain form, or the automatic color match
+                    // is silently identity on this path (it renders from
+                    // bind groups, so it never reaches
+                    // `render_imported_views`'s own gather call).
+                    let planes = pool.plane_views(vram_idx);
+                    let render_buf = self.core.pipeline_mut().render_with_bind_groups_measured(
+                        left_bg, right_bg, planes, pos.yaw, pos.pitch,
+                    );
                     self.submit_render_output(render_buf)?;
                 } else {
                     // Immediate path: stage and render now.
@@ -473,10 +479,14 @@ impl StitchSession {
                 .expect("vram_pool must exist when current_vram_slot is set");
             let left_bg = pool.left_bind_group(vram_idx);
             let right_bg = pool.right_bind_group(vram_idx);
+            // Same reasoning as the Windows D3d11Resident buffered
+            // branch: measure from the pool's own textures, or the
+            // color match never runs on this path.
+            let planes = pool.plane_views(vram_idx);
             let render_buf = self
                 .core
                 .pipeline_mut()
-                .render_with_bind_groups(left_bg, right_bg, yaw, pitch);
+                .render_with_bind_groups_measured(left_bg, right_bg, planes, yaw, pitch);
             self.submit_render_output(render_buf)?;
             return Ok(());
         }

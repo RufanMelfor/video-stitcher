@@ -800,6 +800,13 @@ impl StitchPipeline {
     }
 
     /// Render from pre-built bind groups (VRAM pool path).
+    ///
+    /// **Does not measure the seam band.** Bind groups alone cannot be
+    /// sampled by the color-match gather, so a caller using only this
+    /// gets whatever the last completed measurement produced - identity
+    /// if none ever ran. Callers that *can* supply plane views should
+    /// prefer [`Self::render_with_bind_groups_measured`]; this plain
+    /// form is for paths that genuinely have no views to offer.
     pub fn render_with_bind_groups(
         &mut self,
         left_bg: &wgpu::BindGroup,
@@ -809,6 +816,42 @@ impl StitchPipeline {
     ) -> wgpu::CommandBuffer {
         self.renderer.set_left_bind_group(left_bg.clone());
         self.renderer.set_right_bind_group(right_bg.clone());
+        self.render_to_target_gpu(yaw, pitch)
+    }
+
+    /// Render from pre-built bind groups, measuring the seam band from
+    /// the matching plane views first.
+    ///
+    /// The buffered/lookahead path (VRAM pool) renders from bind groups
+    /// rather than through [`Self::render_imported_views`], so it never
+    /// reached that function's `gather_band_samples` call and the
+    /// automatic color match stayed silently identity there - the same
+    /// class of bug that made color match inactive under hardware decode
+    /// in the first place, resurfacing on a second render path. The
+    /// views must be over the *same* textures the bind groups were built
+    /// from, or the measurement describes a different frame than the one
+    /// being rendered.
+    /// `planes` is `(left_y, left_uv, right_y, right_uv)` - the shape
+    /// `VramPool::plane_views` already returns, kept as a tuple so the
+    /// four views travel together and cannot be passed in the wrong
+    /// order as separate arguments.
+    pub fn render_with_bind_groups_measured(
+        &mut self,
+        left_bg: &wgpu::BindGroup,
+        right_bg: &wgpu::BindGroup,
+        planes: (
+            &wgpu::TextureView,
+            &wgpu::TextureView,
+            &wgpu::TextureView,
+            &wgpu::TextureView,
+        ),
+        yaw: f32,
+        pitch: f32,
+    ) -> wgpu::CommandBuffer {
+        self.renderer.set_left_bind_group(left_bg.clone());
+        self.renderer.set_right_bind_group(right_bg.clone());
+        let (left_y, left_uv, right_y, right_uv) = planes;
+        self.gather_band_samples(left_y, left_uv, right_y, right_uv);
         self.render_to_target_gpu(yaw, pitch)
     }
 
