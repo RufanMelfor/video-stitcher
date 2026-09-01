@@ -218,6 +218,128 @@ chroma correction. Left as a live user-adjustable slider rather than
 changed as the shipped default, since this is one rig's real-world
 measurement, not proof the chroma correction is harmful in general.
 
+## Color-match band silently averaged in the sky - masked a real, large seam mismatch
+
+**Status: fix implemented and verified 2026-09-01 - real improvement,
+does NOT fully close the gap.** Investigated after a user report of an
+"extreme" visible seam around a specific frame (raw-file frame 31850,
+t=17:42.7) in a real match export (`07 XFT - MSD_Duisburg`, 26.5deg-tilt
+rig, a passing storm cloud giving the two cameras very different sky
+content in the same moment).
+
+**Symptom:** the rendered seam showed a hard, ~18% grass-luma step (measured
+in fixed, player-free grass bands well clear of the blend zone: left 122,
+right 76, out of 255) that Auto Color Match, even fully EMA-converged
+(25s runway), only closed to ~14-15% - visibly still broken. The debug log's
+own `left_mean`/`right_mean` for the seam band showed the two cameras as
+*near-identical* (0.390 vs 0.392) at the exact same moment - the measurement
+itself reported almost no mismatch to correct, while the rendered pixels
+disagreed by ~40 gray levels.
+
+**First (wrong) hypothesis, tested and disproven before being proposed:**
+raising `color_match_max_y_offset`/`max_chroma_offset` (the correction's
+safety clamp) threefold produced a byte-for-byte identical render. The
+clamp was never close to being hit - not the bottleneck.
+
+**Second finding, real but incomplete:** this calibration's
+`color_match_band_width` was `0.874` (default `0.15`) - a data problem in
+this specific calibration, not a code bug. Resetting it to `0.15` did
+measurably help (far-field grass gap 18.1% -> 14.0%), confirming the band
+geometry mattered, but far from closed the gap.
+
+**Root cause, found by overlaying the actual computed sample positions
+(`band_sample_positions`) on the raw source frames:** regardless of
+`band_width`, the sample grid's `v_frac` always spans the *entire* plane
+height (`0..1`, i.e. sky to near-camera ground). Near the seam-adjacent
+edge specifically (`u_frac` close to 0 or 1 - which is where the band, by
+definition, has to sit), the KB4 corner-FOV-coverage gap becomes severe:
+swept at fine resolution for this rig's real lens, `u_frac=0.85` still maps
+a broad, contiguous `v_frac` range to valid in-bounds raw pixels
+(`[0.09, 0.92]`), but `u_frac=0.95` collapses to two *disconnected* slivers
+(`[0.01, 0.15]` and `[0.85, 0.99]`) with the entire middle - where the
+seam-relevant, moderate-distance grass actually lives - mapping outside the
+raw frame and getting silently dropped. So the band's valid samples are, by
+geometry, mostly sky plus a sliver of extreme near-field, for *any*
+band_width tight enough to still mean "seam-adjacent." On this footage the
+two cameras' skies differed in the *opposite* direction from their grass
+(left: darker sky, brighter grass; right: brighter sky, darker grass - a
+side-effect of each camera's single-gain auto-exposure reacting to its own,
+very different, sky-dominated frame content), so averaging sky and ground
+into one mean let the two effects cancel toward "the cameras look about the
+same," which is exactly the false-near-zero measurement observed.
+
+**Fix (`render/color_match.rs`, `band_sample_positions`):** restrict
+`v_frac` to the ground half only, `(0.5, 1.0]` - never `[0.0, 0.5]`. This
+reuses the sky/ground split `ground_tilt` already defines (`plane_y > 0` in
+`fisheye.wgsl`'s `fs_main`; `v_frac` here is that same plane-local `uv.y`),
+so it's consistent with an existing convention rather than a new one, and
+it's a single-source-of-truth fix (the GPU gather consumes the exact same
+`band_sample_positions` output, no shader change needed). New test
+`band_sample_positions_ignores_the_sky_half` proves a solid-black synthetic
+sky half no longer moves the measured mean at all.
+
+**Not fixed by this change, left as-is deliberately:** restricting to the
+ground half does not by itself guarantee a *wide, contiguous* set of ground
+samples - at extreme `band_width` values very close to 0 the corner-gap
+problem can still fragment even the ground half. `band_width` still needs a
+sane value (this calibration's own `0.874` should be reset to something
+near the `0.15` default, or a touch wider like `0.2` per the validity sweep
+above; that's a calibration-data fix, not something this change makes for
+you). Not attempted: a robust statistic (median/trimmed mean) in place of
+the plain mean - individual narrow `v_frac` sub-bands showed high sample
+variance from real scene content (players, lines) in a quick diagnostic
+sweep, which a trimmed mean would likely help with but wasn't built this
+session.
+
+**Verified:** `cargo test -p reco-core --lib` - 241/243 pass (the usual 2
+CUDA failures, no CUDA runtime on this box), including the new test and
+the full existing `measure_band_mean_*`/`seam_band_bounds_*`/
+`a_rotated_camera_is_measured_where_it_is_drawn` /
+`the_buffered_bind_group_path_measures_the_seam_band` suite
+(`--features gpu`). `cargo fmt --check` and `cargo clippy --lib
+--all-targets -- -D warnings` both clean. Release `reco-cli` rebuilt with
+`--features tensorrt`.
+
+Real-footage A/B on the diagnosed clip/frame (fixed, player-free grass
+bands, both near the seam and further out - see this entry's earlier
+numbers for how these were chosen), 25s EMA-converged runway, everything
+else unchanged:
+
+| band_width (ground-half fix applied) | near-seam gap | far-field gap |
+|---|---|---|
+| off (no correction) | 17.1% | 18.1% |
+| 0.874 (this calibration's stale value, pre-fix code) | 14.3% | 15.3% |
+| 0.15 (code default) | 13.0% | 14.0% |
+| 0.25 | 11.3% | 12.3% |
+| 0.35 | 9.7% | - |
+
+Monotonically improving with `band_width` in this range (not yet
+plateaued at 0.35) - each step trades "closer to the literal seam" for
+"a bigger, more robust average less dominated by one unlucky local patch
+(a discarded kit pile sat almost exactly on the ground-half band at the
+narrowest widths)". Settled on **0.2** for this calibration (this
+crate's own default stays at the conservative `0.15` - one rig's
+real-world measurement isn't evidence for a new shipped default, same
+reasoning as the chroma-clamp workaround above) plus resetting
+`color_match_max_chroma_offset` back from this calibration's stale
+`0.0104` to the `0.04` default. Debug-log measurement at the settled
+value: `left_mean`/`right_mean` now show a real, correctly-signed
+~0.03-0.04 gap (vs. the pre-fix ~0.002 false-near-zero), well under the
+`0.06` luma clamp - so the clamp still isn't the limit, the measured
+band's own content is.
+
+**Honest bottom line:** real, verified, non-trivial improvement (roughly
+17-18% down to 10-12%), not a full fix - about 10-12 points of the
+original ~18% gap remain. The measurement is no longer *wrong*
+(cancelling sky against ground into a false near-zero), but the ground-half
+band still isn't sampling enough of the true near-seam grass to match
+what a human eye judges from the whole visible half of the frame. Next
+candidate lever, not attempted: a robust statistic (median/trimmed mean)
+over more grid rows/cols in the ground half, so one unlucky patch (kit
+pile, shadow, a player) matters less without needing to keep widening
+`band_width` toward the same "too much of the frame" territory the
+original `0.874` value fell into.
+
 ## Auto color match was silently inactive in the default Windows export path
 
 **Status: fixed 2026-08-27 (see `render/band_gather.rs`).** Established

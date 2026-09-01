@@ -413,6 +413,27 @@ fn nv12_sampler<'a>(
 /// that uploads them to the GPU can cache them until the calibration
 /// changes.
 ///
+/// **Ground half only** (`v_frac` in `(0.5, 1.0]`, never `[0.0, 0.5]`) -
+/// matches the sky/ground split `ground_tilt` already uses (`plane_y > 0`
+/// in `fisheye.wgsl`'s `fs_main`; `v_frac` here is that same plane-local
+/// `uv.y`). A seam-adjacent band that also samples the sky half measures
+/// the wrong thing for two compounding reasons: sky content is optically
+/// irrelevant to pitch/seam continuity, and on a tilted rig the two
+/// cameras' skies can differ in brightness in the *opposite* direction
+/// from their ground - averaging both into one mean lets a real,
+/// visible ground-level exposure mismatch cancel against an unrelated
+/// sky difference instead of being measured. Confirmed on a real 26.5deg
+/// rig, real footage: the full-height band measured left/right as
+/// near-identical (a visible seam went uncorrected) while the same band
+/// restricted to `v_frac > 0.5` recovered most of the real, visually
+/// obvious gap. See FRICTION.md's color-match band-geometry entry for
+/// the full investigation (including why this - not a narrower
+/// `band_width` - is the fix: near the seam-adjacent edge the KB4
+/// corner-FOV coverage gap makes most of the *middle* of `v_frac` map
+/// outside the raw frame regardless of `band_width`, splitting the
+/// in-bounds points into a sky cluster and a ground cluster no matter
+/// how the horizontal band is sized).
+///
 /// Points that map outside the raw frame are dropped rather than clamped:
 /// a clamped point would silently feed the frame's edge pixel into the
 /// mean as though it were band content.
@@ -435,7 +456,8 @@ pub(crate) fn band_sample_positions(
 
     let mut out = Vec::with_capacity((grid_cols * grid_rows) as usize);
     for row in 0..grid_rows {
-        let v_frac = (row as f64 + 0.5) / grid_rows as f64;
+        // Ground half only - see this function's doc comment.
+        let v_frac = 0.5 + (row as f64 + 0.5) / grid_rows as f64 * 0.5;
         for col in 0..grid_cols {
             let t = (col as f64 + 0.5) / grid_cols as f64;
             let u_frac = u0 + t * (u1 - u0);
@@ -659,6 +681,48 @@ mod tests {
                 "channel {i}: {mean:?} vs {expected:?}"
             );
         }
+    }
+
+    /// Y plane split top/bottom at `height / 2` (chroma flat, uninteresting
+    /// for this test) - top half `sky_y`, bottom half `ground_y`.
+    fn sky_ground_split_yuv420p(
+        width: u32,
+        height: u32,
+        sky_y: u8,
+        ground_y: u8,
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let mut y_plane = vec![0u8; (width * height) as usize];
+        for row in 0..height {
+            let v = if row < height / 2 { sky_y } else { ground_y };
+            let start = (row * width) as usize;
+            y_plane[start..start + width as usize].fill(v);
+        }
+        let c_plane = vec![128u8; ((width / 2) * (height / 2)) as usize];
+        let v_plane = vec![128u8; ((width / 2) * (height / 2)) as usize];
+        (y_plane, c_plane, v_plane)
+    }
+
+    #[test]
+    fn band_sample_positions_ignores_the_sky_half() {
+        // A wildly different sky half (Y=0, black) must not move the
+        // measured mean at all - the band is ground-half only. If the
+        // v-range restriction regressed back to spanning the whole plane
+        // (v_frac 0..1), this solid-black sky would visibly darken the
+        // result below `ground_y`'s own decoded value.
+        let params = test_params();
+        let (y, u, v) = sky_ground_split_yuv420p(640, 480, 0, 200);
+        let sampler = yuv420p_sampler(&y, &u, &v, 640);
+
+        let match_params = ColorMatchParams::default();
+        let mean = measure_band_mean(640, 480, &params, true, false, &match_params, sampler)
+            .expect("ground half should yield samples");
+
+        let expected_ground = decode_transfer_yuv(200, 128, 128, false, 1.0);
+        assert!(
+            (mean[0] - expected_ground[0]).abs() < 1e-3,
+            "measured {mean:?} should match the ground half {expected_ground:?} alone, \
+             not be pulled toward the black sky half"
+        );
     }
 
     #[test]
