@@ -58,6 +58,19 @@ struct VramSlot {
     right_uv: wgpu::Texture,
     left_bind_group: wgpu::BindGroup,
     right_bind_group: wgpu::BindGroup,
+    /// Plane views over the four textures above, for consumers that need
+    /// to *sample* the slot rather than just render it - specifically the
+    /// automatic color match's seam-band gather (see
+    /// `render::band_gather`), which the buffered/lookahead render path
+    /// has to drive itself because it renders from bind groups rather
+    /// than through `StitchPipeline::render_imported_views`.
+    ///
+    /// Built once here rather than per frame: a view is cheap but not
+    /// free, and the buffered path renders every frame of an export.
+    left_y_view: wgpu::TextureView,
+    left_uv_view: wgpu::TextureView,
+    right_y_view: wgpu::TextureView,
+    right_uv_view: wgpu::TextureView,
 }
 
 /// Pool of VRAM-resident stereo NV12/P010 textures for frame buffering.
@@ -172,6 +185,12 @@ impl VramPool {
                     pipeline.create_texture_bind_group(&left_y, &left_uv, &format!("vram_L_{i}"));
                 let right_bind_group =
                     pipeline.create_texture_bind_group(&right_y, &right_uv, &format!("vram_R_{i}"));
+                let view =
+                    |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
+                let left_y_view = view(&left_y);
+                let left_uv_view = view(&left_uv);
+                let right_y_view = view(&right_y);
+                let right_uv_view = view(&right_uv);
                 VramSlot {
                     left_y,
                     left_uv,
@@ -179,6 +198,10 @@ impl VramPool {
                     right_uv,
                     left_bind_group,
                     right_bind_group,
+                    left_y_view,
+                    left_uv_view,
+                    right_y_view,
+                    right_uv_view,
                 }
             }));
 
@@ -498,6 +521,33 @@ impl VramPool {
     /// Right bind group for rendering a pool slot.
     pub fn right_bind_group(&self, slot: usize) -> &wgpu::BindGroup {
         &self.slots[slot].right_bind_group
+    }
+
+    /// Plane views for a pool slot, as
+    /// `(left_y, left_uv, right_y, right_uv)`.
+    ///
+    /// Exists so the buffered/lookahead render path can run the color
+    /// match's seam-band gather over the very textures it is about to
+    /// render from. Rendering alone only needs the bind groups above;
+    /// *measuring* needs sampleable views, and without them the
+    /// automatic color match is silently identity on that path - the
+    /// exact bug this accessor was added to fix.
+    pub fn plane_views(
+        &self,
+        slot: usize,
+    ) -> (
+        &wgpu::TextureView,
+        &wgpu::TextureView,
+        &wgpu::TextureView,
+        &wgpu::TextureView,
+    ) {
+        let s = &self.slots[slot];
+        (
+            &s.left_y_view,
+            &s.left_uv_view,
+            &s.right_y_view,
+            &s.right_uv_view,
+        )
     }
 
     /// Number of free slots available.

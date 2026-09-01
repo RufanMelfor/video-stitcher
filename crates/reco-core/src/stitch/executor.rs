@@ -1115,6 +1115,181 @@ mod tests {
         );
     }
 
+    /// The buffered/lookahead render path measures the seam band too.
+    ///
+    /// `render_with_bind_groups` renders from pre-built bind groups,
+    /// which cannot be sampled, so it never reaches
+    /// `render_imported_views`'s gather call. Every export with
+    /// lookahead / AI tracking enabled takes that path (the VRAM pool
+    /// branch of `frame_processing`), so the automatic color match was
+    /// silently identity there - the same bug hardware decode already
+    /// had, resurfacing on a second render path after the first was
+    /// fixed. Found from a real user export where the preview (immediate
+    /// path) matched correctly and the exported file did not.
+    ///
+    /// Asserts both halves of the contract in one test: the `_measured`
+    /// form produces a real correction, and the plain form still does
+    /// not - so this fails if the gather is ever dropped from the
+    /// buffered path again, *and* documents why the plain form exists.
+    #[test]
+    #[cfg(feature = "gpu")]
+    fn the_buffered_bind_group_path_measures_the_seam_band() {
+        let Some(gpu) = gpu_or_skip() else {
+            panic!("GPU required for this test - RECO_REQUIRE_GPU or run manually");
+        };
+        let (cam_w, cam_h) = (192u32, 108u32);
+        let (out_w, out_h) = (160u32, 90u32);
+
+        let mut cal = calib(cam_w, cam_h);
+        cal.topology.color_match_enabled = true;
+        cal.topology.color_match_interval_frames = 1;
+        cal.topology.color_match_ema_alpha = 1.0;
+        cal.topology.color_match_max_y_offset = 0.5;
+        cal.topology.color_match_max_chroma_offset = 0.5;
+
+        let mut exec = GpuExecutor::new(
+            gpu,
+            GpuExecutorConfig {
+                viewport: ViewportConfig {
+                    width: out_w,
+                    height: out_h,
+                    ..Default::default()
+                },
+                ..GpuExecutorConfig::new(cal, cam_w, cam_h, InputFormat::Nv12)
+            },
+        )
+        .expect("gpu backend");
+
+        let gpu_ref = exec.pipeline.gpu();
+        let upload = |w: u32, h: u32, format, bpt: u32, data: Vec<u8>, label: &str| {
+            let texture = gpu_ref.device().create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            gpu_ref.queue().write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bpt * w),
+                    rows_per_image: Some(h),
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+            texture
+        };
+
+        // A large, unambiguous brightness split between the cameras, so
+        // any real measurement produces a correction far above noise.
+        let left_y = upload(
+            cam_w,
+            cam_h,
+            wgpu::TextureFormat::R8Unorm,
+            1,
+            vec![200u8; (cam_w * cam_h) as usize],
+            "buf_left_y",
+        );
+        let right_y = upload(
+            cam_w,
+            cam_h,
+            wgpu::TextureFormat::R8Unorm,
+            1,
+            vec![60u8; (cam_w * cam_h) as usize],
+            "buf_right_y",
+        );
+        let neutral_uv = vec![128u8; (cam_w * cam_h / 2) as usize];
+        let left_uv = upload(
+            cam_w / 2,
+            cam_h / 2,
+            wgpu::TextureFormat::Rg8Unorm,
+            2,
+            neutral_uv.clone(),
+            "buf_left_uv",
+        );
+        let right_uv = upload(
+            cam_w / 2,
+            cam_h / 2,
+            wgpu::TextureFormat::Rg8Unorm,
+            2,
+            neutral_uv,
+            "buf_right_uv",
+        );
+
+        // Exactly what the VRAM pool holds per slot: bind groups to
+        // render from, plus views over those same textures to measure.
+        let left_bg = exec
+            .pipeline
+            .create_texture_bind_group(&left_y, &left_uv, "buf_left");
+        let right_bg = exec
+            .pipeline
+            .create_texture_bind_group(&right_y, &right_uv, "buf_right");
+        let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
+        let (ly, luv, ry, ruv) = (
+            view(&left_y),
+            view(&left_uv),
+            view(&right_y),
+            view(&right_uv),
+        );
+
+        // The plain form first: renders fine, must leave the correction
+        // at identity because nothing ever sampled the frame.
+        for _ in 0..8 {
+            let cmd = exec
+                .pipeline
+                .render_with_bind_groups(&left_bg, &right_bg, 0.0, 0.0);
+            let g = exec.pipeline.gpu();
+            g.queue().submit(std::iter::once(cmd));
+            let _ = g.device().poll(wgpu::PollType::wait_indefinitely());
+        }
+        let unmeasured = exec.pipeline.color_match_correction().left_offset;
+        assert!(
+            unmeasured[0].abs() < 1e-6,
+            "render_with_bind_groups cannot sample anything, so the correction must stay \
+             identity; got {unmeasured:?}"
+        );
+
+        // The measured form on the identical frame must now converge on
+        // a real, non-trivial correction.
+        for _ in 0..8 {
+            let cmd = exec.pipeline.render_with_bind_groups_measured(
+                &left_bg,
+                &right_bg,
+                (&ly, &luv, &ry, &ruv),
+                0.0,
+                0.0,
+            );
+            let g = exec.pipeline.gpu();
+            g.queue().submit(std::iter::once(cmd));
+            let _ = g.device().poll(wgpu::PollType::wait_indefinitely());
+        }
+        let measured = exec.pipeline.color_match_correction().left_offset;
+        assert!(
+            measured[0] < -0.02,
+            "left camera is the bright one and must be pulled down by the buffered path's \
+             own measurement; got {measured:?} (identity here means the lookahead/VRAM-pool \
+             export path stopped measuring again)"
+        );
+    }
+
     /// The manual per-camera gamma actually reaches rendered pixels, and
     /// reaches only the camera it was set on.
     ///
