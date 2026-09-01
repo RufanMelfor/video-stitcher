@@ -1,5 +1,17 @@
 # Session handoff - 2026-09-01 (TGR_PC): color-match band sky-exclusion fix + dynamic auto-gamma; big backlog of prior-session work finally committed
 
+## Status update (later same day, from the 2026-08-29 OPEN list)
+
+Four of the 2026-08-29 entry's "OPEN / WAITING ON THE USER" items,
+confirmed by the user - **no longer open, don't re-list these**:
+- Forum post about the YOLO26s model - posted.
+- Label Studio API token (pasted in chat 2026-08-29) - rotated.
+- Lookahead 0.8s / wider FOV / export quality settings - user says
+  resolved for now (self-service GUI tuning, not a code task).
+- Label Studio project 24 review (60 tasks, 28 blind-spot frames) -
+  **still in progress**, user is actively working through it - keep
+  this one on the list, just not blocked/stalled.
+
 ## FIRST THING NEXT SESSION - user explicitly asked to be reminded
 
 **Do a proper wide-shot on/off A/B of the new "Auto gamma (dynamic)"
