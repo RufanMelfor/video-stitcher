@@ -766,6 +766,52 @@
     return e ? e.ts : null;
   }
 
+  // Cumulative playing-time clock, frozen during an open pause and
+  // excluding time already spent in earlier pauses this period - the
+  // header used to just show `Date.now() - kickoff`, which kept
+  // ticking straight through a pause instead of freezing, and stayed
+  // permanently ahead by the pause's length afterward. Mirrors
+  // reco-gui's `scoreboard_import::state_at` (same event log, same
+  // pause bookkeeping) so the phone-app display and the burned-in
+  // video scoreboard agree. `btnPeriodAction` already auto-emits a
+  // `pause_end` before `period_start` when starting the next period
+  // out of a pause, so that case falls out of this walk with no extra
+  // handling needed.
+  function liveElapsedMs() {
+    var elapsedBeforeCurrentPeriod = 0;
+    var periodStartMs = null;
+    var accumulatedPauseMs = 0;
+    var pauseStartMs = null;
+
+    state.events.forEach(function (e) {
+      var ts = new Date(e.ts).getTime();
+      if (e.type === 'period_start') {
+        if (periodStartMs !== null) {
+          elapsedBeforeCurrentPeriod += Math.max(0, ts - periodStartMs - accumulatedPauseMs);
+        }
+        periodStartMs = ts;
+        accumulatedPauseMs = 0;
+        pauseStartMs = null;
+      } else if (e.type === 'pause_start') {
+        if (pauseStartMs === null) pauseStartMs = ts;
+      } else if (e.type === 'pause_end') {
+        if (pauseStartMs !== null) {
+          accumulatedPauseMs += ts - pauseStartMs;
+          pauseStartMs = null;
+        }
+      } else if (e.type === 'match_end') {
+        if (periodStartMs !== null) {
+          elapsedBeforeCurrentPeriod += Math.max(0, ts - periodStartMs - accumulatedPauseMs);
+        }
+        periodStartMs = null;
+      }
+    });
+
+    if (periodStartMs === null) return elapsedBeforeCurrentPeriod;
+    var effectiveNow = pauseStartMs !== null ? pauseStartMs : Date.now();
+    return elapsedBeforeCurrentPeriod + Math.max(0, effectiveNow - periodStartMs - accumulatedPauseMs);
+  }
+
   function periodLabel() {
     if (state.matchEnded) return L.matchEnded;
     if (state.currentPeriod === 0) return L.notStarted;
@@ -892,11 +938,12 @@
       if (savedEl.textContent === L.savedNothing) savedEl.textContent = restoredNote;
     }
 
-    // Live cumulative clock since period 1 start.
+    // Live cumulative clock since period 1 start - paused/pre-match/
+    // ended handling stays here, the pause-aware elapsed math itself
+    // lives in liveElapsedMs().
     var startTs = firstPeriodStartTs();
     if (startTs && !state.matchEnded) {
-      document.getElementById('dispClock').textContent =
-        fmtClock(Date.now() - new Date(startTs).getTime());
+      document.getElementById('dispClock').textContent = fmtClock(liveElapsedMs());
     } else if (state.matchEnded) {
       document.getElementById('dispClock').textContent = L.ended;
     } else {
