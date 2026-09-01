@@ -150,6 +150,7 @@ pub(crate) mod test_support {
                 color_match_max_chroma_offset: 0.04,
                 color_gamma_left: 1.0,
                 color_gamma_right: 1.0,
+                color_match_auto_gamma: false,
                 ground_tilt_x: 0.0,
                 ground_tilt_z: 0.0,
                 top_tilt_x: 0.0,

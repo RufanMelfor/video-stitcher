@@ -348,6 +348,26 @@ pub struct Topology {
     #[serde(default = "default_color_gamma")]
     pub color_gamma_right: f32,
 
+    /// When `true`, `color_gamma_left`/`_right` above are continuously
+    /// re-fitted from the same seam-band measurement the additive offset
+    /// already uses, on the same `color_match_interval_frames` schedule,
+    /// instead of being read verbatim. Off by default: this overrides
+    /// what's rendered without changing the stored `color_gamma_left`/
+    /// `_right` values, so turning it back off resumes exactly the manual
+    /// value that was there before.
+    ///
+    /// Motivation, from real footage: a fixed manual gamma tuned to fix a
+    /// large mismatch at one moment (a passing storm cloud giving the two
+    /// cameras very different sky content, and via each camera's own
+    /// single-gain auto-exposure, very different ground exposure too)
+    /// measurably *overshot* - visibly reversed the mismatch - at a calmer
+    /// point later in the same match, because the underlying gap had
+    /// shrunk but the static correction had not. See
+    /// `render::color_match::ColorMatchState::apply_measurement`'s
+    /// auto-gamma fit for the actual algorithm.
+    #[serde(default)]
+    pub color_match_auto_gamma: bool,
+
     /// Ground-plane tilt correction for the x-plane (`lenses[1]`'s content -
     /// see `reco_calibrate::geometry`'s module doc for the x-plane/z-plane
     /// left/right swap convention). `tan(theta)` of an additional tilt
@@ -438,6 +458,8 @@ pub const DEFAULT_COLOR_MATCH_MAX_Y_OFFSET: f32 = 0.06;
 pub const DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET: f32 = 0.04;
 /// Identity gamma - see [`Topology::color_gamma_left`].
 pub const DEFAULT_COLOR_GAMMA: f32 = 1.0;
+/// Off - see [`Topology::color_match_auto_gamma`].
+pub const DEFAULT_COLOR_MATCH_AUTO_GAMMA: bool = false;
 
 fn default_color_match_enabled() -> bool {
     DEFAULT_COLOR_MATCH_ENABLED
@@ -1594,6 +1616,7 @@ mod tests {
                 color_match_max_chroma_offset: 0.04,
                 color_gamma_left: 1.0,
                 color_gamma_right: 1.0,
+                color_match_auto_gamma: false,
                 ground_tilt_x: 0.0,
                 ground_tilt_z: 0.0,
                 top_tilt_x: 0.0,

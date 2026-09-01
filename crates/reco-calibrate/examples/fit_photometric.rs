@@ -670,6 +670,7 @@ fn vec5_to_layout(p: &[f64], x_rx: f64, z_rz: f64) -> (Topology, Framing) {
         color_match_max_chroma_offset: DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET,
         color_gamma_left: 1.0,
         color_gamma_right: 1.0,
+        color_match_auto_gamma: false,
         ground_tilt_x: 0.0,
         ground_tilt_z: 0.0,
         top_tilt_x: 0.0,

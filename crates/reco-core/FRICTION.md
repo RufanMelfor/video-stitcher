@@ -1,5 +1,102 @@
 # reco-core friction log
 
+## "Remeasure now" only nudged the color-match correction, never actually refreshed it
+
+**Symptom (found 2026-09-01, same session as the band-geometry fix above):**
+after tuning Auto Color Match on one extreme moment (a real storm cloud
+giving the two cameras very different sky, and hence exposure), seeking to
+a calmer moment and clicking "Remeasure now" produced a visibly *worse*,
+reversed-looking mismatch, not a fresh, accurate one.
+
+**Root cause:** `ColorMatchState::force_remeasure` only reset
+`frames_since_measure` so the *next* tick would be due - the correction
+itself still went through the ordinary `ema_alpha`-weighted blend
+(`ema_toward`), so one click only moved the correction ~15% of the way
+from wherever it last converged toward the fresh reading. After
+converging on a large, storm-driven correction, a single click at a
+calm scene left the stale, oversized correction still dominant - stacked
+on top of a static manual gamma pointed the same way, this overshot
+visibly. The button's own tooltip already promised "a fresh measurement
+... right after seeking to a frame with different lighting" - the
+implementation just didn't deliver that.
+
+**Fix:** `ColorMatchState` gained a `snap_next` flag, set by
+`force_remeasure` (called by both the explicit button and every
+`color_match_*` slider change) and consumed by the next
+`apply_measurement`, which uses `alpha = 1.0` for that one call instead of
+`params.ema_alpha` - a true snap, not a step. Also snaps the very first
+measurement ever (state fresh, nothing to blend with anyway).
+`force_remeasure_snaps_instead_of_taking_one_ema_step` reproduces the real
+bug: converge fully on a wide left/right gap, "seek" to a scene where the
+cameras already agree, force a remeasure, and assert the single resulting
+tick lands within `1e-4` of zero - not 15% of the way there.
+
+## Manual gamma can now auto-fit itself instead of staying static
+
+**Motivated directly by the bug above**, and by the deeper question it
+raised: a *static* manual gamma (`color_gamma_left`/`_right`) is the right
+tool for a real sensor-gain (ISO) mismatch between the two cameras - see
+the band-geometry entry above for why a flat additive offset alone can't
+fix that - but tuning it by eye for one moment and leaving it fixed is
+fragile the instant lighting changes through a match (clouds, sun angle,
+each camera's own auto-exposure reacting independently). New
+`Topology::color_match_auto_gamma` (off by default, GUI checkbox in the
+MANUAL GAMMA card) makes `ColorMatchState` re-fit both gamma values from
+the same seam-band measurement the additive offset already uses, on the
+same interval, instead of holding them at a fixed value.
+
+**Algorithm** (`ColorMatchState::apply_measurement`): per camera, undo
+whichever gamma was actually in force when this measurement was taken
+(`raw = measured^gamma`, inverting `apply_gamma`'s own `pow(x, 1/gamma)`)
+to recover an estimate of the *raw* luma, then re-solve the exponent that
+would carry that raw value to the shared raw target
+(`gamma = ln(raw) / ln(target)`), clamped to `[0.5, 2.0]` (the sliders'
+own range). Reruns every measurement interval rather than needing a
+separate gamma-neutral sampling pass, so it self-corrects the same
+iterative way the additive offset already does. Luma is a stand-in for
+the full per-RGB-channel curve `apply_gamma` actually applies - an
+approximation, acceptable because grass's fairly narrow, consistent
+chroma keeps it close, and because the fit re-converges continuously
+rather than needing to be exact in one shot.
+
+**Real bug found and fixed before shipping this** (caught on the exact
+real footage this was diagnosed on, not by the unit tests - see below for
+why): the first working version pinned both cameras' gamma at the
+`[0.5, 2.0]` clamp and stayed there, even though the true underlying
+mismatch didn't need anywhere near the full range. Cause:
+`StitchPipeline::color_match_params` was still reading `gamma_left`/
+`_right` from the *static* `Topology` fields (left untouched by design,
+so `set_color_gamma`/turning auto off again resume from them) even when
+auto-fitting was on - so `measure_band_mean` always decoded the band as
+if gamma were still whatever the static value was (1.0 in the test),
+while the *render* path correctly used the live fitted value. Each tick's
+`undo_gamma` therefore inverted a gamma that was never actually applied
+to the pixels it measured, and the resulting "raw" estimate drifted
+further from reality every iteration - a real divergent feedback loop,
+not just slow convergence. Fix: `color_match_params` now reads the *live*
+fitted value from `ColorMatchState` itself when `auto_gamma` is on, so
+what gets measured and what gets rendered always agree.
+
+**The unit test for the fit (`auto_gamma_fits_toward_the_camera_that_needs_it`)
+initially had the identical bug baked into its own test loop** (a fixed
+`ColorMatchParams` reused across iterations, never refreshed from the
+state) and still passed, because it only asserted *direction*, which
+happens to survive the runaway. Fixed to rebuild `gamma_left`/`_right`
+from the previous tick's result every iteration (mirroring what the real
+pipeline now does) and tightened to assert convergence to a stable,
+non-clamped value - this version would have caught the bug the direction-
+only assertion missed.
+
+**Verified on the real diagnosed footage** (`07 XFT - MSD_Duisburg`,
+`--start-time`/`--end-time` windows around both the storm-cloud moment and
+a calm one later in the clip, `RUST_LOG=reco_core::render::color_match=debug`
+to confirm the fitted values stabilize rather than pin at the clamp):
+storm-cloud near-seam gap 17.1% (off) -> 5.0% (auto-gamma), matching or
+beating the best hand-tuned static value found earlier (5.8%); the calm
+moment - where the earlier static gamma measurably *overshot* and visibly
+reversed the mismatch - now lands at 2.3%, same direction as reality, no
+reversal.
+
 ## wgpu `gles` feature disabled by default
 
 **Symptom:** Build fails on Windows with `khronos_api` build-script error

@@ -1092,6 +1092,11 @@ export component RecoApp inherits Window {
     // reco-core's Topology::color_gamma_left). 1.0 = identity.
     in-out property <float> color-gamma-left: 1.0;
     in-out property <float> color-gamma-right: 1.0;
+    // When on, the two gamma sliders above are continuously re-fitted from
+    // the auto color-match measurement instead of read verbatim - see
+    // reco-core's Topology::color_match_auto_gamma. Off = the sliders keep
+    // their static, manually-tuned meaning exactly as before.
+    in-out property <bool> color-match-auto-gamma: false;
     in-out property <bool> color-match-enabled: true;
     in-out property <float> color-match-band-width: 0.15;
     in-out property <float> color-match-grid-cols: 8;
@@ -1514,6 +1519,7 @@ export component RecoApp inherits Window {
     // output aspect ratio.
     callback seam-hit-test(float, float, float, float) -> bool;
     callback changed-color-gamma(float, float); // left, right
+    callback changed-color-match-auto-gamma(bool);
     callback changed-color-match-enabled(bool);
     callback changed-color-match-band-width(float);
     callback changed-color-match-grid-cols(float);
@@ -3780,6 +3786,15 @@ export component RecoApp inherits Window {
 
                         CalGroupBox {
                             title: "MANUAL GAMMA (BEFORE AUTO MATCH)";
+
+                            Tip {
+                                tip: "Continuously re-fits the two gamma values below from the same seam-band measurement the automatic match already uses, on the same interval, instead of holding them at a fixed manual value. A flat additive correction alone can't fix a real sensor-gain (ISO) mismatch between the cameras - that's what manual gamma is for - but a value tuned to fix a large mismatch at one moment can overshoot (visibly reverse the mismatch) once lighting changes later in the same match. This tracks it automatically instead. The sliders below still work while this is on, but any value you set gets overwritten at the next remeasure - turn this off first to set a fixed value that sticks.";
+                                CheckBox {
+                                    text: "Auto gamma (dynamic)";
+                                    checked <=> root.color-match-auto-gamma;
+                                    toggled => { root.changed-color-match-auto-gamma(self.checked); }
+                                }
+                            }
 
                             LabeledSlider {
                                 tip: "Left camera's gamma, applied before the automatic match measures anything. Above 1.0 lifts the mid-tones, below 1.0 lowers them. Use this when the two cameras differ in contrast rather than in overall brightness - the automatic match can only shift the average, not reshape the curve. Unlike the automatic match, this also applies on hardware-decode exports. Updates live.";
