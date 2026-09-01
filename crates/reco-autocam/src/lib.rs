@@ -207,6 +207,13 @@ impl AutocamConfig {
         self.ball_coast_secs = Some(secs);
         self
     }
+
+    /// Override the detector's confidence threshold. See
+    /// [`AutocamConfig::confidence_threshold`] for what this controls.
+    pub fn with_confidence_threshold(mut self, threshold: f32) -> Self {
+        self.confidence_threshold = Some(threshold);
+        self
+    }
 }
 
 /// Set up the autocam pipeline from a config struct.

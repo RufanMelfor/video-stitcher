@@ -181,6 +181,30 @@ page, but a real result rather than a guess. Start at `2.5s`; confirm
 via `--events` that the ball's `state` stays `Coasting` rather than
 flipping to `Lost` during the crossing if you need to tune further.
 
+**Detection confidence** (`[0,1]`, `confidence_threshold`) - a raw
+detection of any class (person, ball, referee) below this score never
+reaches the tracker at all; it's the floor the detector itself applies
+before anything downstream (Ball anchor range, the panner, ...) ever
+sees a candidate. Default `0.10`. Added 2026-08-29 after the per-export sidecar log
+(`.log` file next to the output, see `reco_io::export_log`) made a
+real pattern visible in its timeline: dozens of `BallTracker:
+acquired ... conf=0.10-0.20` events over one export, each one a fresh,
+mostly-unsmoothed raw ball position landing straight in the aim blend
+(`ball_weight`) - a plausible source of visible camera wobble distinct
+from the smoothing-rate causes above. Competitive reference: a
+locally-installed competing product's own runtime log shows
+`detectorConfidenceThreshold=0.55`, 5.5x this default - not proof 0.55
+is correct here (different model/pipeline), but a real data point if
+raising this. **Replaces a previously hidden, hardcoded
+behavior**: Ball tracking mode used to silently force this to `0.25`
+regardless of anything else; it no longer does, and Field/Sweep's old
+literal `0.10` is now just this slider's own default for every mode. If
+you were relying on Ball mode's old implicit 0.25 floor, set this
+explicitly now. Not yet A/B-validated on real footage - raise it a
+notch (e.g. `0.2-0.3`) and check the export log's `BallTracker:
+acquired` lines for fewer very-low-confidence entries, and watch
+whether a genuinely faint real ball goes missing as the trade-off.
+
 **Style preset** - a one-shot action that overwrites every slider below
 (framing, cluster mode, lock-pitch, cluster bandwidth, dead-zone, ball
 weight, ball reach, FOV) with a tuned bundle. You can still tweak any
@@ -323,6 +347,36 @@ Source: `FieldPannerConfig::{broadcast, action, frame_all}` in
   if 2 players is too readily forming a cluster (not GUI-exposed today).
 - **Picture feels jittery/twitchy on static play**: raise `dead-zone`, or
   raise `lookahead` for more lead-in smoothing.
+- **Picture wobbles/hops because the AI seems obsessed with the ball -
+  every small ball movement drags the frame** (reported 2026-08-29, not
+  yet A/B-validated - the advice below is reasoned from the code, not
+  yet confirmed on real footage): unlike the player cluster, which is
+  EMA-smoothed via `cluster_alpha` before it ever reaches the aim, the
+  ball's own position is blended into the aim **raw, with no smoothing
+  of its own** - `target = cluster * (1 - w) + last_ball_pos * w` where
+  `w = ball_weight * ball_presence` (see
+  [`FieldPanner::decide_with_lookahead`](../crates/reco-autocam/src/panners/field.rs)).
+  So whenever the ball is confidently tracked (`ball_presence` near 1),
+  every frame's raw detection noise - or a genuinely bouncing ball -
+  feeds straight into where the camera points, only softened afterward
+  by `dead-zone`/the velocity clamp. Two things to try, least invasive
+  first:
+  1. **Raise `dead-zone`** (e.g. 0.05 -> 0.09-0.10 rad) - absorbs small
+     ball-driven jiggle without reducing how hard a real, larger ball
+     movement pulls the aim. This is exactly the softening this setting
+     already exists for; lookahead being on already supports the added
+     latency.
+  2. **If that's not enough, lower `ball weight`** (e.g. 0.5 -> 0.35) -
+     directly reduces how much the raw, unsmoothed ball position can
+     pull the aim at all. Trade-off: 0.5 is the value this same doc
+     recommends raising *to* in the corner-breakaway checklist below,
+     specifically to stop the ball drifting out of frame on a vertical
+     break - lowering it risks reintroducing that.
+  A structurally cleaner fix, if tuning these two doesn't fully resolve
+  it without giving up ball-following strength, would be a dedicated
+  smoothing rate for the ball's own contribution (parallel to
+  `cluster_alpha`) - not built, since the sliders above haven't been
+  tried yet.
 - **Camera zooms further in/out than desired in a specific situation**:
   adjust the FOV Tight/Wide bounds directly - they're bounds, not
   targets, so widening/narrowing them changes the *range* the dynamic

@@ -96,6 +96,12 @@ pub struct AutocamUiConfig {
     /// brief field-ROI exit) before declaring the track lost. See
     /// `reco_autocam::AutocamConfig::ball_coast_secs`.
     pub ball_coast_secs: f32,
+    /// Detector confidence floor `[0,1]` - a raw detection (any class)
+    /// below this score never reaches the tracker. See
+    /// `reco_autocam::AutocamConfig::confidence_threshold`. Applies to
+    /// every tracking mode; Ball mode no longer silently forces a
+    /// higher floor of its own.
+    pub confidence_threshold: f32,
     /// Lookahead buffer depth in seconds (0 = off).
     pub lookahead_secs: f64,
     /// Downconvert the lookahead pool to 8-bit NV12 even for 10-bit
@@ -324,6 +330,7 @@ pub fn run_export(
                 "detection_interval": autocam.detection_interval,
                 "player_anchor_rad": autocam.player_anchor_rad,
                 "ball_coast_secs": autocam.ball_coast_secs,
+                "confidence_threshold": autocam.confidence_threshold,
                 "lookahead_secs": autocam.lookahead_secs,
                 "lookahead_reduced_bit_depth": autocam.lookahead_reduced_bit_depth,
                 "preset": &autocam.preset,
@@ -697,6 +704,7 @@ pub fn run_export(
                     fov_default: autocam.fov_default,
                     fov_alpha: autocam.fov_alpha,
                     cluster_alpha: autocam.cluster_alpha,
+                    confidence_threshold: autocam.confidence_threshold,
                 },
             );
         }
@@ -747,13 +755,9 @@ pub fn run_export(
                 .with_detection_interval(ac.detection_interval as u64)
                 .with_10bit(is_10bit)
                 .with_player_anchor_rad(ac.player_anchor_rad)
-                .with_ball_coast_secs(ac.ball_coast_secs);
+                .with_ball_coast_secs(ac.ball_coast_secs)
+                .with_confidence_threshold(ac.confidence_threshold);
             autocam_config.field_panner_config = Some(panner_cfg);
-            // Ball-only models need a higher floor than the 0.10 field
-            // default (matches the CLI's ball-mode override).
-            if mode == reco_autocam::TrackingMode::Ball {
-                autocam_config.confidence_threshold = Some(0.25);
-            }
             let autocam_config = if let Some(roi) = field_roi.as_ref() {
                 autocam_config.with_field_roi(roi.clone())
             } else {
