@@ -1,4 +1,31 @@
-# Session handoff - 2026-09-02 (TGR_PC), later same day: AI pitch-limit feature shipped + ball-tracker stuck-on-last-position bug fixed
+# Session handoff - 2026-09-02 (TGR_PC), end of day: `lookahead_reactivity` found as the "AI sprints" cause, tested, AWAITING USER VIDEO REVIEW before building
+
+## READ THIS FIRST - exactly where to resume
+
+User is about to put this PC in standby (session ends here). The very
+next thing to do next session is: **ask the user whether
+`08 XFT - UHTF_tune_reactivity15.mp4` (in the match's `TEST VIDEO`
+folder) looked good** - if yes, do "step 2" below (expose
+`lookahead_reactivity` as a real GUI/CLI setting) - **do not build step
+2 without that confirmation**, the user was explicit about the
+ordering ("optie 1, daarna 2 als optie 1 goed gaat").
+
+**The finding**: user reported the AI camera "sprints" from 0 to top
+speed when the ball moves a large distance (~10m), instead of easing
+there - traced to `lookahead_reactivity` (in
+`crates/reco-autocam/src/panners/field.rs`), which multiplies BOTH the
+top pan/tilt speed and the ramp-up rate whenever lookahead is active.
+The calibration's "action" preset sets it to 3.0 (not exposed/
+overridable via `AutocamDefaults` today - preset-only). Tested at 1.5
+via `--panner-config` on the same 70-150s CLI window: peak per-frame
+jump and peak half-second swing both dropped ~45-46%, with ball-
+tracking presence and *typical* smoothness essentially unchanged (this
+asymmetry - peaks down, average unchanged - is the expected signature
+of this specific parameter, not a fluke). Full numbers and the "step 2"
+plan (add as a GUI slider, matching how `fov_alpha`/`cluster_alpha`
+were exposed before) are in the
+`project_ball_tracker_stuck_on_last_position` memory's "Follow-up"
+section - read that before doing anything else with this.
 
 ## REPO STATE AT END OF SESSION (2026-09-02, later)
 
