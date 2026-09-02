@@ -1,4 +1,86 @@
-# Session handoff - 2026-09-02 (TGR_PC): video-not-centered fixed; coverage-clamp corner-leak fix attempted, broke panning, REVERTED
+# Session handoff - 2026-09-02 (TGR_PC), later same day: AI pitch-limit feature shipped + ball-tracker stuck-on-last-position bug fixed
+
+## REPO STATE AT END OF SESSION (2026-09-02, later)
+
+- Branch `main`, working tree clean except the pre-existing untracked
+  `scripts/match-logger/Match Logger.html.txt`. Two commits made and
+  pushed to `github/main` today (later than the morning's entry below):
+  `7a87f1f8` (AI pitch-limit feature), `9ee7b926` (ball tracker fix).
+  `git fsck --full` clean before push.
+- reco-gui release+debug rebuilt with both changes (both
+  `--features tensorrt`) - check timestamps before telling the user to
+  test; a rebuild was in flight when this entry was written.
+- reco-cli release also rebuilt during this session's diagnostics (used
+  for CLI test exports with `--events`).
+
+## DONE THIS SESSION (later, 2026-09-02)
+
+1. **AI pitch-limit feature - user-confirmed working.** See
+   `project_ai_pitch_limit_feature` memory for full detail. Two
+   draggable lines on the stitched preview mark a manual world-space
+   pitch ceiling/floor the AI director's output may never cross -
+   persists to `Calibration.autocam_pitch_limits`, never restricts
+   manual panning. Went through two real bugs found via user testing
+   before it worked: (a) first version put the editor in the lens
+   preview, where the black wedge isn't even visible - moved to the
+   main stitched preview; (b) the clamp only restricted the center
+   pitch, so a wide dynamic-FOV shot's rendered edge still showed the
+   wedge - fixed to margin by half the vertical FOV. Also fixed a
+   "nothing to drag" bug: a fresh calibration with no value set drew
+   nothing at all, so a default placeholder position was added. New
+   reusable reco-core geometry API:
+   `unproject_screen_to_world`/`project_world_to_screen` +
+   `ScreenProjection` (round-trip tested).
+
+2. **Real ball-tracking bug found and fixed** (unrelated investigation,
+   triggered by the user reporting jittery AI tracking / losing the
+   ball near the sideline on the same match). See
+   `project_ball_tracker_stuck_on_last_position` memory for the full
+   diagnostic methodology and root cause.
+   `BallTracker`'s `max_jump_rad` gate could permanently strand
+   tracking on a stale position, rejecting a genuinely correct,
+   player-anchored, high-confidence ball detection forever (only
+   recoverable via a full ~3s coast-timeout cycle). Fixed: the jump
+   gate is now skipped whenever player-anchor filtering is active
+   (every anchor-passing candidate already cleared an independent
+   plausibility check). 15 `reco-autocam` tests pass including a new
+   regression test.
+
+3. **Separate, real finding from the same investigation, NOT a code
+   bug**: a persistent ~18.5s "ball not tracked" gap in a real test
+   export turned out to be a static white field-marker disc on the
+   halfway line, misclassified as "ball" by the model for 554
+   consecutive frames on the exact same pixel position - visually
+   confirmed via `dump_detection_frames.rs` + an ffmpeg crop. The
+   tracker correctly rejected it (far from any player); the genuine
+   ball wasn't confidently detected either (real play was far away
+   near a goal at the time). This is a training-data hard-negative
+   candidate, logged in `project_yolo26n_training_pipeline`'s
+   2026-09-02 entry - not extracted into a training batch yet.
+
+4. **Tested and ruled out** (before finding the tracker bug): lowering
+   `detection_interval` (10->4) measurably improved ball presence
+   (74.9%->82.7% of frames) but did NOT show a clear improvement in
+   frame-to-frame pose smoothness when lowering `cluster_alpha`
+   (0.08->0.025-0.03) - the lookahead/centered-smoothing already
+   absorbs most of that regardless. Don't re-reach for cluster_alpha
+   tuning as the fix for "jumpy" AI tracking without new evidence.
+
+## OPEN / WAITING ON THE USER
+
+- User is watching the earlier coverage-clamp-morning test videos
+  (`_tune_baseline`/`_moderate`/`_aggressive`/`_baseline_trackerfix`,
+  in `TEST VIDEO/`) and will report back which framing/smoothness
+  feels best.
+- Whether to extract the stray field-marker frames into an actual
+  training batch (`project_yolo26n_training_pipeline`) - not started,
+  ask before doing so given the established "balance for difficulty,
+  don't just add data" lesson from the last training regression.
+- The morning's coverage-clamp black-wedge item (see the entry below)
+  is separately still open - the AI pitch-limit feature is the shipped
+  mitigation for it, not a fix to the coverage clamp itself.
+
+## Previous entry - 2026-09-02 (TGR_PC), morning: video-not-centered fixed; coverage-clamp corner-leak fix attempted, broke panning, REVERTED
 
 ## REPO STATE AT END OF SESSION (2026-09-02)
 
