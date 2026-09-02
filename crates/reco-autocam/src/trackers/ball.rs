@@ -19,13 +19,21 @@
 //!    one player in panorama yaw/pitch space to survive. When no
 //!    players have been supplied (no player provider attached, or a
 //!    ball-only model), the filter is a no-op.
-//! 4. **Nearest-to-last with max-jump** — among survivors, pick the
+//! 4. **Nearest-to-last, with max-jump** — among survivors, pick the
 //!    one whose panorama position is closest to the last accepted
-//!    tracked position, provided the jump is below `max_jump_rad`.
-//!    Cross-camera yaw/pitch is meaningful because the
-//!    projection already unifies the coordinate frame, so same-cam
-//!    vs cross-cam are scored identically (unlike the Python POC
-//!    which worked in pixels and had to special-case cross-cam).
+//!    tracked position (breaking ties toward higher confidence).
+//!    `max_jump_rad` only hard-rejects a candidate when player anchors
+//!    are NOT active this frame (step 3 was a no-op) - when anchors
+//!    ARE active, every survivor already passed that independent
+//!    plausibility check, so distance-from-last is a preference, not a
+//!    second mandatory gate (see [`BallTracker::score`]'s doc for why:
+//!    ANDing both gates could permanently strand the tracker on a
+//!    stale `last`, rejecting a genuinely correct, anchored,
+//!    high-confidence ball forever). Cross-camera yaw/pitch is
+//!    meaningful because the projection already unifies the coordinate
+//!    frame, so same-cam vs cross-cam are scored identically (unlike
+//!    the Python POC which worked in pixels and had to special-case
+//!    cross-cam).
 //! 5. **Coaster** — if no candidate survived this frame, hold the
 //!    last known position for up to `max_coast_frames` frames, then
 //!    transition to `Lost`.
@@ -151,8 +159,28 @@ impl BallTracker {
     /// Score a candidate detection against the last known position.
     ///
     /// Lower = better. Returns `None` when the jump exceeds
-    /// `max_jump_rad`. With no prior position, scoring is pure
-    /// negative-confidence (highest-confidence detection wins).
+    /// `max_jump_rad` AND no player anchors are active this frame. With
+    /// no prior position, scoring is pure negative-confidence
+    /// (highest-confidence detection wins).
+    ///
+    /// The jump gate is skipped (never hard-rejects) whenever player
+    /// anchors are active (`current_players` non-empty): every
+    /// candidate reaching `score()` already survived
+    /// `passes_player_anchor` in [`Tracker::update`], which is itself a
+    /// real plausibility check ("this is near an actual tracked
+    /// player"), independent of - and no weaker than - "close to
+    /// wherever the tracker last thought the ball was". ANDing both
+    /// gates let a single missed/implausible detection permanently
+    /// strand `last` on a stale or wrong point: every subsequent frame
+    /// then re-rejects the genuine, anchor-passing, high-confidence
+    /// ball forever (until a full coast-timeout Lost cycle resets
+    /// `last` to `None`, restarting the same failure the next time the
+    /// ball moves far in one detection interval - a real, observed
+    /// symptom: sustained multi-second "ball not tracked" stretches
+    /// even while the model detects it, right next to a player, every
+    /// single frame). Distance from `last` still breaks ties toward
+    /// continuity via the scoring formula below when multiple anchored
+    /// candidates compete - it's just no longer a hard cutoff.
     fn score(&self, det: &MappedDetection) -> Option<f32> {
         let pos = det.position?;
         match self.last {
@@ -161,7 +189,7 @@ impl BallTracker {
                 let dy = pos.yaw - last.yaw;
                 let dp = pos.pitch - last.pitch;
                 let dist = (dy * dy + dp * dp).sqrt();
-                if dist > self.max_jump_rad {
+                if dist > self.max_jump_rad && self.current_players.is_empty() {
                     None
                 } else {
                     // Balance proximity and confidence; the 0.1-rad
@@ -460,6 +488,47 @@ mod tests {
         // No fresh accepted — tracker coasts on the last known.
         assert_eq!(out[0].state, TrackState::Coasting);
         assert_eq!(out[0].yaw, 0.0);
+    }
+
+    #[test]
+    fn player_anchor_active_bypasses_max_jump_gate() {
+        // Reproduces a real observed failure: a ball genuinely detected
+        // right next to a tracked player (high confidence, well inside
+        // the anchor radius) kept getting rejected every frame because
+        // it was farther than `max_jump_rad` from a stale `last` -
+        // permanently stranding the tracker until a full coast-timeout
+        // Lost cycle (multiple seconds later). Player-anchor presence
+        // must let the anchored candidate through regardless of
+        // distance from `last`.
+        let mut t = BallTracker::new(0).with_max_jump_rad(0.1);
+        // Acquire far away at yaw=-1.0 (no players yet - jump gate
+        // active, matches an isolated/breakaway acquisition).
+        let d0 = det(CameraId::Left, -1.0, -0.2, 0.6, 0.2, 0.2);
+        t.update(&[d0], 0.0);
+
+        // Next frame: a player appears right next to a NEW ball
+        // position (yaw=0.5), far outside the 0.1 jump gate from
+        // yaw=-1.0 - old code would coast/reject this forever.
+        let player = TrackedEntity {
+            id: 1,
+            class_id: 0,
+            yaw: 0.5,
+            pitch: 0.28,
+            confidence: 0.9,
+            state: TrackState::Tracking,
+            age_frames: 5,
+            origin: CameraId::Left,
+        };
+        t.set_players(&[player]);
+        let anchored = det(CameraId::Left, 0.5, 0.28, 0.7, 0.5, 0.5);
+        let out = t.update(&[anchored], 16.6);
+        assert_eq!(
+            out[0].state,
+            TrackState::Tracking,
+            "an anchored, high-confidence candidate must not be rejected \
+             just for being far from a stale `last` position"
+        );
+        assert!((out[0].yaw - 0.5).abs() < 1e-6);
     }
 
     #[test]
