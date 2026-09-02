@@ -14,14 +14,20 @@ use crate::source::FrameSource;
 /// same lag-free way the angles are - otherwise FOV jitter survives the
 /// lookahead untouched.
 ///
-/// The window is symmetric only in steady state. At the stream head the
-/// `past` side is short (it grows from empty during warm-up) and in the
-/// drain tail the `ahead` side shrinks, so the average is computed over a
-/// lopsided window at both boundaries - the first/last ~`post_smooth_half`
-/// rendered poses are smoothed slightly differently from the middle. On a
-/// clip shorter than the lookahead window the entire output is in this
-/// boundary regime. This is acceptable (no future data exists past EOF);
-/// it is documented so the boundary behavior is not mistaken for a bug.
+/// The window is symmetric at both boundaries by construction: callers
+/// cap the `ahead` side to however many `past` samples exist so far
+/// (see the `ahead_n` computation at each call site), so at the very
+/// first rendered frame (zero past samples) there is no smoothing at
+/// all rather than an average pulled toward `post_smooth_half` frames
+/// of already-migrated future poses - the window then grows evenly on
+/// both sides until it reaches full size in steady state.
+///
+/// In the drain tail the `ahead` side naturally shrinks as the pose
+/// queue empties (there is no future data past EOF), so the last
+/// ~`post_smooth_half` rendered poses are smoothed slightly differently
+/// from the middle - this half of the asymmetry is unavoidable and
+/// intentionally left as-is. On a clip shorter than the lookahead
+/// window the entire output is in this tail regime.
 fn centered_smooth(
     raw_pose: crate::geometry::ViewportPosition,
     ahead: impl Iterator<Item = crate::geometry::ViewportPosition>,
@@ -558,9 +564,15 @@ impl StitchSession {
 
                 // Centered post-smooth: average past + current + future
                 // poses (yaw/pitch/fov) so zoom is smoothed like the angles.
+                // `ahead_n` caps the future side to how many past samples
+                // exist so far, keeping the window symmetric at the stream
+                // head instead of biasing the first frames toward
+                // already-migrated future poses - see `centered_smooth`'s
+                // doc comment.
+                let ahead_n = past_poses.len().min(post_smooth_half);
                 let smoothed_pose = centered_smooth(
                     raw_pose,
-                    pose_queue.iter().take(post_smooth_half).map(|(_, p)| *p),
+                    pose_queue.iter().take(ahead_n).map(|(_, p)| *p),
                     past_poses.iter().copied(),
                 );
                 past_poses.push_back(raw_pose);
@@ -592,9 +604,10 @@ impl StitchSession {
             let Some((oldest, raw_pose)) = pose_queue.pop_front() else {
                 break;
             };
+            let ahead_n = past_poses.len().min(post_smooth_half);
             let smoothed_pose = centered_smooth(
                 raw_pose,
-                pose_queue.iter().take(post_smooth_half).map(|(_, p)| *p),
+                pose_queue.iter().take(ahead_n).map(|(_, p)| *p),
                 past_poses.iter().copied(),
             );
             past_poses.push_back(raw_pose);
