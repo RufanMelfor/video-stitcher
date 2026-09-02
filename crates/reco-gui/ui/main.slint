@@ -1622,6 +1622,47 @@ export component RecoApp inherits Window {
     callback goal-pointer-up();
     callback goal-pointer-delete(float, float, float, float);
 
+    // Manual AI-tracking pitch safety margin: two horizontal lines
+    // drawn directly on the STITCHED panorama preview (not a per-camera
+    // lens preview - the black-wedge corner leak this exists to work
+    // around is only visible once both cameras are stitched together).
+    // Not an N-point polygon like ROI/GOAL - no add/delete, just drag.
+    // See `AutocamPitchLimits`'s doc comment for why the stored value
+    // is a world-space pitch, and `sync_pitch_limit_overlay` (Rust) for
+    // how it's projected to/from this screen space every frame (the
+    // line's screen position moves as the user pans/zooms the preview,
+    // unlike ROI/GOAL's fixed lens-preview overlay).
+    //
+    // `has-pitch-limit-top/bottom-set` mirror whether that bound exists
+    // in calibration at all (`None` = fully unrestricted) - drives the
+    // DETECTION ZONES status text/Clear button, shown regardless of
+    // `show-pitch-limits`. `pitch-limit-top/bottom-screen-y` are the
+    // CURRENT on-screen Y fraction `[0,1]` within the output frame
+    // (only meaningful, and only drawn, while also currently in front
+    // of the camera - Rust leaves `has-pitch-limit-top/bottom-set` but
+    // simply doesn't update `*-screen-y` for a bound that's projected
+    // behind the current view).
+    in-out property <bool> show-pitch-limits: false;
+    // Fires on toggle so Rust can force one overlay-position sync
+    // immediately, instead of waiting for the next camera-moved vsync
+    // tick to first draw the lines.
+    callback changed-show-pitch-limits(bool);
+    in-out property <bool> has-pitch-limit-top-set: false;
+    in-out property <bool> has-pitch-limit-bottom-set: false;
+    in-out property <bool> pitch-limit-top-visible: false;
+    in-out property <float> pitch-limit-top-screen-y: 0.3;
+    in-out property <bool> pitch-limit-bottom-visible: false;
+    in-out property <float> pitch-limit-bottom-screen-y: 0.7;
+    // -1 = neither line hit, 0 = top, 1 = bottom. Args mirror
+    // `seam-hit-test`'s convention: raw mouse position + the preview
+    // box's own size, letterbox math done in Rust (not local coords
+    // pre-computed in Slint, unlike the lens-preview ROI/GOAL editors).
+    callback pitch-limit-pointer-hit-test(float, float, float, float) -> int;
+    callback pitch-limit-pointer-drag(int, float, float, float, float);
+    callback pitch-limit-pointer-up();
+    // Clears both bounds back to unrestricted (calibration: None/None).
+    callback pitch-limit-clear();
+
     // Shared enter/exit logic, used by the DETECTION ZONES card's single
     // Edit/Done button below.
     function enter-zone-edit() {
@@ -2207,6 +2248,29 @@ export component RecoApp inherits Window {
                                         horizontal-stretch: 1;
                                     }
                                 }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: (root.has-pitch-limit-top-set || root.has-pitch-limit-bottom-set)
+                                            ? "AI Pitch Limit: set" : "AI Pitch Limit: none";
+                                        color: (root.has-pitch-limit-top-set || root.has-pitch-limit-bottom-set) ? #7ec8ff : #777;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+                                    if root.has-pitch-limit-top-set || root.has-pitch-limit-bottom-set: FlatButton {
+                                        text: "Clear";
+                                        clicked => { root.pitch-limit-clear(); }
+                                    }
+                                }
+                                Tip {
+                                    tip: "Draws two draggable lines on the stitched preview marking how far up/down the AI camera may aim - a manual safety margin to keep it away from the black-wedge seam area. Doesn't affect manual panning, only AI tracking.";
+                                    CheckBox {
+                                        text: "Show AI pitch limits";
+                                        checked <=> root.show-pitch-limits;
+                                        toggled => { root.changed-show-pitch-limits(self.checked); }
+                                    }
+                                }
 
                                 // Single entry point for both polygon types -
                                 // opens the distorted lens preview, where a
@@ -2252,6 +2316,7 @@ export component RecoApp inherits Window {
                                     font-size: 10px;
                                     wrap: word-wrap;
                                 }
+
 
                                 if !root.zone-edit-mode && !root.has-roi: Text {
                                     text: "Or paste ROI JSON above (from another calibration, or scripted).";
@@ -2803,6 +2868,63 @@ export component RecoApp inherits Window {
                         border-color: #ff8c1a;
                     }
 
+                    // AI-tracking pitch-limit lines - drawn on the
+                    // STITCHED panorama preview (never in lens-preview
+                    // mode, where the black wedge this exists to guard
+                    // against isn't even visible - only one camera's
+                    // raw frame is shown there). Unlike ROI/GOAL's
+                    // per-lens overlay, this one's screen position moves
+                    // every frame as the user pans/zooms - kept current
+                    // by `sync_pitch_limit_overlay` (Rust), called from
+                    // the same vsync tick that redraws the preview
+                    // itself. Two full-width horizontal bars with a
+                    // small centered grab handle so a thin line stays
+                    // comfortably draggable.
+                    if !root.lens-preview-active && root.show-pitch-limits && root.pitch-limit-top-visible: Rectangle {
+                        x: preview-box.content-x;
+                        y: preview-box.content-y + root.pitch-limit-top-screen-y * preview-box.content-h - 1px;
+                        width: preview-box.content-w;
+                        height: 2px;
+                        background: #38b6ffcc;
+                    }
+                    if !root.lens-preview-active && root.show-pitch-limits && root.pitch-limit-top-visible: Rectangle {
+                        x: preview-box.content-x + preview-box.content-w / 2 - 24px;
+                        y: preview-box.content-y + root.pitch-limit-top-screen-y * preview-box.content-h - 6px;
+                        width: 48px;
+                        height: 12px;
+                        border-radius: 6px;
+                        background: #38b6ff;
+                        Text {
+                            text: "TOP";
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            font-size: 8px;
+                            color: #06121a;
+                        }
+                    }
+                    if !root.lens-preview-active && root.show-pitch-limits && root.pitch-limit-bottom-visible: Rectangle {
+                        x: preview-box.content-x;
+                        y: preview-box.content-y + root.pitch-limit-bottom-screen-y * preview-box.content-h - 1px;
+                        width: preview-box.content-w;
+                        height: 2px;
+                        background: #ff6fb0cc;
+                    }
+                    if !root.lens-preview-active && root.show-pitch-limits && root.pitch-limit-bottom-visible: Rectangle {
+                        x: preview-box.content-x + preview-box.content-w / 2 - 24px;
+                        y: preview-box.content-y + root.pitch-limit-bottom-screen-y * preview-box.content-h - 6px;
+                        width: 48px;
+                        height: 12px;
+                        border-radius: 6px;
+                        background: #ff6fb0;
+                        Text {
+                            text: "BOTTOM";
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            font-size: 7px;
+                            color: #200a13;
+                        }
+                    }
+
                     // Pan/zoom (panorama or lens-preview) and, in lens
                     // preview + ROI-edit mode, field-boundary point
                     // editing: click empty space to add a point, drag an
@@ -2842,6 +2964,11 @@ export component RecoApp inherits Window {
                             && self.local-y >= 0px && self.local-y <= preview-box.content-h;
                         property <int> goal-dragging-index: -1;
                         property <bool> goal-click-pending: false;
+                        // -1 = not dragging a pitch-limit line, 0 = top, 1 =
+                        // bottom. No click-pending state needed here (unlike
+                        // ROI/GOAL) - there are always exactly two lines, no
+                        // add/delete gesture.
+                        property <int> pitch-dragging-index: -1;
                         // Whether the mouse is currently near the seam debug
                         // line (hover feedback / drag gating - see
                         // `seam-hit-test`'s own doc). Only meaningful outside
@@ -2909,6 +3036,14 @@ export component RecoApp inherits Window {
                                             self.goal-click-pending = true;
                                         }
                                     }
+                                } else if (!root.lens-preview-active && root.show-pitch-limits
+                                           && e.button == PointerEventButton.left) {
+                                    self.pitch-dragging-index = root.pitch-limit-pointer-hit-test(
+                                        self.mouse-x / 1px,
+                                        self.mouse-y / 1px,
+                                        preview-box.width / 1px,
+                                        preview-box.height / 1px,
+                                    );
                                 }
                             }
                             if (e.kind == PointerEventKind.up) {
@@ -2928,6 +3063,10 @@ export component RecoApp inherits Window {
                                 if (self.goal-dragging-index >= 0) {
                                     root.goal-pointer-up();
                                     self.goal-dragging-index = -1;
+                                }
+                                if (self.pitch-dragging-index >= 0) {
+                                    root.pitch-limit-pointer-up();
+                                    self.pitch-dragging-index = -1;
                                 }
                                 if (self.goal-click-pending) {
                                     root.goal-pointer-add(
@@ -3011,6 +3150,14 @@ export component RecoApp inherits Window {
                                 } else if (root.lens-preview-active) {
                                     root.lens-pan-x += self.mouse-x - self.last-x;
                                     root.lens-pan-y += self.mouse-y - self.last-y;
+                                } else if (!root.lens-preview-active && root.show-pitch-limits && self.pitch-dragging-index >= 0) {
+                                    root.pitch-limit-pointer-drag(
+                                        self.pitch-dragging-index,
+                                        self.mouse-x / 1px,
+                                        self.mouse-y / 1px,
+                                        preview-box.width / 1px,
+                                        preview-box.height / 1px,
+                                    );
                                 } else if (root.show-seam-line && self.seam-dragging) {
                                     // Seam-edit mode: horizontal drag nudges the
                                     // seam instead of panning, normalized by

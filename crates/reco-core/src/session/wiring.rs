@@ -136,6 +136,17 @@ impl StitchSession {
         self.core.set_panner(panner);
     }
 
+    /// Set (or clear) the manual AI-tracking pitch safety margin. Mirror
+    /// of [`StitchCore::set_autocam_pitch_limits`](crate::core::StitchCore::set_autocam_pitch_limits) -
+    /// see its doc comment for what this restricts (the director's
+    /// output only, never manual panning) and why.
+    pub fn set_autocam_pitch_limits(
+        &mut self,
+        limits: Option<crate::calibration::AutocamPitchLimits>,
+    ) {
+        self.core.set_autocam_pitch_limits(limits);
+    }
+
     /// Set the lookahead buffer depth in frames.
     pub fn set_lookahead(&mut self, frames: usize) {
         self.lookahead_frames = frames;

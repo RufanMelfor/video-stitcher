@@ -683,6 +683,38 @@ pub struct AutocamDefaults {
     pub confidence_threshold: f32,
 }
 
+/// Manual pitch safety margin for AI tracking (world-space radians) -
+/// two horizontal lines set by dragging directly on the stitched
+/// panorama preview (`reco-gui`), where the black-wedge corner leak
+/// this exists to work around is actually visible - unlike a single
+/// raw camera frame, which never shows the stitch seam at all. Stored
+/// pre-resolved (not e.g. a raw-frame pixel position) since the preview
+/// drag already derives a world pitch via
+/// `reco_core::geometry::unproject_screen_to_world`; no further
+/// projection is needed at the point of use.
+///
+/// Applies ONLY to the AI director's output (see
+/// `StitchCore::set_autocam_pitch_limits` in `reco-core`), never to
+/// manual GUI panning - a deliberate, simpler alternative to the
+/// automatic per-pitch coverage-clamp fix that was reverted after
+/// breaking normal panning (see the `project_coverage_clamp_corner_leak`
+/// investigation): rather than perfectly computing where the coverage
+/// tapers, the user pulls the AI camera's own operating range in by
+/// hand, away from the seam-adjacent region where the black wedge shows
+/// up. A detection/autocam concern, kept here transitionally like
+/// `FieldRoi`/`GoalGeometry`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct AutocamPitchLimits {
+    /// World-space pitch (radians) the AI camera's aim may never go
+    /// above. `None` = no ceiling.
+    #[serde(default)]
+    pub top_rad: Option<f32>,
+    /// Mirror of [`Self::top_rad`] for the lower bound. `None` = no
+    /// floor.
+    #[serde(default)]
+    pub bottom_rad: Option<f32>,
+}
+
 /// `FieldPannerConfig::default().fov_alpha` - kept in sync manually
 /// since `AutocamDefaults` can't depend on `reco-autocam` (would be a
 /// dependency cycle: reco-autocam already depends on reco-core).
@@ -855,6 +887,10 @@ pub struct Calibration {
     /// detection/autocam concern).
     #[serde(default)]
     pub autocam_defaults: Option<AutocamDefaults>,
+    /// Optional manual pitch safety margin restricting where the AI
+    /// director may aim. Transitional (a detection/autocam concern).
+    #[serde(default)]
+    pub autocam_pitch_limits: Option<AutocamPitchLimits>,
     /// Optional saved scoreboard overlay settings. Transitional (a
     /// reco-scoreboard concern).
     #[serde(default)]
@@ -877,6 +913,7 @@ impl Calibration {
             field_roi: None,
             goal_geometry: None,
             autocam_defaults: None,
+            autocam_pitch_limits: None,
             scoreboard: None,
         }
     }
@@ -1484,6 +1521,38 @@ mod tests {
     }
 
     #[test]
+    fn old_calibration_without_autocam_pitch_limits_still_parses() {
+        // sample_json() predates this field entirely - #[serde(default)]
+        // must let it parse as None rather than erroring.
+        let cal: Calibration = serde_json::from_str(sample_json()).unwrap();
+        assert!(cal.autocam_pitch_limits.is_none());
+    }
+
+    #[test]
+    fn parse_calibration_with_autocam_pitch_limits() {
+        let mut cal: Calibration = serde_json::from_str(sample_json()).unwrap();
+        cal.autocam_pitch_limits = Some(AutocamPitchLimits {
+            top_rad: Some(0.4),
+            bottom_rad: Some(-0.3),
+        });
+        let json = cal.to_json_pretty();
+        let back: Calibration = serde_json::from_str(&json).unwrap();
+        let limits = back.autocam_pitch_limits.as_ref().unwrap();
+        assert!((limits.top_rad.unwrap() - 0.4).abs() < 1e-6);
+        assert!((limits.bottom_rad.unwrap() - (-0.3)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn old_autocam_pitch_limits_without_one_bound_gets_none_for_it() {
+        // A limit set on only one side (e.g. only a bottom line dragged)
+        // must not silently invent a top bound.
+        let json = r#"{ "bottom_rad": -0.2 }"#;
+        let limits: AutocamPitchLimits = serde_json::from_str(json).unwrap();
+        assert!(limits.top_rad.is_none());
+        assert!((limits.bottom_rad.unwrap() - (-0.2)).abs() < 1e-6);
+    }
+
+    #[test]
     fn old_autocam_defaults_without_alpha_fields_gets_sane_defaults() {
         // Older saved calibrations (or events written before this
         // change) won't have fov_alpha/cluster_alpha at all -
@@ -1633,6 +1702,7 @@ mod tests {
             field_roi: None,
             goal_geometry: None,
             autocam_defaults: None,
+            autocam_pitch_limits: None,
             scoreboard: None,
         }
     }

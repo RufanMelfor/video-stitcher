@@ -2535,6 +2535,142 @@ fn sync_goal_points(state: &AppState, app: &RecoApp) {
     app.set_goal_points_y(slint::ModelRc::new(slint::VecModel::from(ys)));
 }
 
+/// Push whether `cal.autocam_pitch_limits` has each bound *set at all*
+/// to the Slint status text/Clear button in the DETECTION ZONES card.
+/// Cheap, calibration-only - independent of the live preview pose, so
+/// this is safe to call on calibration load/change alone. The other
+/// half (where the lines currently sit ON SCREEN, which depends on the
+/// live camera pose) is [`sync_pitch_limit_overlay`], called every
+/// vsync tick instead.
+fn sync_pitch_limit_status(state: &AppState, app: &RecoApp) {
+    let limits = state
+        .calibration
+        .as_ref()
+        .and_then(|c| c.autocam_pitch_limits);
+    app.set_has_pitch_limit_top_set(limits.is_some_and(|l| l.top_rad.is_some()));
+    app.set_has_pitch_limit_bottom_set(limits.is_some_and(|l| l.bottom_rad.is_some()));
+}
+
+/// Everything needed to project between the stitched preview's screen
+/// space and world-space pitch: the current camera basis/position, rig
+/// tilt/roll, the pipeline's live FOV/aspect, and the current viewport
+/// pose (world-space yaw/pitch `PoseControl` is tracking). `None` when
+/// no calibration or no active preview bridge is available yet (e.g.
+/// before files are loaded) - every pitch-limit callback treats that
+/// as a no-op, matching `on_seam_hit_test`'s same early-return shape.
+struct PitchLimitProjection {
+    cam: reco_core::geometry::VirtualCamera,
+    position: [f32; 3],
+    fov_v_deg: f32,
+    aspect: f32,
+    rig_tilt: f32,
+    rig_roll: f32,
+    pose: ViewportPosition,
+}
+
+impl PitchLimitProjection {
+    /// Bundle into the form `reco_core::geometry`'s screen<->world
+    /// conversions actually take (see `ScreenProjection`'s own doc for
+    /// why it exists as a separate type from this GUI-side struct: this
+    /// one also carries `pose` before it's split into yaw/pitch here).
+    fn as_screen_projection(&self) -> reco_core::geometry::ScreenProjection<'_> {
+        reco_core::geometry::ScreenProjection {
+            cam: &self.cam,
+            position: self.position,
+            world_yaw: self.pose.yaw,
+            world_pitch: self.pose.pitch,
+            fov_v_deg: self.fov_v_deg,
+            aspect: self.aspect,
+            rig_tilt: self.rig_tilt,
+            rig_roll: self.rig_roll,
+        }
+    }
+}
+
+fn pitch_limit_projection(state: &AppState) -> Option<PitchLimitProjection> {
+    let bridge = state.bridge.as_ref()?;
+    let pipeline = bridge.engine().pipeline();
+    let cal = pipeline.calibration();
+    let lens_aspect = cal.lenses[0].width as f32 / cal.lenses[0].height as f32;
+    let scene =
+        reco_core::render::scene::SceneGeometry::new(&cal.topology, &cal.framing, lens_aspect);
+    let cam = reco_core::geometry::VirtualCamera::new(&scene.camera_position);
+    Some(PitchLimitProjection {
+        cam,
+        position: scene.camera_position,
+        fov_v_deg: pipeline.viewport().fov_degrees,
+        aspect: pipeline.viewport().aspect_ratio(),
+        rig_tilt: cal.framing.tilt as f32,
+        rig_roll: cal.framing.roll as f32,
+        pose: state.pose.current_pose(),
+    })
+}
+
+/// Re-derive where the two AI pitch-limit lines currently sit on the
+/// stitched preview, given the live camera pose - called every vsync
+/// tick while `show_pitch_limits` is on (the screen position moves as
+/// the user pans/zooms, unlike ROI/GOAL's fixed lens-preview overlay).
+/// A bound with no value, or one that currently projects behind the
+/// camera (`project_world_to_screen` returns `None`), is simply left
+/// not-visible for this frame - not an error, just off-screen right now.
+/// Default screen-Y fraction (`[0,1]`, top-left origin) for a
+/// pitch-limit line before it has ever been set. Without this, a fresh
+/// calibration (`autocam_pitch_limits: None`) draws nothing at all when
+/// "Show AI pitch limits" is turned on - there would be no line
+/// anywhere on screen to grab, so the user could never create the
+/// first value by dragging. Once dragged, the real world-space value
+/// takes over (see [`pitch_limit_display_y`]).
+const PITCH_LIMIT_DEFAULT_TOP_Y: f32 = 0.15;
+/// Mirror of [`PITCH_LIMIT_DEFAULT_TOP_Y`] for the bottom line.
+const PITCH_LIMIT_DEFAULT_BOTTOM_Y: f32 = 0.85;
+
+/// Current on-screen Y fraction (`[0,1]`, top-left origin) for one
+/// pitch-limit line - `index` 0 = top, 1 = bottom. `Some` whenever the
+/// line should be drawn/grabbable right now: either a real stored value
+/// that currently projects on-screen, or - when nothing is stored yet -
+/// a fixed default position so the user always has something to drag
+/// to create the first value (see the constants above). `None` only
+/// for a *stored* value that's currently panned/zoomed out of view -
+/// that case genuinely has nothing sensible to draw, unlike the unset
+/// case.
+fn pitch_limit_display_y(
+    limits: Option<reco_core::calibration::AutocamPitchLimits>,
+    proj: Option<&PitchLimitProjection>,
+    index: i32,
+) -> Option<f32> {
+    let rad = limits.and_then(|l| if index == 0 { l.top_rad } else { l.bottom_rad });
+    let Some(rad) = rad else {
+        return Some(if index == 0 {
+            PITCH_LIMIT_DEFAULT_TOP_Y
+        } else {
+            PITCH_LIMIT_DEFAULT_BOTTOM_Y
+        });
+    };
+    let p = proj?;
+    let (_, sy) =
+        reco_core::geometry::project_world_to_screen(&p.as_screen_projection(), p.pose.yaw, rad)?;
+    Some(((1.0 - sy) / 2.0).clamp(0.0, 1.0))
+}
+
+fn sync_pitch_limit_overlay(state: &AppState, app: &RecoApp) {
+    let limits = state
+        .calibration
+        .as_ref()
+        .and_then(|c| c.autocam_pitch_limits);
+    let proj = pitch_limit_projection(state);
+
+    let top = pitch_limit_display_y(limits, proj.as_ref(), 0);
+    app.set_pitch_limit_top_visible(top.is_some());
+    if let Some(y) = top {
+        app.set_pitch_limit_top_screen_y(y);
+    }
+    let bottom = pitch_limit_display_y(limits, proj.as_ref(), 1);
+    app.set_pitch_limit_bottom_visible(bottom.is_some());
+    if let Some(y) = bottom {
+        app.set_pitch_limit_bottom_screen_y(y);
+    }
+}
+
 /// Hit-test radius (pixels) for grabbing the seam debug line - see
 /// `reco_core::render::renderer::seam_line_screen_points` for how its
 /// on-screen position is computed.
@@ -5810,6 +5946,120 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Manual AI-tracking pitch safety margin: two horizontal lines on
+    // the STITCHED preview - see `sync_pitch_limit_overlay`,
+    // `pitch_limit_projection`, and `AutocamPitchLimits`'s doc comment.
+    // Simpler than the ROI/GOAL point editors above (no add/delete,
+    // always exactly two lines), but unlike them the screen position
+    // depends on the live camera pose, not just calibration, so both
+    // callbacks re-derive it fresh via `pitch_limit_projection` rather
+    // than reading a cached Slint property.
+    let state_ref = Rc::clone(&state);
+    app.on_pitch_limit_pointer_hit_test(move |mouse_x, mouse_y, box_w, box_h| {
+        if box_w <= 0.0 || box_h <= 0.0 {
+            return -1;
+        }
+        let s = state_ref.borrow();
+        let Some(bridge) = s.bridge.as_ref() else {
+            return -1;
+        };
+        let output_aspect = bridge.engine().pipeline().viewport().aspect_ratio();
+        let (content_w, content_h, content_x, content_y) =
+            panorama_letterbox_rect(box_w, box_h, output_aspect);
+        let lx = mouse_x - content_x;
+        let ly = mouse_y - content_y;
+        if lx < 0.0 || lx > content_w || ly < 0.0 || ly > content_h {
+            return -1;
+        }
+
+        let limits = s.calibration.as_ref().and_then(|c| c.autocam_pitch_limits);
+        let proj = pitch_limit_projection(&s);
+        let candidates = [
+            pitch_limit_display_y(limits, proj.as_ref(), 0).map(|y| (0, y * content_h)),
+            pitch_limit_display_y(limits, proj.as_ref(), 1).map(|y| (1, y * content_h)),
+        ];
+        candidates
+            .into_iter()
+            .flatten()
+            .filter(|&(_, y)| (y - ly).abs() <= SEAM_LINE_HIT_RADIUS_PX)
+            .min_by(|(_, a), (_, b)| (a - ly).abs().total_cmp(&(b - ly).abs()))
+            .map(|(idx, _)| idx)
+            .unwrap_or(-1)
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_pitch_limit_pointer_drag(move |index, mouse_x, mouse_y, box_w, box_h| {
+        if box_w <= 0.0 || box_h <= 0.0 || (index != 0 && index != 1) {
+            return;
+        }
+        let mut s = state_ref.borrow_mut();
+        let Some(bridge) = s.bridge.as_ref() else {
+            return;
+        };
+        let output_aspect = bridge.engine().pipeline().viewport().aspect_ratio();
+        let (content_w, content_h, content_x, content_y) =
+            panorama_letterbox_rect(box_w, box_h, output_aspect);
+        let sx = (2.0 * (mouse_x - content_x) / content_w - 1.0).clamp(-1.0, 1.0);
+        let sy = (1.0 - 2.0 * (mouse_y - content_y) / content_h).clamp(-1.0, 1.0);
+        let Some(proj) = pitch_limit_projection(&s) else {
+            return;
+        };
+        let target =
+            reco_core::geometry::unproject_screen_to_world(&proj.as_screen_projection(), sx, sy);
+        if let Some(cal) = s.calibration.as_mut() {
+            let limits = cal
+                .autocam_pitch_limits
+                .get_or_insert_with(Default::default);
+            if index == 0 {
+                limits.top_rad = Some(target.pitch);
+            } else {
+                limits.bottom_rad = Some(target.pitch);
+            }
+        }
+        if let Some(app) = app_weak.upgrade() {
+            sync_pitch_limit_status(&s, &app);
+            sync_pitch_limit_overlay(&s, &app);
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_show_pitch_limits(move |enabled| {
+        let mut s = state_ref.borrow_mut();
+        if let Some(app) = app_weak.upgrade() {
+            if enabled {
+                sync_pitch_limit_overlay(&s, &app);
+            }
+            s.preview_dirty = true;
+            app.window().request_redraw();
+        }
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_pitch_limit_pointer_up(move || {
+        let s = state_ref.borrow();
+        if let Err(e) = s.save_calibration() {
+            log::error!("Failed to save calibration after AI pitch limit edit: {e}");
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_pitch_limit_clear(move || {
+        let mut s = state_ref.borrow_mut();
+        if let Some(cal) = s.calibration.as_mut() {
+            cal.autocam_pitch_limits = None;
+        }
+        if let Err(e) = s.save_calibration() {
+            log::error!("Failed to save calibration after clearing the AI pitch limit: {e}");
+        }
+        if let Some(app) = app_weak.upgrade() {
+            sync_pitch_limit_status(&s, &app);
+            sync_pitch_limit_overlay(&s, &app);
+        }
+    });
+
     let state_ref = Rc::clone(&state);
     let app_weak = app.as_weak();
     app.on_changed_color_match_enabled(move |enabled| {
@@ -7713,6 +7963,13 @@ fn vsync_render_tick(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<RecoA
         if let Some(fov) = current.fov_degrees {
             app.set_fov(fov);
         }
+        // The AI pitch-limit overlay's screen position depends on this
+        // same live pose - only worth recomputing while it's actually
+        // shown (`show_pitch_limits`), skipped otherwise so idle
+        // playback doesn't pay for it every frame.
+        if app.get_show_pitch_limits() {
+            sync_pitch_limit_overlay(&s, &app);
+        }
         if let Some(bridge) = s.bridge.as_ref() {
             let c = bridge.engine().pipeline().color_match_correction();
             app.set_color_match_status(
@@ -8112,6 +8369,7 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                         .is_some_and(|g| !g.left.is_empty() || !g.right.is_empty()),
                 );
                 sync_goal_points(&s, &app);
+                sync_pitch_limit_status(&s, &app);
                 sync_frame_display(&app, s.playback.frame_index(), total, fps);
                 app.set_fps(fps as f32);
                 app.set_playback_speed(s.playback.speed() as f32);
@@ -8520,6 +8778,7 @@ fn handle_calibration_result(
                                 .is_some_and(|g| !g.left.is_empty() || !g.right.is_empty()),
                         );
                         sync_goal_points(state, &app);
+                        sync_pitch_limit_status(state, &app);
                         app.set_calibration_path(cal_label.into());
                         sync_recent_paths(&state.user_settings, &app);
                         sync_frame_display(&app, state.playback.frame_index(), total, fps);

@@ -148,6 +148,12 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         .field_roi
         .as_ref()
         .map(|roi| roi.densified(&cal.lenses[0], &cal.lenses[1]));
+    // Manual AI-tracking pitch safety margin - see
+    // `reco_core::calibration::AutocamPitchLimits`'s doc comment. Set
+    // unconditionally in the `on_session` hook below (harmless without
+    // a panner attached), mirroring the GUI export path.
+    #[cfg_attr(not(feature = "autocam"), allow(unused_variables))]
+    let autocam_pitch_limits = cal.autocam_pitch_limits;
 
     // Accept `a.mp4;b.mp4;c.mp4` to chain segments via the concat demuxer
     // (mirrors the GUI's multi-segment selection). A single path stays Single.
@@ -517,6 +523,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         }
 
         job = job.on_session(move |session, source| {
+            session.set_autocam_pitch_limits(autocam_pitch_limits);
             let info = source.info();
             let mode = match mode_str.as_str() {
                 "sweep" => reco_autocam::TrackingMode::Sweep,

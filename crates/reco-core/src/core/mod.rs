@@ -181,6 +181,14 @@ pub struct StitchCore {
     /// for ad-hoc clamping outside the render loop.
     pub(crate) constrained_look: bool,
 
+    /// Manual pitch safety margin for AI tracking (world-space radians,
+    /// `(top, bottom)`) - see [`Self::set_autocam_pitch_limits`]. Stored
+    /// pre-resolved: unlike the coverage boundary, this value is not
+    /// derived from calibration geometry (the GUI already resolves a
+    /// world pitch at the point the user drags it), so no
+    /// recompute-on-calibration-change hook is needed.
+    pub(crate) autocam_pitch_limit_rad: (Option<f32>, Option<f32>),
+
     pub(crate) frame_count: u64,
     pub(crate) session_start: Option<Instant>,
 }
@@ -247,6 +255,7 @@ impl StitchCore {
             #[cfg(feature = "gpu")]
             stacked_gpu_recorder: None,
             constrained_look: true,
+            autocam_pitch_limit_rad: (None, None),
             frame_count: 0,
             session_start: None,
         })
@@ -626,6 +635,48 @@ impl StitchCore {
     pub fn toggle_constrained_look(&mut self) -> bool {
         self.constrained_look = !self.constrained_look;
         self.constrained_look
+    }
+
+    /// Set (or clear) the manual AI-tracking pitch safety margin.
+    ///
+    /// Applies ONLY to the director's own output - see
+    /// [`Self::clamp_autocam_pitch`], called from `resolve_current_pose`
+    /// (live) and `decide_pose_with_lookahead` (buffered export) right
+    /// after the panner produces a pose, before the coverage clamp ever
+    /// runs. [`Self::safe_clamp`]/manual GUI panning never call the
+    /// panner, so this margin never restricts hand-dragged framing - a
+    /// deliberate, simpler alternative to fully solving the coverage
+    /// clamp's own black-wedge corner leak (see
+    /// `project_coverage_clamp_corner_leak`; that automatic fix was
+    /// reverted after it broke normal panning).
+    ///
+    /// `limits` holds pre-resolved world-space pitch radians (the GUI
+    /// derives them from where the user drags on the stitched preview
+    /// via `reco_core::geometry::unproject_screen_to_world`); pass
+    /// `None` to clear the margin entirely.
+    pub fn set_autocam_pitch_limits(
+        &mut self,
+        limits: Option<crate::calibration::AutocamPitchLimits>,
+    ) {
+        self.autocam_pitch_limit_rad = match limits {
+            Some(l) => (l.top_rad, l.bottom_rad),
+            None => (None, None),
+        };
+    }
+
+    /// Clamp a director-produced pose's pitch to the manual AI-tracking
+    /// safety margin (see [`Self::set_autocam_pitch_limits`]). Yaw and
+    /// FOV pass through unchanged. See
+    /// [`crate::detect::panner::clamp_pitch_to_limits`] for the shared
+    /// clamp logic (also used by the live-frame dispatch path via
+    /// `DispatchContext::pitch_limit`) and its fail-open behavior.
+    pub(crate) fn clamp_autocam_pitch(&self, pose: ViewportPosition) -> ViewportPosition {
+        let pitch = crate::detect::panner::clamp_pitch_to_limits(
+            pose.pitch,
+            pose.fov_degrees,
+            self.autocam_pitch_limit_rad,
+        );
+        ViewportPosition { pitch, ..pose }
     }
 
     /// Full angular extent of the stitched panorama, derived from the

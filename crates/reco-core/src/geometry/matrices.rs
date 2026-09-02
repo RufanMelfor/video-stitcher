@@ -5,7 +5,7 @@
 //! planes - shared verbatim by the GPU pipeline and the CPU inverse maps
 //! so the two executors agree by construction.
 
-use nalgebra::{Matrix4, Point3, UnitQuaternion};
+use nalgebra::{Matrix4, Point3, UnitQuaternion, Vector3};
 
 /// Near clipping plane for the perspective projection.
 pub const NEAR_PLANE: f32 = 0.01;
@@ -43,6 +43,128 @@ pub fn view_matrix(
     let up = rotation * up_frame;
     let target = Point3::from(eye.coords + forward);
     nalgebra::Isometry3::look_at_rh(&eye, &target, &up).to_homogeneous()
+}
+
+/// A viewport's WORLD-space pose (camera basis, position, yaw/pitch/FOV,
+/// rig tilt/roll) bundled for [`unproject_screen_to_world`] and
+/// [`project_world_to_screen`] - keeps both under
+/// `clippy::too_many_arguments`, and lets a caller build it once and
+/// reuse it for several screen<->world conversions against the same
+/// live pose (e.g. hit-testing both bounds of an on-screen drag
+/// editor). Mirrors why `detect::panner::DispatchContext` exists.
+pub struct ScreenProjection<'a> {
+    /// The camera basis (`VirtualCamera::new(&position)` - callers
+    /// typically already have both).
+    pub cam: &'a super::virtual_camera::VirtualCamera,
+    /// World-space camera position (`scene.camera_position`).
+    pub position: [f32; 3],
+    /// Viewport center world-space yaw (radians).
+    pub world_yaw: f32,
+    /// Viewport center world-space pitch (radians).
+    pub world_pitch: f32,
+    /// Vertical field of view (degrees).
+    pub fov_v_deg: f32,
+    /// Output aspect ratio (width / height).
+    pub aspect: f32,
+    /// Rig tilt (radians) - see [`view_matrix`].
+    pub rig_tilt: f32,
+    /// Rig roll (radians) - see [`view_matrix`].
+    pub rig_roll: f32,
+}
+
+/// Reconstruct the world-space `(yaw, pitch)` a point on-screen
+/// ray-projects to, given the viewport's WORLD-space pose (yaw, pitch,
+/// vertical FOV) and aspect ratio it was rendered at.
+///
+/// `sx`/`sy` are normalized device coordinates in `[-1, 1]` - screen
+/// center is `(0, 0)`, right/up positive. Translate a `[0,1]`
+/// top-left-origin UI fraction `(u, v)` first: `sx = 2*u - 1`,
+/// `sy = 1 - 2*v` (screen `v` grows downward, world `sy` grows upward).
+///
+/// The inverse of the forward corner-projection this same combination
+/// (`view_matrix` + an FOV-derived ray + `VirtualCamera::direction_to_yaw_pitch`)
+/// already performs elsewhere - see
+/// `examples/verify_coverage_corner_gap.rs`'s own from-scratch
+/// reimplementation of this exact math, written before this function
+/// existed (and which needed two real fixes - a missing world-to-render
+/// conversion, then a yaw-sign mixup - before its numbers were
+/// trustworthy). Deliberately reuses the real [`view_matrix`] and
+/// transposes its rotation block (orthonormal, so transpose is inverse)
+/// rather than re-deriving the rotation independently, for the same
+/// by-construction-correct reason. For interactive "click/drag a point
+/// on the rendered preview to pick a world direction" UIs (e.g. the
+/// manual AI-tracking pitch-limit editor).
+pub fn unproject_screen_to_world(
+    viewport: &ScreenProjection<'_>,
+    sx: f32,
+    sy: f32,
+) -> super::types::ViewportPosition {
+    let half_vfov = (viewport.fov_v_deg * 0.5).to_radians();
+    let half_hfov = (viewport.aspect * half_vfov.tan()).atan();
+    let view_dir = Vector3::new(sx * half_hfov.tan(), sy * half_vfov.tan(), -1.0_f32).normalize();
+
+    let (render_yaw, render_pitch) = super::rig_correction::world_to_render_pose(
+        viewport.cam,
+        viewport.world_yaw,
+        viewport.world_pitch,
+        viewport.rig_tilt,
+        viewport.rig_roll,
+    );
+    let view = view_matrix(
+        &viewport.position,
+        render_yaw,
+        render_pitch,
+        viewport.rig_tilt,
+        viewport.rig_roll,
+    );
+    let r_t = view.fixed_view::<3, 3>(0, 0).into_owned().transpose();
+    let world_dir = (r_t * view_dir).normalize();
+    viewport.cam.direction_to_yaw_pitch(&world_dir)
+}
+
+/// Forward counterpart of [`unproject_screen_to_world`]: where on screen
+/// (normalized device coordinates, `[-1, 1]`, same convention) does a
+/// world-space `(target_yaw, target_pitch)` direction project to, given
+/// the viewport's own WORLD-space pose and FOV/aspect?
+///
+/// Returns `None` when the target is behind the camera (dot product
+/// with the forward axis is non-positive) - there is no finite screen
+/// position for a point behind the eye. For interactive UIs that need
+/// to draw a marker/line at a *known* world pitch/yaw over the live
+/// preview (the display half of a drag-to-set-a-world-direction
+/// editor; see [`unproject_screen_to_world`] for the input half).
+pub fn project_world_to_screen(
+    viewport: &ScreenProjection<'_>,
+    target_world_yaw: f32,
+    target_world_pitch: f32,
+) -> Option<(f32, f32)> {
+    let (render_yaw, render_pitch) = super::rig_correction::world_to_render_pose(
+        viewport.cam,
+        viewport.world_yaw,
+        viewport.world_pitch,
+        viewport.rig_tilt,
+        viewport.rig_roll,
+    );
+    let view = view_matrix(
+        &viewport.position,
+        render_yaw,
+        render_pitch,
+        viewport.rig_tilt,
+        viewport.rig_roll,
+    );
+    let r = view.fixed_view::<3, 3>(0, 0).into_owned();
+    let target_dir = viewport
+        .cam
+        .yaw_pitch_to_direction(target_world_yaw, target_world_pitch);
+    let view_dir = r * target_dir;
+    if view_dir.z >= 0.0 {
+        return None; // behind the camera (looks down -Z)
+    }
+    let half_vfov = (viewport.fov_v_deg * 0.5).to_radians();
+    let half_hfov = (viewport.aspect * half_vfov.tan()).atan();
+    let sx = (view_dir.x / -view_dir.z) / half_hfov.tan();
+    let sy = (view_dir.y / -view_dir.z) / half_vfov.tan();
+    Some((sx, sy))
 }
 
 /// Convert a nalgebra `Matrix4` to column-major `[[f32; 4]; 4]` for wgpu.
@@ -137,6 +259,139 @@ mod tests {
                     cam.z
                 );
             }
+        }
+    }
+
+    #[test]
+    fn unproject_screen_to_world_center_ray_round_trips() {
+        // sx=sy=0 is the viewport's own center ray - it must unproject
+        // back to exactly the world (yaw, pitch) the viewport is
+        // centered on, for any tilt/roll/FOV/aspect.
+        use super::super::virtual_camera::VirtualCamera;
+        let position = [0.24_f32, 0.0, 0.24];
+        let cam = VirtualCamera::new(&position);
+        for &(tilt, roll) in &[(0.0_f32, 0.0), (0.15, 0.0), (0.0, 0.12), (0.26, -0.1)] {
+            for &(yaw, pitch) in &[(0.0_f32, 0.0), (0.3, -0.2), (-0.5, 0.4), (0.0, 0.6)] {
+                for &fov in &[35.0_f32, 60.0, 90.0] {
+                    let viewport = ScreenProjection {
+                        cam: &cam,
+                        position,
+                        world_yaw: yaw,
+                        world_pitch: pitch,
+                        fov_v_deg: fov,
+                        aspect: 16.0 / 9.0,
+                        rig_tilt: tilt,
+                        rig_roll: roll,
+                    };
+                    let pos = unproject_screen_to_world(&viewport, 0.0, 0.0);
+                    assert!(
+                        (pos.yaw - yaw).abs() < 1e-4 && (pos.pitch - pitch).abs() < 1e-4,
+                        "center ray should round-trip at tilt={tilt} roll={roll} \
+                         yaw={yaw} pitch={pitch} fov={fov}: got ({}, {})",
+                        pos.yaw,
+                        pos.pitch
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn project_world_to_screen_round_trips_with_unproject() {
+        // Locks the forward and inverse transforms together: project a
+        // known world direction to screen, then unproject that screen
+        // point back - must recover the original (yaw, pitch). Also
+        // exercises the reverse order (unproject then re-project lands
+        // back on the same screen point) so neither direction can drift
+        // independently without this test catching it.
+        use super::super::virtual_camera::VirtualCamera;
+        let position = [0.24_f32, 0.0, 0.24];
+        let cam = VirtualCamera::new(&position);
+        for &(tilt, roll) in &[(0.0_f32, 0.0), (0.15, 0.0), (0.0, 0.12), (0.26, -0.1)] {
+            for &(vp_yaw, vp_pitch) in &[(0.0_f32, 0.0), (0.3, -0.2), (-0.4, 0.3)] {
+                let viewport = ScreenProjection {
+                    cam: &cam,
+                    position,
+                    world_yaw: vp_yaw,
+                    world_pitch: vp_pitch,
+                    fov_v_deg: 55.0,
+                    aspect: 16.0 / 9.0,
+                    rig_tilt: tilt,
+                    rig_roll: roll,
+                };
+                for &(target_yaw, target_pitch) in &[(0.05_f32, 0.05), (-0.2, 0.15), (0.1, -0.1)] {
+                    let Some((sx, sy)) =
+                        project_world_to_screen(&viewport, target_yaw, target_pitch)
+                    else {
+                        continue; // outside this sweep's FOV - not an error
+                    };
+                    let back = unproject_screen_to_world(&viewport, sx, sy);
+                    assert!(
+                        (back.yaw - target_yaw).abs() < 1e-4
+                            && (back.pitch - target_pitch).abs() < 1e-4,
+                        "project->unproject should round-trip at tilt={tilt} roll={roll} \
+                         viewport=({vp_yaw},{vp_pitch}) target=({target_yaw},{target_pitch}): \
+                         got ({}, {}) via screen ({sx},{sy})",
+                        back.yaw,
+                        back.pitch
+                    );
+
+                    let (sx2, sy2) = project_world_to_screen(&viewport, back.yaw, back.pitch)
+                        .expect(
+                            "re-projecting the round-tripped target must stay in front of the camera",
+                        );
+                    assert!(
+                        (sx2 - sx).abs() < 1e-3 && (sy2 - sy).abs() < 1e-3,
+                        "unproject->project should round-trip: ({sx},{sy}) vs ({sx2},{sy2})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unproject_screen_to_world_matches_hand_checkable_corners() {
+        // Mirrors examples/verify_coverage_corner_gap.rs's own SELFTEST:
+        // zero tilt/roll, centered at yaw=pitch=0, a 90deg *square* FOV
+        // (aspect=1). Expected values are NOT the naive +-45/+-45 (a
+        // corner ray's actual elevation off the horizontal plane is
+        // shallower than its nominal half-FOV once both axes are
+        // combined - the classic cube-corner angle atan(1/sqrt(2)) =
+        // 35.26deg, confirmed against the real crate output by that
+        // example script's own SELFTEST block before this function
+        // existed). Yaw is mirror-signed (sx=-1 -> yaw=+45, not -45) -
+        // this crate's intentional convention per `virtual_camera.rs`'s
+        // left-handed-triple note, also confirmed there.
+        use super::super::virtual_camera::VirtualCamera;
+        let position = [1.0_f32, 0.0, 1.0];
+        let cam = VirtualCamera::new(&position);
+        for &(sx, sy, expect_yaw, expect_pitch) in &[
+            (-1.0_f32, -1.0_f32, 45.0_f32, -35.26_f32),
+            (1.0, -1.0, -45.0, -35.26),
+            (-1.0, 1.0, 45.0, 35.26),
+            (1.0, 1.0, -45.0, 35.26),
+        ] {
+            let viewport = ScreenProjection {
+                cam: &cam,
+                position,
+                world_yaw: 0.0,
+                world_pitch: 0.0,
+                fov_v_deg: 90.0,
+                aspect: 1.0,
+                rig_tilt: 0.0,
+                rig_roll: 0.0,
+            };
+            let pos = unproject_screen_to_world(&viewport, sx, sy);
+            assert!(
+                (pos.yaw.to_degrees() - expect_yaw).abs() < 0.5,
+                "corner ({sx},{sy}): expected yaw~{expect_yaw}, got {}",
+                pos.yaw.to_degrees()
+            );
+            assert!(
+                (pos.pitch.to_degrees() - expect_pitch).abs() < 0.5,
+                "corner ({sx},{sy}): expected pitch~{expect_pitch}, got {}",
+                pos.pitch.to_degrees()
+            );
         }
     }
 }

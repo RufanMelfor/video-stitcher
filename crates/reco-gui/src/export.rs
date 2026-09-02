@@ -236,6 +236,16 @@ pub fn run_export(
         .as_ref()
         .map(|roi| roi.densified(&cal.lenses[0], &cal.lenses[1]));
 
+    // Manual AI-tracking pitch safety margin (see
+    // `reco_core::calibration::AutocamPitchLimits`'s doc comment) -
+    // applied to the director's output only, via
+    // `StitchCore::set_autocam_pitch_limits` inside the `on_session`
+    // hook below. Independent of `field_roi`/autocam-enabled gating
+    // above; harmless to set even with tracking off (unused until a
+    // panner is attached).
+    #[cfg(feature = "autocam")]
+    let autocam_pitch_limits = cal.autocam_pitch_limits;
+
     let post_status = |text: String| {
         let weak = app_weak.clone();
         let _ = slint::invoke_from_event_loop(move || {
@@ -710,7 +720,9 @@ pub fn run_export(
         }
         let ac = autocam.clone();
         let status_weak = app_weak.clone();
+        let pitch_limits = autocam_pitch_limits;
         job = job.on_session(move |session, source| {
+            session.set_autocam_pitch_limits(pitch_limits);
             let info = source.info();
             let mode = match ac.tracking_mode.as_str() {
                 "ball" => reco_autocam::TrackingMode::Ball,
