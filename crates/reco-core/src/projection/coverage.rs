@@ -432,11 +432,9 @@ impl CoverageBoundary {
     }
 
     /// One clamp pass with explicit half-viewport margins: pitch against
-    /// the global bounds, then yaw against the coverage range spanning
-    /// the viewport's full height at that pitch (not just its center -
-    /// see [`yaw_range_over_span`](Self::yaw_range_over_span)). Degenerate
-    /// ranges (viewport taller/wider than the coverage) fall back to the
-    /// range midpoint.
+    /// the global bounds, then yaw against the coverage range at that
+    /// pitch. Degenerate ranges (viewport taller/wider than the coverage)
+    /// fall back to the range midpoint.
     fn clamp_with_margins(
         &self,
         yaw: f32,
@@ -450,7 +448,7 @@ impl CoverageBoundary {
             (self.pitch_min + self.pitch_max) * 0.5
         };
 
-        let (yaw_lo, yaw_hi) = self.yaw_range_over_span(clamped_pitch, half_v);
+        let (yaw_lo, yaw_hi) = self.yaw_range_at(clamped_pitch);
         let clamped_yaw = if yaw_lo + half_h <= yaw_hi - half_h {
             yaw.clamp(yaw_lo + half_h, yaw_hi - half_h)
         } else {
@@ -461,43 +459,6 @@ impl CoverageBoundary {
             yaw: clamped_yaw,
             pitch: clamped_pitch,
         }
-    }
-
-    /// Yaw coverage range that stays valid across a viewport's full
-    /// vertical extent, not just its center pitch.
-    ///
-    /// Intersects `yaw_range_at`-equivalent coverage over every
-    /// precomputed slice within `[pitch - half_v, pitch + half_v]`
-    /// (the viewport's top-to-bottom span). Coverage tapers away from
-    /// center - typically at the seam between planes (see
-    /// [`max_fov_degrees`](Self::max_fov_degrees)'s doc comment) - so a
-    /// range computed only at the center pitch can be wider than what
-    /// the viewport's top or bottom edge actually sees, letting a
-    /// corner land in genuinely uncovered territory (black wedge) even
-    /// though the center pitch alone is safe. Falls back to the plain
-    /// center-pitch lookup when the table has degenerate bounds.
-    fn yaw_range_over_span(&self, pitch: f32, half_v: f32) -> (f32, f32) {
-        if self.n_slices == 0 || self.pitch_max <= self.pitch_min {
-            return self.yaw_range_at(pitch);
-        }
-        let pitch_range = self.pitch_max - self.pitch_min;
-        let idx_at = |p: f32| -> usize {
-            let t = (p - self.pitch_min) / pitch_range;
-            let idx = (t * (self.n_slices - 1) as f32).round() as isize;
-            idx.clamp(0, self.n_slices as isize - 1) as usize
-        };
-        let idx_lo = idx_at(pitch - half_v);
-        let idx_hi = idx_at(pitch + half_v);
-
-        let mut lo = f32::NEG_INFINITY;
-        let mut hi = f32::INFINITY;
-        for &(s_lo, s_hi) in &self.slices[idx_lo..=idx_hi] {
-            if s_lo <= s_hi {
-                lo = lo.max(s_lo);
-                hi = hi.min(s_hi);
-            }
-        }
-        if lo > hi { (0.0, 0.0) } else { (lo, hi) }
     }
 
     /// Maximum vertical FOV (degrees) that fits within the coverage.
