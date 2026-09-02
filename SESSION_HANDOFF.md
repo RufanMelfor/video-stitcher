@@ -1,18 +1,25 @@
-# Session handoff - 2026-09-02 (TGR_PC): coverage-clamp corner leak (mostly) fixed + video-not-centered fixed
+# Session handoff - 2026-09-02 (TGR_PC): video-not-centered fixed; coverage-clamp corner-leak fix attempted, broke panning, REVERTED
 
 ## REPO STATE AT END OF SESSION (2026-09-02)
 
 - Branch `main`, working tree clean except the pre-existing untracked
   `scripts/match-logger/Match Logger.html.txt` (not written this
-  session, left alone as always). Two commits made and pushed to
-  `github/main` today: `8eb872f5` (centering fix), `910886d5`
-  (coverage-clamp fix). `git fsck --full` clean before push.
+  session, left alone as always). Four commits made and pushed to
+  `github/main` today: `8eb872f5` (centering fix, KEPT), `910886d5`
+  (coverage-clamp fix, BROKEN), `c22200af` (docs, superseded by this
+  entry), `7ce4aec4` (revert of `910886d5`). `git fsck --full` clean
+  before every push.
+- reco-gui release+debug **rebuilt after the revert** (both
+  `--features tensorrt`) - the binaries on disk right now do NOT
+  contain the reverted coverage-clamp change, only the centering fix.
 - Picked up the 2026-08-30 coverage-clamp/corner-leak todo list (see
-  `project_coverage_clamp_corner_leak` memory for full detail).
+  `project_coverage_clamp_corner_leak` memory for full detail,
+  including the root-cause writeup on why the reverted fix broke
+  panning - read that before attempting #2 again).
 
 ## DONE THIS SESSION (2026-09-02)
 
-1. **Video doesn't start centered - FIXED.** `run_loop.rs`'s
+1. **Video doesn't start centered - FIXED, kept.** `run_loop.rs`'s
    `centered_smooth` window was lopsided at frame 0 (empty past,
    `post_smooth_half` already-migrated future poses from the panner
    warm-up), biasing the first rendered frames away from center. Fixed
@@ -20,38 +27,46 @@
    far (`ahead_n = past_poses.len().min(post_smooth_half)`); frame 0
    now renders unsmoothed/centered, growing symmetrically from there.
    Tail/EOF behavior unchanged (already-accepted asymmetry). Commit
-   `8eb872f5`.
+   `8eb872f5`. **Not yet user-confirmed in a real export.**
 
-2. **Black-wedge corner leak - MOSTLY FIXED.** `coverage.rs`'s
-   `clamp_with_margins` validated yaw only at the viewport's center
-   pitch, not its full height, letting a wide-FOV viewport's top/bottom
-   corner exit real coverage even when its center passed. Added
-   `yaw_range_over_span`, which intersects yaw coverage across the
-   viewport's actual vertical extent. Verified against the real
-   Berghem Sport calibration with the existing
-   `verify_coverage_corner_gap.rs` repro script: leaks dropped from
-   3.5% to 1.1% of 144,000 corner checks, worst-case overshoot from
-   137deg to 78deg (68% reduction). **Remaining gap** (documented, not
-   fixed): all leftover leaks trace to requests at the exact tip of the
-   panorama's yaw range, where no yaw position at all satisfies the
-   margin - the degenerate fallback re-centers yaw but never adjusts
-   pitch. Deferred by user request; low expected real-world impact
-   (AI camera rarely frames the literal outer edge). Commit `910886d5`.
+2. **Black-wedge corner leak - fix attempted, REVERTED after user
+   testing found a real regression.** `coverage.rs`'s `clamp_with_margins`
+   validated yaw only at the viewport's center pitch, not its full
+   height. Added `yaw_range_over_span` to intersect yaw coverage across
+   the viewport's actual vertical extent - looked good against the
+   `verify_coverage_corner_gap.rs` repro script alone (leaks 3.5% ->
+   1.1%, worst-case overshoot 137deg -> 78deg), so it was built and
+   shipped for testing. **User found it broke real GUI panning
+   (left/right locked, only up/down worked) and froze export framing
+   near center.** Root cause: `clamp_with_margins`'s axis-aligned-box
+   viewport approximation already over-estimates the true rendered
+   frustum footprint (an accepted pre-existing approximation); requiring
+   the WHOLE box to stay inside coverage (not just its center) is
+   correct against the box but far stricter than reality, collapsing
+   the valid yaw range for large stretches of completely normal camera
+   positions, not just genuine edge cases. Reverted (`7ce4aec4`), GUI
+   rebuilt from the reverted state. **#2 is open again** - full
+   root-cause writeup and "what not to try next" in the
+   `project_coverage_clamp_corner_leak` memory.
 
-Both fixes verified via `cargo build`/`clippy -D warnings`/`fmt --check`
-(reco-core) and `cargo test -p reco-core` (244/246 pass; 2 pre-existing
-CUDA-device test failures unrelated to this session's changes, no GPU
-context in that shell). **Neither fix has been confirmed yet in a real
-GUI/CLI export** - next session, ask whether real footage looked right
-(centered start, no visible black wedge at wide FOV near the seam).
+Both changes were build/clippy/fmt-clean and passed `cargo test -p
+reco-core` (244/246; 2 pre-existing CUDA-device failures unrelated, no
+GPU context in that shell) before shipping - the corner-leak regression
+only showed up under real interactive use, which the verify script
+doesn't test for (it checks for leaks, not over-restriction). Lesson:
+for `safe_clamp`-adjacent changes, real panning/export testing is
+required before considering a fix done, unit tests and the diagnostic
+script are not sufficient on their own.
 
 ## OPEN / WAITING ON THE USER
 
-- Real-footage confirmation of both fixes above.
+- Real-footage confirmation of fix #1 (centering) above.
+- Fix #2 (black wedge) is open again - do not resume with a smaller
+  version of the reverted box-intersection approach without addressing
+  why it over-constrained normal poses; see the memory's "lesson for
+  the next attempt".
 - The wide-shot auto-gamma A/B test from the 2026-09-01 entry below -
   still not done, still first-priority once picked back up.
-- The coverage-clamp fallback-at-the-panorama-tip gap (see above) -
-  only worth resuming if it's ever seen as a real visible bug.
 - Everything else from the 2026-09-01 entry's OPEN list still applies.
 
 ## Previous entry - 2026-09-01 (TGR_PC): color-match band sky-exclusion fix + dynamic auto-gamma; big backlog of prior-session work finally committed
