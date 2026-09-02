@@ -24,6 +24,65 @@ use super::tracker::{Tracker, WorldState};
 use crate::calibration::Calibration;
 use crate::geometry::ViewportPosition;
 
+/// `ViewportPosition::fov_degrees`'s own documented pipeline default -
+/// the fallback vertical FOV [`clamp_pitch_to_limits`] margins against
+/// when a pose doesn't carry one (should be rare in practice; every
+/// shipped panner sets a dynamic FOV every frame, but a pose is still
+/// safe to clamp without one).
+const DEFAULT_FOV_DEGREES: f32 = 75.0;
+
+/// Clamp `pitch` to a manual AI-tracking safety margin - `(top, bottom)`
+/// world-space pitch radians, either or both `None` for unrestricted -
+/// so that the viewport's rendered TOP/BOTTOM EDGE stays within the
+/// margin, not just its center pitch.
+///
+/// Margining by half the vertical FOV matters: the user sets this
+/// margin by dragging a line to exactly where a visible defect (e.g.
+/// the coverage-clamp's black-wedge corner leak - see
+/// `project_coverage_clamp_corner_leak`) starts on the *rendered
+/// preview*, i.e. they are marking an EDGE constraint. A wide dynamic
+/// FOV moment (e.g. a "frame everyone" wide shot) can push the top
+/// edge well above an unmargined center-pitch clamp even while the
+/// center itself stays comfortably under the line - clamping only the
+/// center silently let the edge (and the defect behind it) back into
+/// frame on exactly the shots most likely to reach that far to begin
+/// with. `fov_degrees` should be the pose's actual (already-dynamic)
+/// FOV; `None` falls back to [`DEFAULT_FOV_DEGREES`].
+///
+/// Shared by [`dispatch`] (the live-frame path) and
+/// `StitchCore::clamp_autocam_pitch` (the buffered/lookahead path,
+/// which calls the panner directly and never goes through
+/// [`DispatchContext`]) so the two can't drift out of sync.
+///
+/// Fails open toward a plain center clamp (not a full no-op) when the
+/// margined range is inverted - i.e. the FOV is briefly too wide for
+/// the margin to fully contain edge-to-edge. A misconfigured/degenerate
+/// margin (bottom above top even before margining) still returns
+/// `pitch` unchanged rather than pin the camera to a single pitch.
+pub(crate) fn clamp_pitch_to_limits(
+    pitch: f32,
+    fov_degrees: Option<f32>,
+    limits: (Option<f32>, Option<f32>),
+) -> f32 {
+    let half_vfov = (fov_degrees.unwrap_or(DEFAULT_FOV_DEGREES) * 0.5).to_radians();
+    match limits {
+        (Some(top), Some(bottom)) if bottom <= top => {
+            let (lo, hi) = (bottom + half_vfov, top - half_vfov);
+            if lo <= hi {
+                pitch.clamp(lo, hi)
+            } else {
+                // FOV too wide for the margin to fit edge-to-edge this
+                // frame - still clamp the center within the raw bounds
+                // rather than give up entirely.
+                pitch.clamp(bottom, top)
+            }
+        }
+        (Some(top), None) => pitch.min(top - half_vfov),
+        (None, Some(bottom)) => pitch.max(bottom + half_vfov),
+        _ => pitch,
+    }
+}
+
 /// Per-frame context a [`Panner`] receives alongside the world state.
 ///
 /// The context carries timing plus a borrow of the current
@@ -120,6 +179,11 @@ pub(crate) struct DispatchContext<'a> {
     /// Short label used only for the >1-ball warning so log output
     /// still says which caller ran the dispatch.
     pub caller: &'static str,
+    /// Manual AI-tracking pitch safety margin - see
+    /// [`clamp_pitch_to_limits`]. Unused by [`dispatch_detect_only`]
+    /// (no panner runs there to clamp), but carried on the shared
+    /// context struct so both call sites build it the same way.
+    pub pitch_limit: (Option<f32>, Option<f32>),
 }
 
 /// Run the shared tracker → panner dispatch one frame's worth.
@@ -221,7 +285,8 @@ pub(crate) fn dispatch(
     // buffered loop calls `StitchCore::decide_pose_with_lookahead`
     // with the real future window. This immediate-mode dispatch has
     // no future frames by construction.
-    let pose = panner.decide_with_lookahead(&world, &[], &pan_ctx);
+    let mut pose = panner.decide_with_lookahead(&world, &[], &pan_ctx);
+    pose.pitch = clamp_pitch_to_limits(pose.pitch, pose.fov_degrees, ctx.pitch_limit);
     *previous_panner_pose = pose;
 
     if let Some(sink) = event_sink.as_mut() {
@@ -247,6 +312,111 @@ mod tests {
     use crate::calibration::{Calibration, Framing, Lens, Topology};
     use crate::detect::tracker::{TrackState, TrackedEntity, WorldState};
     use crate::geometry::CameraId;
+
+    #[test]
+    fn clamp_pitch_to_limits_no_limit_passes_through() {
+        assert_eq!(clamp_pitch_to_limits(0.5, Some(50.0), (None, None)), 0.5);
+    }
+
+    #[test]
+    fn clamp_pitch_to_limits_clamps_both_bounds() {
+        // Some(0.0) FOV -> zero margin, isolating the base center-clamp
+        // behavior from the edge-margin behavior covered separately
+        // below.
+        assert_eq!(
+            clamp_pitch_to_limits(0.9, Some(0.0), (Some(0.4), Some(-0.4))),
+            0.4
+        );
+        assert_eq!(
+            clamp_pitch_to_limits(-0.9, Some(0.0), (Some(0.4), Some(-0.4))),
+            -0.4
+        );
+        assert_eq!(
+            clamp_pitch_to_limits(0.1, Some(0.0), (Some(0.4), Some(-0.4))),
+            0.1
+        );
+    }
+
+    #[test]
+    fn clamp_pitch_to_limits_one_sided_bounds() {
+        // Top-only: never exceed the ceiling, floor is unrestricted.
+        assert_eq!(
+            clamp_pitch_to_limits(0.9, Some(0.0), (Some(0.4), None)),
+            0.4
+        );
+        assert_eq!(
+            clamp_pitch_to_limits(-0.9, Some(0.0), (Some(0.4), None)),
+            -0.9
+        );
+        // Bottom-only: never go below the floor, ceiling is unrestricted.
+        assert_eq!(
+            clamp_pitch_to_limits(-0.9, Some(0.0), (None, Some(-0.4))),
+            -0.4
+        );
+        assert_eq!(
+            clamp_pitch_to_limits(0.9, Some(0.0), (None, Some(-0.4))),
+            0.9
+        );
+    }
+
+    #[test]
+    fn clamp_pitch_to_limits_fails_open_on_inverted_bounds() {
+        // A misconfigured margin (bottom above top, even before
+        // margining) must not pin the camera to a single pitch - pass
+        // the raw value through.
+        assert_eq!(
+            clamp_pitch_to_limits(0.5, Some(0.0), (Some(-0.4), Some(0.4))),
+            0.5
+        );
+    }
+
+    #[test]
+    fn clamp_pitch_to_limits_margins_by_half_the_fov_not_just_center() {
+        // The whole point: a wide dynamic FOV must not let the rendered
+        // TOP/BOTTOM EDGE cross the line the user dragged, even while
+        // the CENTER pitch alone would look comfortably clear of it.
+        // 20deg FOV -> 10deg (0.1745rad) half-vfov margin on each side -
+        // comfortably fits within the [-0.4, 0.4] band (2*half=0.349rad
+        // < 0.8rad band width), so this isolates the margining behavior
+        // from the too-wide-to-fit fallback covered separately below.
+        let limits = (Some(0.4_f32), Some(-0.4_f32));
+        let half_vfov = 10.0_f32.to_radians();
+
+        // A center pitch that's fine unmargined (0.39 < 0.4) still gets
+        // pulled in so the top edge (pitch + half_vfov) lands exactly
+        // at the limit, not past it.
+        let clamped = clamp_pitch_to_limits(0.39, Some(20.0), limits);
+        assert!(
+            (clamped + half_vfov - 0.4).abs() < 1e-5,
+            "top edge should land exactly at the limit, got center={clamped} \
+             (edge={})",
+            clamped + half_vfov
+        );
+
+        // Mirror for the bottom edge.
+        let clamped = clamp_pitch_to_limits(-0.39, Some(20.0), limits);
+        assert!(
+            (clamped - half_vfov - (-0.4)).abs() < 1e-5,
+            "bottom edge should land exactly at the limit, got center={clamped} \
+             (edge={})",
+            clamped - half_vfov
+        );
+
+        // A pitch already well clear of both margined edges passes
+        // through unchanged.
+        assert_eq!(clamp_pitch_to_limits(0.0, Some(20.0), limits), 0.0);
+    }
+
+    #[test]
+    fn clamp_pitch_to_limits_falls_back_to_center_clamp_when_fov_too_wide_for_margin() {
+        // A 170deg FOV's half-vfov (85deg) exceeds the whole [-0.4,0.4]
+        // margin band - there is no pitch whose full height fits inside
+        // it. Falling back to a plain center clamp (not collapsing to
+        // one pitch, and not failing open to unrestricted) is still a
+        // real, useful restriction for this rare case.
+        let clamped = clamp_pitch_to_limits(0.9, Some(170.0), (Some(0.4), Some(-0.4)));
+        assert_eq!(clamped, 0.4);
+    }
 
     /// A fixture calibration shaped like the v1 test JSON without
     /// needing disk access or real lens data.

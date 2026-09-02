@@ -2619,6 +2619,7 @@ mod tests {
             field_roi: None,
             goal_geometry: None,
             autocam_defaults: None,
+            autocam_pitch_limits: None,
             scoreboard: None,
         }
     }
@@ -2752,6 +2753,7 @@ mod tests {
             field_roi: None,
             goal_geometry: None,
             autocam_defaults: None,
+            autocam_pitch_limits: None,
             scoreboard: None,
         };
         let viewport = ViewportConfig {

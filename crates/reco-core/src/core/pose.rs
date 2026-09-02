@@ -51,6 +51,10 @@ impl super::StitchCore {
             .map(|s| s.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
         let _ = fresh_detection; // reserved for future freshness-aware panners
+        // The manual AI-tracking pitch limit is already applied inside
+        // `dispatch_pose` (it threads `autocam_pitch_limit_rad` through
+        // `DispatchContext`), so `raw` here needs no separate clamp -
+        // see `StitchCore::set_autocam_pitch_limits`'s doc comment.
         let raw = self
             .dispatch_pose(self.frame_count, timestamp_ms, "StitchCore")
             .pose
@@ -115,6 +119,7 @@ impl super::StitchCore {
                 frame_index: index,
                 timestamp_ms,
                 caller,
+                pitch_limit: self.autocam_pitch_limit_rad,
             },
         );
         DispatchStats {
@@ -138,6 +143,7 @@ impl super::StitchCore {
                 frame_index: index,
                 timestamp_ms,
                 caller: "lookahead_produce",
+                pitch_limit: self.autocam_pitch_limit_rad,
             },
         )
     }
@@ -163,7 +169,14 @@ impl super::StitchCore {
             previous_position: self.previous_panner_pose,
             calibration: self.executor.calibration(),
         };
+        // Unlike `dispatch_pose` (the live path), this doesn't go
+        // through `DispatchContext`/`crate::detect::panner::dispatch` -
+        // the buffered loop calls the panner directly so it can pass
+        // the real future window. Apply the same manual AI-tracking
+        // pitch limit here explicitly (via the shared
+        // `clamp_autocam_pitch`) so both paths stay in lockstep.
         let pose = panner.decide_with_lookahead(world, futures, &ctx);
+        let pose = self.clamp_autocam_pitch(pose);
         self.previous_panner_pose = pose;
         pose
     }
