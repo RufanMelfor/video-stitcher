@@ -314,6 +314,76 @@ fn main() {
     }
     println!();
 
+    println!("Leak concentration:");
+    println!(
+        "  fov: {:?}",
+        FOV_SWEEP_DEG
+            .iter()
+            .map(|&f| (f, leaks.iter().filter(|l| l.fov == f).count()))
+            .collect::<Vec<_>>()
+    );
+    println!(
+        "  corner: bl={} br={} tl={} tr={}",
+        leaks.iter().filter(|l| l.corner == "bottom-left").count(),
+        leaks.iter().filter(|l| l.corner == "bottom-right").count(),
+        leaks.iter().filter(|l| l.corner == "top-left").count(),
+        leaks.iter().filter(|l| l.corner == "top-right").count(),
+    );
+    let yaw_edge = yaw_hi.to_degrees() - 10.0; // within 10deg of the global yaw extreme
+    let yaw_edge_lo = yaw_lo.to_degrees() + 10.0;
+    let near_edge = leaks
+        .iter()
+        .filter(|l| l.yaw.to_degrees() >= yaw_edge || l.yaw.to_degrees() <= yaw_edge_lo)
+        .count();
+    println!(
+        "  within 10deg of global yaw extreme [{:.1},{:.1}]: {near_edge} / {}",
+        yaw_lo.to_degrees(),
+        yaw_hi.to_degrees(),
+        leaks.len()
+    );
+    let unique_poses: std::collections::HashSet<(i32, i32, i32)> = leaks
+        .iter()
+        .map(|l| {
+            (
+                (l.render_yaw_deg * 10.0).round() as i32,
+                (l.render_pitch_deg * 10.0).round() as i32,
+                l.fov as i32,
+            )
+        })
+        .collect();
+    println!(
+        "  unique underlying (render_yaw,render_pitch,fov) clamp outputs leaking: {}",
+        unique_poses.len()
+    );
+    println!();
+
+    println!("One representative leak per unique underlying clamp output:");
+    let mut seen: std::collections::HashSet<(i32, i32, i32)> = std::collections::HashSet::new();
+    for l in &leaks {
+        let key = (
+            (l.render_yaw_deg * 10.0).round() as i32,
+            (l.render_pitch_deg * 10.0).round() as i32,
+            l.fov as i32,
+        );
+        if seen.insert(key) {
+            println!(
+                "  world=({:.2},{:.2}) fov={:.0} -> render=({:.2},{:.2}) corner={} c=({:.2},{:.2}) valid=[{:.2},{:.2}] overshoot={:.2}deg",
+                l.yaw.to_degrees(),
+                l.pitch.to_degrees(),
+                l.fov,
+                l.render_yaw_deg,
+                l.render_pitch_deg,
+                l.corner,
+                l.corner_yaw_deg,
+                l.corner_pitch_deg,
+                l.range_lo_deg,
+                l.range_hi_deg,
+                l.overshoot_deg
+            );
+        }
+    }
+    println!();
+
     println!("Worst 20 leaks (by overshoot):");
     println!(
         "{:>8} {:>8} {:>6} {:>10} {:>10} {:>12} {:>10} {:>10} {:>18} {:>10}",
