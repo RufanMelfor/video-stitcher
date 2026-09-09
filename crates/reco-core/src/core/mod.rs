@@ -520,6 +520,19 @@ impl StitchCore {
         self.executor.set_show_seam_line(show);
     }
 
+    /// Set the universal color grade (brightness/saturation/gamma)
+    /// applied to the whole composited frame. `(1.0, 1.0, 1.0)` disables
+    /// grading entirely (identity - the pass is skipped, no cost).
+    pub fn set_color_grade(&mut self, brightness: f32, saturation: f32, gamma: f32) {
+        self.executor.set_color_grade(brightness, saturation, gamma);
+    }
+
+    /// Set unsharp-mask sharpening strength and radius applied to the
+    /// final composited frame. `amount` of `0.0` disables sharpening.
+    pub fn set_sharpen_params(&mut self, amount: f32, radius: f32) {
+        self.executor.set_sharpen_params(amount, radius);
+    }
+
     /// Set the lens-correction strength on every lens (`0` = pinhole,
     /// `1` = full KB4).
     pub fn set_lens_correction_amount(&mut self, amount: f32) {

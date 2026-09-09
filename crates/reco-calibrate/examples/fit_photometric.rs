@@ -677,6 +677,11 @@ fn vec5_to_layout(p: &[f64], x_rx: f64, z_rz: f64) -> (Topology, Framing) {
         top_tilt_z: 0.0,
         ground_tilt_band_width: DEFAULT_TILT_BAND_WIDTH,
         top_tilt_band_width: DEFAULT_TILT_BAND_WIDTH,
+        color_grade_brightness: 1.0,
+        color_grade_saturation: 1.0,
+        color_grade_gamma: 1.0,
+        sharpen_amount: 0.0,
+        sharpen_radius: 1.0,
     };
     let framing = Framing {
         axis_offset: p[0],

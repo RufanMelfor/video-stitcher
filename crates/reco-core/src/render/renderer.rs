@@ -2613,6 +2613,11 @@ mod tests {
                 top_tilt_z: 0.0,
                 ground_tilt_band_width: 0.16,
                 top_tilt_band_width: 0.16,
+                color_grade_brightness: 1.0,
+                color_grade_saturation: 1.0,
+                color_grade_gamma: 1.0,
+                sharpen_amount: 0.0,
+                sharpen_radius: 1.0,
             },
             framing: crate::calibration::Framing {
                 axis_offset: 0.24,
@@ -2747,6 +2752,11 @@ mod tests {
                 top_tilt_z: 0.0,
                 ground_tilt_band_width: 0.16,
                 top_tilt_band_width: 0.16,
+                color_grade_brightness: 1.0,
+                color_grade_saturation: 1.0,
+                color_grade_gamma: 1.0,
+                sharpen_amount: 0.0,
+                sharpen_radius: 1.0,
             },
             framing: crate::calibration::Framing {
                 axis_offset: 0.18876110017299652,
