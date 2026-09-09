@@ -702,4 +702,5 @@ mod tests {
 pub mod color_grade;
 pub mod nv12_converter;
 pub mod rgba_readback;
+pub mod sharpen;
 pub mod yuv_stack_packer;
