@@ -132,7 +132,11 @@ impl PreviewBridge {
 
         // Allocate a fresh texture on the shared device. RENDER_ATTACHMENT
         // lets reco-core write into it; TEXTURE_BINDING lets Slint sample
-        // it in the compositor.
+        // it in the compositor. STORAGE_BINDING | COPY_SRC | COPY_DST are
+        // needed by the color grade/sharpen compute passes (Color
+        // Mapping panel) - see `StitchPipeline::render_to_view`'s doc
+        // comment - so those sliders update this live preview, not just
+        // the export path.
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("reco-gui preview frame"),
             size: wgpu::Extent3d {
@@ -144,7 +148,11 @@ impl PreviewBridge {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: self.texture_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
 
@@ -152,7 +160,8 @@ impl PreviewBridge {
 
         // Render into Slint's own device — commands submit on the shared
         // queue, no copies, no synchronization round-trip.
-        self.engine.render_to_view(left, right, pose, &view)?;
+        self.engine
+            .render_to_view(left, right, pose, &view, &texture)?;
 
         // Hand the texture to Slint. ownership transfers; Slint releases
         // it when the Image is no longer referenced by any UI property.

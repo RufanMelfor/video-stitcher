@@ -1108,6 +1108,25 @@ export component RecoApp inherits Window {
     // Live readout of the actual measured correction, refreshed every
     // rendered frame - see the Color Mapping section's diagnostic Text.
     in-out property <string> color-match-status: "";
+    // Universal color grade (brightness/saturation/gamma), applied to the
+    // whole composited frame - see reco-core's
+    // Topology::color_grade_brightness/_saturation/_gamma and
+    // StitchPipeline::set_color_grade. Saved in the calibration document,
+    // same as color-gamma-left/-right above. "Vivid" toggle sets a tuned
+    // preset (1.0, 1.15, 1.05); the three sliders let it be fine-tuned
+    // further, or driven standalone with the toggle off. (1.0, 1.0, 1.0)
+    // is identity - the GPU compute pass is skipped, no cost.
+    in-out property <bool> vivid-enabled: false;
+    in-out property <float> color-grade-brightness: 1.0;
+    in-out property <float> color-grade-saturation: 1.0;
+    in-out property <float> color-grade-gamma: 1.0;
+    // Unsharp-mask sharpening applied to the final composited output,
+    // compensating for detail loss when the AI panner zooms into a crop
+    // of the panorama - see reco-core's Topology::sharpen_amount/_radius
+    // and StitchPipeline::set_sharpen_params. Also calibration-saved.
+    // 0.0 amount (default) disables it, no GPU cost. GPU-only.
+    in-out property <float> sharpen-amount: 0.0;
+    in-out property <float> sharpen-radius: 1.0;
     in-out property <float> rig-tilt: 0.0; // degrees
     in-out property <float> rig-roll: 0.0; // degrees
     in-out property <int> sync-offset: 0;  // frames
@@ -1782,6 +1801,8 @@ export component RecoApp inherits Window {
     callback toggled-scoreboard-derive-highlights(bool);
     callback changed-highlights-margins();
     callback changed-pause-overlay();
+    callback changed-color-grade-settings();
+    callback changed-sharpen-settings();
 
     // File management: per-side segment lists and removal.
     in-out property <[string]> left-segments: [];
@@ -4073,6 +4094,91 @@ export component RecoApp inherits Window {
                             FlatButton {
                                 text: "Reset";
                                 clicked => { root.reset-color-match(); }
+                            }
+                        }
+
+                        CalGroupBox {
+                            title: "VIVID COLOR GRADE";
+
+                            Tip {
+                                tip: "Universal color grade applied to the whole composited output - perks up grey/dull footage. Sets brightness/saturation/gamma to a tuned preset; use the sliders below to fine-tune further, or leave this off and drive the sliders directly. 1.0/1.0/1.0 is identity - off by default, no GPU cost. Updates live and is saved in the calibration.";
+                                CheckBox {
+                                    text: "Vivid";
+                                    checked <=> root.vivid-enabled;
+                                    toggled => {
+                                        if (root.vivid-enabled) {
+                                            root.color-grade-brightness = 1.0;
+                                            root.color-grade-saturation = 1.15;
+                                            root.color-grade-gamma = 1.05;
+                                        } else {
+                                            root.color-grade-brightness = 1.0;
+                                            root.color-grade-saturation = 1.0;
+                                            root.color-grade-gamma = 1.0;
+                                        }
+                                        root.changed-color-grade-settings();
+                                    }
+                                }
+                            }
+
+                            LabeledSlider {
+                                label: "Brightness";
+                                tip: "Color grade brightness multiplier. 1.0 is identity - above brightens, below darkens. Updates live.";
+                                minimum: 0.5;
+                                maximum: 1.5;
+                                value <=> root.color-grade-brightness;
+                                decimals: 2;
+                                changed(v) => { root.changed-color-grade-settings(); }
+                            }
+
+                            LabeledSlider {
+                                label: "Saturation";
+                                tip: "Color grade saturation multiplier. 1.0 is identity - above makes colors more vivid, below desaturates toward greyscale. Updates live.";
+                                minimum: 0.5;
+                                maximum: 1.5;
+                                value <=> root.color-grade-saturation;
+                                decimals: 2;
+                                changed(v) => { root.changed-color-grade-settings(); }
+                            }
+
+                            LabeledSlider {
+                                label: "Gamma";
+                                tip: "Color grade gamma. 1.0 is identity - above lifts mid-tones, below lowers them. Updates live.";
+                                minimum: 0.5;
+                                maximum: 1.5;
+                                value <=> root.color-grade-gamma;
+                                decimals: 2;
+                                changed(v) => { root.changed-color-grade-settings(); }
+                            }
+                        }
+
+                        CalGroupBox {
+                            title: "SHARPENING";
+
+                            LabeledSlider {
+                                label: "Sharpening";
+                                tip: "Unsharp-mask sharpening applied to the final output, compensating for detail loss when the AI panner zooms into a crop of the panorama. 0.0 (default) disables it - no GPU cost. Above ~1.5 starts showing visible haloing around high-contrast edges. GPU-only. Updates live and is saved in the calibration.";
+                                minimum: 0.0;
+                                maximum: 2.0;
+                                value <=> root.sharpen-amount;
+                                decimals: 2;
+                                changed(v) => { root.changed-sharpen-settings(); }
+                            }
+                            if root.sharpen-amount > 0: Tip {
+                                tip: "Blur sample radius in pixels. Larger sharpens coarser detail (useful when heavily zoomed in); smaller targets fine detail.";
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text { text: "Radius"; color: #888; font-size: 11px; vertical-alignment: center; }
+                                    NumEdit {
+                                        text: root.sharpen-radius;
+                                        width: 56px;
+                                        edited(v) => {
+                                            root.sharpen-radius = Math.max(v.to-float(), 0.1);
+                                            root.changed-sharpen-settings();
+                                        }
+                                        escaped => { self.text = root.sharpen-radius; }
+                                    }
+                                    Text { text: "px"; color: #888; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
+                                }
                             }
                         }
                     }
