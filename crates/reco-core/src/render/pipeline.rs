@@ -28,6 +28,7 @@ use super::scene::SceneGeometry;
 use super::viewport::{ResolvedViewport, ViewportConfig};
 use crate::calibration::Calibration;
 use crate::geometry::ViewportPosition;
+use crate::gpu::color_grade::{ColorGradeParams, ColorGradePass};
 use crate::gpu::{GpuContext, GpuError};
 
 use thiserror::Error;
@@ -118,6 +119,22 @@ pub struct StitchPipeline {
     /// re-uploads a texture whenever its pixels change, while this one
     /// uploads once and then only rewrites 32 bytes per frame.
     transition: Option<RgbaOverlayCompositor>,
+    /// Universal color grade (brightness/saturation/gamma), applied
+    /// right after the stitch render, before overlay/transition
+    /// compositing - so a "Vivid" boost affects the whole frame the
+    /// same way an overlay/scoreboard on top of it would not want
+    /// touched. Lazily created on first non-identity `set_color_grade`
+    /// call, like `sharpen` and `band_gather` - no consumer that leaves
+    /// it off pays for a shader compile or scratch texture.
+    color_grade: Option<ColorGradePass>,
+    /// Current color grade parameters, kept even before `color_grade`
+    /// exists so a call to [`Self::set_color_grade`] before the pass is
+    /// created isn't lost (mirrors `overlay_placement`'s pattern).
+    color_grade_params: ColorGradeParams,
+    /// Scratch texture the color grade compute pass writes into (a
+    /// compute pass can't read and write the same texture). Same
+    /// size/format as `render_target`; rebuilt in [`Self::resize`].
+    color_grade_scratch: std::sync::Mutex<Option<wgpu::Texture>>,
 }
 
 /// Pre-built bind groups for GPU-resident zero-copy sources.
@@ -206,6 +223,9 @@ impl StitchPipeline {
             overlay: None,
             overlay_placement: super::overlay::OverlayPlacement::default(),
             transition: None,
+            color_grade: None,
+            color_grade_params: ColorGradeParams::default(),
+            color_grade_scratch: std::sync::Mutex::new(None),
         })
     }
 
@@ -290,6 +310,10 @@ impl StitchPipeline {
         if let Some(transition) = self.transition.as_mut() {
             transition.resize(&gpu, (width, height));
         }
+        // Scratch texture is rebuilt lazily (size-checked) on next
+        // color grade encode rather than eagerly here - avoids
+        // allocating it on every resize when grading is off.
+        *self.color_grade_scratch.lock().unwrap() = None;
         Some((width, height))
     }
 
@@ -395,6 +419,12 @@ impl StitchPipeline {
         &self,
         stitch_commands: wgpu::CommandBuffer,
     ) -> wgpu::CommandBuffer {
+        // Color grade runs first (on the raw stitched frame, before any
+        // overlay/transition compositing) - a "Vivid" boost is meant for
+        // the video content, not a scoreboard or PAUZE card drawn on top
+        // of it. See `Self::color_grade_target_commands`.
+        let stitch_commands = self.color_grade_target_commands(stitch_commands);
+
         // Transition first so the content overlay draws on top of it -
         // see the `transition` field's doc comment.
         let passes: Vec<&RgbaOverlayCompositor> = [self.transition.as_ref(), self.overlay.as_ref()]
@@ -422,6 +452,60 @@ impl StitchPipeline {
         last.encode(&self.gpu, &target_view)
     }
 
+    /// Encode the color grade pass (if enabled) on the raw stitched
+    /// frame, before overlay/transition compositing, writing the result
+    /// back into `render_target` so every downstream consumer keeps
+    /// reading a single texture without knowing color grade exists.
+    /// No-op (returns `commands` unchanged) when grading is off.
+    ///
+    /// Compute passes can't read and write the same texture, so this
+    /// runs the pass into a same-sized scratch texture, then blits the
+    /// result back - both GPU-side, no CPU round trip. Mirrors
+    /// `Self::sharpen_target_commands`'s shape (see the sharpen pass).
+    fn color_grade_target_commands(&self, commands: wgpu::CommandBuffer) -> wgpu::CommandBuffer {
+        let Some(pass) = self.color_grade.as_ref() else {
+            return commands;
+        };
+        if pass.is_identity() {
+            return commands;
+        }
+
+        self.gpu.queue().submit(std::iter::once(commands));
+
+        let target = self.renderer.render_target();
+        let size = target.size();
+        let mut scratch_guard = self.color_grade_scratch.lock().unwrap();
+        let make_scratch = || {
+            self.gpu.device().create_texture(&wgpu::TextureDescriptor {
+                label: Some("color_grade_scratch"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let scratch = scratch_guard.get_or_insert_with(make_scratch);
+        if scratch.size() != size {
+            *scratch = make_scratch();
+        }
+
+        let mut encoder =
+            self.gpu
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("color_grade_pass"),
+                });
+        pass.encode(&self.gpu, &mut encoder, target, scratch);
+        encoder.copy_texture_to_texture(scratch.as_image_copy(), target.as_image_copy(), size);
+        encoder.finish()
+    }
+
     fn composite_view_if_enabled(&self, target_view: &wgpu::TextureView) {
         for pass in [self.transition.as_ref(), self.overlay.as_ref()]
             .into_iter()
@@ -444,6 +528,30 @@ impl StitchPipeline {
     /// Get the current field of view in degrees.
     pub fn fov(&self) -> f32 {
         self.viewport.fov_degrees
+    }
+
+    /// Set universal color grading (brightness/saturation/gamma) applied
+    /// to the whole composited frame - used for the "Vivid" preset that
+    /// perks up grey/dull footage. `(1.0, 1.0, 1.0)` disables grading
+    /// entirely (identity - the pass is skipped and costs nothing). GPU
+    /// resources are created lazily on the first non-identity call;
+    /// subsequent calls just update the uniform buffer.
+    pub fn set_color_grade(&mut self, brightness: f32, saturation: f32, gamma: f32) {
+        self.color_grade_params = ColorGradeParams::new(brightness, saturation, gamma);
+        if let Some(pass) = self.color_grade.as_mut() {
+            pass.update_params(&self.gpu, &self.color_grade_params);
+        } else if !self.color_grade_params.is_identity() {
+            self.color_grade = Some(ColorGradePass::new(&self.gpu, &self.color_grade_params));
+        }
+    }
+
+    /// Current color grade parameters, `(1.0, 1.0, 1.0)` if grading is off.
+    pub fn color_grade(&self) -> (f32, f32, f32) {
+        (
+            self.color_grade_params.brightness,
+            self.color_grade_params.saturation,
+            self.color_grade_params.gamma,
+        )
     }
 
     /// Set the lens distortion correction amount for every lens (per-frame
