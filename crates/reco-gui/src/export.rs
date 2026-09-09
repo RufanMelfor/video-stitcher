@@ -149,6 +149,9 @@ pub struct AutocamUiConfig {
     /// Cluster-position smoothing rate (EMA alpha per frame). See
     /// `reco_autocam::panners::FieldPannerConfig::cluster_alpha`.
     pub cluster_alpha: f32,
+    /// Lookahead reactivity multiplier (>= 1.0). See
+    /// `reco_autocam::panners::FieldPannerConfig::lookahead_reactivity`.
+    pub lookahead_reactivity: f32,
 }
 
 /// Telemetry sink that forwards snapshots to the Slint UI thread.
@@ -715,6 +718,7 @@ pub fn run_export(
                     fov_alpha: autocam.fov_alpha,
                     cluster_alpha: autocam.cluster_alpha,
                     confidence_threshold: autocam.confidence_threshold,
+                    lookahead_reactivity: autocam.lookahead_reactivity,
                 },
             );
         }

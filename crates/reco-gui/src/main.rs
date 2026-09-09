@@ -1652,6 +1652,45 @@ impl AppState {
         }
     }
 
+    /// Universal color grade (brightness/saturation/gamma), applied to
+    /// the whole composited frame - the Color Mapping panel's "Vivid"
+    /// toggle and its three sliders (see
+    /// `reco_core::calibration::Topology::color_grade_brightness`).
+    /// Same shape as [`Self::set_color_gamma`] - live pipeline update
+    /// plus the source-of-truth calibration copy.
+    fn set_color_grade(&mut self, brightness: f32, saturation: f32, gamma: f32) {
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.color_grade_brightness = brightness;
+            cal.topology.color_grade_saturation = saturation;
+            cal.topology.color_grade_gamma = gamma;
+        }
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge
+                .engine_mut()
+                .pipeline_mut()
+                .set_color_grade(brightness, saturation, gamma);
+            self.preview_dirty = true;
+        }
+    }
+
+    /// Unsharp-mask sharpening, applied to the final composited output -
+    /// the Color Mapping panel's "Sharpening" slider (see
+    /// `reco_core::calibration::Topology::sharpen_amount`). Same shape
+    /// as [`Self::set_color_gamma`].
+    fn set_sharpen_params(&mut self, amount: f32, radius: f32) {
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.sharpen_amount = amount;
+            cal.topology.sharpen_radius = radius;
+        }
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge
+                .engine_mut()
+                .pipeline_mut()
+                .set_sharpen_params(amount, radius);
+            self.preview_dirty = true;
+        }
+    }
+
     /// Restore all Auto Color Match tuning knobs to their engineering
     /// defaults - not the values loaded from the current calibration file,
     /// which is what `reset_calibration` does for the layout sliders.
@@ -1675,12 +1714,21 @@ impl AppState {
             pipeline.set_color_match_max_chroma_offset(DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET);
             pipeline.set_color_gamma(DEFAULT_COLOR_GAMMA, DEFAULT_COLOR_GAMMA);
             pipeline.set_color_match_auto_gamma(DEFAULT_COLOR_MATCH_AUTO_GAMMA);
+            // Vivid color grade / sharpening reset to identity/off too -
+            // both live in this same Color Mapping panel.
+            pipeline.set_color_grade(1.0, 1.0, 1.0);
+            pipeline.set_sharpen_params(0.0, 1.0);
             self.preview_dirty = true;
         }
         if let Some(cal) = self.calibration.as_mut() {
             cal.topology.color_gamma_left = DEFAULT_COLOR_GAMMA;
             cal.topology.color_gamma_right = DEFAULT_COLOR_GAMMA;
             cal.topology.color_match_auto_gamma = DEFAULT_COLOR_MATCH_AUTO_GAMMA;
+            cal.topology.color_grade_brightness = 1.0;
+            cal.topology.color_grade_saturation = 1.0;
+            cal.topology.color_grade_gamma = 1.0;
+            cal.topology.sharpen_amount = 0.0;
+            cal.topology.sharpen_radius = 1.0;
         }
     }
 
@@ -2986,6 +3034,12 @@ fn snapshot_autocam_defaults(app: &RecoApp) -> reco_core::calibration::AutocamDe
         fov_alpha: app.get_export_fov_alpha(),
         cluster_alpha: app.get_export_cluster_alpha(),
         confidence_threshold: app.get_export_confidence_threshold(),
+        // No GUI slider yet for this one (out of scope here) - falls
+        // back to FieldPannerConfig's own default so the events JSONL
+        // header/calibration snapshot at least records a real value
+        // instead of an arbitrary placeholder.
+        lookahead_reactivity: reco_autocam::panners::FieldPannerConfig::default()
+            .lookahead_reactivity,
     }
 }
 
@@ -5012,6 +5066,36 @@ fn main() -> anyhow::Result<()> {
         );
     });
 
+    // The Color Mapping panel's Vivid checkbox or one of its three
+    // sliders changed - live preview update + calibration dirty, same
+    // as the Manual Gamma sliders' `on_changed_color_gamma` handler.
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_color_grade_settings(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        state_ref.borrow_mut().set_color_grade(
+            app.get_color_grade_brightness(),
+            app.get_color_grade_saturation(),
+            app.get_color_grade_gamma(),
+        );
+        app.set_cal_dirty(true);
+    });
+
+    // The Color Mapping panel's Sharpening slider or its radius changed.
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_sharpen_settings(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        state_ref
+            .borrow_mut()
+            .set_sharpen_params(app.get_sharpen_amount(), app.get_sharpen_radius());
+        app.set_cal_dirty(true);
+    });
+
     // One of the four auto-cut margin fields was edited. Re-derives in
     // place so the timeline shows the new boundaries immediately - the
     // whole point of the fields is judging the result against the
@@ -6180,6 +6264,12 @@ fn main() -> anyhow::Result<()> {
             app.set_color_gamma_left(DEFAULT_COLOR_GAMMA);
             app.set_color_gamma_right(DEFAULT_COLOR_GAMMA);
             app.set_color_match_auto_gamma(DEFAULT_COLOR_MATCH_AUTO_GAMMA);
+            app.set_vivid_enabled(false);
+            app.set_color_grade_brightness(1.0);
+            app.set_color_grade_saturation(1.0);
+            app.set_color_grade_gamma(1.0);
+            app.set_sharpen_amount(0.0);
+            app.set_sharpen_radius(1.0);
             app.set_cal_dirty(true);
         }
     });
@@ -7218,6 +7308,10 @@ fn main() -> anyhow::Result<()> {
             fov_default: app.get_export_fov_default(),
             fov_alpha: app.get_export_fov_alpha(),
             cluster_alpha: app.get_export_cluster_alpha(),
+            // No GUI slider yet for this one (out of scope here) - see
+            // `snapshot_autocam_defaults`'s matching comment.
+            lookahead_reactivity: reco_autocam::panners::FieldPannerConfig::default()
+                .lookahead_reactivity,
         };
         let replay_enabled = app.get_export_replay_enabled();
         let events_enabled = app.get_export_events_enabled();
@@ -8258,6 +8352,18 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 .bridge
                 .as_ref()
                 .map(|b| b.engine().calibration().topology.color_match_auto_gamma);
+            let color_grade = s.bridge.as_ref().map(|b| {
+                let t = &b.engine().calibration().topology;
+                (
+                    t.color_grade_brightness,
+                    t.color_grade_saturation,
+                    t.color_grade_gamma,
+                )
+            });
+            let sharpen_params = s.bridge.as_ref().map(|b| {
+                let t = &b.engine().calibration().topology;
+                (t.sharpen_amount, t.sharpen_radius)
+            });
             // Lens-correction strength came in via the loaded calibration and
             // the renderer was seeded with it at bridge creation; mirror it
             // into AppState so a later save re-persists the right value.
@@ -8458,6 +8564,20 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 }
                 if let Some(v) = color_match_auto_gamma {
                     app.set_color_match_auto_gamma(v);
+                }
+                if let Some((brightness, saturation, gamma)) = color_grade {
+                    app.set_color_grade_brightness(brightness);
+                    app.set_color_grade_saturation(saturation);
+                    app.set_color_grade_gamma(gamma);
+                    // "Vivid" reads as on when the stored values aren't
+                    // identity, regardless of whether they match the
+                    // exact preset numbers - lets a manually-tuned grade
+                    // still show the toggle on and the sliders expanded.
+                    app.set_vivid_enabled((brightness, saturation, gamma) != (1.0, 1.0, 1.0));
+                }
+                if let Some((amount, radius)) = sharpen_params {
+                    app.set_sharpen_amount(amount);
+                    app.set_sharpen_radius(radius);
                 }
                 if let Some(lc) = lens_correction {
                     app.set_lens_correction_amount(lc);
@@ -8717,6 +8837,18 @@ fn handle_calibration_result(
                         .bridge
                         .as_ref()
                         .map(|b| b.engine().calibration().topology.color_match_auto_gamma);
+                    let color_grade = state.bridge.as_ref().map(|b| {
+                        let t = &b.engine().calibration().topology;
+                        (
+                            t.color_grade_brightness,
+                            t.color_grade_saturation,
+                            t.color_grade_gamma,
+                        )
+                    });
+                    let sharpen_params = state.bridge.as_ref().map(|b| {
+                        let t = &b.engine().calibration().topology;
+                        (t.sharpen_amount, t.sharpen_radius)
+                    });
                     let lens_correction =
                         state.calibration.as_ref().map(|c| c.lenses[0].correction);
                     if let Some(lc) = lens_correction {
@@ -8858,6 +8990,16 @@ fn handle_calibration_result(
                         }
                         if let Some(v) = color_match_auto_gamma {
                             app.set_color_match_auto_gamma(v);
+                        }
+                        if let Some((brightness, saturation, gamma)) = color_grade {
+                            app.set_color_grade_brightness(brightness);
+                            app.set_color_grade_saturation(saturation);
+                            app.set_color_grade_gamma(gamma);
+                            app.set_vivid_enabled((brightness, saturation, gamma) != (1.0, 1.0, 1.0));
+                        }
+                        if let Some((amount, radius)) = sharpen_params {
+                            app.set_sharpen_amount(amount);
+                            app.set_sharpen_radius(radius);
                         }
                         if let Some(lc) = lens_correction {
                             app.set_lens_correction_amount(lc);

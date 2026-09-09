@@ -393,6 +393,7 @@ impl GuiSettings {
         self.pause_overlay_hold_secs = hold_secs;
         self.save();
     }
+
 }
 
 #[cfg(test)]
@@ -648,6 +649,7 @@ mod tests {
             fov_alpha: 0.06,
             cluster_alpha: 0.05,
             confidence_threshold: 0.2,
+            lookahead_reactivity: 2.5,
         };
         s.autocam_defaults = Some(ac);
         let json = serde_json::to_string(&s).unwrap();

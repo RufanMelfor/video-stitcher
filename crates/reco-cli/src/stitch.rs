@@ -518,6 +518,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                     fov_alpha: fp.fov_alpha,
                     cluster_alpha: fp.cluster_alpha,
                     confidence_threshold: confidence_threshold.unwrap_or(0.10),
+                    lookahead_reactivity: fp.lookahead_reactivity,
                 },
             );
         }
