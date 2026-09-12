@@ -541,12 +541,12 @@ impl StitchPipeline {
             *scratch = make_scratch();
         }
 
-        let mut encoder = self
-            .gpu
-            .device()
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("sharpen_pass"),
-            });
+        let mut encoder =
+            self.gpu
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("sharpen_pass"),
+                });
         pass.encode(&self.gpu, &mut encoder, target, scratch);
         encoder.copy_texture_to_texture(scratch.as_image_copy(), target.as_image_copy(), size);
         encoder.finish()

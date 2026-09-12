@@ -312,8 +312,8 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
             );
         }
     }
-    if let Some(path) = args.events_path {
-        job = job.events(path);
+    if args.events_path.is_some() {
+        job = job.events(args.events_path.expect("checked above"));
     }
     if let Some(ref enc) = args.encoder_name {
         job = job.encoder_name(enc);
@@ -557,6 +557,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                 &autocam_config,
                 info.fps as f32,
                 source.is_gpu_resident(),
+                None,
             ) {
                 Ok(true) => {
                     println!("Autocam: tracking enabled (model: {model_path})");

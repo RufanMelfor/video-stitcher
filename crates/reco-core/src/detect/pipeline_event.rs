@@ -304,6 +304,38 @@ impl Drop for BackpressuredSink {
     }
 }
 
+/// Forwards every event to two sinks in order.
+///
+/// A [`StitchSession`](crate::session::StitchSession) has exactly one
+/// event-sink slot (see `set_event_sink`'s doc comment), so a consumer
+/// that needs two independent observers of the same stream - e.g.
+/// `reco-cli`'s `--ai-debug-overlay` alongside `--events` JSONL logging -
+/// composes them here rather than the session growing a second slot.
+/// Order matters only if a sink has side effects that could race (both
+/// current uses - a JSONL writer and the AI-debug overlay's frame
+/// buffer - are independent, so it doesn't).
+pub struct TeeSink {
+    first: Box<dyn PipelineEventSink>,
+    second: Box<dyn PipelineEventSink>,
+}
+
+impl TeeSink {
+    /// Forward every event to both `first` and `second`, in that order.
+    pub fn new(first: Box<dyn PipelineEventSink>, second: Box<dyn PipelineEventSink>) -> Self {
+        Self { first, second }
+    }
+}
+
+impl PipelineEventSink for TeeSink {
+    fn emit(&mut self, event: PipelineEvent) {
+        // Cloning once and forwarding the clone to `first` keeps this
+        // generic over any two sinks without requiring `PipelineEvent`
+        // itself to implement `Copy` (it can't - `Vec` fields).
+        self.first.emit(event.clone());
+        self.second.emit(event);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,6 +366,30 @@ mod tests {
             frame_index: i,
             timestamp_ms: i as f64,
         }
+    }
+
+    #[test]
+    fn tee_sink_forwards_every_event_to_both_sinks_in_order() {
+        let a = SharedVecSink::default();
+        let b = SharedVecSink::default();
+        let mut tee = TeeSink::new(Box::new(a.clone()), Box::new(b.clone()));
+        for i in 0..5 {
+            tee.emit(mk_frame(i));
+        }
+        let a_indices: Vec<u64> =
+            a.0.lock()
+                .unwrap()
+                .iter()
+                .map(|e| e.frame_index())
+                .collect();
+        let b_indices: Vec<u64> =
+            b.0.lock()
+                .unwrap()
+                .iter()
+                .map(|e| e.frame_index())
+                .collect();
+        assert_eq!(a_indices, vec![0, 1, 2, 3, 4]);
+        assert_eq!(b_indices, vec![0, 1, 2, 3, 4]);
     }
 
     #[test]
@@ -498,6 +554,7 @@ mod tests {
                 fov_alpha: 0.05,
                 cluster_alpha: 0.05,
                 confidence_threshold: 0.3,
+                lookahead_reactivity: 1.5,
             },
         };
         assert_eq!(ev.frame_index(), 0);

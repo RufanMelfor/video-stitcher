@@ -393,7 +393,6 @@ impl GuiSettings {
         self.pause_overlay_hold_secs = hold_secs;
         self.save();
     }
-
 }
 
 #[cfg(test)]

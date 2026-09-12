@@ -1154,6 +1154,12 @@ export component RecoApp inherits Window {
 
     // Export dialog state.
     in-out property <bool> export-dialog-open: false;
+    // DEBUG/DIAGNOSTIC ONLY - true while the no-field-ROI confirmation
+    // is open on behalf of the "Export Raw Camera AI Debug" button
+    // rather than the normal "Start Export" one, so the confirmation's
+    // "Export Anyway" choice resumes the right one. Never persisted;
+    // reset alongside every no-ROI-warning open/close.
+    in-out property <bool> pending-ai-debug-raw-export: false;
     in-out property <string> export-output-path: "";
     in-out property <int> export-width: 1920;
     in-out property <int> export-height: 1080;
@@ -1744,6 +1750,10 @@ export component RecoApp inherits Window {
     callback pick-export-output();
     callback pick-export-model();
     callback start-export();
+    // DEBUG/DIAGNOSTIC ONLY - see "Export Raw Camera AI Debug"'s tip
+    // text. A distinct callback from `start-export`, never merged into
+    // it, so a normal export can never accidentally carry this.
+    callback start-ai-debug-raw-export();
     // Populate the visible panner controls from a named preset.
     callback apply-panner-preset(string);
     callback cancel-export();
@@ -6483,6 +6493,37 @@ export component RecoApp inherits Window {
                             clicked => { root.export-dialog-open = false; root.export-error-text = ""; }
                         }
 
+                        // DEBUG/DIAGNOSTIC ONLY - a deliberately separate
+                        // button, not a checkbox on the normal Export
+                        // button, so it can never be left on by accident
+                        // for a real match export (see AGENTS.md's
+                        // friction-not-workaround rule and this feature's
+                        // own design constraints). Only meaningful with AI
+                        // tracking on - draws the detector's actual
+                        // bounding boxes directly on the raw, unstitched
+                        // Left/Right camera feeds (TWO separate output
+                        // files, no panorama/pan/zoom) so the AI's real
+                        // input is visible with no re-projection step to
+                        // get wrong. Two files, not one side-by-side
+                        // video, because a full-resolution side-by-side
+                        // frame exceeds H.264's 4096px width limit. Never
+                        // persisted anywhere.
+                        if root.export-autocam-enabled: Tip {
+                            tip: "Diagnostic export: draws the AI model's real detections directly on the raw Left/Right camera feeds - two separate video files (one per camera), exactly what the model saw, no stitching/panning involved. Not for real distribution - filenames get an _ai_debug_raw_L/_R suffix automatically.";
+                            FlatButton {
+                                text: "Export Raw Camera AI Debug";
+                                enabled: root.export-output-path != "" && root.export-model-path != "";
+                                clicked => {
+                                    if !root.has-roi {
+                                        root.no-roi-warning-open = true;
+                                        root.pending-ai-debug-raw-export = true;
+                                    } else {
+                                        root.start-ai-debug-raw-export();
+                                    }
+                                }
+                            }
+                        }
+
                         FlatButton {
                             text: "Start Export";
                             primary: true;
@@ -6493,6 +6534,7 @@ export component RecoApp inherits Window {
                                 && !(root.export-autocam-enabled && root.export-model-path == "");
                             clicked => {
                                 if !root.has-roi {
+                                    root.pending-ai-debug-raw-export = false;
                                     root.no-roi-warning-open = true;
                                 } else {
                                     root.start-export();
@@ -6545,7 +6587,12 @@ export component RecoApp inherits Window {
                             primary: true;
                             clicked => {
                                 root.no-roi-warning-open = false;
-                                root.start-export();
+                                if root.pending-ai-debug-raw-export {
+                                    root.pending-ai-debug-raw-export = false;
+                                    root.start-ai-debug-raw-export();
+                                } else {
+                                    root.start-export();
+                                }
                             }
                         }
                     }

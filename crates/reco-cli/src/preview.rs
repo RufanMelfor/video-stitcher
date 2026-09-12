@@ -861,7 +861,8 @@ impl ApplicationHandler for App {
                 // support them; `reco-gui`'s live preview (a
                 // caller-owned, not swapchain, texture) is the supported
                 // path for tuning those sliders.
-                if let Err(e) = renderer.render_to_view(&left, &right, render, &view, &frame.texture)
+                if let Err(e) =
+                    renderer.render_to_view(&left, &right, render, &view, &frame.texture)
                 {
                     log::error!("Render failed: {e}");
                     return;

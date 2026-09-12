@@ -968,6 +968,22 @@ impl Texture {
         let plane = match base.aspect {
             crate::FormatAspects::COLOR | crate::FormatAspects::DEPTH => 0,
             crate::FormatAspects::STENCIL => 1,
+            // Multi-planar formats (NV12/P010): `FormatAspects::PLANE_0`/
+            // `PLANE_1`/`PLANE_2` select the Y, UV (and, for P016-style
+            // 3-plane layouts, a third) plane respectively - see the same
+            // MS docs link above this function ("Plane slice" section).
+            // These aspects were already defined and used for texture
+            // *views* (`AspectSelector::from`/`Into<wgt::TextureAspect>`,
+            // near the top of this crate) but this copy-subresource path
+            // never learned to map them, so any per-plane
+            // copy_texture_to_buffer/copy_buffer_to_texture/
+            // copy_texture_to_texture on an NV12/P010 texture (e.g. a
+            // GPU-decoded frame's planes read back to the CPU) hit this
+            // `unreachable!()` instead of copying. Same plane-index
+            // convention `calc_subresource` documents.
+            crate::FormatAspects::PLANE_0 => 0,
+            crate::FormatAspects::PLANE_1 => 1,
+            crate::FormatAspects::PLANE_2 => 2,
             _ => unreachable!(),
         };
         self.calc_subresource(base.mip_level, base.array_layer, plane)
