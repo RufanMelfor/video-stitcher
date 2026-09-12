@@ -40,7 +40,23 @@ Usage:
   # re-select from the cache without re-running anything expensive:
   python3 pick_training_frames.py --match-dir ... --out ... --model ... \\
       --reselect-only --per-camera 25
+      
+Voorbeeld:
+cd d:\VOETBAL_VIDEO\RECO\repository
+
+& C:\Users\Rufan\AppData\Local\Programs\Python\Python314\python.exe scripts/pick_training_frames.py `
+    --match-dir "D:\VOETBAL_VIDEO\XFT\TOERNOOI 30082026\02 XFT- PSV" `
+    --match-dir "D:\VOETBAL_VIDEO\XFT\TOERNOOI 30082026\03 XFT - Graafschap" `
+    --match-dir "D:\VOETBAL_VIDEO\XFT\TOERNOOI 30082026\05 XFT- Schalke_04_Blue" `
+    --match-dir "D:\VOETBAL_VIDEO\XFT\TOERNOOI 30082026\06 XFT - KAS_Eupen" `
+    --match-dir "D:\VOETBAL_VIDEO\XFT\TOERNOOI 30082026\07 XFT - MSD_Duisburg" `
+    --match-dir "D:\VOETBAL_VIDEO\XFT\TOERNOOI 30082026\08 XFT - UHTF" `
+    --model "D:\VOETBAL_VIDEO\RECO\training\merged_v1_tiled_1920\runs\full_patience100\weights\best.pt" `
+    --out "D:\VOETBAL_VIDEO\RECO\training\round6_candidates" `
+    --per-camera 10
+      
 """
+
 
 import argparse
 import json

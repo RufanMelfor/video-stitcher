@@ -1606,3 +1606,100 @@ replacement.** Checkpoints kept for reference:
 Next step, not started: root-cause the merged-data recall regression
 before another training attempt, rather than trying further blind
 training variants.
+
+## Round 7: first real continued fine-tune (not from-scratch) - same "picky, not better" pattern recurred, not shipped (2026-09-10/11)
+
+**Design change from every prior round**: all rounds through 6 trained
+fresh from stock COCO `yolo26s.pt` every time, never continuing from
+this project's own best prior checkpoint. User caught this explicitly:
+"we moeten beter en beter worden en niet steeds opnieuw beginnen" (we
+should keep getting better, not keep starting from scratch) - round 7
+is the first genuine continued fine-tune, `model=` pointed at
+`merged_v1_tiled_1920/runs/full_patience100/weights/best.pt`,
+`pretrained=false` (load the real trained weights, don't re-init from
+COCO).
+
+**Data**: all 275 tasks from Label Studio project 24 (round5's 60 +
+round6's ~115 + the original pre-round5 100 "ai_learning" tasks),
+**all fully human-reviewed by the user this time** - including the old
+ai_learning-100 batch, the exact source that caused the 2026-08-22
+"easy ball bias" regression documented above when it went in
+unreviewed. Deliberate decision to include it anyway: this round's
+measured mean-ball-size for the `project24` source (0.000102 normalized
+area) landed close to `round4`'s (0.000082), not inflated like the old
+bias sources were (+8% to +43%) - the bias risk looked low going in.
+Merged with round4 (`merge_yolo_datasets.py`) -> 533 images, tiled
+(`tile_yolo_dataset.py`) -> 1066 tiles (`training/round7_tiled_1920`).
+Sample tiles visually spot-checked (boxes correct, no class swaps).
+
+**Training**: 8-epoch smoke test clean (losses down monotonically, no
+crashes), then a `patience=100`/`epochs=300` full run. User asked to
+stop it manually partway through once the plateau was obvious and the
+PC was needed back - ultralytics' `stop`-signal-file convention
+(touch a `stop` file in the run dir) did NOT work on this
+version/setup (file sat there unconsumed, training kept going 2 more
+epochs past when it was created) - had to `taskkill` the process and
+its workers directly instead. No data lost: every completed epoch's
+checkpoint is saved incrementally, `best.pt` (whichever epoch had the
+best val mAP50-95 at that point) is always current. **Note this stop-file
+gap for next time - don't rely on it, kill the process directly if the
+user wants to stop early.**
+
+Stopped after epoch 285 (of 300 max). Best epoch was 217
+(mAP50-95=0.6306) and had NOT been beaten again in the 65 epochs since -
+essentially a plateau from ~epoch 160 onward (0.60-0.63, noisy, no
+further real progress). Final/best val numbers, all-class aggregate:
+
+```
+              Precision  Recall  mAP50  mAP50-95
+old (merged tiled1920, best@288)   0.886   0.826  0.846   0.636
+new (round7, best@217)             ~0.87   ~0.73  ~0.79   0.631
+```
+
+Roughly equivalent val-mAP, not a clear win either way on aggregate
+val numbers alone.
+
+**Real-footage test** (`scripts/compare_checkpoints_real_footage.py`,
+a new committed script built specifically for this - reusable for
+future rounds - implementing the same left/right tiled-inference
+methodology used above, 60 sampled frames/camera, t=300-360s, `02
+Berghem Sport - Zwaluw VFC` match, `conf=0.1`):
+
+```
+                                   left rate  left conf  right rate  right conf
+old (merged tiled1920)               46.7%      0.61       33.3%       0.60
+new (round7)                         40.0%      0.68       23.3%       0.68
+```
+
+**The exact same "picky, not better" pattern as the 2026-08-21/22
+merged-data regression, again.** Detection RATE dropped on BOTH
+cameras (left -6.7pp, right -10.0pp) while confidence on the hits it
+DID find rose substantially (+0.07-0.08 both cameras) - a model that
+is more confident when it fires but fires less often, i.e. it got
+pickier, not better at finding hard/marginal balls. This is despite
+this round's deliberate effort to avoid re-introducing the ball-size
+bias (verified going in - see above) and despite continuing from a
+real prior checkpoint instead of training from scratch.
+
+**Not shipping round7's checkpoint.** `merged_v1_tiled_1920` remains
+the production checkpoint. Kept for reference:
+`training/round7_tiled_1920/runs/full_patience100/weights/best.pt`
+(epoch 217) and `.../last.pt` (epoch 285, not necessarily better than
+best.pt, just the most recent).
+
+**Open question for the next attempt, not resolved this round**: if
+matching ball-size distribution and continuing from a proven
+checkpoint both weren't enough to avoid this, the "picky, not better"
+failure mode may not be fully explained by data-source ball-size bias
+alone - possibly a training-hyperparameter effect (e.g. this round's
+`patience=100`/300-epoch schedule converging to a sharper, higher-
+confidence-threshold decision boundary regardless of data mix), or a
+genuinely different unmeasured property of the reviewed project24
+labels themselves (e.g. confidence-threshold-adjacent labeling
+conventions differing between this round's human review pass and
+round4's). Worth comparing the two checkpoints' full confidence-score
+*distributions* (not just the binary hit-rate at conf=0.1) before the
+next round, to see whether round7 is uniformly shifted to higher
+confidence (suggesting a calibration/threshold effect fixable without
+retraining) or genuinely missing detections the old model made at any
+confidence (a real capability loss).
