@@ -243,6 +243,12 @@ struct AppState {
     /// yet persisted into the calibration file (deliberately deferred
     /// to a follow-up).
     cut_ranges: Vec<(f64, f64)>,
+    /// Same as `cut_ranges` above but for the AI Debug tab - a fully
+    /// separate list (see `AiDebugSettings`'s doc comment for why this
+    /// tab's settings don't share state with the normal Export tab).
+    /// Mutated only via the `on_ai_debug_cut_range_*` handlers; session-
+    /// only, never persisted (same as `cut_ranges`).
+    ai_debug_cut_ranges: Vec<(f64, f64)>,
     playback: Playback,
     bridge: Option<PreviewBridge>,
     scoreboard_packages: Vec<reco_scoreboard::ScoreboardPackage>,
@@ -675,6 +681,7 @@ impl AppState {
             calibration_path: None,
             calibration: None,
             cut_ranges: Vec::new(),
+            ai_debug_cut_ranges: Vec::new(),
             playback: Playback::new(),
             bridge: None,
             scoreboard_packages: discovery.packages,
@@ -2239,6 +2246,21 @@ fn sync_cut_ranges(state: &AppState, app: &RecoApp) {
     app.set_cut_ranges(slint::ModelRc::new(slint::VecModel::from(items)));
 }
 
+/// Same as `sync_cut_ranges` but for the AI Debug tab's own, separate
+/// cut-ranges list (`AppState::ai_debug_cut_ranges` /
+/// `root.ai-debug-cut-ranges`).
+fn sync_ai_debug_cut_ranges(state: &AppState, app: &RecoApp) {
+    let items: Vec<CutRangeItem> = state
+        .ai_debug_cut_ranges
+        .iter()
+        .map(|&(start, end)| CutRangeItem {
+            start_secs: start as f32,
+            end_secs: end as f32,
+        })
+        .collect();
+    app.set_ai_debug_cut_ranges(slint::ModelRc::new(slint::VecModel::from(items)));
+}
+
 /// Recompute and re-apply the "Auto-cut kickoff lead-in + pauses" derived
 /// cut ranges from the current Match Logger export + sync anchor,
 /// replacing whatever this toggle previously added (see
@@ -3160,6 +3182,24 @@ fn snapshot_scoreboard_settings(
 fn persist_scoreboard_settings(app: &RecoApp, s: &mut AppState) {
     let sb = snapshot_scoreboard_settings(app, s);
     s.user_settings.set_scoreboard_settings(sb);
+}
+
+/// Snapshot the AI Debug tab's current field values into `AiDebugSettings`
+/// and persist them - the tab's counterpart to
+/// `persist_scoreboard_settings`/`snapshot_scoreboard_settings`. Called
+/// from `on_ai_debug_settings_changed` (cameras/confidence/detection-
+/// interval edits) and from the model/output pickers directly (same
+/// split as `export-model-path`'s own dedicated persistence).
+fn persist_ai_debug_settings(app: &RecoApp, s: &mut AppState) {
+    let model_path = app.get_ai_debug_model_path();
+    let ad = crate::settings::AiDebugSettings {
+        model_path: (!model_path.is_empty()).then(|| PathBuf::from(model_path.as_str())),
+        output_path: app.get_ai_debug_output_path().to_string(),
+        cameras: app.get_ai_debug_raw_cameras().to_string(),
+        confidence_threshold: app.get_ai_debug_confidence_threshold(),
+        detection_interval: app.get_ai_debug_detection_interval(),
+    };
+    s.user_settings.set_ai_debug_settings(ad);
 }
 
 /// Adopt a freshly parsed Match Logger export as the current one: the
@@ -4629,6 +4669,86 @@ fn main() -> anyhow::Result<()> {
             // every next one needed a re-click first.
             slint::Model::set_row_data(
                 &app.get_cut_ranges(),
+                idx,
+                CutRangeItem {
+                    start_secs: start as f32,
+                    end_secs: end as f32,
+                },
+            );
+        }
+    });
+
+    // AI Debug tab's own cut ranges - same three callbacks/logic as
+    // the Export tab's on_cut_range_add/remove/update just above, but
+    // against `ai_debug_cut_ranges`/`ai-debug-start-secs`/`ai-debug-
+    // end-secs` (see `AppState::ai_debug_cut_ranges`'s doc comment for
+    // why this is a separate list rather than sharing the Export tab's).
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_ai_debug_cut_range_add(move || {
+        let mut s = state_ref.borrow_mut();
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let export_start = app.get_ai_debug_start_secs() as f64;
+        let export_end = if app.get_ai_debug_end_secs() > 0.0 {
+            app.get_ai_debug_end_secs() as f64
+        } else {
+            app.get_clip_duration_secs() as f64
+        };
+        let playhead_secs = if app.get_total_frames() > 0 {
+            app.get_current_frame() as f64 / app.get_total_frames() as f64
+                * app.get_clip_duration_secs() as f64
+        } else {
+            export_start
+        };
+        let default_width = 2.0_f64;
+        let start = playhead_secs.clamp(export_start, (export_end - 0.2).max(export_start));
+        let end = (start + default_width).min(export_end);
+        if end - start < 0.2 {
+            return;
+        }
+        s.ai_debug_cut_ranges.push((start, end));
+        sync_ai_debug_cut_ranges(&s, &app);
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_ai_debug_cut_range_remove(move |idx| {
+        let mut s = state_ref.borrow_mut();
+        let idx = idx as usize;
+        if idx < s.ai_debug_cut_ranges.len() {
+            s.ai_debug_cut_ranges.remove(idx);
+            if let Some(app) = app_weak.upgrade() {
+                sync_ai_debug_cut_ranges(&s, &app);
+            }
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_ai_debug_cut_range_update(move |idx, start, end| {
+        let mut s = state_ref.borrow_mut();
+        let idx = idx as usize;
+        let Some(range) = s.ai_debug_cut_ranges.get_mut(idx) else {
+            return;
+        };
+        let clip_duration = app_weak
+            .upgrade()
+            .map(|app| app.get_clip_duration_secs() as f64)
+            .unwrap_or(f64::MAX);
+        let start = (start as f64).max(0.0);
+        let end = (end as f64).min(clip_duration);
+        if end - start < 0.2 {
+            // Same reject-outright-on-collapse behavior as
+            // on_cut_range_update - see its comment.
+        } else {
+            *range = (start, end);
+        }
+        let committed = s.ai_debug_cut_ranges.get(idx).copied();
+        if let (Some(app), Some((start, end))) = (app_weak.upgrade(), committed) {
+            slint::Model::set_row_data(
+                &app.get_ai_debug_cut_ranges(),
                 idx,
                 CutRangeItem {
                     start_secs: start as f32,
@@ -7157,6 +7277,25 @@ fn main() -> anyhow::Result<()> {
             if app.get_export_end_secs() == 0.0 {
                 app.set_export_end_secs(clip_secs);
             }
+            // Always reopens on the Export tab, never wherever it was
+            // left last time - a stray earlier AI Debug session left
+            // open shouldn't come back silently.
+            app.set_export_dialog_tab("export".into());
+            // Seed the AI Debug tab's own persisted settings the same
+            // way as the Export tab's just above - independent fields,
+            // see `AiDebugSettings`'s doc comment.
+            if let Some(ad) = s.user_settings.ai_debug_settings.as_ref() {
+                if let Some(model_path) = ad.model_path.as_ref() {
+                    app.set_ai_debug_model_path(model_path.to_string_lossy().to_string().into());
+                }
+                app.set_ai_debug_output_path(ad.output_path.clone().into());
+                app.set_ai_debug_raw_cameras(ad.cameras.clone().into());
+                app.set_ai_debug_confidence_threshold(ad.confidence_threshold);
+                app.set_ai_debug_detection_interval(ad.detection_interval);
+            }
+            if app.get_ai_debug_end_secs() == 0.0 {
+                app.set_ai_debug_end_secs(clip_secs);
+            }
             app.set_export_dialog_open(true);
         }
     });
@@ -7194,6 +7333,46 @@ fn main() -> anyhow::Result<()> {
             let mut s = state_ref.borrow_mut();
             s.user_settings.ai_model_path = Some(path);
             s.user_settings.save();
+        }
+    });
+
+    // AI Debug tab's own output/model pickers - same shape as
+    // on_pick_export_output/on_pick_export_model just above, but
+    // persisted into `AiDebugSettings` instead of the Export tab's own
+    // fields (see that struct's doc comment for why they're separate).
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_pick_ai_debug_output(move || {
+        let dialog = rfd::FileDialog::new()
+            .set_title("Export raw camera AI debug to…")
+            .add_filter("MP4", &["mp4"])
+            .add_filter("MOV", &["mov"])
+            .add_filter("MKV", &["mkv"]);
+        if let Some(mut path) = dialog.save_file() {
+            if path.extension().is_none() {
+                path.set_extension("mp4");
+            }
+            if let Some(app) = app_weak.upgrade() {
+                let output_path = path.to_string_lossy().to_string();
+                app.set_ai_debug_output_path(output_path.clone().into());
+                let mut s = state_ref.borrow_mut();
+                persist_ai_debug_settings(&app, &mut s);
+            }
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_pick_ai_debug_model(move || {
+        let dialog = rfd::FileDialog::new()
+            .set_title("Select YOLO ONNX model")
+            .add_filter("ONNX", &["onnx"]);
+        if let Some(path) = dialog.pick_file()
+            && let Some(app) = app_weak.upgrade()
+        {
+            app.set_ai_debug_model_path(path.to_string_lossy().to_string().into());
+            let mut s = state_ref.borrow_mut();
+            persist_ai_debug_settings(&app, &mut s);
         }
     });
 
@@ -7239,6 +7418,15 @@ fn main() -> anyhow::Result<()> {
                 app.get_export_autocam_enabled(),
                 app.get_export_async_detect(),
             );
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_ai_debug_settings_changed(move || {
+        if let Some(app) = app_weak.upgrade() {
+            let mut s = state_ref.borrow_mut();
+            persist_ai_debug_settings(&app, &mut s);
         }
     });
 
@@ -7544,7 +7732,7 @@ fn main() -> anyhow::Result<()> {
             log::error!("Cannot start AI debug raw export without left/right/calibration");
             return;
         };
-        let model_path = app.get_export_model_path().to_string();
+        let model_path = app.get_ai_debug_model_path().to_string();
         if model_path.is_empty() {
             log::warn!("AI debug raw export: no model selected, ignoring");
             return;
@@ -7558,12 +7746,13 @@ fn main() -> anyhow::Result<()> {
             .clone()
             .unwrap_or(reco_io::stitch_job::InputPath::Single(right_path));
 
-        // Same cut ranges the normal export uses - see
-        // `start_export_impl`'s identical conversion. A malformed pair
-        // (shouldn't happen via the GUI's own drag-editor, but cheap to
-        // guard) is dropped rather than failing the whole export.
+        // The AI Debug tab's own cut ranges - independent of the Export
+        // tab's (see `AppState::ai_debug_cut_ranges`'s doc comment). A
+        // malformed pair (shouldn't happen via the GUI's own list
+        // editor, but cheap to guard) is dropped rather than failing
+        // the whole export.
         let cut_ranges: Vec<reco_io::cut_range::CutRange> = s
-            .cut_ranges
+            .ai_debug_cut_ranges
             .iter()
             .filter_map(|&(start, end)| reco_io::cut_range::CutRange::new(start, end).ok())
             .collect();
@@ -7584,7 +7773,7 @@ fn main() -> anyhow::Result<()> {
             _ => reco_io::raw_camera_debug::CameraSelection::Both,
         };
 
-        let output_str = app.get_export_output_path().to_string();
+        let output_str = app.get_ai_debug_output_path().to_string();
         let (output_left_str, output_right_str) = if output_str.is_empty() {
             let stem = left
                 .first_path()
@@ -7604,14 +7793,13 @@ fn main() -> anyhow::Result<()> {
              with detector boxes, not a stitched export, not for real distribution)"
         );
 
-        let start_secs = app.get_export_start_secs() as f64;
-        // Same "0 means unset" convention `start_export_impl`'s own
-        // cut-range handling uses (see e.g. its `export_end` fallback to
-        // `clip_duration_secs`) - `export_end_secs` defaults to 0.0
-        // until the user (or the auto-fill at line ~7103) sets it.
+        let start_secs = app.get_ai_debug_start_secs() as f64;
+        // Same "0 means unset" convention as the Export tab's own
+        // start/end handling - `ai-debug-end-secs` defaults to 0.0
+        // until the user (or on_open_export_dialog's auto-fill) sets it.
         let end_secs =
-            (app.get_export_end_secs() as f64 > 0.0).then(|| app.get_export_end_secs() as f64);
-        let confidence_threshold = app.get_export_confidence_threshold();
+            (app.get_ai_debug_end_secs() as f64 > 0.0).then(|| app.get_ai_debug_end_secs() as f64);
+        let confidence_threshold = app.get_ai_debug_confidence_threshold();
         let field_roi = cal
             .field_roi
             .as_ref()
@@ -7687,14 +7875,12 @@ fn main() -> anyhow::Result<()> {
             sync_offset_right: 0,
             max_frames: None,
             cut_ranges,
-            // Reuses the Export page's own AI Tracking "detection
-            // interval" dropdown rather than adding a second control -
-            // user's explicit ask ("gebruik wat er nu al in de Export
-            // pagina staat"). Same meaning as for a real export, but a
-            // far bigger lever here: this tool detects on two
-            // full-resolution raw feeds instead of one downscaled
-            // stitched output.
-            detection_interval: app.get_export_detection_interval().max(1) as u32,
+            // The AI Debug tab's own "Detect every N frames" dropdown -
+            // independent of the Export tab's, since detection on two
+            // full-resolution raw feeds (this tool's dominant cost) is
+            // a far bigger throughput lever here than for a stitched
+            // export downscaled to one output resolution.
+            detection_interval: app.get_ai_debug_detection_interval().max(1) as u32,
             ball_class_id,
             confidence_threshold: Some(confidence_threshold),
             field_roi_left: field_roi.as_ref().map(|r| r.left.clone()),
