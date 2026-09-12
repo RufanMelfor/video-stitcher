@@ -1160,6 +1160,12 @@ export component RecoApp inherits Window {
     // "Export Anyway" choice resumes the right one. Never persisted;
     // reset alongside every no-ROI-warning open/close.
     in-out property <bool> pending-ai-debug-raw-export: false;
+    // DEBUG/DIAGNOSTIC ONLY - which camera(s) "Export Raw Camera AI
+    // Debug" produces: "left", "right", or "both" (default). Not
+    // persisted, same as the rest of this diagnostic's settings -
+    // re-chosen every time so a stale prior pick never silently skips
+    // a camera.
+    in-out property <string> ai-debug-raw-cameras: "both";
     in-out property <string> export-output-path: "";
     in-out property <int> export-width: 1920;
     in-out property <int> export-height: 1080;
@@ -1800,9 +1806,18 @@ export component RecoApp inherits Window {
     callback edit-scoreboard();
     callback copy-scoreboard-share();
     callback load-scoreboard-events();
+    // Unload the currently loaded Match Logger export (drops the parsed
+    // JSON + sync anchor), same end state as picking a match folder with
+    // no export in it - the difference is this is explicit, from a
+    // button, rather than a side effect of switching folders.
+    callback clear-scoreboard-events();
     callback set-scoreboard-sync-point();
     callback changed-scoreboard-placement();
     callback pick-scoreboard-logo(string); // "home" | "away"
+    // Remove a team logo (same "home" | "away" argument as
+    // pick-scoreboard-logo), so a previously chosen logo can be
+    // unpicked without having to pick a replacement file.
+    callback clear-scoreboard-logo(string);
     callback changed-scoreboard-font(string);
     callback changed-scoreboard-logo-size(float);
     callback changed-scoreboard-banner-color(string); // preset name, e.g. "Navy"
@@ -2401,9 +2416,17 @@ export component RecoApp inherits Window {
                                 // itself (e.g. to avoid the banner entirely)
                                 // needs to reach this button with the Overlay
                                 // toggle left OFF.
-                                FlatButton {
-                                    text: root.scoreboard-match-summary == "" ? "Load Match Logger export..." : "Load…";
-                                    clicked => { root.load-scoreboard-events(); }
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    FlatButton {
+                                        text: root.scoreboard-match-summary == "" ? "Load Match Logger export..." : "Load…";
+                                        horizontal-stretch: 1;
+                                        clicked => { root.load-scoreboard-events(); }
+                                    }
+                                    if root.scoreboard-match-summary != "": FlatButton {
+                                        text: "Remove";
+                                        clicked => { root.clear-scoreboard-events(); }
+                                    }
                                 }
 
                                 if root.scoreboard-match-summary != "": Text {
@@ -2616,10 +2639,18 @@ export component RecoApp inherits Window {
                                         horizontal-stretch: 1;
                                         clicked => { root.pick-scoreboard-logo("home"); }
                                     }
+                                    if root.scoreboard-home-logo-path != "": FlatButton {
+                                        text: "X";
+                                        clicked => { root.clear-scoreboard-logo("home"); }
+                                    }
                                     FlatButton {
                                         text: root.scoreboard-away-logo-path == "" ? "Away logo…" : "Away logo ✓";
                                         horizontal-stretch: 1;
                                         clicked => { root.pick-scoreboard-logo("away"); }
+                                    }
+                                    if root.scoreboard-away-logo-path != "": FlatButton {
+                                        text: "X";
+                                        clicked => { root.clear-scoreboard-logo("away"); }
                                     }
                                 }
 
@@ -6510,15 +6541,29 @@ export component RecoApp inherits Window {
                         // persisted anywhere.
                         if root.export-autocam-enabled: Tip {
                             tip: "Diagnostic export: draws the AI model's real detections directly on the raw Left/Right camera feeds - two separate video files (one per camera), exactly what the model saw, no stitching/panning involved. Not for real distribution - filenames get an _ai_debug_raw_L/_R suffix automatically.";
-                            FlatButton {
-                                text: "Export Raw Camera AI Debug";
-                                enabled: root.export-output-path != "" && root.export-model-path != "";
-                                clicked => {
-                                    if !root.has-roi {
-                                        root.no-roi-warning-open = true;
-                                        root.pending-ai-debug-raw-export = true;
-                                    } else {
-                                        root.start-ai-debug-raw-export();
+                            VerticalLayout {
+                                spacing: 6px;
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    Text { text: "Cameras"; color: #aaa; font-size: 11px; vertical-alignment: center; }
+                                    ComboBox {
+                                        model: ["Both", "Left", "Right"];
+                                        current-value: root.ai-debug-raw-cameras == "left" ? "Left" : root.ai-debug-raw-cameras == "right" ? "Right" : "Both";
+                                        selected(value) => {
+                                            root.ai-debug-raw-cameras = value == "Left" ? "left" : value == "Right" ? "right" : "both";
+                                        }
+                                    }
+                                }
+                                FlatButton {
+                                    text: "Export Raw Camera AI Debug";
+                                    enabled: root.export-output-path != "" && root.export-model-path != "";
+                                    clicked => {
+                                        if !root.has-roi {
+                                            root.no-roi-warning-open = true;
+                                            root.pending-ai-debug-raw-export = true;
+                                        } else {
+                                            root.start-ai-debug-raw-export();
+                                        }
                                     }
                                 }
                             }

@@ -203,6 +203,28 @@ fn class_color(class_id: u16, ball_class_id: Option<u16>) -> BoxColor {
     }
 }
 
+/// Which camera(s) a run processes - see [`RawCameraDebugConfig::cameras`].
+/// Not persisted (same "never a saved setting" constraint as the rest
+/// of this config) - deliberately re-chosen every run so a diagnostic
+/// pass never silently skips a camera because of a stale prior choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraSelection {
+    Left,
+    Right,
+    Both,
+}
+
+impl CameraSelection {
+    fn includes(self, camera: CameraId) -> bool {
+        matches!(
+            (self, camera),
+            (CameraSelection::Both, _)
+                | (CameraSelection::Left, CameraId::Left)
+                | (CameraSelection::Right, CameraId::Right)
+        )
+    }
+}
+
 /// Configuration for [`run`]. Every field is required (no calibration-
 /// persisted defaults - this is a one-shot diagnostic run, never a
 /// saved setting, mirroring the removed stitched overlay's own "never
@@ -210,10 +232,16 @@ fn class_color(class_id: u16, ball_class_id: Option<u16>) -> BoxColor {
 pub struct RawCameraDebugConfig {
     pub left: InputPath,
     pub right: InputPath,
-    /// Output path for the Left camera's boxed video.
+    /// Output path for the Left camera's boxed video. Unused (never
+    /// opened/written) when [`cameras`](Self::cameras) excludes Left.
     pub output_left: PathBuf,
-    /// Output path for the Right camera's boxed video.
+    /// Output path for the Right camera's boxed video. Unused (never
+    /// opened/written) when [`cameras`](Self::cameras) excludes Right.
     pub output_right: PathBuf,
+    /// Which camera(s) to actually process. A user diagnosing one
+    /// side's tracking shouldn't have to wait through (and re-encode)
+    /// the other camera's full pass just to get the file they wanted.
+    pub cameras: CameraSelection,
     /// Skip this many seconds of both sources before drawing/encoding
     /// starts. Converted to a frame count using the left source's own
     /// decoded fps (matches `StitchJob::start_time`'s convention:
@@ -349,31 +377,39 @@ pub fn run(
     interrupted: &AtomicBool,
     mut on_progress: impl FnMut(RawCameraDebugProgress),
 ) -> Result<u64, RawCameraDebugError> {
-    let left_frames = run_one_camera(
-        CameraId::Left,
-        &config.left,
-        &config.output_left,
-        config.field_roi_left.as_deref(),
-        0, // Left's own decode never needs a sync-offset skip
-        &config,
-        detector.as_mut(),
-        interrupted,
-        &mut on_progress,
-    )?;
+    let left_frames = if config.cameras.includes(CameraId::Left) {
+        run_one_camera(
+            CameraId::Left,
+            &config.left,
+            &config.output_left,
+            config.field_roi_left.as_deref(),
+            0, // Left's own decode never needs a sync-offset skip
+            &config,
+            detector.as_mut(),
+            interrupted,
+            &mut on_progress,
+        )?
+    } else {
+        0
+    };
     if interrupted.load(Ordering::Relaxed) {
         return Ok(left_frames);
     }
-    let right_frames = run_one_camera(
-        CameraId::Right,
-        &config.right,
-        &config.output_right,
-        config.field_roi_right.as_deref(),
-        config.sync_offset_right,
-        &config,
-        detector.as_mut(),
-        interrupted,
-        &mut on_progress,
-    )?;
+    let right_frames = if config.cameras.includes(CameraId::Right) {
+        run_one_camera(
+            CameraId::Right,
+            &config.right,
+            &config.output_right,
+            config.field_roi_right.as_deref(),
+            config.sync_offset_right,
+            &config,
+            detector.as_mut(),
+            interrupted,
+            &mut on_progress,
+        )?
+    } else {
+        0
+    };
 
     Ok(left_frames + right_frames)
 }
@@ -1335,6 +1371,24 @@ mod tests {
         // the model's real ball class id - avoids assuming COCO's
         // ordering (see this module's doc comment).
         assert_eq!(class_color(1, None), COLOR_OTHER);
+    }
+
+    #[test]
+    fn camera_selection_both_includes_either_camera() {
+        assert!(CameraSelection::Both.includes(CameraId::Left));
+        assert!(CameraSelection::Both.includes(CameraId::Right));
+    }
+
+    #[test]
+    fn camera_selection_left_excludes_right() {
+        assert!(CameraSelection::Left.includes(CameraId::Left));
+        assert!(!CameraSelection::Left.includes(CameraId::Right));
+    }
+
+    #[test]
+    fn camera_selection_right_excludes_left() {
+        assert!(CameraSelection::Right.includes(CameraId::Right));
+        assert!(!CameraSelection::Right.includes(CameraId::Left));
     }
 
     #[test]
