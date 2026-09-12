@@ -82,7 +82,7 @@ fn main() {
                     .with_detection_interval(30);
                 let fps = source.info().fps as f32;
                 let gpu = source.is_gpu_resident();
-                match reco_autocam::setup_autocam(session, &cfg, fps, gpu) {
+                match reco_autocam::setup_autocam(session, &cfg, fps, gpu, None) {
                     Ok(active) => println!("    autocam active={active}"),
                     Err(e) => println!("    autocam setup failed: {e}"),
                 }

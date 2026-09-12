@@ -675,7 +675,15 @@ unsafe fn import_d3d11_shared_handle(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        // COPY_SRC in addition to sampling: the stitch pipeline only ever
+        // samples these in a render pass, but a consumer that decodes on
+        // the GPU and still needs the pixels on the CPU (the raw-camera AI
+        // debug export, which draws boxes directly on the decoded YUV
+        // planes) copies each plane out via `TextureAspect::Plane0`/
+        // `Plane1` - a same-format per-plane `copy_texture_to_buffer`.
+        // Costs nothing when unused; the underlying D3D11 staging textures
+        // are already shared-handle resources on FFmpeg's device.
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     };
 

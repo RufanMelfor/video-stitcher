@@ -2399,6 +2399,31 @@ fn strip_highlights_suffix(output: &str) -> String {
     }
 }
 
+/// Marker inserted into a raw-camera AI-debug export's filename - see
+/// `reco-cli`'s `ai-debug-raw` subcommand help text and this feature's
+/// own design constraints (never persisted, never a checkbox that
+/// could be left on by accident). Mirrors [`HIGHLIGHTS_SUFFIX`]'s
+/// convention.
+const AI_DEBUG_RAW_SUFFIX: &str = "_ai_debug_raw";
+
+/// `match.mp4` -> `(match_ai_debug_raw_L.mp4, match_ai_debug_raw_R.mp4)`,
+/// idempotent. Two names, not one, because this diagnostic exports two
+/// separate files (one per camera) rather than one side-by-side
+/// composite - see `reco_io::raw_camera_debug`'s doc comment for why
+/// (H.264's 4096px width limit). See [`add_highlights_suffix`] for the
+/// identical dot-handling logic this mirrors.
+fn add_ai_debug_raw_suffixes(output: &str) -> (String, String) {
+    let (stem, extension) = match output.rfind('.') {
+        Some(dot) if !output[dot..].contains(['/', '\\']) => output.split_at(dot),
+        _ => (output, ""),
+    };
+    let stem = stem.strip_suffix(AI_DEBUG_RAW_SUFFIX).unwrap_or(stem);
+    (
+        format!("{stem}{AI_DEBUG_RAW_SUFFIX}_L{extension}"),
+        format!("{stem}{AI_DEBUG_RAW_SUFFIX}_R{extension}"),
+    )
+}
+
 /// Push the per-side segment filenames into the Slint left/right-segments
 /// models so the Files panel shows what was imported.
 fn sync_segments(state: &AppState, app: &RecoApp) {
@@ -7199,6 +7224,16 @@ fn main() -> anyhow::Result<()> {
     let app_weak = app.as_weak();
     let state_ref = Rc::clone(&state);
     app.on_start_export(move || {
+        start_export_impl(&app_weak, &state_ref);
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_start_ai_debug_raw_export(move || {
+        start_ai_debug_raw_export_impl(&app_weak, &state_ref);
+    });
+
+    fn start_export_impl(app_weak: &slint::Weak<RecoApp>, state_ref: &Rc<RefCell<AppState>>) {
         let Some(app) = app_weak.upgrade() else {
             return;
         };
@@ -7216,16 +7251,16 @@ fn main() -> anyhow::Result<()> {
         let output_path = PathBuf::from(&output_str);
         if let Some(parent) = output_path.parent() {
             if !parent.exists() {
-                log::warn!("Export: output directory does not exist: {}", parent.display());
+                log::warn!(
+                    "Export: output directory does not exist: {}",
+                    parent.display()
+                );
                 app.set_export_error_text(
                     format!("Output directory does not exist: {}", parent.display()).into(),
                 );
                 return;
             }
-            if parent
-                .metadata()
-                .is_ok_and(|m| m.permissions().readonly())
-            {
+            if parent.metadata().is_ok_and(|m| m.permissions().readonly()) {
                 log::warn!(
                     "Export: output directory has read-only attribute: {} (may be normal on Windows)",
                     parent.display()
@@ -7424,7 +7459,257 @@ fn main() -> anyhow::Result<()> {
             let _ = tx.send(outcome);
         });
         s.export_thread = Some(handle);
-    });
+    }
+
+    // DEBUG/DIAGNOSTIC ONLY - "Export Raw Camera AI Debug" button body.
+    // Deliberately NOT a branch of `start_export_impl`/`run_export`:
+    // this bypasses stitching entirely (see
+    // `reco_io::raw_camera_debug`'s module doc for why a raw-camera
+    // diagnostic never needs the virtual camera/panorama pipeline at
+    // all), so it drives `reco_io::raw_camera_debug::run` directly on
+    // its own worker thread instead of going through `StitchJob`. Never
+    // persisted anywhere; a one-shot flag-free diagnostic run.
+    #[cfg(feature = "ort")]
+    fn start_ai_debug_raw_export_impl(
+        app_weak: &slint::Weak<RecoApp>,
+        state_ref: &Rc<RefCell<AppState>>,
+    ) {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let mut s = state_ref.borrow_mut();
+        if s.export_thread.is_some() {
+            log::warn!("Export already running, ignoring AI debug raw request");
+            return;
+        }
+        let (Some(left_path), Some(right_path), Some(cal)) = (
+            s.left_path.clone(),
+            s.right_path.clone(),
+            s.calibration.clone(),
+        ) else {
+            log::error!("Cannot start AI debug raw export without left/right/calibration");
+            return;
+        };
+        let model_path = app.get_export_model_path().to_string();
+        if model_path.is_empty() {
+            log::warn!("AI debug raw export: no model selected, ignoring");
+            return;
+        }
+        let left = s
+            .left_input
+            .clone()
+            .unwrap_or(reco_io::stitch_job::InputPath::Single(left_path));
+        let right = s
+            .right_input
+            .clone()
+            .unwrap_or(reco_io::stitch_job::InputPath::Single(right_path));
+
+        // Same cut ranges the normal export uses - see
+        // `start_export_impl`'s identical conversion. A malformed pair
+        // (shouldn't happen via the GUI's own drag-editor, but cheap to
+        // guard) is dropped rather than failing the whole export.
+        let cut_ranges: Vec<reco_io::cut_range::CutRange> = s
+            .cut_ranges
+            .iter()
+            .filter_map(|&(start, end)| reco_io::cut_range::CutRange::new(start, end).ok())
+            .collect();
+        if !cut_ranges.is_empty() {
+            log::info!(
+                "AI debug raw export: {} cut range(s) will be excluded",
+                cut_ranges.len()
+            );
+        }
+
+        let output_str = app.get_export_output_path().to_string();
+        let (output_left_str, output_right_str) = if output_str.is_empty() {
+            let stem = left
+                .first_path()
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "output".to_string());
+            (
+                format!("{stem}_ai_debug_raw_L.mp4"),
+                format!("{stem}_ai_debug_raw_R.mp4"),
+            )
+        } else {
+            add_ai_debug_raw_suffixes(&output_str)
+        };
+        log::warn!(
+            "AI debug raw export requested: output_left={output_left_str} \
+             output_right={output_right_str} (DIAGNOSTIC - two separate raw Left/Right camera \
+             feed videos with detector boxes, not a stitched export, not for real distribution)"
+        );
+
+        let start_secs = app.get_export_start_secs() as f64;
+        // Same "0 means unset" convention `start_export_impl`'s own
+        // cut-range handling uses (see e.g. its `export_end` fallback to
+        // `clip_duration_secs`) - `export_end_secs` defaults to 0.0
+        // until the user (or the auto-fill at line ~7103) sets it.
+        let end_secs = (app.get_export_end_secs() as f64 > 0.0)
+            .then(|| app.get_export_end_secs() as f64);
+        let confidence_threshold = app.get_export_confidence_threshold();
+        let field_roi = cal
+            .field_roi
+            .as_ref()
+            .filter(|roi| roi.left.len() >= 3 || roi.right.len() >= 3)
+            .map(|roi| roi.densified(&cal.lenses[0], &cal.lenses[1]));
+
+        let detector = match reco_autocam::CpuYoloDetector::with_config(
+            &model_path,
+            confidence_threshold,
+            Vec::new(),
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                log::error!("AI debug raw export: failed to load model {model_path}: {e}");
+                app.set_export_error_text(format!("Failed to load model: {e}").into());
+                return;
+            }
+        };
+        let ball_class_id = detector
+            .class_names()
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case("ball") || n.eq_ignore_ascii_case("sports ball"))
+            .map(|idx| idx as u16);
+        let input_size = detector.input_size();
+
+        // GPU NV12 preprocessing - same wgpu compute-shader path
+        // `setup_autocam` uses for the real export's detector, moving
+        // the CPU-side resize/letterbox/normalize (the actual
+        // bottleneck, not ORT inference) onto the GPU. A throwaway
+        // `GpuContext` is built the same validated way the app does
+        // elsewhere; any failure falls back to plain CPU preprocessing
+        // rather than failing the export - see
+        // `reco_io::raw_camera_debug::RawCameraDebugConfig::gpu`'s doc
+        // comment. `0, 0` defers preprocessor sizing to the first real
+        // frame (this call site doesn't know the source resolution
+        // yet either - see `WgpuPreprocessingDetector::new`'s doc
+        // comment).
+        let (detector, gpu): (Box<dyn reco_core::detect::detector::UnifiedDetector>, _) =
+            match reco_core::gpu::GpuContext::new_blocking() {
+                Ok(gpu) => {
+                    log::info!(
+                        "AI debug raw export: GPU NV12 preprocessing enabled ({}, {})",
+                        gpu.gpu_name(),
+                        gpu.backend_name(),
+                    );
+                    let wrapper = reco_autocam::WgpuPreprocessingDetector::new(
+                        Box::new(detector),
+                        gpu.device().clone(),
+                        gpu.queue().clone(),
+                        input_size,
+                        0,
+                        0,
+                    );
+                    (Box::new(wrapper), Some(gpu))
+                }
+                Err(e) => {
+                    log::warn!(
+                        "AI debug raw export: GPU context init failed ({e}), falling back to \
+                         CPU preprocessing (slower, same detections)"
+                    );
+                    (Box::new(detector), None)
+                }
+            };
+
+        let config = reco_io::raw_camera_debug::RawCameraDebugConfig {
+            left,
+            right,
+            output_left: PathBuf::from(&output_left_str),
+            output_right: PathBuf::from(&output_right_str),
+            start_secs,
+            end_secs,
+            sync_offset_right: 0,
+            max_frames: None,
+            cut_ranges,
+            // Reuses the Export page's own AI Tracking "detection
+            // interval" dropdown rather than adding a second control -
+            // user's explicit ask ("gebruik wat er nu al in de Export
+            // pagina staat"). Same meaning as for a real export, but a
+            // far bigger lever here: this tool detects on two
+            // full-resolution raw feeds instead of one downscaled
+            // stitched output.
+            detection_interval: app.get_export_detection_interval().max(1) as u32,
+            ball_class_id,
+            confidence_threshold: Some(confidence_threshold),
+            field_roi_left: field_roi.as_ref().map(|r| r.left.clone()),
+            field_roi_right: field_roi.as_ref().map(|r| r.right.clone()),
+            encoder: reco_io::ffmpeg::encoder::EncoderConfig::default(),
+            gpu,
+        };
+
+        s.export_interrupted.store(false, Ordering::Relaxed);
+        let interrupted = Arc::clone(&s.export_interrupted);
+        let (tx, rx) = std::sync::mpsc::channel();
+        s.export_rx = Some(rx);
+        app.set_export_error_text("".into());
+        app.set_export_in_progress(true);
+        app.set_export_progress(0.0);
+        app.set_export_frames_done(0);
+        app.set_export_status_text("AI debug raw export starting...".into());
+        app.set_export_dialog_open(false);
+
+        let progress_weak = app_weak.clone();
+        // `ExportOutcome::Ok` carries one path (shared with the normal
+        // stitch-export flow's single-file result) - the left output's
+        // path stands in for both, since they always land in the same
+        // directory; the log line above and the finished toast/status
+        // text below both name each file explicitly so neither is lost.
+        let output_left_path = PathBuf::from(&output_left_str);
+        let output_right_display = output_right_str.clone();
+        let handle = std::thread::spawn(move || {
+            let progress_weak_inner = progress_weak.clone();
+            // `run` processes Left fully, then Right - see its own doc
+            // comment for why. `p.frames_done` counts within the
+            // current camera's own pass; the status text names which
+            // pass is active so a mid-stream reset to a lower count
+            // reads as "Right just started", not as a stall/bug.
+            let result = reco_io::raw_camera_debug::run(config, detector, &interrupted, {
+                move |p: reco_io::raw_camera_debug::RawCameraDebugProgress| {
+                    let weak = progress_weak_inner.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(app) = weak.upgrade() {
+                            app.set_export_frames_done(p.frames_done as i32);
+                            app.set_export_status_text(
+                                format!(
+                                    "{} pass: frame {} ({} detections)",
+                                    p.camera, p.frames_done, p.detections
+                                )
+                                .into(),
+                            );
+                        }
+                    });
+                }
+            });
+            let outcome = match result {
+                Ok(frames) => {
+                    log::info!(
+                        "AI debug raw export finished: {frames} frames -> {} and {}",
+                        output_left_path.display(),
+                        output_right_display
+                    );
+                    crate::export::ExportOutcome::Ok(frames, output_left_path)
+                }
+                Err(e) => crate::export::ExportOutcome::Failed(
+                    reco_io::stitch_job::StitchError::Other(e.to_string()),
+                ),
+            };
+            let _ = tx.send(outcome);
+        });
+        s.export_thread = Some(handle);
+    }
+    #[cfg(not(feature = "ort"))]
+    fn start_ai_debug_raw_export_impl(
+        app_weak: &slint::Weak<RecoApp>,
+        _state_ref: &Rc<RefCell<AppState>>,
+    ) {
+        if let Some(app) = app_weak.upgrade() {
+            app.set_export_error_text(
+                "AI debug raw export requires this build's `ort` feature (CPU YOLO inference)."
+                    .into(),
+            );
+        }
+    }
 
     let state_ref = Rc::clone(&state);
     app.on_cancel_export(move || {
@@ -8995,7 +9280,9 @@ fn handle_calibration_result(
                             app.set_color_grade_brightness(brightness);
                             app.set_color_grade_saturation(saturation);
                             app.set_color_grade_gamma(gamma);
-                            app.set_vivid_enabled((brightness, saturation, gamma) != (1.0, 1.0, 1.0));
+                            app.set_vivid_enabled(
+                                (brightness, saturation, gamma) != (1.0, 1.0, 1.0),
+                            );
                         }
                         if let Some((amount, radius)) = sharpen_params {
                             app.set_sharpen_amount(amount);

@@ -784,6 +784,7 @@ pub fn run_export(
                 &autocam_config,
                 info.fps as f32,
                 source.is_gpu_resident(),
+                None,
             );
             // --async-detect equivalent. Only meaningful once tracking
             // is confirmed active and the buffered/export loop is in

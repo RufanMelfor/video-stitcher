@@ -109,6 +109,8 @@ pub struct WgpuPreprocessor {
     uniform_buffer: wgpu::Buffer,
     input_size: u32,
     tensor_bytes: usize,
+    frame_width: u32,
+    frame_height: u32,
 }
 
 impl WgpuPreprocessor {
@@ -262,6 +264,8 @@ impl WgpuPreprocessor {
             uniform_buffer,
             input_size,
             tensor_bytes,
+            frame_width,
+            frame_height,
         }
     }
 
@@ -363,5 +367,15 @@ impl WgpuPreprocessor {
     /// Model input size (square dimension).
     pub fn input_size(&self) -> u32 {
         self.input_size
+    }
+
+    /// The source frame `(width, height)` this preprocessor was sized
+    /// for. Callers that reuse a preprocessor across frames of varying
+    /// resolution (e.g. `WgpuPreprocessingDetector::preprocessor_for`)
+    /// use this to detect when a rebuild is needed - the letterbox
+    /// scale/pad baked into the uniform buffer at construction time is
+    /// only correct for this exact size.
+    pub fn frame_size(&self) -> (u32, u32) {
+        (self.frame_width, self.frame_height)
     }
 }

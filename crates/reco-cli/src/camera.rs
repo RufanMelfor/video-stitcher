@@ -216,6 +216,7 @@ pub fn run_camera(
                 &autocam_config,
                 capture_fps as f32,
                 use_nvmm,
+                None,
             ) {
                 Ok(true) => println!("Autocam: {tracking_mode:?} director attached"),
                 Ok(false) => {

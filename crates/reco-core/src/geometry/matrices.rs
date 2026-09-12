@@ -133,6 +133,19 @@ pub fn unproject_screen_to_world(
 /// to draw a marker/line at a *known* world pitch/yaw over the live
 /// preview (the display half of a drag-to-set-a-world-direction
 /// editor; see [`unproject_screen_to_world`] for the input half).
+///
+/// `viewport.world_yaw`/`world_pitch` must be genuinely WORLD-frame
+/// (rig-tilt/roll-independent) here - e.g. a panner's raw decision, or
+/// live interactive pan/zoom state. A viewport pose that is already
+/// RENDER-frame (rig-tilt/roll already baked in - notably
+/// `StitchCore::safe_clamp`/`presented_clamped_pose`'s output, which is
+/// exactly what `PipelineEvent::PosePresented` carries) must not be fed
+/// here: it would double-apply the tilt/roll correction, scattering the
+/// projected point upward/off by roughly twice the tilt angle. No
+/// current caller needs a render-frame projection (the AI-debug overlay
+/// that once did was removed - see `project_render_pose_to_screen_impl`'s
+/// git history if a render-frame variant is needed again); reintroduce a
+/// `project_render_pose_to_screen` sibling if one does.
 pub fn project_world_to_screen(
     viewport: &ScreenProjection<'_>,
     target_world_yaw: f32,
@@ -145,6 +158,28 @@ pub fn project_world_to_screen(
         viewport.rig_tilt,
         viewport.rig_roll,
     );
+    project_render_pose_to_screen_impl(
+        viewport,
+        render_yaw,
+        render_pitch,
+        target_world_yaw,
+        target_world_pitch,
+    )
+}
+
+/// Shared tail for [`project_world_to_screen`]: build the view matrix
+/// from an already-resolved `(render_yaw, render_pitch)` and project a
+/// world-space target direction through it. `target_world_yaw`/
+/// `target_world_pitch` are always genuine world-space (a target
+/// direction, not a viewport pose, is never itself subject to the
+/// render-frame distinction above).
+fn project_render_pose_to_screen_impl(
+    viewport: &ScreenProjection<'_>,
+    render_yaw: f32,
+    render_pitch: f32,
+    target_world_yaw: f32,
+    target_world_pitch: f32,
+) -> Option<(f32, f32)> {
     let view = view_matrix(
         &viewport.position,
         render_yaw,
