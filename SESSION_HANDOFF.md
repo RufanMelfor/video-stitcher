@@ -1,4 +1,1602 @@
-# Session handoff - 2026-09-02 (TGR_PC), end of day: `lookahead_reactivity` found as the "AI sprints" cause, tested, AWAITING USER VIDEO REVIEW before building
+# Session handoff - 2026-09-12 (TGR_PC), newest: user confirmed "vandaag alles getest en alles lijkt goed te werken" - the accumulated uncommitted work below was split into 3 commits and pushed to fork
+
+## READ THIS FIRST - 2026-09-12 entry
+
+User tested everything on `feat/gpu-vivid-colorgrade` today and
+confirmed it all works. The large pile of uncommitted changes sitting
+in the working tree (per the 2026-09-11 entry below, and going back
+further for the ball-anchor/ai-panner-tuning work) was split into 3
+commits on this branch and pushed to `fork`, in this order:
+
+1. `feat(reco-autocam): ramp ball-tracker player-anchor radius by
+   pitch (near/far)` - the near/far anchor-radius ramp +
+   docs/ai-panner-tuning*.md.
+2. `feat(reco-cli, reco-io, reco-core): raw-camera AI debug export
+   (ai-debug-raw)` - the full ai-debug-raw feature (CLI subcommand,
+   reco-io raw_camera_debug module, GUI diagnostic button, TeeSink,
+   world-to-screen projection, lazy wgpu_detector preprocessor,
+   D3D11/CUDA COPY_SRC, vendored wgpu-hal NV12 fixes). GPU decode
+   stays disabled per the entry below - only CPU-decode path shipped.
+3. `docs: FFmpeg Windows runtime note, YOLO round 7 fine-tune writeup,
+   training scripts` - README FFmpeg DLL note, YOLO26_Training.md
+   round 7 writeup (not shipped, documentation only), new training
+   scripts.
+
+Also deleted (not committed, per user's explicit instruction): 7
+stray `scratch_ai_debug_frame*.png` debug snapshots in the repo root,
+and a stray untracked `scripts/match-logger/Match Logger.html.txt`
+backup (the real `Match Logger.html` was already tracked and current).
+
+No local build/clippy/test verification was run before this commit
+split - `reco-gui.exe` was running at the time (user was actively
+using it) and the user opted to skip local re-verification and rely on
+today's own testing instead. **Run the standard fmt/clippy/test pass
+before opening a PR or merging to main**, and rebuild both debug+release
+before any further GUI test per [[feedback_rebuild_gui_before_user_test]].
+
+---
+
+# Session handoff - 2026-09-11 (TGR_PC), newest: ai-debug-raw D3D11VA GPU decode DISABLED (real bug: produced empty/all-zero frames, caught by user via real GUI test) - CPU decode + detection_interval + end_secs fix all confirmed working; PC about to be restarted, read this fully before resuming
+
+## READ THIS FIRST - exactly where to resume
+
+**PC restart imminent** (user's own words: "als je klaar ben wil ik
+deze pc herstarten"). Everything below is uncommitted on
+`feat/gpu-vivid-colorgrade` - restarting the PC does not lose it (disk
+state persists). **Both debug and release `reco-cli`/`reco-gui` are
+built and current as of this entry** (debug 16:56-16:57, release
+16:59-17:05, 2026-09-11) - safe to use directly after the restart,
+no rebuild needed unless more code changes first. Full test suite
+re-confirmed clean (267/268, only the pre-existing/documented
+`test_shared_memory_allocation` failure) right before this entry was
+written.
+
+**The headline result of this whole session's ai-debug-raw work: two
+of three fixes shipped and confirmed working via real footage; the
+third (GPU decode) was found to be BROKEN via real user testing and is
+now disabled, not deleted.** In order:
+
+**1. `detection_interval` - SHIPPED, WORKING.** Reuses the Export
+page's own dropdown. Verified via real pixel inspection (not just "it
+ran") - see the GPU-decode failure story below for why that
+distinction now matters a lot in this session's own retrospective.
+
+**2. `end_secs` (Processing range "End" slider) - SHIPPED, WORKING.**
+Real, separate bug found mid-session: `RawCameraDebugConfig` never
+had an `end_secs` field at all - the GUI's End slider was silently
+ignored, the export always ran to the source's actual end (or
+`max_frames`, always `None` from the GUI). This is why the user's
+first real test ran to "frame 261/287" instead of stopping near
+Start+30s as the 120/150 slider values implied - NOT the same bug as
+the empty-frames one below, found and fixed first, before the deeper
+investigation started. Now threaded through config -> `keep_windows`
+(which already supported it correctly - `raw_camera_debug.rs` was the
+only thing never passing a real value). GUI reads `export_end_secs`
+(0.0 = unset, same convention as the rest of the Export page). CLI got
+`--end-time`.
+
+**3. D3D11VA GPU decode - BUILT, THEN FOUND BROKEN, NOW DISABLED.**
+This was the big one and deserves the full story because of how it was
+caught: **not by me** - by the user, testing through the real GUI,
+comparing the "0 detections" result against footage they knew had a
+player and ball at that exact timestamp, and refusing to accept "maybe
+that moment is just empty" as an answer. My own earlier smoke tests
+had the EXACT SAME symptom (a flat, empty-looking exported field) and
+I wrote it off as "camera pointed at empty pitch" without checking
+actual pixel data. That was a real process failure on my part - I
+verified "doesn't crash, looks plausible at a glance" and called it
+done, instead of checking pixel statistics against known content. That
+mistake is worth remembering for how this kind of change gets
+verified from here on: **always check actual mean/std/nonzero-fraction
+of the pixel data against a timestamp with known content, not just
+"the export finished and something is visible".**
+
+Investigation (raw pixel inspection, then temporary diagnostic
+logging directly in the readback code) conclusively proved: the GPU
+decode path's readback (`Nv12Readback::read`) returns all-zero Y/UV
+planes on literally every frame - the only real pixels in any GPU-path
+export were the CPU-drawn ROI outline/boxes on top of nothing. Root
+cause investigation went deep into `vendor/wgpu-core`'s texture
+initialization tracking (`TextureUses::UNINITIALIZED`,
+`TextureClearMode::None` on HAL-imported textures, lazy-zero-init
+semantics for `copy_texture_to_buffer`) but hit a real contradiction
+between two lines of evidence that couldn't be resolved before the
+user (correctly) called time on further digging. **Full investigation
+trail + next steps for whoever picks this up:
+[[project_d3d11_gpu_decode_empty_frames_bug]] in memory - read it
+before attempting to re-enable GPU decode.**
+
+Fix applied: `D3d11FrameSource::try_new` in
+`crates/reco-io/src/raw_camera_debug.rs` now unconditionally returns
+`None` (logs why, falls back to CPU decode) - the real implementation
+is preserved as `try_new_impl` (renamed, not deleted,
+`#[allow(dead_code)]`) so a future session doesn't have to
+reconstruct it. **All the supporting GPU-decode infrastructure stays
+in the codebase, unused**: `reco_core::gpu::nv12_readback::
+Nv12Readback` (new file), the `FrameSource` Cpu/D3d11 enum split, the
+`D3d11FrameSource` struct. None of it was shown to be structurally
+wrong - only its end-to-end result.
+
+**Two real bugs in vendored `wgpu-hal` were found+fixed along the
+way** (while building the now-disabled GPU decode path) - these ARE
+real, reproducible, confirmed-fixed, and worth keeping regardless of
+the GPU-decode outcome, since any future multi-planar-texture copy on
+DX12 would hit them too:
+- `Texture::calc_subresource_for_copy`
+  (`vendor/wgpu-hal/src/dx12/mod.rs`) had no match arm for
+  `FormatAspects::PLANE_0/1/2` - `unreachable!()` panic on any
+  per-plane copy of an NV12/P010 texture.
+- `map_texture_format_for_copy`
+  (`vendor/wgpu-hal/src/auxil/dxgi/conv.rs`) had the same gap one
+  level deeper - `.unwrap()` panic.
+Full detail: [[project_wgpu_hal_nv12_copy_bug]].
+
+**Verification done this session, all real footage**: `cargo test -p
+reco-io -p reco-core --features ffmpeg` full suite passes (268/268,
+including a genuinely pre-existing, unrelated CUDA test fix - see
+below). `cargo clippy` clean across reco-io/reco-core/reco-cli/
+reco-gui + the two touched vendor crates. Debug AND release builds
+done multiple times as the investigation progressed (always
+`--features tensorrt`). Final real CLI export with GPU decode
+DISABLED, at the user's own t=120s: confirmed via raw YUV extraction
+(Y mean=104, std=57, 99.99% nonzero - real content) AND visually
+(correct fisheye frame, correct person/ball/referee boxes, correct ROI
+outline) - this is the state the debug/release exes are built with as
+of this entry.
+
+**Bonus, unrelated, found+partially fixed while chasing a test
+failure earlier in the session**: `interop::cuda::tests::
+test_cuda_available` was failing before this session too (confirmed:
+last real touch to `cuda.rs` was merged PR #389) -
+`is_cuda_available()` never calls `cuInit`, so a bare test binary's
+first real CUDA call fails cold. Fixed by calling
+`cuda_ensure_context()` at the top of the test - now passes.
+`test_shared_memory_allocation` still fails one call deeper
+(`cuMemCreate` -> `CUDA_ERROR_INVALID_VALUE`) - suspected
+`CUmemAllocationProp` struct layout missing a field vs. the real CUDA
+header, affects `crate::interop::vulkan.rs`'s CUDA<->Vulkan
+shared-texture path. NOT fixed (deliberately out of scope, unrelated
+to ai-debug-raw) - separate task for later.
+
+## OPEN / WAITING ON THE USER
+
+- User has still never done a full, successful real GUI
+  click-through test of ai-debug-raw end-to-end (every test so far
+  either predates a fix or hit the bugs documented above). Worth a
+  clean retest once the PC is back up, with the now-disabled-GPU-decode
+  build.
+- `test_shared_memory_allocation`'s `cuMemCreate` bug - separate task.
+- The D3D11VA GPU decode investigation itself -
+  [[project_d3d11_gpu_decode_empty_frames_bug]] has concrete next
+  steps if anyone wants to pick it back up.
+- Reporting the two wgpu-hal bugs upstream to `gfx-rs/wgpu` - not done.
+
+---
+
+# Session handoff - 2026-09-11 (TGR_PC), newest: ai-debug-raw detection-interval + D3D11VA GPU decode shipped (real ~65fps-class throughput now in reach); two real wgpu-hal bugs found+patched along the way; user testing debug build now
+
+## READ THIS FIRST - exactly where to resume
+
+**User is testing the debug build right now** (`target/debug/reco-gui.exe`,
+built 15:15) - the release build (13:30 -> rebuilt, done) is also ready.
+Wait for their result before assuming this is finished; see "Open" below.
+
+**Why this round happened**: user pointed out ai-debug-raw's throughput
+(~7-10fps/camera after the earlier pipelining fix) is nowhere close to
+a real export's 65fps - a legitimate gap, not a misunderstanding. Root
+cause, found by actually reading the real export's own log: a real
+export detects every 10th frame (`detection_interval`) on ONE
+downscaled stitched 1920x1080 output using GPU zero-copy (D3D11VA)
+decode; ai-debug-raw detected on EVERY frame of TWO full-resolution
+raw 3840x2880 feeds using CPU decode. Both gaps are now closed:
+
+**1. `detection_interval` wired through** (small, safe change):
+`RawCameraDebugConfig` gained a `detection_interval: u32` field -
+detect every Nth frame, redraw the previous detection's boxes on
+frames in between. GUI reuses the Export page's existing "detection
+interval" dropdown (`export_detection_interval`, user's explicit ask:
+"gebruik wat er nu al in de Export pagina staat") rather than adding a
+new control. CLI got a matching `--detection-interval` flag (default
+1 = unchanged behavior). `crates/reco-io/src/raw_camera_debug.rs`,
+`crates/reco-cli/src/ai_debug_raw.rs`, `crates/reco-cli/src/main.rs`,
+`crates/reco-gui/src/main.rs`.
+
+**2. D3D11VA GPU decode added** (the big one). User confirmed option
+B after I laid out the tradeoff: GPU-decode the raw feed (the
+expensive part at 3840x2880 HEVC) but draw boxes on the CPU (keeps
+every non-box pixel bit-exact - option A, drawing with a shader,
+would have put the WHOLE frame through a lossy NV12->RGB->NV12
+roundtrip just to draw a few thin rectangles). New `FrameSource` enum
+in `raw_camera_debug.rs` (`Cpu`/`D3d11` variants) wraps either a plain
+`VideoDecoder` or a new `D3d11FrameSource` that decodes via D3D11VA,
+copies NV12 planes back to CPU via a new
+`reco_core::gpu::nv12_readback::Nv12Readback` (new file,
+`crates/reco-core/src/gpu/nv12_readback.rs`), de-interleaves to
+YUV420P (`interleaved_uv_to_yuv420p`, exact inverse of the existing
+`yuv420p_to_interleaved_uv`), and hands back a `&mut YuvFrame` so the
+rest of the loop (draw/encode) is unchanged. Falls back to CPU decode
+for every reason the GPU path can fail to open (no hw device, wrong
+backend, decoder open failure) - never fails the whole export.
+`reco_core::interop::d3d11`'s imported NV12 staging textures gained
+`wgpu::TextureUsages::COPY_SRC` (was `TEXTURE_BINDING` only) to make
+the per-plane readback possible at all.
+
+**Two real bugs found in vendored `wgpu-hal` while building this -
+NOT hypothetical, both reproduced via a real crash on real footage,
+both fixed and reverified**:
+- `Texture::calc_subresource_for_copy`
+  (`vendor/wgpu-hal/src/dx12/mod.rs`) had no match arm for
+  `FormatAspects::PLANE_0/1/2` - `unreachable!()` panic on ANY
+  per-plane copy of a multi-planar (NV12/P010) texture. The aspects
+  already existed and were used elsewhere for texture VIEWS (sampling)
+  - just never taught to this COPY path.
+- `map_texture_format_for_copy`
+  (`vendor/wgpu-hal/src/auxil/dxgi/conv.rs`) had the same gap one
+  level deeper - fell through to `_ => return None`, causing an
+  `.unwrap()` panic in `command.rs`. Fixed by adding the DXGI formats
+  a per-plane NV12/P010 copy actually needs (`R8_UNORM`/`R8G8_UNORM`
+  for NV12, `R16_UNORM`/`R16G16_UNORM` for P010) - same values
+  `y_format()`/`uv_format()` already use for view creation, so a copy
+  and a view of the same plane now agree.
+
+Both are real gaps in a third-party crate this project vendors (see
+[[project_reco_obs_wgpu_feature_bug]] for why it's vendored at all) -
+worth reporting upstream to `gfx-rs/wgpu` at some point, not done this
+session (out of scope, no GitHub issue filed).
+
+**Verification done**: real CLI smoke-test export on real DJI footage
+(120 frames, both cameras, `--detection-interval 3`) - crashed twice
+(one panic per bug above), fixed both, third run completed cleanly: L
+7.0fps, R 10.0fps (was ~7-10fps already from the prior session's
+encode-pipelining fix alone - GPU decode's fps win wasn't dramatically
+visible at this frame count/interval, worth a longer real comparison).
+Visually inspected 3 extracted frames (ffmpeg) from both L and R
+outputs - correct colors (BT.709 roundtrip verified consistent, no
+shift), correct ROI outline placement, no plane-misalignment
+artifacts. `cargo test -p reco-io -p reco-core --features ffmpeg`:
+266/268 -> now 268/268 (see below). `cargo clippy` clean on both
+crates + the two touched vendor crates. Debug AND release builds both
+done (`reco-cli`+`reco-gui`, `--features tensorrt` as always).
+
+**Bonus, unrelated but found+fixed while investigating a test
+failure**: `interop::cuda::tests::test_cuda_available` and
+`test_shared_memory_allocation` were failing BEFORE this session's
+changes too (confirmed: last touch to `cuda.rs` was merged PR #389,
+long before this session) - `is_cuda_available()` only checks the
+driver library loads, never calls `cuInit`; in production something
+else in the process (FFmpeg's NVDEC backend) always calls
+`cuda_ensure_context()` first, but a bare test binary doesn't, so the
+first real CUDA call in these tests failed cold
+(`cudaErrorInitializationError`). Fixed by calling
+`cuda_ensure_context()` at the top of both tests, matching the
+pattern the module's own doc comment already prescribes.
+`test_cuda_available` now passes. **`test_shared_memory_allocation`
+still fails**, one call deeper (`cuMemCreate` ->
+`CUDA_ERROR_INVALID_VALUE`) - suspected real bug: the Rust
+`CUmemAllocationProp` struct
+(`crates/reco-core/src/interop/cuda.rs`) may be missing a trailing
+`allocFlags` field the real CUDA driver header has, which would
+silently misalign every field after `win32_handle_value`. NOT fixed
+this session (deliberately scoped out - unrelated to ai-debug-raw,
+needs the real CUDA header to verify rather than guessing at the
+layout). This is `crate::interop::cuda::allocate_shared_memory`, used
+by `crate::interop::vulkan.rs`'s CUDA<->Vulkan shared-texture path -
+a real, currently-broken code path, worth a dedicated session.
+
+## OPEN / WAITING ON THE USER
+
+- User is testing the debug build's ai-debug-raw export through the
+  actual GUI button right now (first real GUI click-through test of
+  this whole feature across multiple sessions - always CLI-only
+  before). Get their result.
+- A longer, more controlled fps comparison (same clip, same interval,
+  GPU decode on vs. off) would nail down exactly how much the D3D11VA
+  decode path is worth on its own vs. the detection_interval change -
+  not done, the smoke test's 120 frames at interval 3 isn't a clean
+  A/B.
+- `test_shared_memory_allocation`'s `cuMemCreate` bug (see above) -
+  separate task, not ai-debug-raw related.
+- Reporting the two wgpu-hal bugs upstream to `gfx-rs/wgpu` - not done.
+
+---
+
+# Session handoff - 2026-09-11 (TGR_PC), newest: round7 fine-tune stopped+NOT SHIPPED (real-footage regression, same "picky not better" pattern); ai-debug-raw GPU/TensorRT verified working correctly; pipelining fix shipped for ai-debug-raw's remaining low-but-nonzero GPU utilization
+
+## READ THIS FIRST - exactly where to resume
+
+**round7 YOLO training is over, NOT shipped.** User stopped it manually
+(`taskkill`, ultralytics' file-based `stop` convention did NOT work on
+this setup - don't rely on it next time) after epoch 285/300, plateaued
+since epoch 217 (best mAP50-95=0.6306). Val metrics looked like a wash
+vs. the current production checkpoint (0.631 vs 0.636), but
+`scripts/compare_checkpoints_real_footage.py` (new, committed, reusable)
+found a real regression on real DJI footage: ball detection rate DROPPED
+on both cameras (L 46.7%->40.0%, R 33.3%->23.3%) while confidence on
+hits rose (+0.07-0.08) - the same "picky, not better" failure mode as
+the 2026-08-21/22 regression, recurring despite this round doing
+everything right that one got wrong. **`merged_v1_tiled_1920` remains
+the production checkpoint.** Full writeup: `YOLO26_Training.md`'s
+"Round 7" entry - has an open, unresolved research question (data vs.
+training-hyperparameter/calibration issue - worth a confidence-score
+distribution comparison) to investigate before the next training round.
+Memory: [[project_yolo26_round7_finetune]].
+
+**ai-debug-raw's GPU/TensorRT verification, done this session**: with
+training finished, investigated the user's "GPU is niet belast, export
+is traag" complaint properly (live `nvidia-smi` sampling during a real
+CLI export). Confirmed NOT a bug: TensorRT is active, GPU preprocessing
+(the earlier session's fix) is working, GPU utilization sits at 20-46%
+- low but not zero/broken. Root cause: the per-frame loop was fully
+serial (decode -> GPU detect/preprocess -> CPU draw -> encode, each
+stage blocking on the previous one, no overlap). User chose to
+investigate a pipelining fix rather than just document this as a known
+limitation.
+
+**Pipelining fix shipped this session** (scope: encoding only, the
+smaller of two options offered - see "Pipelining fix" section below for
+the full design). `crates/reco-io/src/raw_camera_debug.rs`'s per-camera
+loop now submits each frame's pixels to a
+`reco_core::async_encode::AsyncEncodeThread` (wrapping
+`crate::adapters::FfmpegFileEncoder`, both reused as-is from the real
+`StitchJob` export path - no new concurrency code written) instead of
+calling the blocking `VideoEncoder::write_yuv420p_planes` directly on
+the calling thread. Decode/detect/draw stay serial; only the encode
+stage moved to a background thread, so the loop no longer waits on
+ffmpeg's `send_frame`/`receive_packets` calls before decoding the next
+frame. One `reco-core` API change: `async_encode` module changed from
+`pub(crate)` to `pub` (user confirmed, "Module public maken" -
+AGENTS.md already frames reco-core as meant to be usable standalone).
+
+**Verification done**: `cargo test -p reco-io --features ffmpeg` (all
+10 `raw_camera_debug` tests + full suite pass), `cargo build -p reco-cli
+-p reco-gui --features tensorrt` debug clean, release build kicked off
+(see below for its result if this was captured before the background
+build finished - check `target/release/reco-gui.exe`'s timestamp if
+unsure). **NOT YET measured**: actual fps/GPU-utilization delta from
+this change on a real export - no real CLI/GUI run done yet this
+session with the new encode path. Ask for or run a real export next
+session and compare against the previously-measured ~9-10fps/pass
+baseline (interleaved-camera 2026-09-10 numbers superseded by the
+sequential-camera fix, so ~9-10fps/pass is the right baseline to beat).
+
+**Still open**: the user has NEVER re-tested ai-debug-raw through the
+actual GUI button across this entire multi-day feature (CLI + log/frame
+verification only, repeatedly noted). Ask for a real GUI click-through
+test next.
+
+---
+
+# Session handoff - 2026-09-10 (TGR_PC), newest: round7 YOLO fine-tune launched (real doubly-continued fine-tune, not from-scratch) - training in progress overnight; ai-debug-raw GPU-speed investigation deferred until it finishes
+
+## READ THIS FIRST - exactly where to resume
+
+**A long-running background training process may still be active** -
+check first: `Get-Content "D:\VOETBAL_VIDEO\RECO\training\round7_tiled_1920\runs\full_patience100\results.csv" -Tail 5`
+(or `-Wait` to follow live). If the file hasn't grown in a long time
+and no `python.exe`/`yolo` process is in `tasklist`, it finished or
+was interrupted - check `weights/best.pt`'s timestamp and whether
+`patience=100` triggered early-stopping (look for the last few rows'
+epoch numbers vs. epoch 300).
+
+**Do not start any GPU-heavy reco-cli/reco-gui build or export while
+this training is running** - user explicitly asked to defer the
+ai-debug-raw GPU/TensorRT investigation (see below) until training
+finishes, specifically to avoid GPU contention skewing either
+measurement.
+
+## What's running: round7 fine-tune
+
+**User's own architectural correction, worth remembering for every
+future round**: earlier rounds all trained fresh from stock
+COCO-pretrained `yolo26s.pt` every time - never continuing from the
+project's own best prior checkpoint. User caught this explicitly:
+"we moeten beter en beter worden en niet steeds opnieuw beginnen" (we
+should keep getting better, not keep starting over) and asked for a
+genuine continued fine-tune instead. This round is the first one that
+actually does that.
+
+**Data pipeline** (all steps completed, verified along the way):
+1. Downloaded Label Studio project 24's full YOLO export via the API
+   (275 tasks total - round5's 60 + round6's ~115 + the original
+   pre-round5 100 "ai_learning" tasks, ALL of which the user has now
+   fully reviewed/corrected in LS).
+2. LS's export omits image bytes and prefixes label filenames with an
+   8-hex-char task UUID (`<uuid>-<original_filename>.txt`) that
+   `prepare_yolo_train_split_from_ls_export.py` doesn't strip on its
+   own - had to manually match by stripping that prefix and locating
+   each image, split across two sources: `round5_candidates`/
+   `round6_candidates`'s own `images/{left,right}/` dirs (175 images)
+   for the newer tasks, and `training/merged_v1/images/{train,val}/`'s
+   already-`ai_learning_`-prefixed copies (100 images) for the
+   original pre-round5 batch - all 275 found, none missing.
+3. **Explicit user decision**: include ALL 275 tasks, including the
+   old "ai_learning" 100 - even though that batch was originally
+   selected via `select_ball_rich_frames.py`'s teacher-ball-score
+   ranking, the exact selection method later root-caused as the cause
+   of the 2026-08-22 "easy ball bias" regression (see
+   `YOLO26_Training.md`'s "Root cause found" entry). Reasoning: the
+   LABELS are now human-corrected (accurate), and this round's actual
+   measured mean-ball-size for the `project24` source (0.000102
+   normalized area) came out close to `round4`'s (0.000082) - NOT
+   inflated like the old bias sources were (which were +8% to +43%
+   larger) - so the bias risk this time is low. Visually spot-checked
+   3 sample images (one round5, one ai_learning, one round6) with boxes
+   drawn back on - all correct, no swapped classes or offset boxes.
+4. `prepare_yolo_train_split_from_ls_export.py` -> 234 train / 41 val
+   (`project24_prepared`).
+5. `merge_yolo_datasets.py --ready-source project24=... --ready-source
+   round4=training/round4` -> 453 train / 80 val, 533 total
+   (`round7_merged`). Class counts train: 6023 person / 510 ball / 415
+   referee - healthy.
+6. `tile_yolo_dataset.py` -> 906 train / 160 val tiles, 1066 total
+   (`round7_tiled_1920`). Sample tile visually verified (boxes land
+   correctly on the L-crop).
+
+**Training environment gap found and fixed**: the Python install this
+machine's earlier training rounds used (`torch`/`ultralytics` at
+`AppData\Local\Programs\Python\Python314`) no longer exists - only a
+fresh `C:\Program Files\Python314` (Python 3.14.7) with NO packages
+installed. Root cause not investigated (old install just gone/replaced
+at some point outside this session). Reinstalled: `torch==2.14.0+cu126`
++ `torchvision` (from `download.pytorch.org/whl/cu126` - `cu121`/
+`cu124` have no Python-3.14 wheels yet, `cu126` does and works fine
+against this machine's driver, CUDA 13.2) + `ultralytics`. CUDA
+confirmed working (`torch.cuda.is_available()` -> True, "NVIDIA
+GeForce RTX 3060 Ti"). The `yolo` CLI script lands in `C:\Users\Rufan\
+AppData\Roaming\Python\Python314\Scripts\yolo.exe`, not on PATH -
+use the full path (`python -m ultralytics` does NOT work, the package
+has no `__main__`).
+
+**Training itself**:
+- Smoke test (8 epochs, same command minus `patience`) ran clean -
+  losses monotonically down, mAP50-95 0.018 -> 0.218, no crashes.
+  `model=` pointed at the checkpoint (real fine-tune), `pretrained=false`
+  (don't re-init from COCO weights, we're loading real trained weights).
+- Full run launched as a background task (this session's own
+  background-task mechanism, NOT a visible terminal - see the note
+  below about live progress):
+  ```
+  yolo detect train model="D:\VOETBAL_VIDEO\RECO\training\merged_v1_tiled_1920\runs\full_patience100\weights\best.pt" data="D:\VOETBAL_VIDEO\RECO\training\round7_tiled_1920\data.yaml" epochs=300 patience=100 batch=2 imgsz=1920 workers=2 pretrained=false project="D:\VOETBAL_VIDEO\RECO\training\round7_tiled_1920\runs" name=full_patience100 exist_ok=true
+  ```
+- As of this entry (still running): **epoch 20/300**, ~257s/epoch
+  average, mAP50-95 fluctuating 0.33-0.42 (normal noisy-but-improving
+  pattern this early). Will very likely NOT be finished by morning at
+  this rate unless it early-stops well before epoch 300 - check
+  `results.csv`'s last row and compare its epoch number/timestamp
+  against real time elapsed to judge how much further it has to go.
+
+**User feedback on process, for next time**: user wanted the LIVE
+per-batch percentage progress bar (`tqdm`-style, e.g. "45%|##  |
+120/267") that `yolo detect train` prints to its own terminal when run
+in the foreground - NOT available when the process is launched as this
+session's own background task (its `\r`-based live line never reaches
+the captured log, only flushes on epoch boundaries, which is what
+`results.csv`/`Get-Content -Wait -Tail` already shows). Offered to
+restart with `resume=true` in a user-visible foreground terminal to
+get the real live bar; user declined (didn't want to risk interrupting
+the run) and said "volgende keer beter" (better next time) instead.
+**For a future long training run: ask up front whether the user wants
+to watch it via a foreground terminal (real live %) vs. a background
+task (per-epoch only via results.csv), before starting it** - avoids
+this exact mid-run dilemma.
+
+## OPEN / WAITING ON THE USER (this entry)
+
+- **Training completion.** Check `results.csv` first thing next
+  session (see "READ THIS FIRST" above). If it finished or
+  early-stopped, the new checkpoint is at
+  `training/round7_tiled_1920/runs/full_patience100/weights/best.pt` -
+  needs the same real-footage validation methodology prior rounds used
+  (val-set metrics AND a real-footage left/right raw-camera detection
+  rate comparison against the current `merged_v1_tiled_1920` checkpoint
+  before considering shipping it - do NOT ship on val-set numbers
+  alone, see `YOLO26_Training.md`'s repeated lesson on this) before
+  replacing `merged_v1_tiled_1920` as the production checkpoint
+  anywhere (HF upload, `reco-yolo26s-football`, calibration defaults).
+- **ai-debug-raw GPU-speed investigation - explicitly deferred until
+  training finishes** (user: "na de trainings run"). User's own repro:
+  ran a real export today (build/version not confirmed) and reports
+  GPU still not utilized. This session's own read-only code review
+  (no build/run done, to avoid disturbing the training GPU) found the
+  GPU-preprocessing code path itself (`WgpuPreprocessor`'s compute
+  shader, `NvUploadPool`) is structurally correct and should be
+  GPU-bound (~1ms/dispatch per its own doc comment) - NOT confirmed
+  as the actual bottleneck. Two live hypotheses, neither confirmed:
+  (1) apples-to-oranges comparison - user's "~60fps at AI detect
+  interval 10" reference is ~6 real detections/sec (1 per 10 rendered
+  frames), while ai-debug-raw's measured 9-10fps IS 9-10 real
+  detections/sec (it deliberately detects every frame, by design) -
+  so it may already be faster per-detection than the number being
+  compared against; (2) **more likely real cause**: TensorRT is an
+  opt-in Cargo feature (`--features tensorrt`) - if the binary the
+  user tested wasn't built with that flag, ORT silently falls back to
+  CUDA or DirectML EP (DirectML confirmed much slower elsewhere in
+  this project's own history, per [[feedback_always_tensorrt_build]]).
+  **First step next session**: confirm which EP was actually active in
+  the user's test (check for "ORT: TensorRT execution provider
+  enabled" vs. a CUDA/DirectML line in that run's log), then a fresh
+  `cargo build -p reco-cli --features tensorrt` + real export + log
+  check to settle it properly.
+
+## READ THIS FIRST - exactly where to resume
+
+Branch `feat/gpu-vivid-colorgrade`, same branch as every entry below -
+not switched. **All changes in this entry are UNCOMMITTED.** Debug
+`reco-gui.exe` and release `reco.exe` (CLI) both rebuilt with
+`--features tensorrt` this entry. **User has not yet re-tested through
+the GUI itself** - verified via a real CLI export + log inspection +
+one dumped frame, same as this session's other recent entries.
+
+## What changed and why
+
+The entry directly below ("GPU NV12 preprocessing wired in") flagged,
+as an explicitly undecided follow-up, the user's own idea from earlier
+that day: process Left camera fully (every frame, finished file) before
+starting Right, instead of alternating camera-by-camera each frame.
+User confirmed today: "ik kan beide beeld toch niet tegelijkertijd
+kijken, dus kies maar wat het best is" (I can't watch both videos at
+the same time anyway, so just pick whichever is best) - since the two
+output files are watched one at a time regardless, finishing Left
+completely gives the user something watchable as soon as possible,
+instead of making them wait for the combined runtime of both before
+either file is usable. Total work and total wall time are unchanged -
+this only reorders when each file finishes.
+
+**What was built**: `raw_camera_debug.rs`'s `run()` was a single loop
+alternating Left/Right every frame, sharing one cut-range keep-window
+computation and one pair of GPU-upload-pool/encoder state across both
+cameras. Restructured into a new private `run_one_camera()` helper
+(decode, cut-range windows, GPU-or-CPU detect, draw, encode - i.e.
+everything the old per-frame loop body did for one camera) that `run()`
+now calls twice, sequentially: once for Left, once for Right, each with
+its own decoder/encoder/GPU-texture-pool instance and its own
+independent cut-range window computation (same source data,
+`config.cut_ranges`, just evaluated twice - once per camera's own
+`sync_offset_frames`, mirroring how the old code already computed
+Left's and Right's seek targets from the same windows but with
+different offsets). `run()` checks `interrupted` between the two passes
+so a cancel during Left's pass doesn't still kick off Right.
+
+**API changes**: `RawCameraDebugProgress` changed from
+`{frames_done, left_detections, right_detections}` (one struct meant
+to describe both cameras' state in the same frame-tick) to
+`{camera: CameraId, frames_done, detections}` (one pass's own state -
+`frames_done` now counts within the CURRENT camera's pass, not a
+combined total, since the two passes no longer share a frame counter).
+Both callers (`reco-cli/src/ai_debug_raw.rs`, `reco-gui/src/main.rs`)
+updated: the CLL prints "L pass:" / "R pass:" headers and resets its
+progress-bar reporter when `p.camera` changes (so the printed count
+visibly resetting to a lower number reads as "next camera started",
+not a stall); the GUI's status text now says e.g. "Left pass: frame 42
+(3 detections)" instead of the old combined "Frame 42 (L:3 R:5
+detections)".
+
+## Verified
+
+- `cargo fmt --all -- --check` clean.
+- `cargo clippy -p reco-io -p reco-cli -p reco-gui --all-targets
+  --features tensorrt -- -D warnings` clean (one real fix needed along
+  the way: `&PathBuf` -> `&Path` parameter, `clippy::ptr_arg`).
+- `cargo test -p reco-io raw_camera`: 10 tests pass (unchanged from the
+  entry below - this restructure didn't touch the box-drawing/NV12-
+  interleave/GPU-pool unit-testable logic, only the loop shape around
+  it, which has no dedicated unit test - covered by the real-export
+  verification below instead).
+- **Real CLI export** (`reco ai-debug-raw`, real DJI footage,
+  `--start-time 30 --max-frames 100`, release build): log confirms the
+  exact expected shape - `"L pass:"` header, 100 frames processed and
+  `"Encoder finished"` for Left, THEN `"R pass:"` header and Right's own
+  100 frames, in that order, not interleaved. Steady-state speed this
+  run: ~9-10 fps for each pass (vs. ~4.1 fps measured for the old
+  interleaved-per-frame GPU path in the entry below) - not something
+  this entry set out to change, but plausibly explained by the GPU
+  texture pool no longer needing to alternate between two different
+  camera resolutions/textures every single frame; not deeply
+  investigated, treat as a nice-to-have observation, not a claimed
+  guarantee.
+- Dumped a frame from the Right-pass output and visually confirmed
+  boxes/ROI still land correctly - the restructure didn't touch any
+  drawing/detection math, only reordered when each camera's frames are
+  processed, so this was a sanity check rather than an expected-to-fail
+  one.
+- `cargo build -p reco-gui --features tensorrt` succeeds (checked
+  `reco-gui.exe` wasn't running first).
+
+## OPEN / WAITING ON THE USER
+
+- **User has not yet re-tested this through the actual GUI button** -
+  verified via CLI + log/frame inspection only, per this session's
+  established pattern. Confirm the GUI's status text reads sensibly
+  through a real click-through, and that Left genuinely becomes
+  watchable while Right is still processing (the whole point of this
+  change).
+- **End of session 2026-09-10 - user is switching to unrelated work,
+  GUI test deferred to tomorrow.** Debug `reco-gui.exe` (this entry's
+  build) and release `reco.exe` are both current on disk and ready to
+  test as-is - no further build needed before that test, only if the
+  working tree changes again first. This is the correct resume point
+  for the whole `ai-debug-raw` feature: read this entry plus the two
+  below it (GPU preprocessing, then two-file-split + cut-range) in
+  order for full context before touching this feature again.
+- Everything in the "OPEN" sections of both entries below still
+  applies unless specifically addressed above.
+
+---
+
+# Session handoff - 2026-09-10 (TGR_PC), newest: ai-debug-raw GPU NV12 preprocessing wired in - fixed near-zero GPU utilization, ~10-13x measured fps
+
+## READ THIS FIRST - exactly where to resume
+
+Branch `feat/gpu-vivid-colorgrade`, same branch as every entry below -
+not switched. **All changes in this entry are UNCOMMITTED.** Release
+`reco.exe` (CLI) rebuilt with `--features tensorrt` and re-verified on
+real footage this entry; debug + release `reco-gui.exe` build (`cargo
+build -p reco-gui --features tensorrt`) succeeds but was not run
+(interactive GUI click-through out of scope this entry - no display
+automation, per standing policy). This entry's fix builds directly on
+top of the "split into two output files" + "cut-range support" entry
+immediately below - read that one first if picking this up cold.
+
+## Problem: user reported ai-debug-raw is extremely slow, 0% GPU utilization
+
+Real numbers from earlier this session (informal, CPU-only build):
+roughly **0.1-0.4 fps**, `nvidia-smi` idle the whole run. User asked
+for this to work "exactly like reco itself" - i.e. match the normal
+stitched export's GPU-accelerated detection performance, not a
+bespoke fix.
+
+**Root cause, confirmed by reading code before touching anything**:
+`raw_camera_debug.rs` built a plain `CpuYoloDetector` and called
+`detector.detect()` with `DetectorFrame::Cpu(RawFrame)` - the decoded
+YUV420P frame straight off `VideoDecoder::next_frame()`, at full
+camera resolution (3840x2880 here). `CpuYoloDetector::detect_raw`
+already routes inference through ORT, which already picks
+TensorRT/CUDA/DirectML on its own (confirmed in this session's own
+log: `ORT: TensorRT execution provider enabled`) - the GPU matmuls
+were never the bottleneck. The bottleneck is `self.preprocess(frame)`
+inside `detect_raw`: a CPU scalar bilinear resize/letterbox/normalize
+of the full 3840x2880 frame down to the model's 1920x1920 input,
+**per camera, per frame, sequentially, with zero GPU touched at all**
+- exactly matching the reported symptom.
+
+The real stitch export avoids this entirely: `reco-autocam::
+setup_autocam`'s "wgpu preprocessing path" wraps the same
+`CpuYoloDetector` in `WgpuPreprocessingDetector`
+(`reco-autocam/src/wgpu_detector.rs`), which runs `WgpuPreprocessor`
+(`reco-detect/src/wgpu_preprocess.rs`) - a compute shader doing
+NV12->RGB, resize, letterbox, normalize entirely on the GPU (module
+doc comment's own numbers: ~300ms/frame CPU scalar resize at 1280 ->
+~1ms GPU compute dispatch) - then hands the inner detector an
+already-GPU-processed `DetectorFrame::PreprocessedChw` tensor, so
+`detect_raw`'s CPU preprocessing branch never runs at all.
+`raw_camera_debug.rs` had none of this wgpu machinery - by design
+(see its module doc: it deliberately has zero dependency on
+`reco-autocam`/`reco-detect`, to stay detector-agnostic and keep the
+diagnostic's code surface small).
+
+**Format mismatch found while designing the fix**: `WgpuPreprocessor`
+requires genuinely interleaved NV12 chroma (`DetectorFrame::WgpuNv12`
+- one `Rg8Unorm` UV texture, confirmed by its WGSL shader taking both
+channels from a single `uv_tex` sample), but `VideoDecoder::
+next_frame()` produces planar YUV420P (separate U and V textures/
+buffers) - the two are not interchangeable. Needed a small CPU-side
+interleave step before the GPU upload (cheap - microseconds at
+1920x1440 chroma resolution, nowhere near the ~300ms resize it
+replaces), not a texture-format trick.
+
+## What was built
+
+**Design preserved the existing architectural boundary**
+(`reco-io` stays detector-agnostic, no new dependency on
+`reco-autocam`/`reco-detect`): the wgpu texture upload/interleave step
+- the part that has to live inside the per-frame decode loop
+regardless of who builds the detector - went into `raw_camera_debug.rs`
+itself, using only `reco_core::gpu`/`reco_core::wgpu` (already
+available transitively - `reco-core`'s `gpu` feature is default-on and
+`reco-io` never disables it; confirmed prior art already existed,
+`reco-io/src/stitch_job.rs` already calls `GpuContext::new_blocking()`
+unconditionally). The `WgpuPreprocessingDetector` wrapping itself stays
+in the CLI/GUI callers, which already depend on `reco-autocam`.
+
+- `crates/reco-io/src/raw_camera_debug.rs`:
+  - `RawCameraDebugConfig` gained `gpu: Option<reco_core::gpu::
+    GpuContext>`. `None` (or any upload failure) runs the original
+    all-CPU `DetectorFrame::Cpu` path unchanged - GPU preprocessing is
+    strictly an opportunistic speed upgrade, matching `setup_autocam`'s
+    own cascading-fallback pattern; it can never make a correct run
+    fail.
+  - New `NvUploadPool`: one small wgpu texture pair (Y as R8Unorm, UV
+    as Rg8Unorm) per camera, built lazily on each camera's first frame
+    (mirrors the existing lazy-encoder pattern) and reused every frame
+    after via `queue.write_texture` (no per-frame texture allocation).
+    Left and Right get separate pools since they could in principle
+    differ in resolution, even though in practice this rig's two
+    cameras matched (3840x2880 both).
+  - New `yuv420p_to_interleaved_uv(u, v, out)`: the CPU-side planar->
+    interleaved chroma conversion described above. Pure function, unit
+    tested (happy path, empty planes, mismatched plane lengths).
+  - `detect_one` (the original CPU-only helper) kept as-is; new
+    `detect_one_gpu_or_cpu` wraps it, choosing the GPU path when
+    `config.gpu` is `Some` and this camera's pool builds/uploads
+    successfully, logging once and falling back to `detect_one`
+    otherwise. Shared confidence-filter/`DrawDet`-mapping logic
+    factored into a new `run_detect` so both paths stay in sync.
+  - 4 new tests: `yuv420p_to_interleaved_uv` (pairs correctly, empty
+    input, mismatched-length input truncates instead of panicking),
+    `nv_upload_pool_rejects_zero_sized_frames` (real-GPU test, skips
+    gracefully with no adapter).
+
+- `crates/reco-autocam/src/wgpu_detector.rs` (`WgpuPreprocessingDetector`):
+  changed to build its `WgpuPreprocessor` **lazily** (on first
+  `WgpuNv12` frame, or rebuilt if the incoming resolution changes)
+  instead of requiring `frame_width`/`frame_height` at construction.
+  Needed because `WgpuPreprocessor::new` bakes the source frame's
+  letterbox scale/pad into a uniform buffer once at construction and
+  never updates it - `setup_autocam`'s call site always knew the real
+  resolution up front (session already open), but `ai-debug-raw`'s CLI/
+  GUI callers build the detector *before* `raw_camera_debug::run` has
+  even opened the decoders, so they genuinely don't know the frame size
+  yet. `WgpuPreprocessingDetector::new(..., 0, 0)` now means "defer
+  sizing"; existing callers passing a real size are unaffected
+  (`setup_autocam`'s own call site unchanged in behavior). Small
+  borrow-checker wrinkle: `preprocessor_for(&mut self, ...)` needed the
+  device/queue handles cloned (cheap, Arc-backed) before the call site
+  could also borrow `self.device`/`self.queue` alongside the mutable
+  preprocessor reference.
+- `crates/reco-detect/src/wgpu_preprocess.rs` (`WgpuPreprocessor`):
+  added `frame_size() -> (u32, u32)` accessor so the caller above can
+  detect a resolution change and know when to rebuild.
+- `crates/reco-cli/src/ai_debug_raw.rs`: builds a throwaway
+  `GpuContext::new_blocking()` the same validated way the real app
+  does, wraps the `CpuYoloDetector` in `WgpuPreprocessingDetector`
+  (`0, 0` - deferred sizing, see above), passes `Some(gpu)` into
+  `RawCameraDebugConfig.gpu`. Any `GpuContext` init failure logs a
+  warning and falls back to the plain `CpuYoloDetector` + `gpu: None`
+  - never fails the whole export over a GPU init problem.
+- `crates/reco-gui/src/main.rs`
+  (`start_ai_debug_raw_export_impl`, `#[cfg(feature = "ort")]` variant):
+  identical wrapping pattern, same fallback behavior. The wrapped
+  detector and `GpuContext` are `Send` (`wgpu::Device`/`Queue` clones,
+  same pattern `setup_autocam` already uses from worker threads) so
+  this still works from the export's background `std::thread::spawn`.
+
+## Measured before/after (real footage, real model)
+
+Footage: `D:\VOETBAL_VIDEO\Berghem Sport J011-1\KNVB Competitie\02
+Berghem Sport - Zwaluw VFC\LEFT\DJI_20260905102840_0006_D_L01.MP4` +
+matching RIGHT file, `Calibration.json` from the same folder. Model:
+`D:\VOETBAL_VIDEO\RECO\training\hf_upload\reco-yolo26s-football\
+best.onnx` (a real production **.onnx** checkpoint, not a prebuilt
+`.engine` - confirms the fix works with the model format the user
+actually has; class mapping 0=person, 1=ball, 2=referee, confirmed via
+the run's own "Resolved ball class id 1 from model labels" log line).
+Release build (`cargo build --release -p reco-cli --features
+tensorrt`), 200 frames (`--max-frames 200 --show-field-roi`), output
+to the scratchpad (not the repo).
+
+- **Before** (this session's own earlier CPU-only measurement, no
+  clean pre-fix checkout exists since `raw_camera_debug.rs` is a new,
+  not-yet-committed file with no prior git revision to diff against):
+  **~0.1-0.4 fps**, 0% GPU utilization observed.
+- **After**: log confirms the GPU path was actually taken, not a
+  silent CPU fallback - `"ai-debug-raw: GPU NV12 preprocessing enabled
+  (NVIDIA GeForce RTX 3060 Ti, Dx12)"` and `"WgpuPreprocessor: 3840x2880
+  -> 1920x1920, scale=0.500, pad=(0.0,240.0), tensor=42.2MB"` (the real
+  camera resolution, not a stale placeholder - confirms the lazy-sizing
+  fix above actually worked). Progress line: `"Processed 30 frames (3.0
+  / 3.0 fps) ... Processed 180 frames (3.8 / 4.1 fps)"` - steady-state
+  **~3.8-4.1 fps**, both cameras, both detector calls, full decode+
+  draw+encode loop included. **Roughly a 10-13x speedup over the low
+  end of the "before" range, higher over the low end (0.1 fps)**. Total
+  wall time for 200 frames (both cameras): 56.6s. Both outputs used
+  hardware `h264_nvenc`, no encoder fallback.
+- **Accuracy check (not just speed)**: dumped 3 frames via ffmpeg
+  (`frame_L_30.png`, `frame_L_100.png`, `frame_R_100.png`) from the
+  AFTER run and inspected visually. All three show correctly placed,
+  tightly-fit boxes: blue (person) boxes on individual players/sideline
+  figures, one green (referee) box on the correct kit, small red (ball)
+  boxes on plausible ball-sized targets, yellow field-ROI polygon
+  tracing the pitch boundary correctly in every frame. No systematic
+  offset, scale error, or garbled boxes that a broken NV12 interleave
+  or a stale letterbox uniform would have produced - GPU preprocessing
+  reads as detection-equivalent to the CPU path, just far faster.
+
+## Verification
+
+- `cargo fmt --all -- --check`: clean after `cargo fmt --all`
+  (one doc-comment lazy-continuation clippy lint fixed along the way -
+  a line starting with `- ` inside a doc comment reads as an unindented
+  markdown list continuation).
+- `cargo clippy -p reco-io -p reco-detect -p reco-autocam -p reco-cli
+  --all-targets --features tensorrt -- -D warnings`: clean. Also clean
+  with `,profiling` added (AGENTS.md's standing rule) and for
+  `reco-gui --all-targets --features tensorrt` separately (longer
+  build, checked on its own).
+- `cargo test -p reco-io -p reco-detect -p reco-autocam --features
+  tensorrt`: all green (76 + 5 + 30 + 69 unit tests across the four
+  crates' lib suites, no new failures). The `reco-io` doctest run
+  failed at the harness level (`error: doctest failed` with zero
+  individual test lines reported, unlike `reco-core`'s doctest run in
+  the same session which listed each test normally) - traced to the
+  known FFmpeg-DLL-runtime-requirement gap (env_build_requirements.md/
+  project_ffmpeg_dll_runtime_requirement.md): the merged-doctest binary
+  runs from an isolated temp directory with no FFmpeg DLLs copied
+  alongside it, unlike `target/debug` (which does have them, why the
+  real unit-test binaries pass fine). Confirmed unrelated to this
+  change - zero markdown code fences exist anywhere in
+  `raw_camera_debug.rs`'s doc comments, so there is no new doctest for
+  this failure to be about. Pre-existing environment gap, not a
+  regression.
+- Known pre-existing CUDA-device test failures (`cudaGetDevice code 3`,
+  no GPU context in a bare shell) mentioned in this task's brief did
+  not reproduce in any of the four crates touched here - not present in
+  this run's output at all (likely specific to `reco-core`'s own test
+  suite, not touched this entry).
+- `cargo build -p reco-gui --features tensorrt`: succeeds (1m53s clean
+  clippy pass, ~4min build). `reco-gui.exe` was confirmed NOT running
+  first (`tasklist` check) so this didn't need to block on the user.
+  Interactive GUI click-through itself out of scope (no display
+  automation).
+
+## OPEN - flagged, not implemented, needs a decision
+
+**"Process Left fully, then Right" (sequential cameras) idea**: the
+user separately floated processing the whole Left camera first, then
+the whole Right camera, instead of today's per-frame alternation
+(current loop: decode+detect+draw+encode one Left frame, then the
+matching Right frame, repeat). This was raised as a possible
+*additional* improvement alongside the GPU fix, not a replacement for
+it, and the user's explicit instruction for this entry's work was
+specifically "make it work like reco itself" (GPU acceleration) - so
+this was deliberately NOT implemented here. Judged non-trivial enough
+to leave as an open decision rather than silently doing it or silently
+dropping it: it would change the loop's shape substantially (two full
+passes over each source instead of one interleaved pass over both,
+different seek/memory-residency trade-offs, and touches the same
+`'windows: for` cut-range loop structure the entry below just built) -
+worth a dedicated look rather than folding into this fix. Ask the user
+before implementing.
+
+- Everything in the OPEN sections of the two 2026-09-10 entries below
+  still applies unchanged (GUI click-through re-test still pending for
+  both of those fixes too).
+
+
+
+Branch `feat/gpu-vivid-colorgrade`, same branch as every entry below -
+not switched. **All changes in this entry are UNCOMMITTED.** Debug
+`reco-gui.exe`/`reco.exe` (CLI) both rebuilt with `--features tensorrt`
+this entry, carrying both fixes below. **User has NOT yet re-tested
+either fix through the GUI itself** - both were found/fixed/verified
+via the user's own GUI export log output + this session's own
+independent CLI re-verification, not a GUI click-through. User is
+about to close for the day; test resumes later.
+
+This entry covers TWO separate, real issues found after the entry
+directly below ("replaced stitched AI debug overlay...") shipped its
+first version of `ai-debug-raw`:
+
+## Fix 1: side-by-side composite exceeded H.264's 4096px width limit
+
+**User's real GUI export log showed the actual symptom** (not
+theorized): `[h264_nvenc] No capable devices found`, then QSV and AMF
+each failed too, falling back all the way to software `h264_mf` -
+which took **over 5 minutes just probing encoders** before encoding
+even started, on every attempt, reproducible after a full reco-gui
+restart (ruling out a one-off driver glitch).
+
+**Root cause, confirmed directly**: `ffmpeg -f lavfi -i
+color=s=7680x2880 -c:v h264_nvenc ...` reproduces the exact error -
+`Width 7680 exceeds 4096`. H.264 has a hard, codec-level 4096px width
+ceiling (not a GPU capability gap) - the entry below's side-by-side
+composite (2x 3840px cameras = 7680px) always exceeded it, on any GPU,
+which is why every hardware encoder refused to open and it fell all
+the way through to slow software encoding every time.
+
+**User's own proposed fix, after discussing alternatives** (a
+downscale, or reverting to the removed stitched-overlay approach were
+also offered and explicitly declined - user wants the true raw-camera
+view, not a projected/scaled derivative): **two separate output files**
+(Left and Right), not one composite. Simpler than gestapeld
+(stacked-vertically) too, and each file stays at native
+3840x2880 - safely under the 4096px limit either way.
+
+**What changed**:
+- `reco-io/src/raw_camera_debug.rs`: `RawCameraDebugConfig.output`
+  (one `PathBuf`) split into `output_left`/`output_right` (two). The
+  `hstack_yuv420p`/`blit_yuv420p`/`Composite` compositing code and its
+  3 tests deleted entirely - each camera's frame now goes straight to
+  its own `VideoEncoder` at native resolution, no compositing step at
+  all. Module doc comment gained a "Why two separate files" section
+  explaining the 4096px limit for future readers.
+- `reco-cli/src/ai_debug_raw.rs`: `auto_output_name` (one name) split
+  into `auto_output_names`/`suffixed_output_names` (both return
+  `(String, String)`, `_L`/`_R` suffixed) - 5 tests updated/added.
+- `reco-cli/src/main.rs`: `AiDebugRaw` subcommand help text updated
+  (two files, why).
+- `reco-gui/src/main.rs`: `add_ai_debug_raw_suffix` ->
+  `add_ai_debug_raw_suffixes` (two names); `ExportOutcome::Ok`'s single
+  `PathBuf` slot (shared with the normal stitch-export's result type,
+  not touched) now carries the LEFT output's path as the "primary"
+  one, with both filenames explicitly named in the log line and
+  finished-export status text so neither is lost from the user's view.
+- `reco-gui/ui/main.slint`: button tooltip updated (two files, why).
+
+**Verified**: real CLI export (`ai-debug-raw`, real DJI footage) after
+the fix - log confirms `Encoder: 3840x2880 h264_nvenc (hardware)` for
+BOTH files, immediately, no fallback probing at all. Dumped a frame
+from each output and visually confirmed: full native 3840x2880
+resolution (visibly sharper than the old downscaled composite),
+correct boxes/ROI on both. `cargo test -p reco-io`: 6 raw_camera_debug
+tests pass (hstack tests removed, not just skipped). `cargo test -p
+reco-cli --features tensorrt`: 5 ai_debug_raw tests pass. fmt/clippy
+clean (`--features tensorrt`, reco-io/reco-cli/reco-gui). `cargo build
+-p reco-gui --features tensorrt` succeeds (had to wait for the user to
+close their own running `reco-gui.exe` first - it locks its own build
+target file).
+
+## Fix 2: ai-debug-raw ignored cut ranges entirely
+
+**User's question, after fix 1 shipped**: "houdt hij ook rekening mee
+met de Cuts" (does it also account for the Cuts) - a real gap: the
+tool decoded start-to-end linearly with zero awareness of
+`AppState.cut_ranges`/`--cut-range`, unlike the normal stitch export.
+
+**Design decision** (user confirmed, after being offered the choice):
+skip a cut range via a real seek (`VideoDecoder::seek_to_secs`), the
+same mechanism `StitchJob::run_windows` already uses for the normal
+export - NOT frame-accurate sequential decode-and-discard (this
+module's own stated design principle everywhere else, matching
+`dump_detection_frames.rs`). A cut range is typically minutes long (a
+match halftime); decoding through one just to throw the frames away
+would make the diagnostic impractically slow for a benefit
+(frame-exact cut boundaries) nobody needs here - nothing is drawn from
+inside a cut range at all.
+
+**What changed**:
+- `reco-io/src/raw_camera_debug.rs`: `RawCameraDebugConfig` gained
+  `cut_ranges: Vec<crate::cut_range::CutRange>`. `run()`'s single frame
+  loop restructured into an outer `'windows: for` loop over
+  `crate::cut_range::keep_windows(...)` (the same primitive
+  `StitchJob` uses) wrapping the original per-frame inner loop; window
+  0 uses the existing start-frame skip, every later window seeks both
+  decoders (right decoder's seek target adjusted by
+  `sync_offset_right`), each window's own end is tracked by a local
+  frame counter against `(win_end - win_start) * fps`. New
+  `RawCameraDebugError::CutRange` variant for `validate_cut_ranges`
+  failures (malformed/overlapping input).
+- `reco-cli/src/main.rs` + `ai_debug_raw.rs`: new `--cut-range
+  START:END` flag (reuses the existing `parse_cut_range` value parser
+  the normal `stitch` subcommand already has), repeatable, threaded
+  into `AiDebugRawArgs`/`RawCameraDebugConfig`.
+- `reco-gui/src/main.rs`: `start_ai_debug_raw_export_impl` gained the
+  exact same `AppState.cut_ranges -> Vec<CutRange>` conversion
+  `start_export_impl` already does for the normal export - so the
+  GUI's existing cut-range timeline/editor just works for this export
+  too, with zero new UI needed.
+
+**Verified with two real CLI exports** (real DJI footage,
+`--cut-range`):
+1. `--start-time 30 --cut-range 35:50 --max-frames 100`: log correctly
+   resolved `"1 cut range(s) excluded, 2 keep window(s): 30.00-35.00s,
+   50.00s-end"` - but the 100-frame cap never actually reached the cut
+   boundary (window 1 alone is 150 frames), so this run alone didn't
+   prove the seek fires.
+2. Re-ran with a SMALLER window to force crossing it:
+   `--start-time 30 --cut-range 32:50 --max-frames 200`. Log shows the
+   seek firing exactly where expected: `"seeking to 50.00s for the
+   next keep window (skipping a cut range)"`, logged right after
+   frame 60 (2s @ 30fps = window 1's own 32-30=2s span). Dumped output
+   frames right before/after that boundary (1.9s/2.1s into the output)
+   and visually confirmed a clean, correct scene jump (different
+   player positions, someone newly walking into frame) with no
+   corruption, boxes/ROI still drawn correctly on both sides of the
+   cut.
+
+fmt/clippy clean, existing tests still pass (no new unit test added
+for the window-seek logic itself - covered by the real-export
+verification above instead; a synthetic unit test would need a fake
+seekable decoder this module doesn't have a test double for yet).
+
+## OPEN / WAITING ON THE USER
+
+- **User has not yet re-tested either fix through the actual GUI** -
+  both fixes were verified via CLI + log/frame inspection only. Ask
+  for a GUI test result (button click-through, both L/R files land
+  correctly, cut ranges from the GUI's own timeline actually get
+  excluded) before considering this feature done/committable.
+- Everything in the "Deferred / not done" list of the entry directly
+  below still applies unless specifically addressed above (`TeeSink`
+  still unused-but-kept, no commit made, etc).
+
+---
+
+# Session handoff - 2026-09-10 (TGR_PC), later: replaced stitched AI debug overlay with a raw-camera side-by-side box export (user's own reasoning: show exactly what the model saw, no re-projection to get wrong)
+
+**SUPERSEDED by the entry above** - the side-by-side single-file design
+described here was replaced by two separate output files (H.264's
+4096px width limit) later the same day, and cut-range support was
+added. Kept below as accurate history of the original design and its
+own real-footage verification.
+
+## READ THIS FIRST - exactly where to resume
+
+Branch `feat/gpu-vivid-colorgrade`, same branch as every entry below -
+not switched. **All changes in this entry are UNCOMMITTED.** This
+entry documents removing the entry directly below (stitched AI-debug
+overlay) and replacing it with a different, simpler feature per the
+user's own explicit design decision - both entries are accurate
+history, read both.
+
+## Why the previous feature (below) was replaced, not kept alongside a new one
+
+User's own words: "ik wil eigenlijk exact zien wat het model ook ziet,
+anders kan ik geen juiste conclusie trekken" (I want to see EXACTLY
+what the model itself sees, otherwise I can't draw a correct
+conclusion) - comparing it to how Label Studio (their annotation tool)
+shows bounding boxes directly on the raw camera frames the model was
+actually trained/run on. The stitched-overlay approach (previous
+entry) burned markers into the *panned/zoomed, stitched* export - a
+re-projection of what the detector saw (panorama-space mapping, then
+the virtual camera's yaw/pitch/FOV/tilt-correction chain) - and that
+re-projection step is exactly where both of the previous entry's real
+bugs lived (wrong hardcoded ball class id; double rig-tilt-correction
+in the screen projection). Drawing boxes directly on the raw camera
+frame the detector actually ran inference on has no re-projection step
+to get wrong. One feature to maintain, not two - the old one is fully
+removed, not kept as a parallel option.
+
+## What was removed
+
+- `crates/reco-core/src/render/ai_debug_overlay.rs` - deleted whole
+  file (the `AiDebugEventSink`/`AiDebugOverlaySource`/`AiDebugViewport`
+  module described in the entry below).
+- `crates/reco-core/src/render/mod.rs` - removed the module
+  registration.
+- `crates/reco-core/src/geometry/matrices.rs` - removed
+  `project_render_pose_to_screen` (public fn) and its private
+  `_impl` split point folded back into `project_world_to_screen`
+  directly; removed the `render_pose_projection_does_not_double_apply_tilt_correction`
+  regression test (both were added purely for the removed overlay's
+  double-tilt-correction bugfix). `project_world_to_screen`'s doc
+  comment trimmed to drop the now-irrelevant "AI-debug overlay" bug
+  story but KEPT the world-frame-vs-render-frame distinction itself
+  (still correct, general documentation - e.g. relevant to anyone
+  reading `PipelineEvent::PosePresented`).
+- `crates/reco-core/src/detect/pipeline_event.rs` - `TeeSink` itself
+  was KEPT (still exported, still tested) since nothing else in this
+  entry needed to change it, but its only two real callers (the
+  removed overlay's event-sink wiring in `stitch.rs`/`export.rs`) were
+  removed - it is currently unused in the shipped call sites, kept as
+  working infrastructure since the doc comment already generalizes it
+  ("a consumer that needs two independent observers of the same
+  stream"), not overlay-specific.
+- `crates/reco-autocam/src/lib.rs` - `setup_autocam`'s
+  `resolved_ball_class_id: Option<&mut Option<u16>>` parameter and its
+  doc comment were KEPT (still real, useful API - any consumer
+  resolving a model's real class ids needs this, not just the removed
+  overlay), but every call site that used to thread a live
+  `Arc<Mutex<Option<u16>>>` through it for the overlay
+  (`reco-cli/src/stitch.rs`, `reco-gui/src/export.rs`) now passes
+  `None` - the stitched-export path has no consumer for it anymore.
+  The NEW feature (below) resolves its own ball class id directly from
+  its own `CpuYoloDetector::class_names()` instead (it doesn't go
+  through `setup_autocam`/`StitchSession` at all - see design below),
+  so `setup_autocam`'s parameter itself needed no redesign.
+- `crates/reco-cli/src/stitch.rs` + `src/main.rs` - removed
+  `--ai-debug-overlay`, its viewport-geometry/ball-class-id/event-sink
+  local wiring, the `overlay_layer` attach, the always-printed warning.
+- `crates/reco-gui/src/export.rs` - removed the `ai_debug_overlay`
+  parameter on `run_export` and its mirrored wiring.
+- `crates/reco-gui/src/main.rs` - `start_export_impl` reverted to a
+  plain no-flag function; `add_ai_debug_suffix`/`AI_DEBUG_SUFFIX`
+  renamed for the new feature's own naming (see below) rather than
+  deleted outright, since the filename-marker convention itself is
+  still wanted.
+- `crates/reco-gui/ui/main.slint` - removed `start-ai-debug-export()`/
+  `pending-ai-debug-export`/the "Export with AI Debug Overlay" button;
+  replaced with the new feature's own callback/property/button (below).
+
+## What was built instead: `ai-debug-raw` / "Export Raw Camera AI Debug"
+
+**Design decision: does NOT reuse `StitchJob`/`StitchSession` at all.**
+The user's actual goal (see boxes drawn directly on raw camera pixels)
+never needed a virtual camera, panorama projection, or GPU stitching -
+threading it through that whole pipeline (the old feature's shape) was
+the wrong shape in the first place. The new feature is a standalone
+decode -> detect -> draw -> composite -> encode loop:
+
+- **`crates/reco-io/src/raw_camera_debug.rs`** (new module, `ffmpeg`
+  feature-gated): `run(config, detector: Box<dyn UnifiedDetector>,
+  interrupted, on_progress)`. Opens Left/Right via
+  `ffmpeg::decoder::VideoDecoder::open_input` (frame-accurate
+  sequential decode, same technique
+  `reco-io/examples/dump_detection_frames.rs` and
+  `reco-calibrate/examples/dump_undistorted.rs` already use - not a
+  lossy `-ss` seek), runs the supplied detector directly on each
+  decoded `YuvFrame` via `DetectorFrame::Cpu(RawFrame{...})` (every
+  `YuvFrame` already satisfies this shape with zero preprocessing - no
+  GPU zero-copy path needed since this is CPU-resident by
+  construction), draws bounding boxes DIRECTLY on the decoded YUV420P
+  planes (ported `dump_detection_frames.rs`'s box-drawing math -
+  rectangle outline, color-coded by class: person=blue, ball=red,
+  referee=green, other=yellow, plus the field ROI polygon outline in
+  yellow - to a YUV-native version, since this module intentionally
+  does NOT depend on the `image` crate as a real dependency, only as a
+  reco-io dev-dependency for the example), horizontally composites
+  Left+Right into one frame at native per-camera resolution (no
+  resampling - resampling would blur exactly the small
+  detection-sized detail this diagnostic exists to show), and encodes
+  via the existing `ffmpeg::encoder::VideoEncoder` (same encoder the
+  real stitch path uses, so codec/hardware-encoder selection behaves
+  identically). `reco-io` doesn't depend on `reco-autocam`/
+  `reco-detect` (wrong dependency direction), so it takes the detector
+  as a pre-built trait object - the caller (reco-cli/reco-gui) builds
+  it exactly like `setup_autocam` does internally.
+- **`crates/reco-cli/src/ai_debug_raw.rs`** (new, `ort`-feature-gated)
+  + a new `reco ai-debug-raw` subcommand in `main.rs` (NOT a flag on
+  `stitch` - it's a genuinely separate pipeline, so it gets its own
+  subcommand rather than overloading `Stitch`'s many flags with one
+  that skips stitching entirely). Builds a `CpuYoloDetector` from
+  `--model`, resolves the real ball class id from the model's own
+  label metadata (never assumes COCO ordering, same reasoning as the
+  removed feature's bugfix), resolves the calibration's field ROI
+  (densified, same as `dump_detection_frames.rs`), auto-suffixes the
+  output filename `_ai_debug_raw` when `-o` is left empty, prints a
+  loud diagnostic warning unconditionally.
+- **`crates/reco-gui/src/main.rs`**: new `start_ai_debug_raw_export_impl`
+  function + `on_start_ai_debug_raw_export` callback - a deliberately
+  separate code path from `start_export_impl`/`run_export`, spawning a
+  worker thread that calls `reco_io::raw_camera_debug::run` directly
+  (mirrors the CLI wiring: builds its own `CpuYoloDetector`, resolves
+  ball class id from labels, reads the calibration's field ROI). Same
+  "never persisted, always off by default" requirement as the removed
+  feature.
+- **`crates/reco-gui/ui/main.slint`**: "Export Raw Camera AI Debug"
+  button replaces "Export with AI Debug Overlay", same placement/
+  visibility rule (shown only when AI Tracking is enabled), same
+  no-field-ROI confirmation flow (renamed
+  `pending-ai-debug-raw-export`).
+- **Detection interval**: runs on every frame (no `detection_interval`
+  skip) - this is a diagnostic tool answering "what does the model
+  see", so thinning the signal to match a real export's throughput
+  trade-off would defeat the point.
+- **`reco-io/examples/dump_detection_frames.rs`**: left as-is (NOT
+  deleted). It still serves a different purpose the new feature
+  doesn't replace - a two-step `--events` JSONL post-process workflow
+  for inspecting SPECIFIC frame indices as individual PNGs (e.g. "show
+  me exactly frame 2277"), vs. the new feature's continuous
+  live-in-the-loop video covering a whole range. The two share the
+  same box-drawing *design* (colors, thickness/crosshair reasoning)
+  but not code - `reco-io` doesn't depend on `image` as a real
+  dependency, so sharing the actual drawing functions between an RGBA-
+  based example and a YUV-native production module wasn't worth the
+  churn; kept as two small, independently-correct implementations
+  rather than one shared abstraction neither side fits cleanly.
+
+## Verification (real output, not paraphrased)
+
+- `cargo fmt --all -- --check`: clean after `cargo fmt --all` fixed
+  formatting on the 4 new/touched files.
+- `cargo clippy --all-targets -- -D warnings`: clean for reco-core
+  (`--features gpu`), reco-io, reco-cli (`--features tensorrt`,
+  and again with `--features tensorrt,profiling`), reco-gui
+  (`--features tensorrt`), and the full workspace minus `reco-obs`
+  (pre-existing, unrelated: `reco-obs`'s build.rs fails in this shell
+  because the OBS SDK headers aren't installed - not caused by this
+  session's changes, same condition would block any build on this
+  machine regardless).
+- `cargo test -p reco-core -p reco-io -p reco-cli -p reco-autocam
+  --features reco-cli/tensorrt`: reco-autocam 76 passed; reco-cli 3
+  passed (new `ai_debug_raw::tests::auto_output_name_*`); reco-core
+  263 passed, 2 failed - EXACTLY the standing, documented
+  `interop::cuda::tests::{test_cuda_available,
+  test_shared_memory_allocation}` (`cudaGetDevice code 3`, no GPU
+  context in this shell), confirmed still the same two and nothing
+  new; reco-io 68 passed (including new `raw_camera_debug::tests::*`).
+  `cargo test -p reco-io --doc` reports "doctest failed" despite "all
+  doctests ran" and zero listed failures - reco-io's only doc code
+  fences are `rust,ignore`/`rust,no_run` (zero actually-executed
+  doctests), and this new module added none either (no fenced code
+  blocks in its doc comments) - this looks like a pre-existing
+  merged-doctest harness quirk on a crate with no runnable doctests,
+  not something this session's changes caused; not chased further
+  since it does not reflect an actual test failure.
+- `cargo build -p reco-gui --features tensorrt`: succeeds (interactive
+  GUI click-through out of scope, no display automation available).
+- **Real-footage export actually run**:
+  `reco.exe ai-debug-raw <left> <right> -c Calibration.json -o
+  <scratchpad>/test.mp4 --model reco-yolo26s-football/best.onnx
+  --max-frames 300` on the same real DJI match pair/calibration used
+  by the previous entry. Exit code 0, "Done: 300 frames -> ...". Log
+  confirms: TensorRT EP registered, 3 class labels auto-detected,
+  ball class id resolved to `1` from model labels (NOT a hardcoded
+  COCO constant - this model's real mapping), output `7680x2880`
+  (2x 3840x2880 side by side, matching this DJI source's native
+  decoded resolution with its 180deg rotation applied). Dumped frames
+  50/150/250 via ffmpeg and **visually inspected**: both camera halves
+  show their own independent fisheye projection (visible seam down
+  the middle, no stitching/panorama artifact), green boxes land
+  tightly on real players on the pitch, blue boxes land on people in
+  the stands/sideline, the yellow field-ROI polygon outline traces the
+  pitch boundary correctly and consistently across both camera halves
+  and across all three sampled frames.
+
+## Deferred / not done this entry
+
+- Interactive GUI click-through of the new "Export Raw Camera AI
+  Debug" button - same reasoning as the removed feature's entry (no
+  display automation available; [[feedback_synthetic_gui_automation_risk]]).
+  User should test the button itself before considering this
+  committable.
+- No commit made - left uncommitted per this task's instructions, on
+  the same branch (`feat/gpu-vivid-colorgrade`).
+- `TeeSink` is currently unused by any shipped call site (see "What
+  was removed" above) - kept because it's genuinely reusable
+  infrastructure, not because something currently needs it. If nothing
+  ever calls it, a future cleanup pass could reconsider removing it,
+  but that's speculative removal this entry didn't want to do
+  pre-emptively.
+- Debug `reco-gui.exe`/`reco-cli.exe` NOT rebuilt+copied with DLLs for
+  a hands-on GUI test this entry - only `cargo build` was verified
+  (per [[feedback_rebuild_gui_before_user_test]], do this before the
+  user tests the GUI button).
+
+---
+
+# Session handoff - 2026-09-10 (TGR_PC): AI debug overlay export - two real bugs found via user GUI testing and fixed (wrong ball class id, double tilt-correction), re-verified on real footage
+
+**SUPERSEDED by the entry above** - this whole feature (the stitched
+overlay) was removed later the same day per the user's own explicit
+decision. Kept below as accurate history of what was tried, the two
+real bugs found and fixed, and why the approach ultimately changed.
+
+## READ THIS FIRST - exactly where to resume
+
+Branch `feat/gpu-vivid-colorgrade` (same branch as the 2026-09-09 entry
+below - not switched). **All changes in this entry are UNCOMMITTED.**
+Debug `reco-gui.exe` rebuilt with `--features tensorrt` at ~10:13
+2026-09-10, carries BOTH fixes below. **Still not interactively
+GUI-tested by the user** - the two bugs so far were both caught from a
+GUI export's *output video*, not from the button/UI itself; verify the
+button still works as expected in the GUI before considering this done.
+
+**Two real, shipped bugs found and fixed this entry** (both via the
+user actually running the feature and reporting what they saw - see
+[[feedback_verify_before_concluding]] pattern): the first attempt's
+"built + verified" claim in the entry below was real (fmt/clippy/tests/
+one real export all genuinely passed) but the actual on-screen result
+was still wrong on two independent axes. Read "What was fixed" below
+before touching this feature again.
+
+**What this is:** a new diagnostic export mode, requested by the user
+to quickly tell "does the AI lose the ball, or is something else
+wrong" by visually seeing what the detection/tracking/panner pipeline
+did on a per-frame basis, burned into the actual stitched output
+video - not a separate debug-only tool, an alternate export path.
+
+**User's explicit requirement:** must be impossible to end up in a
+real match export by accident - no persisted checkbox/setting, always
+starts off, a clearly separate button/flag from the normal export.
+
+## What was built
+
+**reco-core** (`crates/reco-core/src/render/ai_debug_overlay.rs`, new,
+~795 lines):
+- `AiDebugEventSink` - a `PipelineEventSink` that buffers the latest
+  `DetectionsRaw` / `WorldState` / `PannerDebug` / `PosePresented`
+  event per frame.
+- `AiDebugOverlaySource` - an `OverlayFrameSource` that draws, using
+  the already-existing `project_world_to_screen` (world yaw/pitch ->
+  screen NDC, given the live viewport pose/FOV/aspect/rig tilt-roll -
+  the same primitive the AI-pitch-limit line editor uses):
+  - red dot per raw ball-class detection (every camera, not deduped -
+    both are useful signal for e.g. "is the model seeing the ball on
+    ONE camera but not the other")
+  - green ring on the ball when `TrackState::Tracking`, amber/orange
+    ring when `TrackState::Coasting` (holding a stale position, no
+    fresh detection this frame - **this is the exact visual signature
+    of "AI thinks it knows but has lost the ball"**), nothing drawn
+    when the ball is absent from `WorldState` entirely (`Lost`)
+  - blue dot per tracked player
+  - yellow ring at the panner's cluster center (`PannerDebug`'s
+    `cluster_yaw`/`cluster_pitch`) - explains *why* the camera moved
+    where it did, not just what the ball/players are doing
+  - one corner HUD text line: frame index, ball state + presence,
+    player count - reused the same `ab_glyph` text-drawing approach
+    already used by `render::pause_overlay`, no new font dependency.
+- Wired as one more layer into the existing `overlay_layer`/
+  `LayeredOverlaySource` compositor (same mechanism the scoreboard and
+  PAUZE transition already share one overlay slot through) - canvas is
+  output-resolution, so markers land pixel-accurate, no extra fit/
+  scale math needed on top of what that compositor already does.
+- `TeeSink` added to `pipeline_event.rs` (forwards one `PipelineEvent`
+  to two sinks) - `StitchSession` only has a single event-sink slot,
+  and the debug overlay's own sink must coexist with an optional
+  `--events` JSONL sink when both are requested at once.
+
+**reco-cli** (`stitch.rs`, `main.rs`): new `--ai-debug-overlay` flag.
+Mirrors the existing `--keep-range` highlights convention - if `-o`
+was left at its clap default, the output filename gets an automatic
+`..._ai_debug.mp4` suffix (never silently overwrites a real export
+path); a console warning is always printed regardless, since a debug
+run.
+
+**reco-gui** (`export.rs`, `main.rs`, `ui/main.slint`): a **separate**
+"Export with AI Debug Overlay" button next to (not merged into, not a
+checkbox on top of) the normal "Start Export" button, only shown when
+AI Tracking is enabled. No new `GuiSettings`/calibration field - the
+toggle is not a stored value at all, it's just which button you
+pressed. Same `..._ai_debug.mp4` auto-suffix as the CLI.
+
+**Incidental fix:** `reco-gui/Cargo.toml`'s `profiling` feature wasn't
+forwarding to `reco-autocam?/profiling` - pre-existing gap, unrelated
+to this feature, fixed because AGENTS.md requires clippy to pass with
+`--features profiling` too.
+
+## What was fixed (found via two rounds of the user actually testing exports)
+
+### Bug 1: wrong/hardcoded ball class id ("ROI seems broken, markers all over the place")
+
+User's first GUI export showed raw-ball red dots and even the tracked
+markers scattered outside the field. Root cause was NOT the ROI filter
+(that was working correctly all along) - `ai_debug_overlay.rs` had
+`BALL_CLASS_ID` hardcoded to COCO's `32` ("sports ball"), but reco's
+actual production checkpoint (`reco-yolo26s-football`) uses a custom
+3-class mapping: `0=person, 1=ball, 2=referee` - ball is **not** 32
+there. The raw-ball marker loop matched against a class id that either
+didn't exist in this model or meant something else, drawing noise.
+
+**Fixed:** `reco_autocam::setup_autocam` gained a new
+`resolved_ball_class_id: Option<&mut Option<u16>>` out-parameter that
+reports the model's *actual* resolved ball class (the same `ball_id`
+its own `BallTracker` wiring already computes via
+`resolve_or(&class_names, &["ball", "sports ball"], 32)`) - see that
+function's expanded doc comment. reco-cli/reco-gui thread a shared
+`Arc<Mutex<Option<u16>>>` from before session setup into both
+`setup_autocam` (write) and the new `AiDebugOverlaySource::new`'s
+`ball_class_id` parameter (read, live, every frame) so the overlay
+always matches whatever model is actually loaded. `BALL_CLASS_ID` (32)
+is now explicitly documented as a fallback-only default. Every
+`setup_autocam` call site updated (`camera.rs`, `libcamera_cmd.rs`,
+`stitch.rs`, `export.rs`, the `vram_leak_repro` example, the crate's
+own doctest).
+
+### Bug 2: double tilt-correction ("ik zie alles behalve een bal en kinderen")
+
+After fixing bug 1, the user ran a real GUI export
+(`02 Berghem Sport - Zwaluw VFC_ai_debug.mp4`, this calibration's real
+rig tilt is `0.217 rad` ~= **12.4 degrees**) and reported seeing every
+marker except an actual ball/player match. Pulling frames via ffmpeg
+confirmed it visually: every marker (ball, players, cluster) clustered
+high in the sky/clouds, well above the real players on the pitch -
+consistent across every sampled frame, camera moving.
+
+**Root cause:** `PipelineEvent::PosePresented`'s pose is NOT a raw
+world-space pose - it's `StitchCore::safe_clamp`/
+`presented_clamped_pose`'s output, which already runs the pose through
+`resolve_render_pose` -> `world_to_render_pose` (rig-tilt/roll baked
+in - this is the actual render-frame pose the GPU's `view_matrix`
+consumes). The overlay fed this render-frame pose into
+`ScreenProjection.world_yaw`/`world_pitch` and called
+`project_world_to_screen`, which calls `world_to_render_pose` *again*
+internally - double-applying the ~12.4deg tilt correction, which
+systematically pushed every projected marker up and off by roughly
+twice the tilt angle. The AI-pitch-limit editor (the existing working
+reference this was modeled on) never hit this because its pose source
+(`AppState`'s interactive manual-pan `PoseControl::current_pose()`) is
+genuinely world-frame, unlike the export pipeline's `PosePresented`.
+
+**Fixed:** `reco-core/src/geometry/matrices.rs` gained a new
+`project_render_pose_to_screen` function (shares its view-matrix/
+projection math with `project_world_to_screen` via a new private
+`project_render_pose_to_screen_impl` helper, but skips the
+`world_to_render_pose` conversion on the viewport's own pose - the
+target direction being projected is always genuine world-space
+regardless). `project_world_to_screen`'s doc comment now explicitly
+warns about this distinction. `ai_debug_overlay.rs`'s four projection
+call sites (raw ball, players, tracked ball, cluster center) all
+switched to the new function. A regression test
+(`render_pose_projection_does_not_double_apply_tilt_correction`,
+`matrices.rs`) locks this in: asserts a render-frame viewport's own
+forward direction projects to screen-center via the new function, and
+that the *old* function (fed the same value) does NOT land at center -
+i.e. the test would have caught this exact bug before it shipped.
+
+**Re-verified end to end after fixing:** `cargo test -p reco-core
+--features gpu` now 271 passed (was 270 - the new regression test), 2
+failed (same standing CUDA-no-context condition, not new). fmt/clippy
+clean (`--features gpu`/`tensorrt`, both crates). Ran a real CLI
+export (`reco.exe stitch --ai-debug-overlay`, 300 frames, same real
+DJI match/calibration, `--lookahead 0` to dodge a VRAM contention from
+a still-running GUI test) - dumped frames 2s/8s via ffmpeg, **visually
+confirmed**: green/red ball ring lands exactly on the real ball,
+blue player dots land on real players' feet, HUD accurately reports
+"ball: tracking (presence 1.00)". Debug `reco-gui.exe` rebuilt after
+both fixes (~10:13).
+
+## Verification done (by the building subagent, all real output, not paraphrased)
+
+- `cargo fmt --all -- --check` clean on every touched file.
+- `cargo clippy --all-targets -- -D warnings` clean for reco-core
+  (`--features gpu`), reco-cli (`--features tensorrt`), reco-gui
+  (`--features tensorrt`) - each also re-checked with `profiling`
+  added on top, all clean.
+- `cargo test -p reco-core --features gpu`: 270 passed, 2 failed
+  (`interop::cuda::tests::*`, `cudaGetDevice code 3`) - this is the
+  standing, documented no-GPU-context-in-this-shell condition, not a
+  new failure.
+- `cargo test` green across reco-cli/reco-autocam/reco-io/reco-detect/
+  reco-calibrate/reco-control/reco-scoreboard.
+- `cargo build -p reco-gui --features tensorrt` succeeds.
+- **Real-footage export actually run**: `reco.exe stitch
+  --ai-debug-overlay --model yolo26n.onnx --max-frames 90` on a real
+  DJI match pair. Exit code 0. Frames 3/8/10/60 dumped via ffmpeg and
+  visually inspected: red dots land on the actual ball, blue dots on
+  actual players, HUD line renders correctly. Output + the dumped PNGs
+  kept at repo root (`scratch_ai_debug_*.png`,
+  `scratch_ai_debug_test.mp4`) per [[feedback_keep_test_artifacts]] -
+  **these are scratch files, not meant to be committed**, clean them
+  up (or gitignore-confirm they're already excluded) before a PR.
+- **Not run**: interactive GUI click-through of the new button itself
+  - no display automation available to the building agent, and this
+    session's own [[feedback_synthetic_gui_automation_risk]] memory is
+    exactly why that wasn't attempted with Win32 automation either.
+    This is what the user is testing manually right now.
+
+## OPEN / WAITING ON THE USER
+
+- **A fresh GUI test with the rebuilt (~10:13) binary** - both fixes
+  are only verified via CLI export + frame inspection so far, not
+  through the actual "Export with AI Debug Overlay" button. Re-test
+  before considering this feature done.
+- Whether the marker/color scheme (red raw-ball dot, green/amber
+  tracked-ball ring, blue player dots, yellow cluster ring, HUD text)
+  is actually useful/legible in practice, or needs tuning once seen on
+  a real diagnostic case (e.g. the still-open frame-2277 ball-lost
+  case from [[project_ball_tracker_stuck_on_last_position]] would be a
+  natural first real use of this tool).
+- Whether to commit this once GUI-verified - **user explicitly wants
+  this documented well for a future PR** (this entry + the subagent's
+  file-by-file summary above is written with that in mind).
+- Scratch test-artifact cleanup before any commit: the ORIGINAL
+  `scratch_ai_debug_*` files at repo root (from the first
+  "built+verified" pass) plus this entry's own CLI test output
+  (`fixed_ai_debug_test.mp4`, `fixed_t*.png`, `aidebug_t*.png`) which
+  were written to the session scratchpad, not the repo, so they don't
+  need repo cleanup - only the repo-root ones do.
+- The real user-facing `_ai_debug.mp4` files this produced during
+  testing (in the match folders under `D:\VOETBAL_VIDEO\...`, e.g.
+  `02 Berghem Sport - Zwaluw VFC_ai_debug.mp4`) are the user's own
+  match-folder files, not repo artifacts - no cleanup needed there,
+  just worth knowing they exist if disk space matters.
+- Everything in the 2026-09-09 entry below (Vivid/sharpen PR status,
+  the unrelated `lookahead_reactivity` uncommitted files) is still
+  exactly as it was - unrelated to this feature, not touched today.
+
+## Previous entry - 2026-09-09 (TGR_PC): Vivid color grade + sharpen moved to Color Mapping panel, calibration-based, user quick-tested working
+
+## READ THIS FIRST - exactly where to resume
+
+Branch `feat/gpu-vivid-colorgrade`, NOT `main`. Pushed to `fork`
+(`RufanMelfor/video-stitcher`), two commits: `b27257fb` (reco-core)
+and `ec7030f6` (reco-cli/reco-gui). No PR opened yet - link is
+https://github.com/RufanMelfor/video-stitcher/pull/new/feat/gpu-vivid-colorgrade
+if the user wants one. Not merged into `main`.
+
+**What shipped:** "Deel B" of the sharpen/color plan
+([[project_sharpen_colorgrade_plan]] memory) - Vivid color grade
+(brightness/saturation/gamma) and unsharp-mask sharpening, both now
+live in the GUI's **Color Mapping panel** (not the Export panel where
+an earlier iteration of this session first built it - user explicitly
+asked for the move), calibration-saved like Manual Gamma, and updating
+the **live preview**, not just export output.
+
+**User quick-tested it working** in the GUI. Not yet a thorough test -
+worth asking whether they want more real-footage verification before
+merging to `main` or opening a PR.
+
+## Key design decisions from this session (read before touching this again)
+
+1. **Calibration-based, not app-level/export-only.** User explicitly
+   chose this over an app-level GuiSettings toggle (which is how
+   Sharpen was originally designed on its own never-merged branch).
+   `Topology` gained 5 new fields: `color_grade_brightness/_saturation/
+   _gamma`, `sharpen_amount/_radius` - same pattern as
+   `color_gamma_left/_right`. `StitchPipeline::set_color_grade`/
+   `set_sharpen_params` mirror into `self.calibration.topology`.
+2. **No CLI flags.** User decided against `--vivid`/
+   `--color-brightness` etc. - reco-cli reads calibration-stored
+   values automatically, same as it already does for manual gamma.
+3. **Live preview required real GPU-texture plumbing**, not just a
+   calibration round-trip. `render_to_view`/`render_nv12_to_view`
+   gained a `target: &wgpu::Texture` parameter so the color grade/
+   sharpen compute passes can run against the live preview's own
+   texture (previously they only ran against `render_target`, the
+   export-only path). reco-gui's preview texture gained
+   `STORAGE_BINDING | COPY_SRC | COPY_DST` usage. reco-cli's debug
+   `stitch preview` window's swapchain surface does NOT have those
+   flags and was left as a known limitation (only breaks if a loaded
+   calibration sets non-identity Vivid/sharpen - see the reco-core
+   commit message for detail).
+4. **SharpenPass didn't exist on this branch at all** - it was only
+   ever built on three never-merged branches (`feat/gpu-sharpen-pass`
+   -> `-cli-flag` -> `-gui-slider`, all still sitting unmerged, see
+   [[project_sharpen_colorgrade_plan]]). Restored fresh
+   (`gpu/sharpen.rs`, `shaders/sharpen.wgsl`) from that old commit's
+   content, then adapted to the calibration-based design above -
+   those three sharpen branches are now superseded/redundant, could
+   be deleted.
+
+## Pre-existing bug fixed along the way (unrelated to this feature)
+
+`lookahead_reactivity` (added to `AutocamDefaults` by some other
+in-progress work already in the working tree before this session
+started - see the modified-but-uncommitted `reco-autocam/src/lib.rs`,
+`trackers/ball.rs`, `docs/ai-panner-tuning*.md` still sitting in the
+tree, NOT part of either commit above) was missing from 5 different
+`AutocamDefaults` struct-literal construction sites across
+reco-cli/reco-gui, which blocked every build. Filled in with the
+canonical default (`FieldPannerConfig::default().lookahead_reactivity`
+= 2.5) at each site - purely a compile fix, no new behavior. Worth
+knowing this pre-existing lookahead_reactivity work is still
+uncommitted and unrelated to what shipped today.
+
+## REPO STATE AT END OF SESSION (2026-09-09)
+
+- Branch `feat/gpu-vivid-colorgrade` (not main), pushed to `fork`
+  remote. `gh` active account is now `RufanMelfor` (was `RufanM` at
+  session start - switched mid-session for fork push access, per
+  [[feedback_gh_multi_account_switch]] - check `gh auth status`
+  before any future push).
+- Working tree still has substantial UNRELATED uncommitted changes
+  from an earlier/different session, deliberately left alone:
+  `README.md`, `crates/reco-autocam/src/lib.rs`,
+  `crates/reco-autocam/src/trackers/ball.rs`,
+  `crates/reco-core/src/detect/pipeline_event.rs`,
+  `docs/ai-panner-tuning.md`, `docs/ai-panner-tuning.nl.md`,
+  `scripts/pick_training_frames.py`, plus untracked
+  `scripts/YOLO26_TRAINING_SETUP.md` and the usual stray
+  `scripts/match-logger/Match Logger.html.txt`. None of these touch
+  color-grade/sharpen.
+- `git fsck --full` clean before push (only dangling blobs, harmless).
+- Both debug and release reco-gui/reco-cli rebuilt with
+  `--features tensorrt` and verified building green (real exit codes
+  checked, not piped) before the user tested. Rebuild again before
+  any further real-footage test - the working tree has moved since
+  (SESSION_HANDOFF.md edit only, no code changes after the last build).
+
+## DONE THIS SESSION (2026-09-09)
+
+1. Wired the already-existing-but-unconnected `ColorGradePass` (core
+   layer landed in an earlier session as `b2ea43c3`, "NOT yet wired to
+   CLI/GUI") into a working Vivid toggle - first attempt put it in the
+   Export panel as an app-level GuiSettings setting (mirroring how
+   Sharpen was designed), then the user asked for it to move to Color
+   Mapping and be calibration-based instead - see "Key design
+   decisions" above for the final shape.
+2. Restored `SharpenPass` from scratch (never merged on this branch)
+   and shipped it in the same panel/pattern.
+3. Extended live-preview rendering (`render_to_view` family) to run
+   both compute passes, not just the export path - see decision #3
+   above.
+4. Fixed the pre-existing `lookahead_reactivity` compile gap (5 sites)
+   to unblock the build - see "Pre-existing bug fixed" above.
+5. User did a quick GUI test, confirmed working.
+
+## OPEN / WAITING ON THE USER
+
+- Whether to do a more thorough real-footage test before merging.
+- Whether to merge `feat/gpu-vivid-colorgrade` into `main` / open a PR
+  (link above).
+- The three never-merged sharpen-only branches
+  (`feat/gpu-sharpen-pass`/`-cli-flag`/`-gui-slider`) are now
+  redundant - could be deleted, not done.
+- The unrelated uncommitted `lookahead_reactivity`/ball-tracker files
+  listed above are still sitting in the working tree from a different
+  thread of work - not investigated or committed this session.
+
+## Previous entry - 2026-09-02 (TGR_PC), end of day: `lookahead_reactivity` found as the "AI sprints" cause, tested, AWAITING USER VIDEO REVIEW before building
 
 ## READ THIS FIRST - exactly where to resume
 
