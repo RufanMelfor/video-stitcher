@@ -1,6 +1,71 @@
-# Session handoff - 2026-09-12 (TGR_PC), newest: 3 user-reported detail fixes (scoreboard remove buttons, ai-debug-raw camera selection, sync-point-always-frame-0 bug) + Export dialog split into Export/AI Debug tabs, all committed+pushed, both debug+release rebuilt
+# Session handoff - 2026-09-12 (TGR_PC), newest: disk cleanup across D:\VOETBAL_VIDEO\RECO\training, D:\CLAUDE, D:\VOETBAL_VIDEO\RECO root, and C:\Users\Rufan\AppData\Local\Temp\claude - several GB freed, nothing git-tracked touched
 
-## READ THIS FIRST - 2026-09-12 entry (later, same day)
+## READ THIS FIRST - 2026-09-12 entry (latest, same day)
+
+User asked for a disk cleanup pass, none of it git-tracked (all local-
+only data/scratch dirs, outside the repo). Everything below was
+explicitly approved item-by-item before deleting - see this session's
+own transcript for the exact confirmation on each.
+
+**`D:\VOETBAL_VIDEO\RECO\training`** (~20GB -> ~5.4GB): user's framing
+was "round7 beschouw ik als een soort finale waar we alleen op verder
+blijven finetunen" - i.e. round7 is the new base for all future fine-
+tuning, everything before it is superseded. Deleted: `round3`,
+`round4`, `round5_candidates`, `round6_candidates`, `rough_3class`,
+`rough_v2_v6`, `tiled_1920`, `rect_2560x1920`, `merged_v1`,
+`merged_v1_tiled_1920_verify_samples`, `project24_export(.zip)`,
+`project24_images_flat`, `project24_images_flat_full`,
+`project24_prepared`. **Kept** (do not delete without asking again):
+`round7_merged`, `round7_tiled_1920` (the new base to fine-tune from),
+`merged_v1_tiled_1920` (**current production checkpoint the app
+actually loads** - NOT superseded by round7, round7 was never
+shipped), `models/`, `weights/`, `hf_upload/`, `yolo26n.pt`/
+`yolo26s.pt`, `token.txt`, `README.md`. `finetuned_yolo26n_
+roughv1_ls_export/` and top-level `runs/` were NOT in the approved
+list and were deliberately left alone even though they're part of the
+now-deleted round3 lineage - ask before touching if revisiting this.
+
+**`D:\CLAUDE`** (scratch/temp working dir - see
+[[feedback_use_d_claude_not_c_temp]]): deleted every loose file at the
+root (debug PNGs/MP4s, throwaway .py/.ps1 scripts, the 1.8GB
+`03OJC_full_cuttest.mp4`). Deliberately left alone: `python-3.14.7-
+amd64.exe` installer, `worktrees/` (see below), `scratch/`,
+`sharpen_ab_test/`, `Nieuwe map/`, `__pycache__/`.
+
+**`D:\CLAUDE\worktrees/`** - NOT touched this pass beyond confirming
+state: `pr-474-scoreboard` and `scoreboard-on-main` are ACTIVE,
+registered git worktrees (`git worktree list` sees them) - never
+delete the folder directly, only via `git worktree remove`.
+`mid-video-cut` is a STALE folder no longer in git's worktree registry
+(already unregistered some other way) - safe to `rm -rf` whenever, but
+user only asked for loose files this round so it's still there.
+
+**`D:\VOETBAL_VIDEO\RECO`** root: deleted loose ONNX models
+(`adv_inception_v3_Opset16.onnx`, `detection.onnx`, `yolo26{l,m,n,
+n_640,s,x}.onnx`, ~530MB total, unrelated to the real training
+pipeline which uses `.pt` checkpoints under `training/`), loose images
+(`Best V1.png`, `Code_Generated_Image.png`, `Gemini_Generated_Image_
+v5zztbv5zztbv5zz.jpg`, `icon.jpeg`), and `scratch_goal_check/` (old
+goal-detection debug artifacts). **Kept, explicitly**: `Calibration
+Files/Calibration.json`, `backups/repo-backup-pre-v054-sync-2026-08-
+15.bundle`, `reco-cli-v0.5.4-windows-x86_64/`, `reco-gui-v0.5.4-
+windows-x86_64/`, `DJI Action4 Final_1.json`.
+
+**`C:\Users\Rufan\AppData\Local\Temp\claude`** (~2.3GB freed): deleted
+every past-session scratchpad folder for this project (39 UUID-named
+dirs, dominated by two ~1.9GB/~400MB folders of ai-debug-raw test MP4s/
+PNGs from finished sessions) EXCEPT the currently-running session's own
+folder (`d403af67-c576-40d4-abc7-cc8681efa501` as of this entry - a
+different session will have a different UUID, don't assume this one
+stays special). Also deleted 3 unrelated other-project scratch folders
+(`C--Users-Rufan`, the Drift-Kart-LED project, an old Roaming-Claude-
+scratch-workspaces one) and a stray `cache-break-state-*.json` at the
+root - all were already near-empty, nothing of substance in them.
+`repository/target` (211GB, cargo build output) was identified but
+NOT touched - flagged as an easy `cargo clean` win if disk space is
+still tight, not done automatically since it forces a full rebuild.
+
+## READ THIS FIRST - 2026-09-12 entry (earlier, same day)
 
 After the "everything tested, works" commit split below, the user asked
 for 3 concrete fixes from real GUI testing, then asked to move the
