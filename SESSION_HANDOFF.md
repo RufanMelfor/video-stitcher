@@ -1,6 +1,76 @@
-# Session handoff - 2026-09-12 (TGR_PC), newest: user confirmed "vandaag alles getest en alles lijkt goed te werken" - the accumulated uncommitted work below was split into 3 commits and pushed to fork
+# Session handoff - 2026-09-12 (TGR_PC), newest: 3 user-reported detail fixes (scoreboard remove buttons, ai-debug-raw camera selection, sync-point-always-frame-0 bug) + Export dialog split into Export/AI Debug tabs, all committed+pushed, both debug+release rebuilt
 
-## READ THIS FIRST - 2026-09-12 entry
+## READ THIS FIRST - 2026-09-12 entry (later, same day)
+
+After the "everything tested, works" commit split below, the user asked
+for 3 concrete fixes from real GUI testing, then asked to move the
+AI Debug export out of the normal Export dialog entirely into its own
+tab. Both landed as 2 more commits on `feat/gpu-vivid-colorgrade`,
+pushed to `fork`:
+
+**Commit `1b59ed26`** - three fixes:
+1. Scoreboard: added a "Remove" button next to "Load Match Logger
+   export..." (clears the parsed JSON + sync anchor + derived cut
+   ranges) and a small "X" button next to each team logo once set.
+   Neither existed before - clearing needed re-picking a match folder
+   or restarting the app.
+2. ai-debug-raw: added camera selection (`--cameras left|right|both`
+   CLI flag, GUI dropdown) - `reco_io::raw_camera_debug::
+   CameraSelection` new enum, `run()` skips whichever pass isn't
+   selected. Previously always exported both L+R even if only one
+   side's tracking was in question.
+3. Fixed "Set sync point": it was reading the CURRENT TIMELINE SLIDER
+   POSITION as the sync anchor's `video_seconds`, so clicking it while
+   scrubbed anywhere but the start silently offset every replayed
+   scoreboard event by that amount. `SyncAnchor`'s own doc comment
+   confirms the intended default is `video_seconds: 0.0` (video_start
+   assumed to be frame 0) - now hardcoded to 0.0, ignores playhead
+   position entirely.
+
+**Commit `c5e90611`** - Export dialog split into 2 tabs (user's idea,
+confirmed as a good one): "Export" (normal stitched export, unchanged)
+and "AI Debug" (the raw-camera diagnostic), switched via two
+`FlatButton`s at the top (not std-widgets TabWidget, to match this
+dialog's all-custom-widget styling). AI Debug tab got FULLY
+independent settings, per explicit user decision when asked:
+- Own model path (own file picker + persistence), own output path,
+  own start/end processing range, own confidence threshold, own
+  "Detect every N frames", own cut-ranges list.
+- Persisted in new `GuiSettings::ai_debug_settings`
+  (`settings::AiDebugSettings` struct) - survives app restart, same as
+  the Export tab's own persisted defaults.
+- Cut ranges are session-only (never persisted), matching the Export
+  tab's own cut-ranges convention - user's explicit choice (asked
+  "eigen lijst" vs "hergebruiken", chose eigen/own separate list).
+- No longer gated on/sharing the Export tab's "AI Tracking: Enable"
+  checkbox - the diagnostic button used to only appear with that on.
+- Video-timeline scrubber's cut-range band still only shows/edits the
+  Export tab's ranges (user's explicit choice) - AI Debug tab has its
+  own plain list editor (+ Add cut / numeric fields), not scrubber-
+  linked.
+- Dialog always reopens on the Export tab, never wherever AI Debug was
+  left.
+
+**Verification done for both commits**: `cargo fmt --all -- --check`
+clean, `cargo clippy --all-targets --features tensorrt -- -D warnings`
+clean (reco-io/reco-cli/reco-gui), `cargo test` green - reco-gui 88/88
+(2 new `AiDebugSettings` roundtrip tests), reco-cli/reco-io own suites
+green too. One pre-existing, unrelated flaky test
+(`reco-io`'s `matroska_reader_sees_partial_writes`, a disk-flush-timing
+test in `stacked_video.rs`) still fails in isolation - confirmed NOT
+caused by anything touched this session, not investigated further.
+
+**Both debug and release `reco-gui.exe`/`reco.exe` rebuilt** with
+`--features tensorrt` after this entry, both green (exit code 0,
+`target/debug` ~21:54, `target/release` ~21:58 on 2026-09-12).
+FFmpeg DLLs already present next to both. Safe to test directly -
+no further rebuild needed unless more code changes first.
+
+**Not yet done**: user has not yet confirmed the 3 fixes + tab split
+actually work via real GUI testing (this entry was written right after
+the rebuild, before that test).
+
+## READ THIS FIRST - 2026-09-12 entry (earlier, same day)
 
 User tested everything on `feat/gpu-vivid-colorgrade` today and
 confirmed it all works. The large pile of uncommitted changes sitting
