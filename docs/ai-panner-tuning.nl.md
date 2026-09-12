@@ -59,6 +59,7 @@ FOV Default:                        34deg           (preset-standaard, niet apar
 FOV Wide:                           65-70deg        (standaard van de action preset is 48deg)
 Zoom smoothing (fov_alpha):         0,05-0,08       (standaard 0,01)
 Aim smoothing (cluster_alpha):      0,05-0,08       (standaard 0,012)
+Reactivity (lookahead):             1,5             (standaard 2,5, action preset 3,0) - zie notitie hieronder
 ```
 
 Waarom elk van deze, kort: **Cluster mode -> trimmed_mean** fixt de
@@ -84,7 +85,21 @@ zelfs met Ball reach en FOV Wide opgetrokken zijn de *standaard*
 smoothing-snelheden vaak te traag om de bredere/verplaatste doelwaarde
 daadwerkelijk te bereiken voordat een korte uitbraak alweer voorbij is
 (zie hieronder) - trek deze op als de camera een snelle balactie
-halverwege lijkt "op te geven".
+halverwege lijkt "op te geven". **Reactivity (lookahead) 1,5** (omlaag
+van de standaard 3,0 van de action-preset, gevalideerd 2026-09-03 op
+een echte XFT-UHTF-wedstrijd) fixt een ander symptoom: de camera
+"sprint" zichtbaar naar topsnelheid in plaats van er rustig naartoe te
+komen bij een grote, plotselinge verplaatsing van het doel (bv. de bal
+die ~10m verschuift). Deze vermenigvuldiger verhoogt zowel de
+snelheidslimiet als de optrek-snelheid van de basis-chase zolang
+lookahead actief is, dus een hoge waarde schiet flink door voordat de
+gecentreerde smoother de resulterende schok kan wegwerken. Verlagen
+naar 1,5 verminderde de piek per-frame-sprong en de piek
+halve-seconde-schommeling ~45% in een echte CLI-A/B-render, terwijl
+bal-tracking-aanwezigheid en de *typische* (niet-piek) soepelheid
+ongewijzigd bleven - die asymmetrie (pieken omlaag, gemiddelde
+ongewijzigd) is precies het verwachte effect van deze instelling, geen
+toeval.
 
 **Reduce lookahead memory (8-bit) - momenteel verplicht bij 10-bit
 bronnen, niet alleen een VRAM-noodgreep.** Staat dit uit, dan crasht een
@@ -141,8 +156,13 @@ pan, alleen bruikbaar als debug/basislijn-modus.
 **Detect every N frames** - hoe vaak de detector daadwerkelijk draait;
 tussenliggende frames hergebruiken de laatste detectie. Lager = versere
 posities tijdens snelle actie, hoger = goedkoper. `3` (ongeveer elke
-0,1s bij 30fps) is een goede standaard; ga alleen naar 10-15 als je de
-rekenkracht echt nodig hebt.
+0,1s bij 30fps) is een goede standaard; ga pas hoger als je de
+rekenkracht echt nodig hebt - in de praktijk getest op 2026-08-29 op
+een live export: van 3 naar 10 verdrievoudigde bijna het aantal fps
+(19 -> 52fps), veruit de grootste performance-hendel in de hele panner.
+De impact op de trackingkwaliteit van juist die wijziging is niet apart
+opnieuw gevalideerd - beschouw de fps-winst als bevestigd en de impact
+op trackingkwaliteit als onbekend, niet als nul.
 
 **Ball anchor range** (radialen, `player_anchor_max_rad`) - een poort
 binnen de bal-*tracker* zelf (`crates/reco-autocam/src/trackers/ball.rs`),
@@ -161,6 +181,28 @@ tracker aan het coasten was / de bal kwijtraakte, omdat de detectie
 buiten deze poort viel. Verbreed 'm (0,3-0,5+) als de panner een bal die
 echt ver van de groep is nooit lijkt op te pikken; houd 'm smal als het
 model valse positieven geeft op rommel op de achtergrond.
+
+**Ball anchor range - near/far-ramp (alleen CLI, nog geen GUI-slider)**
+- één vlakke straal dekt een echte, gekoppelde bal dichtbij een naar
+beneden gekantelde rig onvoldoende: dezelfde afstand "teamgenoot vlak
+bij de bal" in het echt komt dichtbij de camera (steile kijkhoek) neer
+op een veel *groter* gat in panorama-ruimte (yaw, pitch) dan ver het
+veld in (ondiepe hoek, dicht bij de horizon). Waargenomen op echte
+XFT-UHTF-beelden: een bal met 90% zekerheid slechts 1-2° buiten een
+vlakke poort van 17° rond het midden van het veld, naast een echte bal
+~25° van zijn dichtstbijzijnde teamgenoot dichtbij de camera.
+`--player-anchor-rad-near` zet een aparte straal die geldt bij een
+wereld-pitch <= -0,05rad (dichtbij de camera), die lineair oploopt naar
+de waarde van `--player-anchor-rad` (het "verre" uiteinde, bij pitch >=
+0,20rad) ertussenin; heeft geen effect tenzij `--player-anchor-rad` ook
+is ingesteld. **Getest en afgewezen bij 30°** (2026-09-03): liet een
+stilstaand wit veldmarkering-schijfje op de zijlijn 65+ seconden
+achtereen als valse "bal" door. Het mechanisme zelf is degelijke
+infrastructuur - alleen deze specifieke brede waarde wordt afgewezen.
+Verhoog dit niet zonder nieuw bewijs; een kleinere near-waarde opnieuw
+valideren tegen hetzelfde stilstaande-marker-geval is de openstaande
+volgende stap. Zie
+[`BallTracker::with_player_anchor_rad_near_far`](../crates/reco-autocam/src/trackers/ball.rs).
 
 **Ball coast time** (seconden, `ball_coast_secs`) - hoe lang een bal die
 al gevolgd wordt zijn laatst bekende positie vasthoudt nadat detecties
@@ -375,7 +417,11 @@ Bron: `FieldPannerConfig::{broadcast, action, frame_all}` in
   beschikbaar).
 - **Beeld voelt onrustig/schokkerig bij statisch spel**: verhoog
   `dead-zone`, of verhoog `lookahead` voor meer vooruitlopende
-  soepelheid.
+  soepelheid. Bevestigd 2026-09-03 op echte beelden: een groep kinderen
+  die om een stilstaande/niet-gevolgde bal heen drentelde, bleef de
+  camera onrustig laten meebewegen bij een lage dead-zone (0,048 rad
+  op die calibratie); optrekken naar **0,15 rad** loste het op zonder
+  waargenomen nadeel.
 - **Beeld schommelt/hopt omdat de AI zo gefocust lijkt op de bal - elke
   kleine bal-beweging trekt het beeld mee** (gemeld 2026-08-29, **nog
   niet A/B-gevalideerd** - onderstaand advies is afgeleid uit de code,
