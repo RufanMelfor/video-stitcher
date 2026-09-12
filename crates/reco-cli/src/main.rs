@@ -592,6 +592,13 @@ enum Commands {
         /// Output codec: h264, hevc, av1. Default: h264.
         #[arg(long, default_value = "h264")]
         codec: String,
+
+        /// Which camera(s) to export: `left`, `right`, or `both`. Runs
+        /// a shorter, single-file diagnostic when only one side's
+        /// tracking is in question, instead of always producing (and
+        /// waiting on) both.
+        #[arg(long, default_value = "both", value_parser = parse_camera_selection)]
+        cameras: reco_io::raw_camera_debug::CameraSelection,
     },
 
     /// Open an interactive preview window to debug the stitch.
@@ -1081,6 +1088,17 @@ fn parse_cut_range(s: &str) -> Result<reco_io::cut_range::CutRange, String> {
     reco_io::cut_range::CutRange::new(start, end)
 }
 
+/// Parse `--cameras` for `ai-debug-raw`: `left`, `right`, or `both`
+/// (case-insensitive).
+fn parse_camera_selection(s: &str) -> Result<reco_io::raw_camera_debug::CameraSelection, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "left" | "l" => Ok(reco_io::raw_camera_debug::CameraSelection::Left),
+        "right" | "r" => Ok(reco_io::raw_camera_debug::CameraSelection::Right),
+        "both" => Ok(reco_io::raw_camera_debug::CameraSelection::Both),
+        _ => Err(format!("expected 'left', 'right', or 'both', got {s:?}")),
+    }
+}
+
 /// Parse a `WIDTHxHEIGHT` string (e.g. `1280x720`, `854x480`) into
 /// `(u32, u32)`. Used by `--replay-scale`. Validates YUV420P
 /// alignment: width divisible by 4, height even.
@@ -1259,6 +1277,7 @@ fn main() -> anyhow::Result<()> {
             show_field_roi,
             encoder,
             codec,
+            cameras,
         } => ai_debug_raw::run_ai_debug_raw(
             ai_debug_raw::AiDebugRawArgs {
                 left: &left,
@@ -1276,6 +1295,7 @@ fn main() -> anyhow::Result<()> {
                 show_field_roi,
                 encoder_name: encoder.as_deref(),
                 codec: &codec,
+                cameras,
             },
             &interrupted,
         ),

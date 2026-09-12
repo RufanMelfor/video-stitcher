@@ -5015,6 +5015,29 @@ fn main() -> anyhow::Result<()> {
 
     let app_weak = app.as_weak();
     let state_ref = Rc::clone(&state);
+    app.on_clear_scoreboard_events(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let mut s = state_ref.borrow_mut();
+        if s.scoreboard_import.is_none() {
+            return;
+        }
+        s.scoreboard_import = None;
+        s.scoreboard_import_path = None;
+        s.scoreboard_sync_anchor = None;
+        s.preview_dirty = true;
+        app.set_scoreboard_match_summary("".into());
+        app.set_scoreboard_sync_label("".into());
+        // The derived ranges belong to whichever export is loaded now,
+        // including "none at all" - same staleness argument as
+        // load/on_load_scoreboard_events and the match-folder pick.
+        refresh_derived_cut_ranges(&mut s, &app);
+        persist_scoreboard_settings(&app, &mut s);
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
     app.on_set_scoreboard_sync_point(move || {
         let Some(app) = app_weak.upgrade() else {
             return;
@@ -5027,11 +5050,19 @@ fn main() -> anyhow::Result<()> {
             app.set_scoreboard_error_text("This export has no video_start event to sync to".into());
             return;
         };
-        let video_seconds = if s.playback.fps() > 0.0 {
-            s.playback.frame_index() as f64 / s.playback.fps()
-        } else {
-            0.0
-        };
+        // Always frame 0 - this button anchors the Match Logger's
+        // `video_start` event (the operator tapped it in sync with
+        // hitting record) to the very start of this video, per
+        // `SyncAnchor`'s own doc comment ("assumed video_seconds: 0.0").
+        // It must NOT pick up wherever the timeline slider currently
+        // happens to be - that reads the operator's own playback
+        // scrubbing as if it were the sync point, silently offsetting
+        // every replayed scoreboard event by however far they'd
+        // scrubbed. Manually syncing to a different frame (the log
+        // comment's "scrubbing to the matching frame by hand"
+        // alternative) is a deliberate, separate action - not this
+        // button.
+        let video_seconds = 0.0;
         s.scoreboard_sync_anchor = Some(scoreboard_import::SyncAnchor {
             event_ts_ms: video_start_ms,
             video_seconds,
@@ -5248,6 +5279,29 @@ fn main() -> anyhow::Result<()> {
                 app.set_scoreboard_error_text(message.into());
             }
         }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_clear_scoreboard_logo(move |team| {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let mut s = state_ref.borrow_mut();
+        if team == "home" {
+            s.scoreboard_style.home_logo = None;
+            s.scoreboard_style.home_logo_path = None;
+            app.set_scoreboard_home_logo_path("".into());
+        } else {
+            s.scoreboard_style.away_logo = None;
+            s.scoreboard_style.away_logo_path = None;
+            app.set_scoreboard_away_logo_path("".into());
+        }
+        // Same redraw-gate reasoning as on_pick_scoreboard_logo just
+        // above - removing a logo changes the composited overlay just
+        // as picking one does.
+        s.preview_dirty = true;
+        persist_scoreboard_settings(&app, &mut s);
     });
 
     let app_weak = app.as_weak();
@@ -7520,6 +7574,16 @@ fn main() -> anyhow::Result<()> {
             );
         }
 
+        // "left"/"right"/"both" - see the `ai-debug-raw-cameras`
+        // property's doc comment in main.slint. Unrecognized values
+        // (shouldn't happen via the GUI's own ComboBox) fall back to
+        // Both rather than silently producing nothing.
+        let cameras = match app.get_ai_debug_raw_cameras().as_str() {
+            "left" => reco_io::raw_camera_debug::CameraSelection::Left,
+            "right" => reco_io::raw_camera_debug::CameraSelection::Right,
+            _ => reco_io::raw_camera_debug::CameraSelection::Both,
+        };
+
         let output_str = app.get_export_output_path().to_string();
         let (output_left_str, output_right_str) = if output_str.is_empty() {
             let stem = left
@@ -7535,9 +7599,9 @@ fn main() -> anyhow::Result<()> {
             add_ai_debug_raw_suffixes(&output_str)
         };
         log::warn!(
-            "AI debug raw export requested: output_left={output_left_str} \
-             output_right={output_right_str} (DIAGNOSTIC - two separate raw Left/Right camera \
-             feed videos with detector boxes, not a stitched export, not for real distribution)"
+            "AI debug raw export requested: cameras={cameras:?} output_left={output_left_str} \
+             output_right={output_right_str} (DIAGNOSTIC - raw Left/Right camera feed video(s) \
+             with detector boxes, not a stitched export, not for real distribution)"
         );
 
         let start_secs = app.get_export_start_secs() as f64;
@@ -7545,8 +7609,8 @@ fn main() -> anyhow::Result<()> {
         // cut-range handling uses (see e.g. its `export_end` fallback to
         // `clip_duration_secs`) - `export_end_secs` defaults to 0.0
         // until the user (or the auto-fill at line ~7103) sets it.
-        let end_secs = (app.get_export_end_secs() as f64 > 0.0)
-            .then(|| app.get_export_end_secs() as f64);
+        let end_secs =
+            (app.get_export_end_secs() as f64 > 0.0).then(|| app.get_export_end_secs() as f64);
         let confidence_threshold = app.get_export_confidence_threshold();
         let field_roi = cal
             .field_roi
@@ -7617,6 +7681,7 @@ fn main() -> anyhow::Result<()> {
             right,
             output_left: PathBuf::from(&output_left_str),
             output_right: PathBuf::from(&output_right_str),
+            cameras,
             start_secs,
             end_secs,
             sync_offset_right: 0,
@@ -7651,10 +7716,16 @@ fn main() -> anyhow::Result<()> {
 
         let progress_weak = app_weak.clone();
         // `ExportOutcome::Ok` carries one path (shared with the normal
-        // stitch-export flow's single-file result) - the left output's
-        // path stands in for both, since they always land in the same
-        // directory; the log line above and the finished toast/status
-        // text below both name each file explicitly so neither is lost.
+        // stitch-export flow's single-file result) - reports whichever
+        // side was actually produced when only one was selected, and
+        // the left output's path stands in for both (they land in the
+        // same directory) when Both ran; the log line below names
+        // whichever file(s) exist explicitly so neither is lost when
+        // both were produced.
+        let outcome_path = match cameras {
+            reco_io::raw_camera_debug::CameraSelection::Right => PathBuf::from(&output_right_str),
+            _ => PathBuf::from(&output_left_str),
+        };
         let output_left_path = PathBuf::from(&output_left_str);
         let output_right_display = output_right_str.clone();
         let handle = std::thread::spawn(move || {
@@ -7683,12 +7754,23 @@ fn main() -> anyhow::Result<()> {
             });
             let outcome = match result {
                 Ok(frames) => {
-                    log::info!(
-                        "AI debug raw export finished: {frames} frames -> {} and {}",
-                        output_left_path.display(),
-                        output_right_display
-                    );
-                    crate::export::ExportOutcome::Ok(frames, output_left_path)
+                    let produced = match cameras {
+                        reco_io::raw_camera_debug::CameraSelection::Left => {
+                            output_left_path.display().to_string()
+                        }
+                        reco_io::raw_camera_debug::CameraSelection::Right => {
+                            output_right_display.clone()
+                        }
+                        reco_io::raw_camera_debug::CameraSelection::Both => {
+                            format!(
+                                "{} and {}",
+                                output_left_path.display(),
+                                output_right_display
+                            )
+                        }
+                    };
+                    log::info!("AI debug raw export finished: {frames} frames -> {produced}");
+                    crate::export::ExportOutcome::Ok(frames, outcome_path)
                 }
                 Err(e) => crate::export::ExportOutcome::Failed(
                     reco_io::stitch_job::StitchError::Other(e.to_string()),

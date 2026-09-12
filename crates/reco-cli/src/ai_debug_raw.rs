@@ -42,6 +42,9 @@ pub struct AiDebugRawArgs<'a> {
     pub show_field_roi: bool,
     pub encoder_name: Option<&'a str>,
     pub codec: &'a str,
+    /// Which camera(s) to export - see
+    /// `reco_io::raw_camera_debug::CameraSelection`.
+    pub cameras: reco_io::raw_camera_debug::CameraSelection,
 }
 
 /// `left.mp4` -> `(left_ai_debug_raw_L.mp4, left_ai_debug_raw_R.mp4)`.
@@ -222,6 +225,7 @@ pub fn run_ai_debug_raw(
         right: to_input(args.right),
         output_left: std::path::PathBuf::from(&output_left),
         output_right: std::path::PathBuf::from(&output_right),
+        cameras: args.cameras,
         start_secs: args.start_time.unwrap_or(0.0),
         end_secs: args.end_time,
         sync_offset_right: args.sync_offset,
@@ -253,7 +257,13 @@ pub fn run_ai_debug_raw(
     })
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    println!("\nDone: {frames} frames -> {output_left} and {output_right}");
+    use reco_io::raw_camera_debug::CameraSelection;
+    let produced = match args.cameras {
+        CameraSelection::Left => output_left.clone(),
+        CameraSelection::Right => output_right.clone(),
+        CameraSelection::Both => format!("{output_left} and {output_right}"),
+    };
+    println!("\nDone: {frames} frames -> {produced}");
     Ok(())
 }
 
