@@ -177,6 +177,49 @@ pub struct GuiSettings {
     /// of the transition that lengthens the export.
     #[serde(default = "default_pause_overlay_hold_secs")]
     pub pause_overlay_hold_secs: f32,
+
+    /// Last-used AI Debug tab settings (model path, camera selection,
+    /// confidence threshold, detection interval) - see
+    /// `AiDebugSettings`'s own doc comment. Fully independent of the
+    /// Export tab's `ai_model_path`/etc. above (the whole point of the
+    /// Export/AI Debug tab split is that neither tab's settings leak
+    /// into the other). Cut ranges are deliberately NOT part of this -
+    /// same as the Export tab's own cut ranges, they're session-only
+    /// (`AppState::ai_debug_cut_ranges`), never persisted.
+    #[serde(default)]
+    pub ai_debug_settings: Option<AiDebugSettings>,
+}
+
+/// Persisted AI Debug tab settings - see `GuiSettings::ai_debug_settings`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AiDebugSettings {
+    /// Path to a YOLO ONNX model, if one was picked.
+    #[serde(default)]
+    pub model_path: Option<PathBuf>,
+    /// Base output path, if the user typed/picked one (empty string
+    /// means "auto-name from the left video", same convention as the
+    /// UI's own placeholder).
+    #[serde(default)]
+    pub output_path: String,
+    /// Which camera(s) to export: "left", "right", or "both".
+    #[serde(default = "default_ai_debug_cameras")]
+    pub cameras: String,
+    /// Detector confidence floor `[0,1]`.
+    #[serde(default = "default_ai_debug_confidence")]
+    pub confidence_threshold: f32,
+    /// Run detection every Nth frame.
+    #[serde(default = "default_ai_debug_detection_interval")]
+    pub detection_interval: i32,
+}
+
+fn default_ai_debug_cameras() -> String {
+    "both".into()
+}
+fn default_ai_debug_confidence() -> f32 {
+    0.10
+}
+fn default_ai_debug_detection_interval() -> i32 {
+    1
 }
 
 fn default_dark_mode() -> bool {
@@ -236,6 +279,7 @@ impl Default for GuiSettings {
             pause_overlay_enabled: false,
             pause_overlay_fade_secs: default_pause_overlay_fade_secs(),
             pause_overlay_hold_secs: default_pause_overlay_hold_secs(),
+            ai_debug_settings: None,
         }
     }
 }
@@ -391,6 +435,13 @@ impl GuiSettings {
         self.pause_overlay_enabled = enabled;
         self.pause_overlay_fade_secs = fade_secs;
         self.pause_overlay_hold_secs = hold_secs;
+        self.save();
+    }
+
+    /// Persist the AI Debug tab's settings (see
+    /// `Self::ai_debug_settings`'s doc comment).
+    pub fn set_ai_debug_settings(&mut self, settings: AiDebugSettings) {
+        self.ai_debug_settings = Some(settings);
         self.save();
     }
 }
@@ -581,6 +632,33 @@ mod tests {
         assert!((restored_sb.match_end_trail_secs - 10.0).abs() < 1e-6);
         assert!((restored_sb.highlight_lead_secs - 18.0).abs() < 1e-6);
         assert!((restored_sb.highlight_trail_secs - 8.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn set_ai_debug_settings_roundtrips_through_json() {
+        let mut s = GuiSettings::default();
+        let ad = AiDebugSettings {
+            model_path: Some(PathBuf::from("model.onnx")),
+            output_path: "debug_out.mp4".into(),
+            cameras: "left".into(),
+            confidence_threshold: 0.25,
+            detection_interval: 5,
+        };
+        s.set_ai_debug_settings(ad);
+        let json = serde_json::to_string(&s).unwrap();
+        let restored: GuiSettings = serde_json::from_str(&json).unwrap();
+        let restored_ad = restored.ai_debug_settings.expect("should roundtrip");
+        assert_eq!(restored_ad.model_path, Some(PathBuf::from("model.onnx")));
+        assert_eq!(restored_ad.output_path, "debug_out.mp4");
+        assert_eq!(restored_ad.cameras, "left");
+        assert!((restored_ad.confidence_threshold - 0.25).abs() < 1e-6);
+        assert_eq!(restored_ad.detection_interval, 5);
+    }
+
+    #[test]
+    fn ai_debug_settings_absent_until_set() {
+        let s = GuiSettings::default();
+        assert!(s.ai_debug_settings.is_none());
     }
 
     #[test]
