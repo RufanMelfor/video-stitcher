@@ -33,7 +33,7 @@ split.
 **Consumes a tiled checkpoint requires tiled inference at runtime**
 (split each live frame the same way, run detection on both crops,
 merge results) - not wired into any production path yet as of
-2026-08-21 (see YOLO26_Training.md / SESSION_HANDOFF.md). This script
+2026-08-21 (see docs/YOLO26_Training.md / SESSION_HANDOFF.md). This script
 only prepares the training data.
 
 Usage:

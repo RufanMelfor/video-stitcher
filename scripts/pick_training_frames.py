@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pick training-candidate frames from raw match footage, aimed at what the
+r"""Pick training-candidate frames from raw match footage, aimed at what the
 current detector gets *wrong*.
 
 Why not just sample more frames: adding data does not automatically help.
@@ -12,6 +12,19 @@ composition is. So this script selects two groups on purpose:
   blind_spot      the model found no ball at all while many players are on
                   the pitch, so play is happening and a ball is very likely
                   in frame - the model's actual failures
+
+Optional second model (--model2): round 5's single-teacher blind_spot
+selection (this script) fed round 7's training, and round 7 regressed
+real-footage ball recall the same way the 2026-08 merged-data round did -
+see docs/YOLO26_Training.md's round-7 entry. A blind spot judged against only
+the production checkpoint risks re-selecting failures that checkpoint
+already learned to fix in a later round, or missing failures specific to
+a newer checkpoint's own blind spots. Pass --model2 (e.g. the round7
+checkpoint, alongside --model pointed at the still-production
+merged_v1_tiled_1920 checkpoint) to require BOTH models to miss the ball
+before a frame counts as blind_spot - narrower, but each kept frame is a
+failure of the whole current model lineage, not just one checkpoint's.
+uncertain_ball selection is unaffected (--model2 only tightens blind_spot).
 
 Ball plausibility matters: at 3840x2880 a real ball is roughly 18 px tall,
 so a "ball" of 80-170 px is a false positive. Without the size cap those
@@ -164,9 +177,17 @@ def spaced(cands, n, key, min_gap):
 
 
 def select(records, args):
-    """Split the kept frames between the two groups described in the module doc."""
+    """Split the kept frames between the two groups described in the module doc.
+
+    blind_spot is judged against `has_ball` alone (model 1) unless a
+    record also carries `has_ball2` (only present when --model2 was
+    given) - then BOTH models must miss the ball, per this module's
+    --model2 doc comment."""
     with_ball = [r for r in records if r["has_ball"]]
-    blind = [r for r in records if not r["has_ball"] and r["persons"] >= args.crowd_min]
+    blind = [
+        r for r in records
+        if not r["has_ball"] and not r.get("has_ball2", False) and r["persons"] >= args.crowd_min
+    ]
 
     n_blind = round(args.per_camera * args.blind_fraction)
     n_ball = args.per_camera - n_blind
@@ -195,6 +216,11 @@ def main():
                    help="Per-camera subdir names (default: LEFT RIGHT)")
     p.add_argument("--out", type=Path, required=True, help="Dataset output dir")
     p.add_argument("--model", type=Path, required=True, help="Teacher weights (.pt)")
+    p.add_argument("--model2", type=Path, default=None,
+                   help="Optional second teacher (e.g. a newer checkpoint alongside "
+                        "--model's still-production one). When given, blind_spot only "
+                        "keeps frames where BOTH models miss the ball - see this "
+                        "module's --model2 doc comment for why")
     p.add_argument("--cache-dir", type=Path, default=None,
                    help="Where candidate frames and detections are cached "
                         "(default: <out>/.cache) - keep it to re-select for free")
@@ -236,6 +262,12 @@ def main():
     dets_file = cache_root / "detections.json"
     cache_root.mkdir(parents=True, exist_ok=True)
     dets = json.loads(dets_file.read_text(encoding="utf-8")) if dets_file.exists() else {}
+    # Model 2's detections live in their own cache file, never mixed
+    # into `dets` - keeps the existing single-model cache schema/format
+    # completely unchanged for every run that doesn't pass --model2.
+    dets2_file = cache_root / "detections_model2.json"
+    dets2 = (json.loads(dets2_file.read_text(encoding="utf-8"))
+             if args.model2 and dets2_file.exists() else {})
 
     for sub in ("images", "labels"):
         shutil.rmtree(args.out / sub, ignore_errors=True)
@@ -260,6 +292,12 @@ def main():
                     for name, boxes in score(todo, args.model, args.imgsz, args.conf).items():
                         dets[f"{tag}/{cam}/{name}"] = boxes
                     dets_file.write_text(json.dumps(dets), encoding="utf-8")
+                if args.model2:
+                    todo2 = [p for p in paths if f"{tag}/{cam}/{p.name}" not in dets2]
+                    if todo2:
+                        for name, boxes in score(todo2, args.model2, args.imgsz, args.conf).items():
+                            dets2[f"{tag}/{cam}/{name}"] = boxes
+                        dets2_file.write_text(json.dumps(dets2), encoding="utf-8")
 
             lo_px, hi_px = args.ball_px
             records = []
@@ -272,13 +310,20 @@ def main():
                 balls = [b for b in boxes if b["cls"] == BALL_CLS
                          and lo_px <= b["xywhn"][3] * args.frame_height <= hi_px]
                 best = max(balls, key=lambda b: b["conf"]) if balls else None
-                records.append({
+                record = {
                     "path": path, "boxes": boxes, "persons": persons,
                     "t": int(path.stem.split("_")[-1].rstrip("s")),
                     "ball_h_px": best["xywhn"][3] * args.frame_height if best else 0.0,
                     "ball_conf": best["conf"] if best else 0.0,
                     "has_ball": best is not None,
-                })
+                }
+                if args.model2:
+                    boxes2 = dets2.get(f"{tag}/{cam}/{path.name}")
+                    if boxes2 is not None:
+                        balls2 = [b for b in boxes2 if b["cls"] == BALL_CLS
+                                  and lo_px <= b["xywhn"][3] * args.frame_height <= hi_px]
+                        record["has_ball2"] = len(balls2) > 0
+                records.append(record)
 
             chosen = select(records, args)
             img_dir, lbl_dir = args.out / "images" / cam, args.out / "labels" / cam
@@ -305,7 +350,11 @@ def main():
             ]
 
     (args.out / "selection_summary.json").write_text(
-        json.dumps(summary, indent=2), encoding="utf-8")
+        json.dumps({
+            "model": str(args.model),
+            "model2": str(args.model2) if args.model2 else None,
+            "by_camera": summary,
+        }, indent=2), encoding="utf-8")
     print(f"\ndone -> {args.out}", flush=True)
 
 

@@ -27,7 +27,7 @@ Model: `yolo26n_v2` is de productiecheckpoint op moment van schrijven,
 maar `yolo26s_v3` (ronde 3, ONNX-geëxporteerd) scoorde dramatisch beter
 in een echte in-app test op dezelfde clip - ruwe baldetecties van 19,7%
 naar 48,7% van de frames. Nog niet gepromoveerd tot "de" standaard, zie
-`YOLO26_Training.md`. Zelfs `yolo26s_v3` mist de bal echter voor langere
+`docs/YOLO26_Training.md`. Zelfs `yolo26s_v3` mist de bal echter voor langere
 tijd op deze clip - frames 720-898 (de laatste ~6sec van het
 gevalideerde 100-130sec 03 OJC-venster) hebben helemaal geen ruwe
 baldetecties, bevestigd 2026-08-12 over alle drie de `ball_weight`

@@ -145,8 +145,73 @@ Once all new frames are reviewed/corrected in Label Studio:
 
 1. Export from LS: `GET /api/projects/<id>/export?exportType=YOLO`
 2. Run `prepare_yolo_train_split_from_ls_export.py` (existing script)
-3. Run `yolo detect train` for new checkpoint
+3. Run `yolo detect train` for new checkpoint - or
+   `train_class_weighted.py` (see below) to also address the ball-
+   class imbalance directly
 4. Export to ONNX (`yolo export format=onnx imgsz=1920 nms=True`)
 5. Test in real app: `reco stitch --events detections.jsonl`
 
-See `YOLO26_Training.md` for full training history & findings.
+See `docs/YOLO26_Training.md` for full training history & findings.
+
+---
+
+## Round 8+ (post-round-7): three tools added to break the "picky, not
+## better" pattern, not yet used in an actual training round
+
+Round 7 (see `docs/YOLO26_Training.md`'s round-7 entry) regressed real-
+footage ball recall the SAME way the 2026-08 merged-data round did,
+despite fixing both of that round's obvious causes (ball-size bias,
+training from scratch). Two regressions with the same signature means
+the real cause is still open. Three tools now exist to actually find
+it, rather than guessing at another blind training variant:
+
+**1. Is it a real capability loss or just a confidence-calibration
+shift?** This was never actually measured - only a single-threshold
+hit rate was ever compared. Run:
+
+```powershell
+python scripts/compare_checkpoints_real_footage.py `
+    --left "<match>/LEFT/<file>.mp4" --right "<match>/RIGHT/<file>.mp4" `
+    --old-checkpoint "training/merged_v1_tiled_1920/runs/full_patience100/weights/best.pt" `
+    --new-checkpoint "training/round7_tiled_1920/runs/full_patience100/weights/best.pt" `
+    --distribution
+```
+
+Read the "Interpretation" section it prints: if the new checkpoint is
+behind the old one at EVERY confidence threshold, it's a real loss (a
+data/training problem, not fixable by changing `--conf` in
+production); if it only falls behind above some threshold, it's
+recalibrated pickier, not less capable, and might not need retraining
+at all - just running the new checkpoint at a lower `--conf`.
+
+**2. Find frames where the WHOLE current model lineage fails, not
+just one checkpoint's known blind spots.** `pick_training_frames.py`
+now accepts `--model2`:
+
+```powershell
+python scripts/pick_training_frames.py `
+    --match-dir "<new match footage not yet used for training>" `
+    --model "training/merged_v1_tiled_1920/runs/full_patience100/weights/best.pt" `
+    --model2 "training/round7_tiled_1920/runs/full_patience100/weights/best.pt" `
+    --out "training/round8_candidates" --per-camera 15
+```
+
+`blind_spot` frames now require BOTH checkpoints to miss the ball
+while players are on the pitch - a much stronger "the model lineage
+genuinely doesn't see this kind of ball" signal than round 5's single-
+teacher version, which is what round 7 trained on and still regressed.
+
+**3. Actually address the class imbalance, not just curate around
+it.** ~7900 person boxes against ~580 ball boxes (round 5 era) means
+every added frame makes the ball relatively rarer even with perfect
+frame selection. `train_class_weighted.py` sets a per-class loss
+weight (ball weighted higher than person/referee) via Ultralytics'
+existing but CLI-inaccessible `class_weights` loss hook - see that
+script's own doc comment for exactly why a script is needed instead of
+a `yolo detect train` flag, and its defaults for continuing from
+round7 instead of training from scratch again.
+
+**Whichever combination is tried next, ship nothing on val-mAP alone**
+- run `compare_checkpoints_real_footage.py --distribution` against
+the still-production `merged_v1_tiled_1920` checkpoint before
+replacing it, exactly like every round so far.

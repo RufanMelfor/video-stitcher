@@ -24,7 +24,7 @@ calibration is loaded; opening a calibration that has its own saved
 Model: `yolo26n_v2` is the production checkpoint as of this writing, but
 `yolo26s_v3` (round 3, ONNX-exported) tested dramatically better in a
 real in-app run on the same clip - raw ball detections 19.7% -> 48.7% of
-frames. Not yet promoted to "the" default - see `YOLO26_Training.md`.
+frames. Not yet promoted to "the" default - see `docs/YOLO26_Training.md`.
 Even `yolo26s_v3` genuinely misses the ball for extended stretches on
 this clip though - frames 720-898 (the last ~6s of the validated
 100-130s 03 OJC window) have zero raw ball detections at all, confirmed

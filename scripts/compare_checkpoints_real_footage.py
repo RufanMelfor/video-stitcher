@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 r"""Real-footage ball-detection comparison between two YOLO checkpoints,
 same methodology every prior tiled-1920 training round used (see
-YOLO26_Training.md's "Root cause found" and "Tiled-1920 training on
+docs/YOLO26_Training.md's "Root cause found" and "Tiled-1920 training on
 the merged multi-project set" entries) - NOT a substitute for val-set
 metrics, a check against them: val-mAP has previously gone UP while
 real-footage ball recall went DOWN (the 2026-08-22 "easy ball bias"
@@ -33,6 +33,29 @@ label order - a continued fine-tune like round7 always keeps its
 base's class order, so this is safe here, but the script re-reads
 `model.names` per checkpoint rather than hardcoding the ball index,
 in case that assumption is ever wrong for a future comparison).
+
+# Confidence-distribution mode (--distribution)
+
+Round 7's writeup in docs/YOLO26_Training.md left one question explicitly
+open: is a "pickier, not better" checkpoint (higher confidence on hits,
+lower hit rate at conf=0.1) merely shifted to a higher confidence
+threshold everywhere (a calibration effect - fixable in production by
+just lowering --conf, no retraining needed), or does it genuinely fail
+to find balls the old checkpoint found AT ANY confidence (a real
+capability loss - no --conf choice fixes that)?
+
+The single-threshold hit-rate this script always reported cannot
+distinguish those two cases: a checkpoint that is uniformly shifted and
+one that is genuinely worse can both show "lower hit rate at conf=0.1,
+higher mean confidence on hits". --distribution answers it directly by
+running every tile at a near-zero floor (conf=0.001) so weak/marginal
+detections are never filtered before comparison, then reporting each
+checkpoint's hit rate at a sweep of thresholds (0.05 through 0.9). A
+genuinely worse checkpoint shows a LOWER hit rate than the other at
+EVERY threshold in the sweep, including low ones; a merely-recalibrated
+one matches or beats the other at low thresholds and only falls behind
+at high ones - the crossover point (if any) tells you what --conf the
+old checkpoint's behavior needs the new one run at, without retraining.
 
 NOT executed as part of building this script - the user asked to only
 prepare it, not run it, while training is still using the GPU. Run it
@@ -133,6 +156,93 @@ def summarize(label: str, stats: dict) -> None:
         print(f"  {camera}: {s['hits']}/{s['total']} ({rate:.1f}%) rate, mean conf {mean_conf:.2f} on hits")
 
 
+# Thresholds swept by --distribution. Starts below the production
+# default (0.1) so a checkpoint that only needs a lower floor to match
+# the old one's behavior is visible, not just "worse at 0.1".
+SWEEP_THRESHOLDS = (0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
+
+
+def run_checkpoint_raw_scores(checkpoint_path: str, tile_paths: list[Path]) -> dict:
+    """Same tiles/model as run_checkpoint, but at a near-zero confidence
+    floor (0.001) and keeping every tile's best ball score (0.0 if the
+    model found no ball box at all, even weak ones) rather than only the
+    ones that clear a single --conf floor. This is what --distribution
+    needs to compute a hit rate at multiple thresholds after the fact,
+    without re-running inference once per threshold."""
+    from ultralytics import YOLO
+
+    model = YOLO(checkpoint_path)
+    ball_id = None
+    for idx, name in model.names.items():
+        if name.lower() == "ball":
+            ball_id = idx
+            break
+    if ball_id is None:
+        sys.exit(f"{checkpoint_path}: no 'ball' class in model.names ({model.names})")
+
+    scores = {"L": [], "R": []}
+    for tile_path in tile_paths:
+        camera = "L" if tile_path.stem.endswith("_L") else "R"
+        results = model.predict(str(tile_path), conf=0.001, verbose=False)
+        best = 0.0
+        for box in results[0].boxes:
+            if int(box.cls[0]) == ball_id:
+                best = max(best, float(box.conf[0]))
+        scores[camera].append(best)
+    return scores
+
+
+def summarize_distribution(label: str, scores: dict) -> None:
+    print(f"\n=== {label} (confidence-sweep) ===")
+    for camera in ("L", "R"):
+        vals = scores[camera]
+        total = len(vals)
+        if total == 0:
+            continue
+        rates = ", ".join(
+            f"{t:.2f}:{sum(1 for v in vals if v >= t) / total * 100:5.1f}%"
+            for t in SWEEP_THRESHOLDS
+        )
+        print(f"  {camera} (n={total}): hit rate by threshold -> {rates}")
+
+
+def compare_distributions(old_scores: dict, new_scores: dict) -> None:
+    """Interpret the two sweeps against each other - see this module's
+    doc comment ("Confidence-distribution mode") for what each outcome
+    means. Compares at the same tile granularity old/new share (both
+    were run over the identical tile_paths list), so a per-threshold
+    hit-rate comparison is apples-to-apples even though the two models
+    may fire on different individual tiles."""
+    print("\n=== Interpretation ===")
+    for camera in ("L", "R"):
+        old_vals, new_vals = old_scores[camera], new_scores[camera]
+        if not old_vals or not new_vals:
+            continue
+        total = len(old_vals)
+        worse_everywhere = True
+        crossover = None
+        for t in SWEEP_THRESHOLDS:
+            old_rate = sum(1 for v in old_vals if v >= t) / total
+            new_rate = sum(1 for v in new_vals if v >= t) / total
+            if new_rate >= old_rate:
+                worse_everywhere = False
+                if crossover is None:
+                    crossover = t
+        if worse_everywhere:
+            print(f"  {camera}: NEW is behind OLD at every threshold in the sweep - "
+                  f"looks like a real capability loss (more/harder misses), not just a "
+                  f"higher confidence calibration. Lowering --conf for NEW will not fix this.")
+        elif crossover == SWEEP_THRESHOLDS[0]:
+            print(f"  {camera}: NEW matches or beats OLD across the whole sweep - "
+                  f"no evidence of a regression here at any threshold.")
+        else:
+            print(f"  {camera}: NEW falls behind OLD only at/above conf~{crossover:.2f} - "
+                  f"looks like a calibration shift (NEW is pickier but not less capable "
+                  f"below that threshold). Consider running NEW at a lower --conf in "
+                  f"production instead of retraining, then re-check with real-footage "
+                  f"testing at that lower floor.")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--left", required=True, help="Path to the raw LEFT camera source video")
@@ -144,6 +254,11 @@ def main():
     p.add_argument("--frame-count", type=int, default=30, help="Number of frames per camera to sample (spread evenly across duration-secs)")
     p.add_argument("--conf", type=float, default=0.1, help="Detection confidence floor - matches reco-detect's documented production default")
     p.add_argument("--work-dir", default=None, help="Where to extract/tile frames (default: a scratch subdir next to this script's cwd)")
+    p.add_argument("--distribution", action="store_true",
+                   help="Instead of a single-threshold hit-rate, sweep hit rate across "
+                        "several confidence thresholds and report whether NEW looks "
+                        "genuinely worse or just recalibrated to a higher confidence - "
+                        "see this module's 'Confidence-distribution mode' doc section")
     args = p.parse_args()
 
     work_dir = Path(args.work_dir) if args.work_dir else Path("checkpoint_compare_scratch")
@@ -160,6 +275,16 @@ def main():
         tile_paths += tile_frame(f, work_dir / "tiles")
 
     print(f"{len(tile_paths)} tiles ready ({len(tile_paths)//2} per camera). Running old checkpoint...")
+
+    if args.distribution:
+        old_scores = run_checkpoint_raw_scores(args.old_checkpoint, tile_paths)
+        print("Running new checkpoint...")
+        new_scores = run_checkpoint_raw_scores(args.new_checkpoint, tile_paths)
+        summarize_distribution(f"OLD: {args.old_checkpoint}", old_scores)
+        summarize_distribution(f"NEW: {args.new_checkpoint}", new_scores)
+        compare_distributions(old_scores, new_scores)
+        return
+
     old_stats = run_checkpoint(args.old_checkpoint, tile_paths, args.conf)
     print("Running new checkpoint...")
     new_stats = run_checkpoint(args.new_checkpoint, tile_paths, args.conf)
