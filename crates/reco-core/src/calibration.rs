@@ -419,6 +419,38 @@ pub struct Topology {
     /// frame instead of the bottom).
     #[serde(default = "default_tilt_band_width")]
     pub top_tilt_band_width: f64,
+
+    /// Universal color grade brightness multiplier, applied to the whole
+    /// composited frame (unlike `color_gamma_left`/`_right`, which are
+    /// per-camera and apply before the seam color match). `1.0` (default)
+    /// is identity - the GPU compute pass is skipped entirely, no cost.
+    /// Part of the "Vivid" preset in the GUI's Color Mapping panel; see
+    /// [`crate::render::pipeline::StitchPipeline::set_color_grade`].
+    #[serde(default = "default_color_grade_neutral")]
+    pub color_grade_brightness: f32,
+    /// Universal color grade saturation multiplier. `1.0` is identity;
+    /// above makes colors more vivid, below desaturates. See
+    /// [`Self::color_grade_brightness`].
+    #[serde(default = "default_color_grade_neutral")]
+    pub color_grade_saturation: f32,
+    /// Universal color grade gamma. `1.0` is identity; above lifts
+    /// mid-tones, below lowers them. See [`Self::color_grade_brightness`].
+    #[serde(default = "default_color_grade_neutral")]
+    pub color_grade_gamma: f32,
+
+    /// Unsharp-mask sharpening strength applied to the final composited
+    /// output, compensating for detail loss when the AI panner zooms into
+    /// a crop of the panorama. `0.0` (default) disables sharpening - the
+    /// GPU compute pass is skipped entirely, no cost. Typical range
+    /// 0.0-1.5; values above ~1.5 start showing visible haloing around
+    /// high-contrast edges. GPU-only (no effect on the CPU executor). See
+    /// [`crate::render::pipeline::StitchPipeline::set_sharpen_params`].
+    #[serde(default)]
+    pub sharpen_amount: f32,
+    /// Unsharp-mask blur sample radius in pixels, only meaningful when
+    /// `sharpen_amount` is non-zero. See [`Self::sharpen_amount`].
+    #[serde(default = "default_sharpen_radius")]
+    pub sharpen_radius: f32,
 }
 
 /// Safe drag range for [`Topology::seam_offset`], in the same plane-local
@@ -503,6 +535,19 @@ pub const DEFAULT_TILT_BAND_WIDTH: f64 = 0.16;
 
 fn default_tilt_band_width() -> f64 {
     DEFAULT_TILT_BAND_WIDTH
+}
+
+/// Identity value for [`Topology::color_grade_brightness`]/
+/// `_saturation`/`_gamma`.
+fn default_color_grade_neutral() -> f32 {
+    1.0
+}
+
+/// Default unsharp-mask blur radius - matches [`Topology::sharpen_amount`]
+/// defaulting to `0.0` (off) while still giving a sane radius once
+/// sharpening is turned on.
+fn default_sharpen_radius() -> f32 {
+    1.0
 }
 
 /// The virtual camera's calibrated coordinate frame: the axis/orientation that
@@ -681,6 +726,20 @@ pub struct AutocamDefaults {
     /// every detection, however weak").
     #[serde(default = "default_confidence_threshold")]
     pub confidence_threshold: f32,
+    /// Lookahead reactivity multiplier - see
+    /// `reco_autocam::panners::FieldPannerConfig::lookahead_reactivity`.
+    /// When lookahead is active, the base chase runs this many times
+    /// more reactive (looser velocity clamp + faster velocity EMA)
+    /// before the loop's centered smoother removes the resulting
+    /// jitter lag-free. The `action` preset's `3.0` was found to
+    /// visibly overshoot on a large, sudden target move ("AI sprints
+    /// instead of easing") - `1.5` cut peak per-frame jump/swing ~45%
+    /// with no measured cost to typical smoothness or ball-tracking
+    /// presence. Defaults to `FieldPannerConfig`'s own base default
+    /// (`2.5`, not the `action` preset's `3.0`) when absent from older
+    /// saved data, matching the `fov_alpha`/`cluster_alpha` convention.
+    #[serde(default = "default_lookahead_reactivity")]
+    pub lookahead_reactivity: f32,
 }
 
 /// Manual pitch safety margin for AI tracking (world-space radians) -
@@ -725,6 +784,12 @@ fn default_fov_alpha() -> f32 {
 /// `FieldPannerConfig::default().cluster_alpha` - see [`default_fov_alpha`].
 fn default_cluster_alpha() -> f32 {
     0.012
+}
+
+/// `FieldPannerConfig::default().lookahead_reactivity` - see
+/// [`default_fov_alpha`].
+fn default_lookahead_reactivity() -> f32 {
+    2.5
 }
 
 fn default_ball_coast_secs() -> f32 {
@@ -1505,6 +1570,7 @@ mod tests {
             fov_alpha: 0.05,
             cluster_alpha: 0.05,
             confidence_threshold: 0.3,
+            lookahead_reactivity: 1.5,
         });
         let json = cal.to_json_pretty();
         let back: Calibration = serde_json::from_str(&json).unwrap();
@@ -1518,6 +1584,7 @@ mod tests {
         assert!((ac.fov_alpha - 0.05).abs() < 1e-6);
         assert!((ac.cluster_alpha - 0.05).abs() < 1e-6);
         assert!((ac.confidence_threshold - 0.3).abs() < 1e-6);
+        assert!((ac.lookahead_reactivity - 1.5).abs() < 1e-6);
     }
 
     #[test]
@@ -1566,6 +1633,11 @@ mod tests {
         // must fall back to the old Field-mode literal (0.10), not 0.0
         // ("accept every detection, however weak").
         assert!((ac.confidence_threshold - 0.10).abs() < 1e-9);
+        // Same for lookahead_reactivity - must fall back to
+        // FieldPannerConfig's own base default (2.5), not 0.0 ("never
+        // reacts") or the `action` preset's 3.0 (this JSON has no
+        // preset context to derive that from).
+        assert!((ac.lookahead_reactivity - 2.5).abs() < 1e-9);
     }
 
     #[test]
@@ -1692,6 +1764,11 @@ mod tests {
                 top_tilt_z: 0.0,
                 ground_tilt_band_width: 0.16,
                 top_tilt_band_width: 0.16,
+                color_grade_brightness: 1.0,
+                color_grade_saturation: 1.0,
+                color_grade_gamma: 1.0,
+                sharpen_amount: 0.0,
+                sharpen_radius: 1.0,
             },
             framing: Framing {
                 axis_offset: 0.25,

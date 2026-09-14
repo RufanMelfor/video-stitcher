@@ -851,7 +851,19 @@ impl ApplicationHandler for App {
                 // tilt/roll basis inversion (roll-aware; the horizon
                 // stays level under pan).
                 let render = renderer.orient_pose(self.pose.current_pose());
-                if let Err(e) = renderer.render_to_view(&left, &right, render, &view) {
+                // NOTE: this debug preview window's surface texture is
+                // RENDER_ATTACHMENT-only (see `resumed()`'s
+                // SurfaceConfiguration) - it lacks the TEXTURE_BINDING/
+                // COPY_SRC/COPY_DST usage the color grade/sharpen compute
+                // passes need on their `target`. Both are skipped as
+                // identity unless a loaded calibration sets non-default
+                // Color Mapping values, in which case this surface won't
+                // support them; `reco-gui`'s live preview (a
+                // caller-owned, not swapchain, texture) is the supported
+                // path for tuning those sliders.
+                if let Err(e) =
+                    renderer.render_to_view(&left, &right, render, &view, &frame.texture)
+                {
                     log::error!("Render failed: {e}");
                     return;
                 }

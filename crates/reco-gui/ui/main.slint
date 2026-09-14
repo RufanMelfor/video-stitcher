@@ -1108,6 +1108,25 @@ export component RecoApp inherits Window {
     // Live readout of the actual measured correction, refreshed every
     // rendered frame - see the Color Mapping section's diagnostic Text.
     in-out property <string> color-match-status: "";
+    // Universal color grade (brightness/saturation/gamma), applied to the
+    // whole composited frame - see reco-core's
+    // Topology::color_grade_brightness/_saturation/_gamma and
+    // StitchPipeline::set_color_grade. Saved in the calibration document,
+    // same as color-gamma-left/-right above. "Vivid" toggle sets a tuned
+    // preset (1.0, 1.15, 1.05); the three sliders let it be fine-tuned
+    // further, or driven standalone with the toggle off. (1.0, 1.0, 1.0)
+    // is identity - the GPU compute pass is skipped, no cost.
+    in-out property <bool> vivid-enabled: false;
+    in-out property <float> color-grade-brightness: 1.0;
+    in-out property <float> color-grade-saturation: 1.0;
+    in-out property <float> color-grade-gamma: 1.0;
+    // Unsharp-mask sharpening applied to the final composited output,
+    // compensating for detail loss when the AI panner zooms into a crop
+    // of the panorama - see reco-core's Topology::sharpen_amount/_radius
+    // and StitchPipeline::set_sharpen_params. Also calibration-saved.
+    // 0.0 amount (default) disables it, no GPU cost. GPU-only.
+    in-out property <float> sharpen-amount: 0.0;
+    in-out property <float> sharpen-radius: 1.0;
     in-out property <float> rig-tilt: 0.0; // degrees
     in-out property <float> rig-roll: 0.0; // degrees
     in-out property <int> sync-offset: 0;  // frames
@@ -1135,6 +1154,47 @@ export component RecoApp inherits Window {
 
     // Export dialog state.
     in-out property <bool> export-dialog-open: false;
+    // Which of the dialog's two tabs is showing: "export" (the normal
+    // stitched export) or "ai-debug" (the raw-camera AI debug export -
+    // see that tab's own state block below). Resets to "export" every
+    // time the dialog opens (see open-export-dialog's Rust side) so a
+    // stray earlier AI Debug session is never silently still active.
+    in-out property <string> export-dialog-tab: "export";
+    // DEBUG/DIAGNOSTIC ONLY - true while the no-field-ROI confirmation
+    // is open on behalf of the "Export Raw Camera AI Debug" button
+    // rather than the normal "Start Export" one, so the confirmation's
+    // "Export Anyway" choice resumes the right one. Never persisted;
+    // reset alongside every no-ROI-warning open/close.
+    in-out property <bool> pending-ai-debug-raw-export: false;
+    // DEBUG/DIAGNOSTIC ONLY - AI Debug tab's own state, fully
+    // independent of the normal Export tab's fields above (separate
+    // model/output/range/confidence/detection-interval/cut-ranges, on
+    // its own persisted settings) - see AGENTS.md's friction-not-
+    // workaround rule: this used to silently piggyback on the Export
+    // tab's AI Tracking section, which meant it only appeared with AI
+    // Tracking enabled and shared settings meant for a stitched
+    // export. Persisted the same way the Export tab's own fields are
+    // (`GuiSettings::ai_debug_settings`), so it doesn't reset on every
+    // restart - unlike the "never persisted" no-ROI-confirmation state
+    // below, which is genuinely per-click and never worth remembering.
+    in-out property <string> ai-debug-raw-cameras: "both";
+    in-out property <string> ai-debug-model-path: "";
+    in-out property <string> ai-debug-output-path: "";
+    in-out property <float> ai-debug-start-secs: 0.0;
+    in-out property <float> ai-debug-end-secs: 0.0;
+    in-out property <float> ai-debug-confidence-threshold: 0.10;
+    in-out property <int> ai-debug-detection-interval: 1;
+    in-out property <[CutRangeItem]> ai-debug-cut-ranges: [];
+    // Fires on any AI Debug tab field edit, mirroring
+    // `autocam-settings-changed`'s auto-persist pattern for the Export
+    // tab. Not wired for ai-debug-model-path/ai-debug-output-path
+    // (those persist themselves in their own pick-*/Rust handlers,
+    // same reasoning as export-model-path above) or cut ranges
+    // (session-only, never persisted - see AppState::ai_debug_cut_ranges).
+    callback ai-debug-settings-changed();
+    changed ai-debug-raw-cameras => { root.ai-debug-settings-changed(); }
+    changed ai-debug-confidence-threshold => { root.ai-debug-settings-changed(); }
+    changed ai-debug-detection-interval => { root.ai-debug-settings-changed(); }
     in-out property <string> export-output-path: "";
     in-out property <int> export-width: 1920;
     in-out property <int> export-height: 1080;
@@ -1725,6 +1785,15 @@ export component RecoApp inherits Window {
     callback pick-export-output();
     callback pick-export-model();
     callback start-export();
+    // DEBUG/DIAGNOSTIC ONLY - see "Export Raw Camera AI Debug"'s tip
+    // text. A distinct callback from `start-export`, never merged into
+    // it, so a normal export can never accidentally carry this.
+    callback start-ai-debug-raw-export();
+    callback pick-ai-debug-model();
+    callback pick-ai-debug-output();
+    callback ai-debug-cut-range-add();
+    callback ai-debug-cut-range-update(int, float, float);
+    callback ai-debug-cut-range-remove(int);
     // Populate the visible panner controls from a named preset.
     callback apply-panner-preset(string);
     callback cancel-export();
@@ -1771,9 +1840,18 @@ export component RecoApp inherits Window {
     callback edit-scoreboard();
     callback copy-scoreboard-share();
     callback load-scoreboard-events();
+    // Unload the currently loaded Match Logger export (drops the parsed
+    // JSON + sync anchor), same end state as picking a match folder with
+    // no export in it - the difference is this is explicit, from a
+    // button, rather than a side effect of switching folders.
+    callback clear-scoreboard-events();
     callback set-scoreboard-sync-point();
     callback changed-scoreboard-placement();
     callback pick-scoreboard-logo(string); // "home" | "away"
+    // Remove a team logo (same "home" | "away" argument as
+    // pick-scoreboard-logo), so a previously chosen logo can be
+    // unpicked without having to pick a replacement file.
+    callback clear-scoreboard-logo(string);
     callback changed-scoreboard-font(string);
     callback changed-scoreboard-logo-size(float);
     callback changed-scoreboard-banner-color(string); // preset name, e.g. "Navy"
@@ -1782,6 +1860,8 @@ export component RecoApp inherits Window {
     callback toggled-scoreboard-derive-highlights(bool);
     callback changed-highlights-margins();
     callback changed-pause-overlay();
+    callback changed-color-grade-settings();
+    callback changed-sharpen-settings();
 
     // File management: per-side segment lists and removal.
     in-out property <[string]> left-segments: [];
@@ -2370,9 +2450,17 @@ export component RecoApp inherits Window {
                                 // itself (e.g. to avoid the banner entirely)
                                 // needs to reach this button with the Overlay
                                 // toggle left OFF.
-                                FlatButton {
-                                    text: root.scoreboard-match-summary == "" ? "Load Match Logger export..." : "Load…";
-                                    clicked => { root.load-scoreboard-events(); }
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    FlatButton {
+                                        text: root.scoreboard-match-summary == "" ? "Load Match Logger export..." : "Load…";
+                                        horizontal-stretch: 1;
+                                        clicked => { root.load-scoreboard-events(); }
+                                    }
+                                    if root.scoreboard-match-summary != "": FlatButton {
+                                        text: "Remove";
+                                        clicked => { root.clear-scoreboard-events(); }
+                                    }
                                 }
 
                                 if root.scoreboard-match-summary != "": Text {
@@ -2585,10 +2673,18 @@ export component RecoApp inherits Window {
                                         horizontal-stretch: 1;
                                         clicked => { root.pick-scoreboard-logo("home"); }
                                     }
+                                    if root.scoreboard-home-logo-path != "": FlatButton {
+                                        text: "X";
+                                        clicked => { root.clear-scoreboard-logo("home"); }
+                                    }
                                     FlatButton {
                                         text: root.scoreboard-away-logo-path == "" ? "Away logo…" : "Away logo ✓";
                                         horizontal-stretch: 1;
                                         clicked => { root.pick-scoreboard-logo("away"); }
+                                    }
+                                    if root.scoreboard-away-logo-path != "": FlatButton {
+                                        text: "X";
+                                        clicked => { root.clear-scoreboard-logo("away"); }
                                     }
                                 }
 
@@ -4073,6 +4169,91 @@ export component RecoApp inherits Window {
                             FlatButton {
                                 text: "Reset";
                                 clicked => { root.reset-color-match(); }
+                            }
+                        }
+
+                        CalGroupBox {
+                            title: "VIVID COLOR GRADE";
+
+                            Tip {
+                                tip: "Universal color grade applied to the whole composited output - perks up grey/dull footage. Sets brightness/saturation/gamma to a tuned preset; use the sliders below to fine-tune further, or leave this off and drive the sliders directly. 1.0/1.0/1.0 is identity - off by default, no GPU cost. Updates live and is saved in the calibration.";
+                                CheckBox {
+                                    text: "Vivid";
+                                    checked <=> root.vivid-enabled;
+                                    toggled => {
+                                        if (root.vivid-enabled) {
+                                            root.color-grade-brightness = 1.0;
+                                            root.color-grade-saturation = 1.15;
+                                            root.color-grade-gamma = 1.05;
+                                        } else {
+                                            root.color-grade-brightness = 1.0;
+                                            root.color-grade-saturation = 1.0;
+                                            root.color-grade-gamma = 1.0;
+                                        }
+                                        root.changed-color-grade-settings();
+                                    }
+                                }
+                            }
+
+                            LabeledSlider {
+                                label: "Brightness";
+                                tip: "Color grade brightness multiplier. 1.0 is identity - above brightens, below darkens. Updates live.";
+                                minimum: 0.5;
+                                maximum: 1.5;
+                                value <=> root.color-grade-brightness;
+                                decimals: 2;
+                                changed(v) => { root.changed-color-grade-settings(); }
+                            }
+
+                            LabeledSlider {
+                                label: "Saturation";
+                                tip: "Color grade saturation multiplier. 1.0 is identity - above makes colors more vivid, below desaturates toward greyscale. Updates live.";
+                                minimum: 0.5;
+                                maximum: 1.5;
+                                value <=> root.color-grade-saturation;
+                                decimals: 2;
+                                changed(v) => { root.changed-color-grade-settings(); }
+                            }
+
+                            LabeledSlider {
+                                label: "Gamma";
+                                tip: "Color grade gamma. 1.0 is identity - above lifts mid-tones, below lowers them. Updates live.";
+                                minimum: 0.5;
+                                maximum: 1.5;
+                                value <=> root.color-grade-gamma;
+                                decimals: 2;
+                                changed(v) => { root.changed-color-grade-settings(); }
+                            }
+                        }
+
+                        CalGroupBox {
+                            title: "SHARPENING";
+
+                            LabeledSlider {
+                                label: "Sharpening";
+                                tip: "Unsharp-mask sharpening applied to the final output, compensating for detail loss when the AI panner zooms into a crop of the panorama. 0.0 (default) disables it - no GPU cost. Above ~1.5 starts showing visible haloing around high-contrast edges. GPU-only. Updates live and is saved in the calibration.";
+                                minimum: 0.0;
+                                maximum: 2.0;
+                                value <=> root.sharpen-amount;
+                                decimals: 2;
+                                changed(v) => { root.changed-sharpen-settings(); }
+                            }
+                            if root.sharpen-amount > 0: Tip {
+                                tip: "Blur sample radius in pixels. Larger sharpens coarser detail (useful when heavily zoomed in); smaller targets fine detail.";
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text { text: "Radius"; color: #888; font-size: 11px; vertical-alignment: center; }
+                                    NumEdit {
+                                        text: root.sharpen-radius;
+                                        width: 56px;
+                                        edited(v) => {
+                                            root.sharpen-radius = Math.max(v.to-float(), 0.1);
+                                            root.changed-sharpen-settings();
+                                        }
+                                        escaped => { self.text = root.sharpen-radius; }
+                                    }
+                                    Text { text: "px"; color: #888; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
+                                }
                             }
                         }
                     }
@@ -5577,6 +5758,33 @@ export component RecoApp inherits Window {
                     padding: 24px;
                     spacing: 14px;
 
+                    // Tab switch: normal stitched export vs. the raw-
+                    // camera AI debug diagnostic. Two independent
+                    // panels below (each an `if` branch on
+                    // export-dialog-tab) rather than std-widgets'
+                    // TabWidget, matching this dialog's existing all-
+                    // custom-widgets styling (FlatButton/Tip/NumEdit)
+                    // instead of pulling in that widget's own look.
+                    HorizontalBox {
+                        padding: 0;
+                        spacing: 6px;
+                        FlatButton {
+                            text: "Export";
+                            primary: root.export-dialog-tab == "export";
+                            horizontal-stretch: 1;
+                            clicked => { root.export-dialog-tab = "export"; }
+                        }
+                        FlatButton {
+                            text: "AI Debug";
+                            primary: root.export-dialog-tab == "ai-debug";
+                            horizontal-stretch: 1;
+                            clicked => { root.export-dialog-tab = "ai-debug"; }
+                        }
+                    }
+
+                    if root.export-dialog-tab == "export": VerticalLayout {
+                    spacing: 14px;
+
                     Text {
                         text: "Export Stitched Video";
                         color: #fff;
@@ -6387,6 +6595,7 @@ export component RecoApp inherits Window {
                                 && !(root.export-autocam-enabled && root.export-model-path == "");
                             clicked => {
                                 if !root.has-roi {
+                                    root.pending-ai-debug-raw-export = false;
                                     root.no-roi-warning-open = true;
                                 } else {
                                     root.start-export();
@@ -6394,6 +6603,268 @@ export component RecoApp inherits Window {
                             }
                         }
                     }
+                    }  // close "export" tab VerticalLayout
+
+                    // ── AI Debug tab ──
+                    //
+                    // Its own model/output/range/confidence/detection-
+                    // interval/cut-ranges, fully independent of the
+                    // Export tab above (see the ai-debug-* properties'
+                    // doc comment) - no longer requires the Export
+                    // tab's "AI Tracking" checkbox to even be visible.
+                    if root.export-dialog-tab == "ai-debug": VerticalLayout {
+                    spacing: 14px;
+
+                    Text {
+                        text: "Raw Camera AI Debug Export";
+                        color: #fff;
+                        font-size: 18px;
+                        font-weight: 600;
+                    }
+
+                    Text {
+                        text: "DEBUG/DIAGNOSTIC ONLY - draws the AI model's real detections directly on the raw, unstitched Left/Right camera feeds (no panorama, no pan/zoom) so the AI's real input is visible with no re-projection step to get wrong. Not for real distribution.";
+                        color: #999;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+
+                    Tip {
+                        tip: "Path to a YOLO ONNX model to run detection with. Required - there is nothing to draw without one.";
+                        Text { text: "Model"; color: #ccc; font-size: 12px; }
+                    }
+                    HorizontalBox {
+                        spacing: 6px;
+                        padding: 0;
+                        LineEdit {
+                            text: root.ai-debug-model-path;
+                            placeholder-text: "Pick a YOLO ONNX model…";
+                            read-only: true;
+                            horizontal-stretch: 1;
+                        }
+                        FlatButton {
+                            text: "Model…";
+                            clicked => { root.pick-ai-debug-model(); }
+                        }
+                    }
+
+                    Tip {
+                        tip: "Which camera(s) to export. Runs a shorter, single-file diagnostic when only one side's tracking is in question, instead of always producing (and waiting on) both.";
+                        HorizontalLayout {
+                            spacing: 4px;
+                            Text { text: "Cameras"; color: #ccc; font-size: 12px; vertical-alignment: center; }
+                            ComboBox {
+                                model: ["Both", "Left", "Right"];
+                                current-value: root.ai-debug-raw-cameras == "left" ? "Left" : root.ai-debug-raw-cameras == "right" ? "Right" : "Both";
+                                selected(value) => {
+                                    root.ai-debug-raw-cameras = value == "Left" ? "left" : value == "Right" ? "right" : "both";
+                                }
+                            }
+                        }
+                    }
+
+                    // Output path
+                    Tip {
+                        tip: "Base output path - actual files get _L/_R inserted before the extension (or just one of them, matching Cameras above). Leave empty to auto-name from the left video's filename.";
+                        Text { text: "Output file"; color: #ccc; font-size: 12px; }
+                    }
+                    HorizontalBox {
+                        spacing: 6px;
+                        padding: 0;
+                        LineEdit {
+                            text <=> root.ai-debug-output-path;
+                            placeholder-text: "Pick a destination file, or type a path…";
+                            horizontal-stretch: 1;
+                        }
+                        FlatButton {
+                            text: "Save to…";
+                            clicked => { root.pick-ai-debug-output(); }
+                        }
+                    }
+
+                    // Processing range
+                    Tip {
+                        tip: "Trims the diagnostic to a start/end time window within the loaded clip. Defaults to the full clip.";
+                        Text { text: "Processing range"; color: #ccc; font-size: 12px; }
+                    }
+                    HorizontalBox {
+                        spacing: 8px;
+                        padding: 0;
+
+                        VerticalLayout {
+                            spacing: 3px;
+                            horizontal-stretch: 1;
+                            Tip {
+                                tip: "Start time, in seconds from the beginning of the clip.";
+                                Text { text: "Start (s)"; color: #888; font-size: 11px; }
+                            }
+                            Slider {
+                                minimum: 0;
+                                maximum: max(1, root.clip-duration-secs);
+                                value <=> root.ai-debug-start-secs;
+                                enabled: root.clip-duration-secs > 0;
+                                changed(v) => {
+                                    if v > root.ai-debug-end-secs { root.ai-debug-start-secs = root.ai-debug-end-secs; }
+                                }
+                            }
+                            NumEdit {
+                                text: root.ai-debug-start-secs == 0 ? "" : root.ai-debug-start-secs;
+                                placeholder-text: "0:00";
+                                edited(v) => {
+                                    root.ai-debug-start-secs = Math.min(max(0, v.to-float()), root.ai-debug-end-secs);
+                                }
+                                escaped => { self.text = root.ai-debug-start-secs == 0 ? "" : root.ai-debug-start-secs; }
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: 3px;
+                            horizontal-stretch: 1;
+                            Tip {
+                                tip: "End time, in seconds from the beginning of the clip.";
+                                Text { text: "End (s)"; color: #888; font-size: 11px; }
+                            }
+                            Slider {
+                                minimum: 0;
+                                maximum: max(1, root.clip-duration-secs);
+                                value <=> root.ai-debug-end-secs;
+                                enabled: root.clip-duration-secs > 0;
+                                changed(v) => {
+                                    if v < root.ai-debug-start-secs { root.ai-debug-end-secs = root.ai-debug-start-secs; }
+                                }
+                            }
+                            NumEdit {
+                                text: root.ai-debug-end-secs;
+                                edited(v) => {
+                                    root.ai-debug-end-secs = Math.max(Math.min(v.to-float(), root.clip-duration-secs), root.ai-debug-start-secs);
+                                }
+                                escaped => { self.text = root.ai-debug-end-secs; }
+                            }
+                        }
+                    }
+
+                    // Cut ranges - AI Debug's own list, independent of
+                    // the Export tab's (see the ai-debug-cut-ranges
+                    // property's doc comment). Not scrubber-linked -
+                    // the scrubber's cut-range band always belongs to
+                    // the Export tab; this is a plain list editor.
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Tip {
+                            tip: "Excludes a time range from this diagnostic, splicing what remains back together with no gap.";
+                            Text { text: "Cut ranges"; color: #ccc; font-size: 12px; vertical-alignment: center; }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        FlatButton {
+                            text: "+ Add cut";
+                            clicked => { root.ai-debug-cut-range-add(); }
+                        }
+                    }
+
+                    for range[i] in root.ai-debug-cut-ranges: HorizontalBox {
+                        padding: 0;
+                        spacing: 6px;
+                        NumEdit {
+                            text: range.start-secs;
+                            width: 64px;
+                            edited(v) => { root.ai-debug-cut-range-update(i, v.to-float(), range.end-secs); }
+                        }
+                        Text { text: "-"; color: #888; vertical-alignment: center; }
+                        NumEdit {
+                            text: range.end-secs;
+                            width: 64px;
+                            edited(v) => { root.ai-debug-cut-range-update(i, range.start-secs, v.to-float()); }
+                        }
+                        Text {
+                            text: round((range.end-secs - range.start-secs) * 10) / 10 + "s";
+                            color: #888;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        ai-debug-cut-rm := Rectangle {
+                            width: 20px;
+                            height: 20px;
+                            border-radius: 5px;
+                            background: ai-debug-cut-rm-ta.has-hover ? #331516 : transparent;
+                            Text { text: "×"; color: ai-debug-cut-rm-ta.has-hover ? #ff6b6b : #6a7077; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                            ai-debug-cut-rm-ta := TouchArea { clicked => { root.ai-debug-cut-range-remove(i); } }
+                        }
+                    }
+
+                    HorizontalBox {
+                        spacing: 10px;
+                        padding: 0;
+
+                        VerticalLayout {
+                            spacing: 4px;
+                            horizontal-stretch: 1;
+                            Tip {
+                                tip: "Runs AI detection every Nth frame; frames in between reuse the last detection. Higher = cheaper but staler positions during fast action. Detection on two full-resolution raw feeds is this tool's dominant cost, so this is its biggest throughput lever.";
+                                Text { text: "Detect every N frames"; color: #ccc; font-size: 12px; }
+                            }
+                            ComboBox {
+                                model: ["1", "3", "5", "10", "15", "30"];
+                                current-index: root.ai-debug-detection-interval == 1 ? 0
+                                             : root.ai-debug-detection-interval == 5 ? 2
+                                             : root.ai-debug-detection-interval == 10 ? 3
+                                             : root.ai-debug-detection-interval == 15 ? 4
+                                             : root.ai-debug-detection-interval == 30 ? 5
+                                             : 1;
+                                selected(v) => {
+                                    root.ai-debug-detection-interval =
+                                        v == "1" ? 1 : v == "5" ? 5 : v == "10" ? 10
+                                        : v == "15" ? 15 : v == "30" ? 30 : 3;
+                                }
+                            }
+                        }
+                    }
+
+                    LabeledSlider {
+                        label: "Detection confidence";
+                        tip: "A raw detection - person, ball, or referee - below this score is not drawn.";
+                        minimum: 0.05;
+                        maximum: 0.9;
+                        value <=> root.ai-debug-confidence-threshold;
+                        decimals: 2;
+                    }
+
+                    Rectangle { height: 10px; }
+
+                    HorizontalBox {
+                        spacing: 10px;
+                        padding: 0;
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        if root.export-error-text != "": Text {
+                            text: root.export-error-text;
+                            color: #e06060;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                        }
+
+                        FlatButton {
+                            text: "Cancel";
+                            clicked => { root.export-dialog-open = false; root.export-error-text = ""; }
+                        }
+
+                        FlatButton {
+                            text: "Export Raw Camera AI Debug";
+                            primary: true;
+                            enabled: root.ai-debug-output-path != "" && root.ai-debug-model-path != "";
+                            clicked => {
+                                if !root.has-roi {
+                                    root.no-roi-warning-open = true;
+                                    root.pending-ai-debug-raw-export = true;
+                                } else {
+                                    root.start-ai-debug-raw-export();
+                                }
+                            }
+                        }
+                    }
+                    }  // close "ai-debug" tab VerticalLayout
                 }
                 }  // close ScrollView
             }
@@ -6439,7 +6910,12 @@ export component RecoApp inherits Window {
                             primary: true;
                             clicked => {
                                 root.no-roi-warning-open = false;
-                                root.start-export();
+                                if root.pending-ai-debug-raw-export {
+                                    root.pending-ai-debug-raw-export = false;
+                                    root.start-ai-debug-raw-export();
+                                } else {
+                                    root.start-export();
+                                }
                             }
                         }
                     }

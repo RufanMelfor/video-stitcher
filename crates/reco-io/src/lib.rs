@@ -39,6 +39,15 @@ pub mod export_log;
 pub mod jsonl_sink;
 pub mod output;
 
+/// Raw-camera AI debug export: draws detector output directly on the
+/// undistorted-but-unstitched Left/Right source frames (no panorama,
+/// no virtual camera) and encodes them side by side into one
+/// diagnostic video. Replaces the removed `reco_core::render::
+/// ai_debug_overlay` (stitched-output) approach - see the module doc
+/// for why.
+#[cfg(feature = "ffmpeg")]
+pub mod raw_camera_debug;
+
 #[cfg(feature = "ffmpeg")]
 pub mod smart_source;
 

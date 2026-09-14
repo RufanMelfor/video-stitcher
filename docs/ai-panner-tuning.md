@@ -24,7 +24,7 @@ calibration is loaded; opening a calibration that has its own saved
 Model: `yolo26n_v2` is the production checkpoint as of this writing, but
 `yolo26s_v3` (round 3, ONNX-exported) tested dramatically better in a
 real in-app run on the same clip - raw ball detections 19.7% -> 48.7% of
-frames. Not yet promoted to "the" default - see `YOLO26_Training.md`.
+frames. Not yet promoted to "the" default - see `docs/YOLO26_Training.md`.
 Even `yolo26s_v3` genuinely misses the ball for extended stretches on
 this clip though - frames 720-898 (the last ~6s of the validated
 100-130s 03 OJC window) have zero raw ball detections at all, confirmed
@@ -56,6 +56,7 @@ FOV Default:                        34deg           (preset default, not separat
 FOV Wide:                           65-70deg        (action preset default 48deg)
 Zoom smoothing (fov_alpha):         0.05-0.08       (default 0.01)
 Aim smoothing (cluster_alpha):      0.05-0.08       (default 0.012)
+Reactivity (lookahead):             1.5             (default 2.5, action preset 3.0) - see note below
 ```
 
 Why each of these, briefly: **Cluster mode -> trimmed_mean** fixes the
@@ -79,7 +80,19 @@ before it can actually open the shot up. **Zoom/Aim smoothing** - even
 with Ball reach and FOV Wide raised, the *default* smoothing rates are
 often too slow to actually reach the wider/repositioned target before a
 brief breakaway is over (see below) - raise these if the camera visibly
-"gives up" following a fast ball event partway through.
+"gives up" following a fast ball event partway through. **Reactivity
+(lookahead) 1.5** (down from the `action` preset's 3.0, validated
+2026-09-03 on a real XFT-UHTF match) fixes a different symptom: the
+camera visibly "sprinting" to top speed instead of easing there on a
+large, sudden target move (e.g. the ball crossing ~10m). This
+multiplier raises both the base chase's velocity clamp and its ramp-up
+rate whenever lookahead is active, so a high value overshoots hard
+before the centered-smoother can remove the resulting jitter. Lowering
+it to 1.5 cut peak per-frame jump and peak half-second swing ~45% in a
+real CLI A/B render, with ball-tracking presence and *typical*
+(non-peak) smoothness unchanged - that asymmetry (peaks down, average
+unchanged) is the expected signature of this specific parameter, not a
+fluke.
 
 **Reduce lookahead memory (8-bit) - currently required for 10-bit
 sources, not just a VRAM fallback.** With it off, a 10-bit source (e.g.
@@ -132,7 +145,12 @@ only as a debug/baseline mode.
 **Detect every N frames** - how often the detector actually runs; frames
 in between reuse the last detection. Lower = fresher positions during
 fast action, higher = cheaper. `3` (every ~0.1s at 30fps) is a good
-default; push to 10-15 only if you need the compute back.
+default; push higher only if you need the compute back - real-world
+tested 2026-08-29 on a live export, going 3 -> 10 nearly tripled
+framerate (19 -> 52fps), by far the single biggest performance lever
+in the whole panner. The tracking-quality cost of that specific change
+has not been separately re-validated - treat the fps win as confirmed
+and the tracking-quality impact as unknown, not zero.
 
 **Ball anchor range** (radians, `player_anchor_max_rad`) - a gate inside
 the ball *tracker* (`crates/reco-autocam/src/trackers/ball.rs`), upstream
@@ -150,6 +168,26 @@ tracker was coasting/losing it, because the detection sat outside this
 gate. Widen it (0.3-0.5+) if the panner never seems to acquire a ball
 that's genuinely far from the pack; keep it tight if the model
 false-positives on background clutter.
+
+**Ball anchor range - near/far ramp (CLI-only, no GUI slider yet)** -
+a single flat radius under-covers a real, anchored ball close to a
+downward-tilted rig: the same real-world "teammate right next to the
+ball" distance maps to a much *larger* panorama (yaw, pitch) gap near
+the camera (steep viewing angle) than it does far up the pitch
+(shallow angle, near the horizon). Observed on real XFT-UHTF footage:
+a 90%-confidence ball only 1-2deg outside a 17deg flat gate near
+mid-pitch, next to a real ball ~25deg from its nearest teammate close
+to the camera. `--player-anchor-rad-near` sets a separate radius
+applied at world pitch <= -0.05rad (near the camera), linearly ramping
+to `--player-anchor-rad`'s value (the "far" end, applied at pitch >=
+0.20rad) in between; has no effect unless `--player-anchor-rad` is
+also set. **Tested and rejected at 30deg** (2026-09-03): admits a
+static white field-marker disc sitting on the touchline as a false
+"ball" for 65+ seconds straight. The mechanism itself is sound
+infrastructure - only that specific wide value is rejected. Do not
+raise this without new evidence; re-validating a smaller near-value
+against the same static-marker case is the open next step. See
+[`BallTracker::with_player_anchor_rad_near_far`](../crates/reco-autocam/src/trackers/ball.rs).
 
 **Ball coast time** (seconds, `ball_coast_secs`) - how long an
 already-tracked ball holds its last known position after detections
@@ -346,7 +384,11 @@ Source: `FieldPannerConfig::{broadcast, action, frame_all}` in
   Increase [`min_cluster`](#extra-parameters-not-yet-exposed-in-the-gui)
   if 2 players is too readily forming a cluster (not GUI-exposed today).
 - **Picture feels jittery/twitchy on static play**: raise `dead-zone`, or
-  raise `lookahead` for more lead-in smoothing.
+  raise `lookahead` for more lead-in smoothing. Confirmed 2026-09-03 on
+  real footage: a group of children milling around a stationary/
+  untracked ball kept restlessly nudging the camera at a low dead-zone
+  (0.048 rad on that calibration); raising to **0.15 rad** fixed it
+  with no observed downside.
 - **Picture wobbles/hops because the AI seems obsessed with the ball -
   every small ball movement drags the frame** (reported 2026-08-29, not
   yet A/B-validated - the advice below is reasoned from the code, not

@@ -177,6 +177,29 @@ pub fn map_texture_format_for_copy(
 
         (format, crate::FormatAspects::COLOR) => map_texture_format(format),
 
+        // Multi-planar formats (NV12/P010): a per-plane copy needs the
+        // *plane's own* single/dual-channel DXGI format, not the whole
+        // texture's packed NV12/P010 format (`map_texture_format` above
+        // would return `DXGI_FORMAT_NV12`/`DXGI_FORMAT_P010`, neither of
+        // which is valid on a `D3D12_SUBRESOURCE_FOOTPRINT` for a planar
+        // copy - only a single-plane format is). Matches the explicit
+        // view formats `y_format()`/`uv_format()`
+        // (`reco_core::render::renderer::GpuPixelFormat`) already use
+        // for sampling the same planes, so a copy and a view of the same
+        // plane agree on its format.
+        (wgt::TextureFormat::NV12, crate::FormatAspects::PLANE_0) => {
+            Dxgi::Common::DXGI_FORMAT_R8_UNORM
+        }
+        (wgt::TextureFormat::NV12, crate::FormatAspects::PLANE_1) => {
+            Dxgi::Common::DXGI_FORMAT_R8G8_UNORM
+        }
+        (wgt::TextureFormat::P010, crate::FormatAspects::PLANE_0) => {
+            Dxgi::Common::DXGI_FORMAT_R16_UNORM
+        }
+        (wgt::TextureFormat::P010, crate::FormatAspects::PLANE_1) => {
+            Dxgi::Common::DXGI_FORMAT_R16G16_UNORM
+        }
+
         _ => return None,
     })
 }

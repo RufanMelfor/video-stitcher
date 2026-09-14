@@ -38,7 +38,7 @@
 //! # let mut session: reco_core::session::StitchSession = todo!();
 //! let config = AutocamConfig::new("ball_v0.onnx")
 //!     .with_tracking_mode(TrackingMode::Field);
-//! reco_autocam::setup_autocam(&mut session, &config, 30.0, false)?;
+//! reco_autocam::setup_autocam(&mut session, &config, 30.0, false, None)?;
 //! # Ok(()) }
 //! ```
 
@@ -131,7 +131,21 @@ pub struct AutocamConfig {
     /// `field_panner_config.ball_max_dist_from_cluster` raised. `None`
     /// keeps the tracker's own default
     /// ([`trackers::ball::DEFAULT_PLAYER_ANCHOR_RAD`], ~0.20 rad / 11deg).
+    ///
+    /// Applied at [`trackers::ball::DEFAULT_ANCHOR_PITCH_FAR`] or above
+    /// when [`player_anchor_max_rad_near`](Self::player_anchor_max_rad_near)
+    /// is also set (the "far" end of that ramp); applied uniformly at
+    /// every pitch when it isn't.
     pub player_anchor_max_rad: Option<f32>,
+    /// Optional "near" end of the player-anchor ramp (radians), applied
+    /// at [`trackers::ball::DEFAULT_ANCHOR_PITCH_NEAR`] or below - see
+    /// [`trackers::ball::BallTracker::with_player_anchor_rad_near_far`]
+    /// for why a flat radius under-covers real anchored balls close to
+    /// a downward-tilted rig. `None` falls back to
+    /// [`player_anchor_max_rad`](Self::player_anchor_max_rad)'s value
+    /// (a flat radius, the pre-existing behavior) - has no effect on
+    /// its own without that also being set.
+    pub player_anchor_max_rad_near: Option<f32>,
     /// Override for [`trackers::ball::BallTracker`]'s coast budget, in
     /// seconds (converted to frames at the source's actual fps). A ball
     /// crossing outside the field ROI looks identical to the tracker as
@@ -163,6 +177,7 @@ impl AutocamConfig {
             field_panner_config: None,
             confidence_threshold: None,
             player_anchor_max_rad: None,
+            player_anchor_max_rad_near: None,
             ball_coast_secs: None,
         }
     }
@@ -201,6 +216,15 @@ impl AutocamConfig {
         self
     }
 
+    /// Override the "near" end of the player-anchor ramp (radians). See
+    /// [`AutocamConfig::player_anchor_max_rad_near`] for what this
+    /// controls - has no effect unless `with_player_anchor_rad` (the
+    /// "far" end) is also set.
+    pub fn with_player_anchor_rad_near(mut self, rad: f32) -> Self {
+        self.player_anchor_max_rad_near = Some(rad);
+        self
+    }
+
     /// Override the ball tracker's coast budget (seconds). See
     /// [`AutocamConfig::ball_coast_secs`] for what this controls.
     pub fn with_ball_coast_secs(mut self, secs: f32) -> Self {
@@ -216,16 +240,25 @@ impl AutocamConfig {
     }
 }
 
-/// Set up the autocam pipeline from a config struct.
-///
-/// Infers input dimensions, fps, and zero-copy mode from the session.
-/// Returns `true` if detection was successfully activated.
 /// Set up the autocam pipeline (detection + tracking + panning) on a stitch session.
 ///
 /// Infers input dimensions, GPU capabilities, and fps from the session and
 /// source. Returns `true` if detection was successfully activated, `false`
 /// if no detector backend is available (the session remains usable without
 /// autocam).
+///
+/// `resolved_ball_class_id`, when given, is filled in with the model's
+/// actual ball class id (resolved from its own label metadata, the same
+/// `ball_id` this function's tracker wiring uses below - see
+/// `resolve_or`'s `["ball", "sports ball"]` lookup) whenever detection
+/// activates. A consumer that needs to interpret this model's raw class
+/// ids itself later (e.g. a diagnostic overlay drawing ball detections)
+/// MUST read this rather than assume COCO's `32` - most of reco's own
+/// production checkpoints are custom-trained with a different ordering
+/// (e.g. `reco-yolo26s-football`: `0=person, 1=ball, 2=referee`, not
+/// COCO's `0=person, 32=ball`), and a hardcoded COCO id silently draws
+/// nothing (or the wrong class) against those. Left `None`/unfilled if
+/// detection never activates (e.g. sweep mode, no detector backend).
 #[cfg_attr(
     not(any(feature = "ort", feature = "tensorrt-native", feature = "ncnn")),
     allow(unused_variables, unreachable_code)
@@ -235,6 +268,7 @@ pub fn setup_autocam(
     config: &AutocamConfig,
     fps: f32,
     source_is_gpu_resident: bool,
+    mut resolved_ball_class_id: Option<&mut Option<u16>>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     #[cfg(not(any(feature = "ort", feature = "tensorrt-native", feature = "ncnn")))]
     {
@@ -552,6 +586,9 @@ pub fn setup_autocam(
         // class is left as an Option so field mode can tell "no players
         // in this model" apart from "players at the COCO index".
         let ball_id = resolve_or(&class_names, &["ball", "sports ball"], 32);
+        if let Some(out) = resolved_ball_class_id.as_mut() {
+            **out = Some(ball_id);
+        }
         let person = resolve_class_id(&class_names, &["person"]);
         match person {
             Some(p) => log::info!(
@@ -566,12 +603,14 @@ pub fn setup_autocam(
 
         match tracking_mode {
             TrackingMode::Field => {
+                let anchor_far = config
+                    .player_anchor_max_rad
+                    .unwrap_or(crate::trackers::ball::DEFAULT_PLAYER_ANCHOR_RAD);
                 let ball_tracker = crate::trackers::BallTracker::new(ball_id)
                     .with_max_jump_rad(0.8)
-                    .with_player_anchor_rad(
-                        config
-                            .player_anchor_max_rad
-                            .unwrap_or(crate::trackers::ball::DEFAULT_PLAYER_ANCHOR_RAD),
+                    .with_player_anchor_rad_near_far(
+                        config.player_anchor_max_rad_near.unwrap_or(anchor_far),
+                        anchor_far,
                     )
                     .with_max_coast_frames(
                         config
@@ -621,12 +660,14 @@ pub fn setup_autocam(
                 // No player provider is attached below, so the player-anchor
                 // gate is a no-op regardless of this value - set anyway for
                 // consistency in case that ever changes.
+                let anchor_far = config
+                    .player_anchor_max_rad
+                    .unwrap_or(crate::trackers::ball::DEFAULT_PLAYER_ANCHOR_RAD);
                 let ball_tracker = crate::trackers::BallTracker::new(ball_id)
                     .with_max_jump_rad(0.5)
-                    .with_player_anchor_rad(
-                        config
-                            .player_anchor_max_rad
-                            .unwrap_or(crate::trackers::ball::DEFAULT_PLAYER_ANCHOR_RAD),
+                    .with_player_anchor_rad_near_far(
+                        config.player_anchor_max_rad_near.unwrap_or(anchor_far),
+                        anchor_far,
                     )
                     .with_max_coast_frames(
                         config

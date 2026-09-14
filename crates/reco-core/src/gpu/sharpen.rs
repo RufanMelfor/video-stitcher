@@ -1,79 +1,77 @@
-//! Universal GPU color grading pass.
+//! GPU unsharp-mask sharpening pass.
 //!
-//! Applies brightness, saturation, and gamma to any RGBA texture.
-//! Designed to slot into any input pipeline (Bayer demosaic, NV12
-//! decode, file playback, OBS BGRA). Future: 1D LUT, tone mapping.
+//! Compensates for the softness introduced when the AI panner zooms in on
+//! a crop of the panorama (fewer source pixels per output pixel). Runs on
+//! the final cropped viewport output, right after color grading.
 
 use super::GpuContext;
 use wgpu::util::DeviceExt;
 
-/// Parameters for the color grade compute shader.
+/// Parameters for the sharpen compute shader.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct ColorGradeParams {
-    pub brightness: f32,
-    pub saturation: f32,
-    /// Gamma exponent (0.5 = sqrt, 1.0 = linear, 0.4545 = sRGB approx).
-    pub gamma: f32,
-    _pad: f32,
+pub struct SharpenParams {
+    /// Strength of the sharpening effect. 0.0 = no-op (identity).
+    pub amount: f32,
+    /// Blur sample radius in pixels (typical range 1.0-3.0).
+    pub radius: f32,
+    _pad0: f32,
+    _pad1: f32,
 }
 
-impl Default for ColorGradeParams {
+impl Default for SharpenParams {
     fn default() -> Self {
         Self {
-            brightness: 1.0,
-            saturation: 1.0,
-            gamma: 1.0,
-            _pad: 0.0,
+            amount: 0.0,
+            radius: 1.0,
+            _pad0: 0.0,
+            _pad1: 0.0,
         }
     }
 }
 
-impl ColorGradeParams {
-    /// Build color grade parameters. `(1.0, 1.0, 1.0)` is identity (no-op).
-    pub fn new(brightness: f32, saturation: f32, gamma: f32) -> Self {
+impl SharpenParams {
+    /// Build sharpen parameters. `amount` of `0.0` is identity (no-op).
+    pub fn new(amount: f32, radius: f32) -> Self {
         Self {
-            brightness,
-            saturation,
-            gamma,
+            amount,
+            radius,
             ..Default::default()
         }
     }
 
-    /// Check if all parameters are identity (no-op).
-    /// When true, the grade pass can be skipped entirely.
+    /// Check if the parameters are identity (no-op).
+    /// When true, the sharpen pass can be skipped entirely.
     pub fn is_identity(&self) -> bool {
-        (self.brightness - 1.0).abs() < 1e-6
-            && (self.saturation - 1.0).abs() < 1e-6
-            && (self.gamma - 1.0).abs() < 1e-6
+        self.amount.abs() < 1e-6
     }
 }
 
-/// GPU compute pass for universal color grading.
+/// GPU compute pass for unsharp-mask sharpening.
 ///
 /// Operates on caller-provided input/output textures (no owned
-/// framebuffers). When [`ColorGradeParams::is_identity`] returns
-/// true, [`encode`](Self::encode) is a no-op - the caller should
-/// use the input texture directly instead of the output.
-pub struct ColorGradePass {
+/// framebuffers). When [`SharpenParams::is_identity`] returns true,
+/// [`encode`](Self::encode) is a no-op - the caller should use the input
+/// texture directly instead of the output.
+pub struct SharpenPass {
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     params_buffer: wgpu::Buffer,
     identity: bool,
 }
 
-impl ColorGradePass {
-    /// Create a new color grade pipeline.
-    pub fn new(gpu: &GpuContext, params: &ColorGradeParams) -> Self {
+impl SharpenPass {
+    /// Create a new sharpen pipeline.
+    pub fn new(gpu: &GpuContext, params: &SharpenParams) -> Self {
         let device = &gpu.device;
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("color_grade"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/color_grade.wgsl").into()),
+            label: Some("sharpen"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sharpen.wgsl").into()),
         });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("color_grade_bgl"),
+            label: Some("sharpen_bgl"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -109,13 +107,13 @@ impl ColorGradePass {
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("color_grade_layout"),
+            label: Some("sharpen_layout"),
             bind_group_layouts: &[&bind_group_layout],
             immediate_size: 0,
         });
 
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("color_grade_pipeline"),
+            label: Some("sharpen_pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,
             entry_point: Some("main"),
@@ -124,7 +122,7 @@ impl ColorGradePass {
         });
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("color_grade_params"),
+            label: Some("sharpen_params"),
             contents: bytemuck::bytes_of(params),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -138,7 +136,7 @@ impl ColorGradePass {
     }
 
     /// Update parameters without rebuilding the pipeline.
-    pub fn update_params(&mut self, gpu: &GpuContext, params: &ColorGradeParams) {
+    pub fn update_params(&mut self, gpu: &GpuContext, params: &SharpenParams) {
         gpu.queue
             .write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
         self.identity = params.is_identity();
@@ -149,12 +147,12 @@ impl ColorGradePass {
         self.identity
     }
 
-    /// Encode the color grade dispatch into `encoder`.
+    /// Encode the sharpen dispatch into `encoder`.
     ///
     /// `input` must be `Rgba8Unorm` with `TEXTURE_BINDING` usage.
     /// `output` must be `Rgba8Unorm` with `STORAGE_BINDING` usage.
-    /// When [`is_identity`](Self::is_identity) returns true, this is
-    /// a no-op and the caller should use `input` directly.
+    /// When [`is_identity`](Self::is_identity) returns true, this is a
+    /// no-op and the caller should use `input` directly.
     pub fn encode(
         &self,
         gpu: &GpuContext,
@@ -170,7 +168,7 @@ impl ColorGradePass {
         let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
 
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("color_grade_bg"),
+            label: Some("sharpen_bg"),
             layout: &self.bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -190,7 +188,7 @@ impl ColorGradePass {
 
         let size = input.size();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("color_grade"),
+            label: Some("sharpen"),
             timestamp_writes: None,
         });
         pass.set_pipeline(&self.pipeline);
@@ -205,17 +203,24 @@ mod tests {
 
     #[test]
     fn identity_default() {
-        assert!(ColorGradeParams::default().is_identity());
+        assert!(SharpenParams::default().is_identity());
     }
 
     #[test]
-    fn identity_via_new_with_neutral_values() {
-        assert!(ColorGradeParams::new(1.0, 1.0, 1.0).is_identity());
-    }
-
-    #[test]
-    fn non_neutral_saturation_is_not_identity() {
-        let params = ColorGradeParams::new(1.0, 1.15, 1.0);
+    fn non_zero_amount_is_not_identity() {
+        let params = SharpenParams {
+            amount: 0.5,
+            ..Default::default()
+        };
         assert!(!params.is_identity());
+    }
+
+    #[test]
+    fn tiny_amount_is_identity() {
+        let params = SharpenParams {
+            amount: 1e-9,
+            ..Default::default()
+        };
+        assert!(params.is_identity());
     }
 }

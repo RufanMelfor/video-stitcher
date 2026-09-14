@@ -4,6 +4,8 @@
 //! reco stitch left.mp4 right.mp4 --calibration match.json -o output.mp4
 //! ```
 
+#[cfg(feature = "ort")]
+mod ai_debug_raw;
 mod calibrate;
 #[cfg(feature = "gstreamer")]
 mod camera;
@@ -494,6 +496,111 @@ enum Commands {
         confidence_threshold: Option<f32>,
     },
 
+    /// DEBUG/DIAGNOSTIC ONLY - export the raw Left/Right camera feeds as
+    /// TWO SEPARATE video files, with the AI detector's actual bounding
+    /// boxes drawn directly on each camera's own unstitched frames (no
+    /// panorama, no virtual camera, no pan/zoom) - exactly what the model
+    /// saw at inference time, matching how Label Studio shows boxes on
+    /// raw training frames. Use this instead of trying to read AI
+    /// behavior off a normal stitched export, where a wrong-looking
+    /// marker could be a real detection problem or just an artifact of
+    /// the panorama re-projection - this output has no re-projection
+    /// step to get wrong. Two files, not one side-by-side video, because
+    /// a full-resolution side-by-side frame exceeds H.264's 4096px width
+    /// limit and forces a slow software-encoder fallback. Never for a
+    /// real match export.
+    AiDebugRaw {
+        /// Path to the left camera video file.
+        left: String,
+
+        /// Path to the right camera video file.
+        right: String,
+
+        /// Path to the calibration JSON file. Only used to resolve the
+        /// field ROI overlay (if the calibration has one) - no geometry
+        /// from it otherwise affects this output.
+        #[arg(short, long)]
+        calibration: String,
+
+        /// Base output file path - actual files get `_L`/`_R` inserted
+        /// before the extension. Left empty to auto-name from the left
+        /// video's filename with an `_ai_debug_raw_L`/`_R` suffix.
+        #[arg(short, long, default_value = "")]
+        output: String,
+
+        /// Path to a YOLO ONNX model to run detection with. Required -
+        /// there is nothing to draw without one.
+        #[arg(long)]
+        model: String,
+
+        /// Detector confidence floor `[0,1]`. `None` draws every
+        /// detection the model returned.
+        #[arg(long = "confidence-threshold")]
+        confidence_threshold: Option<f32>,
+
+        /// Start processing at this time offset (seconds), applied to
+        /// both cameras before --sync-offset.
+        #[arg(long)]
+        start_time: Option<f64>,
+
+        /// Stop processing at this time offset (seconds). Omit to run
+        /// to the source's end (or --max-frames, if set).
+        #[arg(long)]
+        end_time: Option<f64>,
+
+        /// Frame offset for temporal sync between cameras.
+        /// Positive: skip N right frames (right started first).
+        /// Negative: skip N left frames (left started first).
+        #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+        sync_offset: i64,
+
+        /// Hard cap on the number of output frames.
+        #[arg(long)]
+        max_frames: Option<u64>,
+
+        /// Exclude a time range from the export (e.g. a halftime
+        /// pause), as `START:END` in seconds relative to the source
+        /// (same space as --start-time). Repeat for multiple ranges;
+        /// splices what remains back together with no gap. Ranges must
+        /// not overlap. Skipped via a real seek, not frame-accurate
+        /// decode - see `reco_io::raw_camera_debug::RawCameraDebugConfig::cut_ranges`'s
+        /// doc comment for why.
+        #[arg(long = "cut-range", value_name = "START:END", value_parser = parse_cut_range)]
+        cut_range: Vec<reco_io::cut_range::CutRange>,
+
+        /// Run detection every Nth frame (1 = every frame). Frames in
+        /// between reuse the previous detection's boxes, so a large
+        /// value makes boxes visibly lag fast motion - don't diagnose
+        /// ball-loss from a run with a large interval. Detection on two
+        /// full-resolution raw feeds is this tool's dominant cost, so
+        /// this is the biggest throughput lever it has.
+        #[arg(long = "detection-interval", default_value_t = 1)]
+        detection_interval: u32,
+
+        /// Draw the calibration's field ROI polygon outline (yellow),
+        /// when present. A ball the model found but that a real export
+        /// would silently drop (outside an ROI that's too tight) is
+        /// exactly what shows up as a box outside this outline.
+        #[arg(long, default_value_t = true)]
+        show_field_roi: bool,
+
+        /// Force a specific encoder (e.g., h264_nvenc, libx264).
+        /// Auto-detects by default.
+        #[arg(long)]
+        encoder: Option<String>,
+
+        /// Output codec: h264, hevc, av1. Default: h264.
+        #[arg(long, default_value = "h264")]
+        codec: String,
+
+        /// Which camera(s) to export: `left`, `right`, or `both`. Runs
+        /// a shorter, single-file diagnostic when only one side's
+        /// tracking is in question, instead of always producing (and
+        /// waiting on) both.
+        #[arg(long, default_value = "both", value_parser = parse_camera_selection)]
+        cameras: reco_io::raw_camera_debug::CameraSelection,
+    },
+
     /// Open an interactive preview window to debug the stitch.
     Preview {
         /// Path to the left camera video file.
@@ -981,6 +1088,17 @@ fn parse_cut_range(s: &str) -> Result<reco_io::cut_range::CutRange, String> {
     reco_io::cut_range::CutRange::new(start, end)
 }
 
+/// Parse `--cameras` for `ai-debug-raw`: `left`, `right`, or `both`
+/// (case-insensitive).
+fn parse_camera_selection(s: &str) -> Result<reco_io::raw_camera_debug::CameraSelection, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "left" | "l" => Ok(reco_io::raw_camera_debug::CameraSelection::Left),
+        "right" | "r" => Ok(reco_io::raw_camera_debug::CameraSelection::Right),
+        "both" => Ok(reco_io::raw_camera_debug::CameraSelection::Both),
+        _ => Err(format!("expected 'left', 'right', or 'both', got {s:?}")),
+    }
+}
+
 /// Parse a `WIDTHxHEIGHT` string (e.g. `1280x720`, `854x480`) into
 /// `(u32, u32)`. Used by `--replay-scale`. Validates YUV420P
 /// alignment: width divisible by 4, height even.
@@ -1141,6 +1259,53 @@ fn main() -> anyhow::Result<()> {
             },
             &interrupted,
         ),
+
+        #[cfg(feature = "ort")]
+        Commands::AiDebugRaw {
+            left,
+            right,
+            calibration,
+            output,
+            model,
+            confidence_threshold,
+            start_time,
+            end_time,
+            sync_offset,
+            max_frames,
+            cut_range,
+            detection_interval,
+            show_field_roi,
+            encoder,
+            codec,
+            cameras,
+        } => ai_debug_raw::run_ai_debug_raw(
+            ai_debug_raw::AiDebugRawArgs {
+                left: &left,
+                right: &right,
+                calibration: &calibration,
+                output: &output,
+                model_path: &model,
+                confidence_threshold,
+                start_time,
+                end_time,
+                sync_offset,
+                max_frames,
+                cut_ranges: cut_range,
+                detection_interval,
+                show_field_roi,
+                encoder_name: encoder.as_deref(),
+                codec: &codec,
+                cameras,
+            },
+            &interrupted,
+        ),
+        #[cfg(not(feature = "ort"))]
+        Commands::AiDebugRaw { .. } => {
+            anyhow::bail!(
+                "ai-debug-raw requires the `ort` feature (CPU YOLO inference). \
+                 Rebuild with --features ort."
+            )
+        }
 
         Commands::Preview {
             left,

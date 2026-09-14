@@ -27,7 +27,7 @@ Two kinds of source, given as repeatable --raw-source/--ready-source:
       classes.txt claiming 0=person/1=ball while the label files
       underneath still held raw ball=1288/person=144/referee=119 counts
       that didn't match at all once cross-checked against a fresh LS
-      export - see YOLO26_Training.md's merged-training-set entry).
+      export - see docs/YOLO26_Training.md's merged-training-set entry).
 
 Usage:
   python3 merge_yolo_datasets.py \

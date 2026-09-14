@@ -934,6 +934,15 @@ mod tests {
         // This test is informational — it passes on both CUDA and non-CUDA systems.
         if is_cuda_available() {
             println!("CUDA is available");
+            // `is_cuda_available` only checks that the driver library loads
+            // and its symbols resolve - it never calls `cuInit`. In normal
+            // production use something else in the process (FFmpeg's NVDEC
+            // backend, per `cuda_ensure_context`'s doc comment) always
+            // calls it first; a bare test binary has nothing else touching
+            // CUDA, so the runtime call below (`cudaGetDevice`) is the
+            // first CUDA call in the process and fails cold with
+            // `cudaErrorInitializationError` without this.
+            cuda_ensure_context().expect("should establish a CUDA context");
             let uuid = get_cuda_device_uuid().expect("should get UUID");
             println!(
                 "CUDA device UUID: {}",
@@ -950,6 +959,10 @@ mod tests {
             println!("Skipping: CUDA not available");
             return;
         }
+        // See `test_cuda_available`'s matching comment: establish a CUDA
+        // context before the first runtime call, since nothing else in a
+        // bare test binary does it for us.
+        cuda_ensure_context().expect("should establish a CUDA context");
 
         let size = 1920 * 1080; // ~2MB
         let mem = allocate_shared_memory(size).expect("should allocate shared memory");

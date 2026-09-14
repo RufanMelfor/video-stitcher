@@ -243,6 +243,12 @@ struct AppState {
     /// yet persisted into the calibration file (deliberately deferred
     /// to a follow-up).
     cut_ranges: Vec<(f64, f64)>,
+    /// Same as `cut_ranges` above but for the AI Debug tab - a fully
+    /// separate list (see `AiDebugSettings`'s doc comment for why this
+    /// tab's settings don't share state with the normal Export tab).
+    /// Mutated only via the `on_ai_debug_cut_range_*` handlers; session-
+    /// only, never persisted (same as `cut_ranges`).
+    ai_debug_cut_ranges: Vec<(f64, f64)>,
     playback: Playback,
     bridge: Option<PreviewBridge>,
     scoreboard_packages: Vec<reco_scoreboard::ScoreboardPackage>,
@@ -675,6 +681,7 @@ impl AppState {
             calibration_path: None,
             calibration: None,
             cut_ranges: Vec::new(),
+            ai_debug_cut_ranges: Vec::new(),
             playback: Playback::new(),
             bridge: None,
             scoreboard_packages: discovery.packages,
@@ -1652,6 +1659,45 @@ impl AppState {
         }
     }
 
+    /// Universal color grade (brightness/saturation/gamma), applied to
+    /// the whole composited frame - the Color Mapping panel's "Vivid"
+    /// toggle and its three sliders (see
+    /// `reco_core::calibration::Topology::color_grade_brightness`).
+    /// Same shape as [`Self::set_color_gamma`] - live pipeline update
+    /// plus the source-of-truth calibration copy.
+    fn set_color_grade(&mut self, brightness: f32, saturation: f32, gamma: f32) {
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.color_grade_brightness = brightness;
+            cal.topology.color_grade_saturation = saturation;
+            cal.topology.color_grade_gamma = gamma;
+        }
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge
+                .engine_mut()
+                .pipeline_mut()
+                .set_color_grade(brightness, saturation, gamma);
+            self.preview_dirty = true;
+        }
+    }
+
+    /// Unsharp-mask sharpening, applied to the final composited output -
+    /// the Color Mapping panel's "Sharpening" slider (see
+    /// `reco_core::calibration::Topology::sharpen_amount`). Same shape
+    /// as [`Self::set_color_gamma`].
+    fn set_sharpen_params(&mut self, amount: f32, radius: f32) {
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.sharpen_amount = amount;
+            cal.topology.sharpen_radius = radius;
+        }
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge
+                .engine_mut()
+                .pipeline_mut()
+                .set_sharpen_params(amount, radius);
+            self.preview_dirty = true;
+        }
+    }
+
     /// Restore all Auto Color Match tuning knobs to their engineering
     /// defaults - not the values loaded from the current calibration file,
     /// which is what `reset_calibration` does for the layout sliders.
@@ -1675,12 +1721,21 @@ impl AppState {
             pipeline.set_color_match_max_chroma_offset(DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET);
             pipeline.set_color_gamma(DEFAULT_COLOR_GAMMA, DEFAULT_COLOR_GAMMA);
             pipeline.set_color_match_auto_gamma(DEFAULT_COLOR_MATCH_AUTO_GAMMA);
+            // Vivid color grade / sharpening reset to identity/off too -
+            // both live in this same Color Mapping panel.
+            pipeline.set_color_grade(1.0, 1.0, 1.0);
+            pipeline.set_sharpen_params(0.0, 1.0);
             self.preview_dirty = true;
         }
         if let Some(cal) = self.calibration.as_mut() {
             cal.topology.color_gamma_left = DEFAULT_COLOR_GAMMA;
             cal.topology.color_gamma_right = DEFAULT_COLOR_GAMMA;
             cal.topology.color_match_auto_gamma = DEFAULT_COLOR_MATCH_AUTO_GAMMA;
+            cal.topology.color_grade_brightness = 1.0;
+            cal.topology.color_grade_saturation = 1.0;
+            cal.topology.color_grade_gamma = 1.0;
+            cal.topology.sharpen_amount = 0.0;
+            cal.topology.sharpen_radius = 1.0;
         }
     }
 
@@ -2191,6 +2246,21 @@ fn sync_cut_ranges(state: &AppState, app: &RecoApp) {
     app.set_cut_ranges(slint::ModelRc::new(slint::VecModel::from(items)));
 }
 
+/// Same as `sync_cut_ranges` but for the AI Debug tab's own, separate
+/// cut-ranges list (`AppState::ai_debug_cut_ranges` /
+/// `root.ai-debug-cut-ranges`).
+fn sync_ai_debug_cut_ranges(state: &AppState, app: &RecoApp) {
+    let items: Vec<CutRangeItem> = state
+        .ai_debug_cut_ranges
+        .iter()
+        .map(|&(start, end)| CutRangeItem {
+            start_secs: start as f32,
+            end_secs: end as f32,
+        })
+        .collect();
+    app.set_ai_debug_cut_ranges(slint::ModelRc::new(slint::VecModel::from(items)));
+}
+
 /// Recompute and re-apply the "Auto-cut kickoff lead-in + pauses" derived
 /// cut ranges from the current Match Logger export + sync anchor,
 /// replacing whatever this toggle previously added (see
@@ -2349,6 +2419,31 @@ fn strip_highlights_suffix(output: &str) -> String {
         Some(base) => format!("{base}{extension}"),
         None => output.to_string(),
     }
+}
+
+/// Marker inserted into a raw-camera AI-debug export's filename - see
+/// `reco-cli`'s `ai-debug-raw` subcommand help text and this feature's
+/// own design constraints (never persisted, never a checkbox that
+/// could be left on by accident). Mirrors [`HIGHLIGHTS_SUFFIX`]'s
+/// convention.
+const AI_DEBUG_RAW_SUFFIX: &str = "_ai_debug_raw";
+
+/// `match.mp4` -> `(match_ai_debug_raw_L.mp4, match_ai_debug_raw_R.mp4)`,
+/// idempotent. Two names, not one, because this diagnostic exports two
+/// separate files (one per camera) rather than one side-by-side
+/// composite - see `reco_io::raw_camera_debug`'s doc comment for why
+/// (H.264's 4096px width limit). See [`add_highlights_suffix`] for the
+/// identical dot-handling logic this mirrors.
+fn add_ai_debug_raw_suffixes(output: &str) -> (String, String) {
+    let (stem, extension) = match output.rfind('.') {
+        Some(dot) if !output[dot..].contains(['/', '\\']) => output.split_at(dot),
+        _ => (output, ""),
+    };
+    let stem = stem.strip_suffix(AI_DEBUG_RAW_SUFFIX).unwrap_or(stem);
+    (
+        format!("{stem}{AI_DEBUG_RAW_SUFFIX}_L{extension}"),
+        format!("{stem}{AI_DEBUG_RAW_SUFFIX}_R{extension}"),
+    )
 }
 
 /// Push the per-side segment filenames into the Slint left/right-segments
@@ -2986,6 +3081,12 @@ fn snapshot_autocam_defaults(app: &RecoApp) -> reco_core::calibration::AutocamDe
         fov_alpha: app.get_export_fov_alpha(),
         cluster_alpha: app.get_export_cluster_alpha(),
         confidence_threshold: app.get_export_confidence_threshold(),
+        // No GUI slider yet for this one (out of scope here) - falls
+        // back to FieldPannerConfig's own default so the events JSONL
+        // header/calibration snapshot at least records a real value
+        // instead of an arbitrary placeholder.
+        lookahead_reactivity: reco_autocam::panners::FieldPannerConfig::default()
+            .lookahead_reactivity,
     }
 }
 
@@ -3081,6 +3182,24 @@ fn snapshot_scoreboard_settings(
 fn persist_scoreboard_settings(app: &RecoApp, s: &mut AppState) {
     let sb = snapshot_scoreboard_settings(app, s);
     s.user_settings.set_scoreboard_settings(sb);
+}
+
+/// Snapshot the AI Debug tab's current field values into `AiDebugSettings`
+/// and persist them - the tab's counterpart to
+/// `persist_scoreboard_settings`/`snapshot_scoreboard_settings`. Called
+/// from `on_ai_debug_settings_changed` (cameras/confidence/detection-
+/// interval edits) and from the model/output pickers directly (same
+/// split as `export-model-path`'s own dedicated persistence).
+fn persist_ai_debug_settings(app: &RecoApp, s: &mut AppState) {
+    let model_path = app.get_ai_debug_model_path();
+    let ad = crate::settings::AiDebugSettings {
+        model_path: (!model_path.is_empty()).then(|| PathBuf::from(model_path.as_str())),
+        output_path: app.get_ai_debug_output_path().to_string(),
+        cameras: app.get_ai_debug_raw_cameras().to_string(),
+        confidence_threshold: app.get_ai_debug_confidence_threshold(),
+        detection_interval: app.get_ai_debug_detection_interval(),
+    };
+    s.user_settings.set_ai_debug_settings(ad);
 }
 
 /// Adopt a freshly parsed Match Logger export as the current one: the
@@ -4559,6 +4678,86 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
+    // AI Debug tab's own cut ranges - same three callbacks/logic as
+    // the Export tab's on_cut_range_add/remove/update just above, but
+    // against `ai_debug_cut_ranges`/`ai-debug-start-secs`/`ai-debug-
+    // end-secs` (see `AppState::ai_debug_cut_ranges`'s doc comment for
+    // why this is a separate list rather than sharing the Export tab's).
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_ai_debug_cut_range_add(move || {
+        let mut s = state_ref.borrow_mut();
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let export_start = app.get_ai_debug_start_secs() as f64;
+        let export_end = if app.get_ai_debug_end_secs() > 0.0 {
+            app.get_ai_debug_end_secs() as f64
+        } else {
+            app.get_clip_duration_secs() as f64
+        };
+        let playhead_secs = if app.get_total_frames() > 0 {
+            app.get_current_frame() as f64 / app.get_total_frames() as f64
+                * app.get_clip_duration_secs() as f64
+        } else {
+            export_start
+        };
+        let default_width = 2.0_f64;
+        let start = playhead_secs.clamp(export_start, (export_end - 0.2).max(export_start));
+        let end = (start + default_width).min(export_end);
+        if end - start < 0.2 {
+            return;
+        }
+        s.ai_debug_cut_ranges.push((start, end));
+        sync_ai_debug_cut_ranges(&s, &app);
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_ai_debug_cut_range_remove(move |idx| {
+        let mut s = state_ref.borrow_mut();
+        let idx = idx as usize;
+        if idx < s.ai_debug_cut_ranges.len() {
+            s.ai_debug_cut_ranges.remove(idx);
+            if let Some(app) = app_weak.upgrade() {
+                sync_ai_debug_cut_ranges(&s, &app);
+            }
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_ai_debug_cut_range_update(move |idx, start, end| {
+        let mut s = state_ref.borrow_mut();
+        let idx = idx as usize;
+        let Some(range) = s.ai_debug_cut_ranges.get_mut(idx) else {
+            return;
+        };
+        let clip_duration = app_weak
+            .upgrade()
+            .map(|app| app.get_clip_duration_secs() as f64)
+            .unwrap_or(f64::MAX);
+        let start = (start as f64).max(0.0);
+        let end = (end as f64).min(clip_duration);
+        if end - start < 0.2 {
+            // Same reject-outright-on-collapse behavior as
+            // on_cut_range_update - see its comment.
+        } else {
+            *range = (start, end);
+        }
+        let committed = s.ai_debug_cut_ranges.get(idx).copied();
+        if let (Some(app), Some((start, end))) = (app_weak.upgrade(), committed) {
+            slint::Model::set_row_data(
+                &app.get_ai_debug_cut_ranges(),
+                idx,
+                CutRangeItem {
+                    start_secs: start as f32,
+                    end_secs: end as f32,
+                },
+            );
+        }
+    });
+
     // Drag-to-reorder within a side. The segments are the same cameras in a
     // new temporal order, so the calibration still applies: reorder the
     // chained paths and rebuild the preview. The frame total is unchanged,
@@ -4936,6 +5135,29 @@ fn main() -> anyhow::Result<()> {
 
     let app_weak = app.as_weak();
     let state_ref = Rc::clone(&state);
+    app.on_clear_scoreboard_events(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let mut s = state_ref.borrow_mut();
+        if s.scoreboard_import.is_none() {
+            return;
+        }
+        s.scoreboard_import = None;
+        s.scoreboard_import_path = None;
+        s.scoreboard_sync_anchor = None;
+        s.preview_dirty = true;
+        app.set_scoreboard_match_summary("".into());
+        app.set_scoreboard_sync_label("".into());
+        // The derived ranges belong to whichever export is loaded now,
+        // including "none at all" - same staleness argument as
+        // load/on_load_scoreboard_events and the match-folder pick.
+        refresh_derived_cut_ranges(&mut s, &app);
+        persist_scoreboard_settings(&app, &mut s);
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
     app.on_set_scoreboard_sync_point(move || {
         let Some(app) = app_weak.upgrade() else {
             return;
@@ -4948,11 +5170,19 @@ fn main() -> anyhow::Result<()> {
             app.set_scoreboard_error_text("This export has no video_start event to sync to".into());
             return;
         };
-        let video_seconds = if s.playback.fps() > 0.0 {
-            s.playback.frame_index() as f64 / s.playback.fps()
-        } else {
-            0.0
-        };
+        // Always frame 0 - this button anchors the Match Logger's
+        // `video_start` event (the operator tapped it in sync with
+        // hitting record) to the very start of this video, per
+        // `SyncAnchor`'s own doc comment ("assumed video_seconds: 0.0").
+        // It must NOT pick up wherever the timeline slider currently
+        // happens to be - that reads the operator's own playback
+        // scrubbing as if it were the sync point, silently offsetting
+        // every replayed scoreboard event by however far they'd
+        // scrubbed. Manually syncing to a different frame (the log
+        // comment's "scrubbing to the matching frame by hand"
+        // alternative) is a deliberate, separate action - not this
+        // button.
+        let video_seconds = 0.0;
         s.scoreboard_sync_anchor = Some(scoreboard_import::SyncAnchor {
             event_ts_ms: video_start_ms,
             video_seconds,
@@ -5010,6 +5240,36 @@ fn main() -> anyhow::Result<()> {
             app.get_export_pause_overlay_fade_secs(),
             app.get_export_pause_overlay_hold_secs(),
         );
+    });
+
+    // The Color Mapping panel's Vivid checkbox or one of its three
+    // sliders changed - live preview update + calibration dirty, same
+    // as the Manual Gamma sliders' `on_changed_color_gamma` handler.
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_color_grade_settings(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        state_ref.borrow_mut().set_color_grade(
+            app.get_color_grade_brightness(),
+            app.get_color_grade_saturation(),
+            app.get_color_grade_gamma(),
+        );
+        app.set_cal_dirty(true);
+    });
+
+    // The Color Mapping panel's Sharpening slider or its radius changed.
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_sharpen_settings(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        state_ref
+            .borrow_mut()
+            .set_sharpen_params(app.get_sharpen_amount(), app.get_sharpen_radius());
+        app.set_cal_dirty(true);
     });
 
     // One of the four auto-cut margin fields was edited. Re-derives in
@@ -5139,6 +5399,29 @@ fn main() -> anyhow::Result<()> {
                 app.set_scoreboard_error_text(message.into());
             }
         }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_clear_scoreboard_logo(move |team| {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let mut s = state_ref.borrow_mut();
+        if team == "home" {
+            s.scoreboard_style.home_logo = None;
+            s.scoreboard_style.home_logo_path = None;
+            app.set_scoreboard_home_logo_path("".into());
+        } else {
+            s.scoreboard_style.away_logo = None;
+            s.scoreboard_style.away_logo_path = None;
+            app.set_scoreboard_away_logo_path("".into());
+        }
+        // Same redraw-gate reasoning as on_pick_scoreboard_logo just
+        // above - removing a logo changes the composited overlay just
+        // as picking one does.
+        s.preview_dirty = true;
+        persist_scoreboard_settings(&app, &mut s);
     });
 
     let app_weak = app.as_weak();
@@ -6180,6 +6463,12 @@ fn main() -> anyhow::Result<()> {
             app.set_color_gamma_left(DEFAULT_COLOR_GAMMA);
             app.set_color_gamma_right(DEFAULT_COLOR_GAMMA);
             app.set_color_match_auto_gamma(DEFAULT_COLOR_MATCH_AUTO_GAMMA);
+            app.set_vivid_enabled(false);
+            app.set_color_grade_brightness(1.0);
+            app.set_color_grade_saturation(1.0);
+            app.set_color_grade_gamma(1.0);
+            app.set_sharpen_amount(0.0);
+            app.set_sharpen_radius(1.0);
             app.set_cal_dirty(true);
         }
     });
@@ -6988,6 +7277,25 @@ fn main() -> anyhow::Result<()> {
             if app.get_export_end_secs() == 0.0 {
                 app.set_export_end_secs(clip_secs);
             }
+            // Always reopens on the Export tab, never wherever it was
+            // left last time - a stray earlier AI Debug session left
+            // open shouldn't come back silently.
+            app.set_export_dialog_tab("export".into());
+            // Seed the AI Debug tab's own persisted settings the same
+            // way as the Export tab's just above - independent fields,
+            // see `AiDebugSettings`'s doc comment.
+            if let Some(ad) = s.user_settings.ai_debug_settings.as_ref() {
+                if let Some(model_path) = ad.model_path.as_ref() {
+                    app.set_ai_debug_model_path(model_path.to_string_lossy().to_string().into());
+                }
+                app.set_ai_debug_output_path(ad.output_path.clone().into());
+                app.set_ai_debug_raw_cameras(ad.cameras.clone().into());
+                app.set_ai_debug_confidence_threshold(ad.confidence_threshold);
+                app.set_ai_debug_detection_interval(ad.detection_interval);
+            }
+            if app.get_ai_debug_end_secs() == 0.0 {
+                app.set_ai_debug_end_secs(clip_secs);
+            }
             app.set_export_dialog_open(true);
         }
     });
@@ -7025,6 +7333,46 @@ fn main() -> anyhow::Result<()> {
             let mut s = state_ref.borrow_mut();
             s.user_settings.ai_model_path = Some(path);
             s.user_settings.save();
+        }
+    });
+
+    // AI Debug tab's own output/model pickers - same shape as
+    // on_pick_export_output/on_pick_export_model just above, but
+    // persisted into `AiDebugSettings` instead of the Export tab's own
+    // fields (see that struct's doc comment for why they're separate).
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_pick_ai_debug_output(move || {
+        let dialog = rfd::FileDialog::new()
+            .set_title("Export raw camera AI debug to…")
+            .add_filter("MP4", &["mp4"])
+            .add_filter("MOV", &["mov"])
+            .add_filter("MKV", &["mkv"]);
+        if let Some(mut path) = dialog.save_file() {
+            if path.extension().is_none() {
+                path.set_extension("mp4");
+            }
+            if let Some(app) = app_weak.upgrade() {
+                let output_path = path.to_string_lossy().to_string();
+                app.set_ai_debug_output_path(output_path.clone().into());
+                let mut s = state_ref.borrow_mut();
+                persist_ai_debug_settings(&app, &mut s);
+            }
+        }
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_pick_ai_debug_model(move || {
+        let dialog = rfd::FileDialog::new()
+            .set_title("Select YOLO ONNX model")
+            .add_filter("ONNX", &["onnx"]);
+        if let Some(path) = dialog.pick_file()
+            && let Some(app) = app_weak.upgrade()
+        {
+            app.set_ai_debug_model_path(path.to_string_lossy().to_string().into());
+            let mut s = state_ref.borrow_mut();
+            persist_ai_debug_settings(&app, &mut s);
         }
     });
 
@@ -7074,6 +7422,15 @@ fn main() -> anyhow::Result<()> {
     });
 
     let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_ai_debug_settings_changed(move || {
+        if let Some(app) = app_weak.upgrade() {
+            let mut s = state_ref.borrow_mut();
+            persist_ai_debug_settings(&app, &mut s);
+        }
+    });
+
+    let app_weak = app.as_weak();
     app.on_apply_panner_preset(move |name| {
         #[cfg(feature = "autocam")]
         if let Some(app) = app_weak.upgrade() {
@@ -7109,6 +7466,16 @@ fn main() -> anyhow::Result<()> {
     let app_weak = app.as_weak();
     let state_ref = Rc::clone(&state);
     app.on_start_export(move || {
+        start_export_impl(&app_weak, &state_ref);
+    });
+
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_start_ai_debug_raw_export(move || {
+        start_ai_debug_raw_export_impl(&app_weak, &state_ref);
+    });
+
+    fn start_export_impl(app_weak: &slint::Weak<RecoApp>, state_ref: &Rc<RefCell<AppState>>) {
         let Some(app) = app_weak.upgrade() else {
             return;
         };
@@ -7126,16 +7493,16 @@ fn main() -> anyhow::Result<()> {
         let output_path = PathBuf::from(&output_str);
         if let Some(parent) = output_path.parent() {
             if !parent.exists() {
-                log::warn!("Export: output directory does not exist: {}", parent.display());
+                log::warn!(
+                    "Export: output directory does not exist: {}",
+                    parent.display()
+                );
                 app.set_export_error_text(
                     format!("Output directory does not exist: {}", parent.display()).into(),
                 );
                 return;
             }
-            if parent
-                .metadata()
-                .is_ok_and(|m| m.permissions().readonly())
-            {
+            if parent.metadata().is_ok_and(|m| m.permissions().readonly()) {
                 log::warn!(
                     "Export: output directory has read-only attribute: {} (may be normal on Windows)",
                     parent.display()
@@ -7218,6 +7585,10 @@ fn main() -> anyhow::Result<()> {
             fov_default: app.get_export_fov_default(),
             fov_alpha: app.get_export_fov_alpha(),
             cluster_alpha: app.get_export_cluster_alpha(),
+            // No GUI slider yet for this one (out of scope here) - see
+            // `snapshot_autocam_defaults`'s matching comment.
+            lookahead_reactivity: reco_autocam::panners::FieldPannerConfig::default()
+                .lookahead_reactivity,
         };
         let replay_enabled = app.get_export_replay_enabled();
         let events_enabled = app.get_export_events_enabled();
@@ -7330,7 +7701,283 @@ fn main() -> anyhow::Result<()> {
             let _ = tx.send(outcome);
         });
         s.export_thread = Some(handle);
-    });
+    }
+
+    // DEBUG/DIAGNOSTIC ONLY - "Export Raw Camera AI Debug" button body.
+    // Deliberately NOT a branch of `start_export_impl`/`run_export`:
+    // this bypasses stitching entirely (see
+    // `reco_io::raw_camera_debug`'s module doc for why a raw-camera
+    // diagnostic never needs the virtual camera/panorama pipeline at
+    // all), so it drives `reco_io::raw_camera_debug::run` directly on
+    // its own worker thread instead of going through `StitchJob`. Never
+    // persisted anywhere; a one-shot flag-free diagnostic run.
+    #[cfg(feature = "ort")]
+    fn start_ai_debug_raw_export_impl(
+        app_weak: &slint::Weak<RecoApp>,
+        state_ref: &Rc<RefCell<AppState>>,
+    ) {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let mut s = state_ref.borrow_mut();
+        if s.export_thread.is_some() {
+            log::warn!("Export already running, ignoring AI debug raw request");
+            return;
+        }
+        let (Some(left_path), Some(right_path), Some(cal)) = (
+            s.left_path.clone(),
+            s.right_path.clone(),
+            s.calibration.clone(),
+        ) else {
+            log::error!("Cannot start AI debug raw export without left/right/calibration");
+            return;
+        };
+        let model_path = app.get_ai_debug_model_path().to_string();
+        if model_path.is_empty() {
+            log::warn!("AI debug raw export: no model selected, ignoring");
+            return;
+        }
+        let left = s
+            .left_input
+            .clone()
+            .unwrap_or(reco_io::stitch_job::InputPath::Single(left_path));
+        let right = s
+            .right_input
+            .clone()
+            .unwrap_or(reco_io::stitch_job::InputPath::Single(right_path));
+
+        // The AI Debug tab's own cut ranges - independent of the Export
+        // tab's (see `AppState::ai_debug_cut_ranges`'s doc comment). A
+        // malformed pair (shouldn't happen via the GUI's own list
+        // editor, but cheap to guard) is dropped rather than failing
+        // the whole export.
+        let cut_ranges: Vec<reco_io::cut_range::CutRange> = s
+            .ai_debug_cut_ranges
+            .iter()
+            .filter_map(|&(start, end)| reco_io::cut_range::CutRange::new(start, end).ok())
+            .collect();
+        if !cut_ranges.is_empty() {
+            log::info!(
+                "AI debug raw export: {} cut range(s) will be excluded",
+                cut_ranges.len()
+            );
+        }
+
+        // "left"/"right"/"both" - see the `ai-debug-raw-cameras`
+        // property's doc comment in main.slint. Unrecognized values
+        // (shouldn't happen via the GUI's own ComboBox) fall back to
+        // Both rather than silently producing nothing.
+        let cameras = match app.get_ai_debug_raw_cameras().as_str() {
+            "left" => reco_io::raw_camera_debug::CameraSelection::Left,
+            "right" => reco_io::raw_camera_debug::CameraSelection::Right,
+            _ => reco_io::raw_camera_debug::CameraSelection::Both,
+        };
+
+        let output_str = app.get_ai_debug_output_path().to_string();
+        let (output_left_str, output_right_str) = if output_str.is_empty() {
+            let stem = left
+                .first_path()
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "output".to_string());
+            (
+                format!("{stem}_ai_debug_raw_L.mp4"),
+                format!("{stem}_ai_debug_raw_R.mp4"),
+            )
+        } else {
+            add_ai_debug_raw_suffixes(&output_str)
+        };
+        log::warn!(
+            "AI debug raw export requested: cameras={cameras:?} output_left={output_left_str} \
+             output_right={output_right_str} (DIAGNOSTIC - raw Left/Right camera feed video(s) \
+             with detector boxes, not a stitched export, not for real distribution)"
+        );
+
+        let start_secs = app.get_ai_debug_start_secs() as f64;
+        // Same "0 means unset" convention as the Export tab's own
+        // start/end handling - `ai-debug-end-secs` defaults to 0.0
+        // until the user (or on_open_export_dialog's auto-fill) sets it.
+        let end_secs =
+            (app.get_ai_debug_end_secs() as f64 > 0.0).then(|| app.get_ai_debug_end_secs() as f64);
+        let confidence_threshold = app.get_ai_debug_confidence_threshold();
+        let field_roi = cal
+            .field_roi
+            .as_ref()
+            .filter(|roi| roi.left.len() >= 3 || roi.right.len() >= 3)
+            .map(|roi| roi.densified(&cal.lenses[0], &cal.lenses[1]));
+
+        let detector = match reco_autocam::CpuYoloDetector::with_config(
+            &model_path,
+            confidence_threshold,
+            Vec::new(),
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                log::error!("AI debug raw export: failed to load model {model_path}: {e}");
+                app.set_export_error_text(format!("Failed to load model: {e}").into());
+                return;
+            }
+        };
+        let ball_class_id = detector
+            .class_names()
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case("ball") || n.eq_ignore_ascii_case("sports ball"))
+            .map(|idx| idx as u16);
+        let input_size = detector.input_size();
+
+        // GPU NV12 preprocessing - same wgpu compute-shader path
+        // `setup_autocam` uses for the real export's detector, moving
+        // the CPU-side resize/letterbox/normalize (the actual
+        // bottleneck, not ORT inference) onto the GPU. A throwaway
+        // `GpuContext` is built the same validated way the app does
+        // elsewhere; any failure falls back to plain CPU preprocessing
+        // rather than failing the export - see
+        // `reco_io::raw_camera_debug::RawCameraDebugConfig::gpu`'s doc
+        // comment. `0, 0` defers preprocessor sizing to the first real
+        // frame (this call site doesn't know the source resolution
+        // yet either - see `WgpuPreprocessingDetector::new`'s doc
+        // comment).
+        let (detector, gpu): (Box<dyn reco_core::detect::detector::UnifiedDetector>, _) =
+            match reco_core::gpu::GpuContext::new_blocking() {
+                Ok(gpu) => {
+                    log::info!(
+                        "AI debug raw export: GPU NV12 preprocessing enabled ({}, {})",
+                        gpu.gpu_name(),
+                        gpu.backend_name(),
+                    );
+                    let wrapper = reco_autocam::WgpuPreprocessingDetector::new(
+                        Box::new(detector),
+                        gpu.device().clone(),
+                        gpu.queue().clone(),
+                        input_size,
+                        0,
+                        0,
+                    );
+                    (Box::new(wrapper), Some(gpu))
+                }
+                Err(e) => {
+                    log::warn!(
+                        "AI debug raw export: GPU context init failed ({e}), falling back to \
+                         CPU preprocessing (slower, same detections)"
+                    );
+                    (Box::new(detector), None)
+                }
+            };
+
+        let config = reco_io::raw_camera_debug::RawCameraDebugConfig {
+            left,
+            right,
+            output_left: PathBuf::from(&output_left_str),
+            output_right: PathBuf::from(&output_right_str),
+            cameras,
+            start_secs,
+            end_secs,
+            sync_offset_right: 0,
+            max_frames: None,
+            cut_ranges,
+            // The AI Debug tab's own "Detect every N frames" dropdown -
+            // independent of the Export tab's, since detection on two
+            // full-resolution raw feeds (this tool's dominant cost) is
+            // a far bigger throughput lever here than for a stitched
+            // export downscaled to one output resolution.
+            detection_interval: app.get_ai_debug_detection_interval().max(1) as u32,
+            ball_class_id,
+            confidence_threshold: Some(confidence_threshold),
+            field_roi_left: field_roi.as_ref().map(|r| r.left.clone()),
+            field_roi_right: field_roi.as_ref().map(|r| r.right.clone()),
+            encoder: reco_io::ffmpeg::encoder::EncoderConfig::default(),
+            gpu,
+        };
+
+        s.export_interrupted.store(false, Ordering::Relaxed);
+        let interrupted = Arc::clone(&s.export_interrupted);
+        let (tx, rx) = std::sync::mpsc::channel();
+        s.export_rx = Some(rx);
+        app.set_export_error_text("".into());
+        app.set_export_in_progress(true);
+        app.set_export_progress(0.0);
+        app.set_export_frames_done(0);
+        app.set_export_status_text("AI debug raw export starting...".into());
+        app.set_export_dialog_open(false);
+
+        let progress_weak = app_weak.clone();
+        // `ExportOutcome::Ok` carries one path (shared with the normal
+        // stitch-export flow's single-file result) - reports whichever
+        // side was actually produced when only one was selected, and
+        // the left output's path stands in for both (they land in the
+        // same directory) when Both ran; the log line below names
+        // whichever file(s) exist explicitly so neither is lost when
+        // both were produced.
+        let outcome_path = match cameras {
+            reco_io::raw_camera_debug::CameraSelection::Right => PathBuf::from(&output_right_str),
+            _ => PathBuf::from(&output_left_str),
+        };
+        let output_left_path = PathBuf::from(&output_left_str);
+        let output_right_display = output_right_str.clone();
+        let handle = std::thread::spawn(move || {
+            let progress_weak_inner = progress_weak.clone();
+            // `run` processes Left fully, then Right - see its own doc
+            // comment for why. `p.frames_done` counts within the
+            // current camera's own pass; the status text names which
+            // pass is active so a mid-stream reset to a lower count
+            // reads as "Right just started", not as a stall/bug.
+            let result = reco_io::raw_camera_debug::run(config, detector, &interrupted, {
+                move |p: reco_io::raw_camera_debug::RawCameraDebugProgress| {
+                    let weak = progress_weak_inner.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(app) = weak.upgrade() {
+                            app.set_export_frames_done(p.frames_done as i32);
+                            app.set_export_status_text(
+                                format!(
+                                    "{} pass: frame {} ({} detections)",
+                                    p.camera, p.frames_done, p.detections
+                                )
+                                .into(),
+                            );
+                        }
+                    });
+                }
+            });
+            let outcome = match result {
+                Ok(frames) => {
+                    let produced = match cameras {
+                        reco_io::raw_camera_debug::CameraSelection::Left => {
+                            output_left_path.display().to_string()
+                        }
+                        reco_io::raw_camera_debug::CameraSelection::Right => {
+                            output_right_display.clone()
+                        }
+                        reco_io::raw_camera_debug::CameraSelection::Both => {
+                            format!(
+                                "{} and {}",
+                                output_left_path.display(),
+                                output_right_display
+                            )
+                        }
+                    };
+                    log::info!("AI debug raw export finished: {frames} frames -> {produced}");
+                    crate::export::ExportOutcome::Ok(frames, outcome_path)
+                }
+                Err(e) => crate::export::ExportOutcome::Failed(
+                    reco_io::stitch_job::StitchError::Other(e.to_string()),
+                ),
+            };
+            let _ = tx.send(outcome);
+        });
+        s.export_thread = Some(handle);
+    }
+    #[cfg(not(feature = "ort"))]
+    fn start_ai_debug_raw_export_impl(
+        app_weak: &slint::Weak<RecoApp>,
+        _state_ref: &Rc<RefCell<AppState>>,
+    ) {
+        if let Some(app) = app_weak.upgrade() {
+            app.set_export_error_text(
+                "AI debug raw export requires this build's `ort` feature (CPU YOLO inference)."
+                    .into(),
+            );
+        }
+    }
 
     let state_ref = Rc::clone(&state);
     app.on_cancel_export(move || {
@@ -8258,6 +8905,18 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 .bridge
                 .as_ref()
                 .map(|b| b.engine().calibration().topology.color_match_auto_gamma);
+            let color_grade = s.bridge.as_ref().map(|b| {
+                let t = &b.engine().calibration().topology;
+                (
+                    t.color_grade_brightness,
+                    t.color_grade_saturation,
+                    t.color_grade_gamma,
+                )
+            });
+            let sharpen_params = s.bridge.as_ref().map(|b| {
+                let t = &b.engine().calibration().topology;
+                (t.sharpen_amount, t.sharpen_radius)
+            });
             // Lens-correction strength came in via the loaded calibration and
             // the renderer was seeded with it at bridge creation; mirror it
             // into AppState so a later save re-persists the right value.
@@ -8458,6 +9117,20 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 }
                 if let Some(v) = color_match_auto_gamma {
                     app.set_color_match_auto_gamma(v);
+                }
+                if let Some((brightness, saturation, gamma)) = color_grade {
+                    app.set_color_grade_brightness(brightness);
+                    app.set_color_grade_saturation(saturation);
+                    app.set_color_grade_gamma(gamma);
+                    // "Vivid" reads as on when the stored values aren't
+                    // identity, regardless of whether they match the
+                    // exact preset numbers - lets a manually-tuned grade
+                    // still show the toggle on and the sliders expanded.
+                    app.set_vivid_enabled((brightness, saturation, gamma) != (1.0, 1.0, 1.0));
+                }
+                if let Some((amount, radius)) = sharpen_params {
+                    app.set_sharpen_amount(amount);
+                    app.set_sharpen_radius(radius);
                 }
                 if let Some(lc) = lens_correction {
                     app.set_lens_correction_amount(lc);
@@ -8717,6 +9390,18 @@ fn handle_calibration_result(
                         .bridge
                         .as_ref()
                         .map(|b| b.engine().calibration().topology.color_match_auto_gamma);
+                    let color_grade = state.bridge.as_ref().map(|b| {
+                        let t = &b.engine().calibration().topology;
+                        (
+                            t.color_grade_brightness,
+                            t.color_grade_saturation,
+                            t.color_grade_gamma,
+                        )
+                    });
+                    let sharpen_params = state.bridge.as_ref().map(|b| {
+                        let t = &b.engine().calibration().topology;
+                        (t.sharpen_amount, t.sharpen_radius)
+                    });
                     let lens_correction =
                         state.calibration.as_ref().map(|c| c.lenses[0].correction);
                     if let Some(lc) = lens_correction {
@@ -8858,6 +9543,18 @@ fn handle_calibration_result(
                         }
                         if let Some(v) = color_match_auto_gamma {
                             app.set_color_match_auto_gamma(v);
+                        }
+                        if let Some((brightness, saturation, gamma)) = color_grade {
+                            app.set_color_grade_brightness(brightness);
+                            app.set_color_grade_saturation(saturation);
+                            app.set_color_grade_gamma(gamma);
+                            app.set_vivid_enabled(
+                                (brightness, saturation, gamma) != (1.0, 1.0, 1.0),
+                            );
+                        }
+                        if let Some((amount, radius)) = sharpen_params {
+                            app.set_sharpen_amount(amount);
+                            app.set_sharpen_radius(radius);
                         }
                         if let Some(lc) = lens_correction {
                             app.set_lens_correction_amount(lc);

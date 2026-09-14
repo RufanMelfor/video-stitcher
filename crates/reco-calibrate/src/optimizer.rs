@@ -462,6 +462,14 @@ impl Optimizer for NelderMeadOptimizer {
             // this band was fixed at before it became adjustable.
             ground_tilt_band_width: reco_core::calibration::DEFAULT_TILT_BAND_WIDTH,
             top_tilt_band_width: reco_core::calibration::DEFAULT_TILT_BAND_WIDTH,
+            // Not fitted by the optimizer either - color grade/sharpen are
+            // manual-only GUI sliders (Color Mapping panel), identity/off
+            // by default like everywhere else.
+            color_grade_brightness: 1.0,
+            color_grade_saturation: 1.0,
+            color_grade_gamma: 1.0,
+            sharpen_amount: 0.0,
+            sharpen_radius: 1.0,
         };
         let framing = Framing {
             axis_offset: params.cam_d,

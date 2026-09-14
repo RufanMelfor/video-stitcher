@@ -50,7 +50,7 @@
 //! `--clean` skips drawing detection boxes/crosshairs/ROI outline
 //! entirely - just the bare decoded frame, full native resolution,
 //! matching this project's own Label Studio upload convention (see
-//! `YOLO26_Training.md`: never crop or stretch, `reco-detect` always
+//! `docs/YOLO26_Training.md`: never crop or stretch, `reco-detect` always
 //! letterboxes the whole uncropped frame at real inference time, so
 //! training/review images must match that). Use this to produce frames
 //! meant for annotation review, not diagnosis - a debug overlay baked
