@@ -417,6 +417,7 @@ impl super::StitchCore {
         right: &YuvPlanes<'_>,
         pose: ViewportPosition,
         view: &wgpu::TextureView,
+        target: &wgpu::Texture,
     ) -> Result<(), StitchCoreError> {
         if let Some(fov) = pose.fov_degrees {
             self.executor.set_fov(fov);
@@ -426,7 +427,7 @@ impl super::StitchCore {
         };
         Ok(gpu
             .pipeline
-            .render_to_view(left, right, pose.yaw, pose.pitch, view)?)
+            .render_to_view(left, right, pose.yaw, pose.pitch, view, target)?)
     }
 
     /// Render a stereo frame and read back NV12 bytes for encoding - the

@@ -15,10 +15,12 @@
 //!    projection) are dropped.
 //! 3. **Player anchor** (optional) — if player anchors have been
 //!    supplied via [`BallTracker::set_players`] and non-empty, a
-//!    detection must be within `player_anchor_max_rad` of at least
-//!    one player in panorama yaw/pitch space to survive. When no
-//!    players have been supplied (no player provider attached, or a
-//!    ball-only model), the filter is a no-op.
+//!    detection must be within a radius (radians) of at least one
+//!    player in panorama yaw/pitch space to survive - see
+//!    [`BallTracker::with_player_anchor_rad_near_far`] for why that
+//!    radius ramps with the candidate's own pitch rather than being one
+//!    flat number. When no players have been supplied (no player
+//!    provider attached, or a ball-only model), the filter is a no-op.
 //! 4. **Nearest-to-last, with max-jump** — among survivors, pick the
 //!    one whose panorama position is closest to the last accepted
 //!    tracked position (breaking ties toward higher confidence).
@@ -72,6 +74,20 @@ pub const DEFAULT_COAST_FRAMES: u32 = 20;
 /// the POC's 250-500 px pixel threshold on a 3840-wide frame.
 pub const DEFAULT_PLAYER_ANCHOR_RAD: f32 = 0.20;
 
+/// World pitch (radians) marking the "near" end of the anchor-radius
+/// ramp - see [`BallTracker::with_player_anchor_rad_near_far`].
+/// Deliberately the same literal as
+/// `reco_autocam::panners::FieldPannerConfig::pitch_near`'s default so
+/// "near"/"far" mean the same real position everywhere in the autocam
+/// stack; duplicated (not imported) because `ball.rs` has no
+/// dependency on the `panners` module and shouldn't gain one just for
+/// two constants.
+pub const DEFAULT_ANCHOR_PITCH_NEAR: f32 = -0.05;
+
+/// World pitch (radians) marking the "far" end of the anchor-radius
+/// ramp - see [`DEFAULT_ANCHOR_PITCH_NEAR`].
+pub const DEFAULT_ANCHOR_PITCH_FAR: f32 = 0.20;
+
 /// Singleton ball tracker emitting at most one
 /// [`TrackedEntity`] per frame.
 ///
@@ -84,7 +100,12 @@ pub struct BallTracker {
     coaster: Coaster,
     last: Option<LastKnown>,
     max_jump_rad: f32,
-    player_anchor_max_rad: f32,
+    /// Anchor radius (radians) applied at [`DEFAULT_ANCHOR_PITCH_NEAR`]
+    /// or below - see [`with_player_anchor_rad_near_far`](Self::with_player_anchor_rad_near_far).
+    player_anchor_rad_near: f32,
+    /// Anchor radius (radians) applied at [`DEFAULT_ANCHOR_PITCH_FAR`]
+    /// or above.
+    player_anchor_rad_far: f32,
     /// Current-frame player anchors in panorama yaw/pitch. Populated each
     /// frame by [`observe_world`](Tracker::observe_world) (the session
     /// calls it after the player tracker runs). Empty when no player
@@ -111,7 +132,8 @@ impl BallTracker {
             coaster: Coaster::new(DEFAULT_COAST_FRAMES),
             last: None,
             max_jump_rad: DEFAULT_MAX_JUMP_RAD,
-            player_anchor_max_rad: DEFAULT_PLAYER_ANCHOR_RAD,
+            player_anchor_rad_near: DEFAULT_PLAYER_ANCHOR_RAD,
+            player_anchor_rad_far: DEFAULT_PLAYER_ANCHOR_RAD,
             current_players: Vec::new(),
             age_frames: 0,
         }
@@ -135,12 +157,59 @@ impl BallTracker {
         self
     }
 
-    /// Override the player-anchor radius (radians). Set to a large
-    /// value (e.g. `f32::INFINITY`) to effectively disable while
-    /// keeping the code path active.
-    pub fn with_player_anchor_rad(mut self, rad: f32) -> Self {
-        self.player_anchor_max_rad = rad.max(0.0);
+    /// Override the player-anchor radius (radians), uniformly at every
+    /// pitch. Set to a large value (e.g. `f32::INFINITY`) to
+    /// effectively disable while keeping the code path active. A thin
+    /// wrapper over [`with_player_anchor_rad_near_far`](Self::with_player_anchor_rad_near_far)
+    /// with the same value on both ends - kept as the simple default
+    /// entry point since most callers (and every test predating the
+    /// near/far split) only need one number.
+    pub fn with_player_anchor_rad(self, rad: f32) -> Self {
+        self.with_player_anchor_rad_near_far(rad, rad)
+    }
+
+    /// Override the player-anchor radius (radians) as a ramp between a
+    /// "near" value (applied at [`DEFAULT_ANCHOR_PITCH_NEAR`] or below)
+    /// and a "far" value (applied at [`DEFAULT_ANCHOR_PITCH_FAR`] or
+    /// above), linearly interpolated in between by the *candidate
+    /// detection's own pitch* - see [`passes_player_anchor`](Self::passes_player_anchor).
+    ///
+    /// Exists because this gate's flat radius doesn't account for this
+    /// kind of downward-tilted rig's own perspective compression: the
+    /// same real-world "a teammate is right next to the ball" distance
+    /// maps to a much *larger* panorama-space (yaw, pitch) gap near the
+    /// camera (steep viewing angle) than it does far up the pitch
+    /// (shallow viewing angle, near the horizon). A single flat radius
+    /// tuned to work far up the pitch then rejects a real, anchored,
+    /// high-confidence ball near the camera - observed on real XFT-UHTF
+    /// footage: a 90%-confidence ball only ~1-2deg outside a 17deg flat
+    /// gate near mid-pitch, and a real ball ~25deg from its nearest
+    /// teammate (only 4.6deg apart in yaw, 24.5deg apart in pitch) close
+    /// to the camera. Both values pass `rad.max(0.0)` independently -
+    /// `near < far` is the expected/tuned direction but not enforced,
+    /// so an inverted call degrades to "wider near, narrower far"
+    /// rather than panicking.
+    pub fn with_player_anchor_rad_near_far(mut self, near_rad: f32, far_rad: f32) -> Self {
+        self.player_anchor_rad_near = near_rad.max(0.0);
+        self.player_anchor_rad_far = far_rad.max(0.0);
         self
+    }
+
+    /// The anchor radius (radians) at a given world pitch: linear
+    /// interpolation between [`player_anchor_rad_near`](Self::player_anchor_rad_near)
+    /// at [`DEFAULT_ANCHOR_PITCH_NEAR`] and [`player_anchor_rad_far`](Self::player_anchor_rad_far)
+    /// at [`DEFAULT_ANCHOR_PITCH_FAR`], clamped flat beyond either end
+    /// (mirrors the `t_dist` ramp `FieldPannerConfig::target_fov` uses
+    /// for its own near/far FOV bias, so the two "near vs far on the
+    /// pitch" concepts in the autocam stack behave consistently).
+    fn local_anchor_rad(&self, pitch: f32) -> f32 {
+        let span = DEFAULT_ANCHOR_PITCH_FAR - DEFAULT_ANCHOR_PITCH_NEAR;
+        let t = if span.abs() > 1e-6 {
+            ((pitch - DEFAULT_ANCHOR_PITCH_NEAR) / span).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self.player_anchor_rad_near + t * (self.player_anchor_rad_far - self.player_anchor_rad_near)
     }
 
     /// Supply the current frame's player anchors in panorama yaw/pitch.
@@ -202,14 +271,20 @@ impl BallTracker {
     }
 
     /// Decide whether this detection survives the player-anchor gate.
+    ///
+    /// The radius is evaluated at the *candidate's own pitch* (not each
+    /// player's) via [`local_anchor_rad`](Self::local_anchor_rad) - see
+    /// that method and [`with_player_anchor_rad_near_far`](Self::with_player_anchor_rad_near_far)
+    /// for why a flat radius isn't good enough on a tilted rig.
     fn passes_player_anchor(&self, pos_yaw: f32, pos_pitch: f32) -> bool {
         if self.current_players.is_empty() {
             return true;
         }
+        let radius = self.local_anchor_rad(pos_pitch);
         self.current_players.iter().any(|(py, pp)| {
             let dy = pos_yaw - *py;
             let dp = pos_pitch - *pp;
-            (dy * dy + dp * dp).sqrt() <= self.player_anchor_max_rad
+            (dy * dy + dp * dp).sqrt() <= radius
         })
     }
 }
@@ -232,10 +307,10 @@ impl Tracker for BallTracker {
             };
             if !self.passes_player_anchor(pos.yaw, pos.pitch) {
                 log::trace!(
-                    "BallTracker: drop off-player — yaw={:.3} pitch={:.3} nearest player > {:.3}rad",
+                    "BallTracker: drop off-player — yaw={:.3} pitch={:.3} nearest player > {:.3}rad (local anchor radius at this pitch)",
                     pos.yaw,
                     pos.pitch,
-                    self.player_anchor_max_rad
+                    self.local_anchor_rad(pos.pitch)
                 );
                 continue;
             }
@@ -567,6 +642,53 @@ mod tests {
         let d = det(CameraId::Left, 0.2, 0.0, 0.9, 0.5, 0.5);
         let out = t.update(&[d], 0.0);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn player_anchor_near_far_ramp_widens_close_to_the_camera() {
+        // Same 0.3rad-away ball/player pair, evaluated at two different
+        // pitches - a flat radius would reject both identically; the
+        // near/far ramp must accept the near-pitch one and still reject
+        // the far-pitch one, since only the near end was widened.
+        let near_pitch = DEFAULT_ANCHOR_PITCH_NEAR;
+        let far_pitch = DEFAULT_ANCHOR_PITCH_FAR;
+
+        // near=0.35 (wide, matches this session's real-footage finding),
+        // far=0.1 (tight, the flat default this test's sibling uses).
+        let mut t_near = BallTracker::new(0).with_player_anchor_rad_near_far(0.35, 0.1);
+        let player_near = TrackedEntity {
+            id: 1,
+            class_id: 0,
+            yaw: 1.0,
+            pitch: near_pitch,
+            confidence: 0.9,
+            state: TrackState::Tracking,
+            age_frames: 5,
+            origin: CameraId::Right,
+        };
+        t_near.set_players(&[player_near]);
+        // 0.3rad away in yaw, same (near) pitch as the player - within
+        // the 0.35 near radius.
+        let d_near = det(CameraId::Left, 1.3, near_pitch, 0.9, 0.5, 0.5);
+        assert_eq!(
+            t_near.update(&[d_near], 0.0).len(),
+            1,
+            "a 0.3rad-away ball at the near pitch must be accepted by the widened near radius"
+        );
+
+        let mut t_far = BallTracker::new(0).with_player_anchor_rad_near_far(0.35, 0.1);
+        let player_far = TrackedEntity {
+            pitch: far_pitch,
+            ..player_near
+        };
+        t_far.set_players(&[player_far]);
+        // Same 0.3rad yaw offset, but at the far pitch - only the
+        // (tight) far radius applies here, so this must still reject.
+        let d_far = det(CameraId::Left, 1.3, far_pitch, 0.9, 0.5, 0.5);
+        assert!(
+            t_far.update(&[d_far], 0.0).is_empty(),
+            "the same 0.3rad-away ball at the far pitch must still be rejected by the tight far radius"
+        );
     }
 
     #[test]

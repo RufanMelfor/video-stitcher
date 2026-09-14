@@ -30,6 +30,16 @@ impl Default for ColorGradeParams {
 }
 
 impl ColorGradeParams {
+    /// Build color grade parameters. `(1.0, 1.0, 1.0)` is identity (no-op).
+    pub fn new(brightness: f32, saturation: f32, gamma: f32) -> Self {
+        Self {
+            brightness,
+            saturation,
+            gamma,
+            ..Default::default()
+        }
+    }
+
     /// Check if all parameters are identity (no-op).
     /// When true, the grade pass can be skipped entirely.
     pub fn is_identity(&self) -> bool {
@@ -186,5 +196,26 @@ impl ColorGradePass {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(size.width.div_ceil(16), size.height.div_ceil(16), 1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_default() {
+        assert!(ColorGradeParams::default().is_identity());
+    }
+
+    #[test]
+    fn identity_via_new_with_neutral_values() {
+        assert!(ColorGradeParams::new(1.0, 1.0, 1.0).is_identity());
+    }
+
+    #[test]
+    fn non_neutral_saturation_is_not_identity() {
+        let params = ColorGradeParams::new(1.0, 1.15, 1.0);
+        assert!(!params.is_identity());
     }
 }

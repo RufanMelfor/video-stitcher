@@ -542,6 +542,28 @@ impl Executor {
         }
     }
 
+    /// Set the universal color grade (brightness/saturation/gamma). A
+    /// no-op on the CPU executor - it's a headless correctness oracle
+    /// with no GPU compute pass to run the color grade shader on.
+    pub fn set_color_grade(&mut self, brightness: f32, saturation: f32, gamma: f32) {
+        match self {
+            Executor::Cpu(_) => {}
+            #[cfg(feature = "gpu")]
+            Executor::Gpu(g) => g.pipeline.set_color_grade(brightness, saturation, gamma),
+        }
+    }
+
+    /// Set unsharp-mask sharpening strength/radius. A no-op on the CPU
+    /// executor - it's a headless correctness oracle with no GPU compute
+    /// pass to run the sharpen shader on.
+    pub fn set_sharpen_params(&mut self, amount: f32, radius: f32) {
+        match self {
+            Executor::Cpu(_) => {}
+            #[cfg(feature = "gpu")]
+            Executor::Gpu(g) => g.pipeline.set_sharpen_params(amount, radius),
+        }
+    }
+
     /// Set the lens-correction strength on every lens, clamped to `[0, 1]`.
     pub fn set_lens_correction_amount(&mut self, amount: f32) {
         match self {
