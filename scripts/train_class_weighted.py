@@ -42,6 +42,20 @@ class that's starved):
       --ball-weight 4.0 \
       --project training/round8_tiled_1920/runs --name full_patience100
 
+To resume an interrupted run (e.g. after the PC slept/crashed
+mid-training), point --model at that run's weights/last.pt and add
+--resume. Ultralytics then reads epoch count, optimizer state, and
+every other train arg (data/imgsz/batch/etc.) back out of the
+checkpoint itself and ignores the CLI values for those - only
+--ball-weight still needs to be passed explicitly (it is a custom
+runtime attribute this script applies via callback, not something
+Ultralytics persists in the checkpoint's train_args):
+
+  python scripts/train_class_weighted.py \
+      --model training/round8_tiled_1920/runs/full_patience100/weights/last.pt \
+      --resume --ball-weight 4.0 \
+      --data training/round7_tiled_1920/data.yaml
+
 --ball-weight is a starting point, not a tuned value - 4.0 approximates
 the ~8:1 person:ball ratio without fully inverting it (a literal
 inverse-frequency weight this extreme risks the opposite failure,
@@ -88,6 +102,17 @@ def main():
                         "was to stop training from scratch every round (see "
                         "docs/YOLO26_Training.md's round-7 entry); pass this only if "
                         "you deliberately want a from-scratch run.")
+    p.add_argument("--resume", action="store_true",
+                   help="Resume an interrupted run. --model must point at that "
+                        "run's weights/last.pt (not a fresh base checkpoint) - "
+                        "Ultralytics then restores epoch count, optimizer/scaler "
+                        "state, and every other train arg from the checkpoint's "
+                        "own train_args, ignoring --data/--imgsz/--epochs/etc. "
+                        "from this invocation. --ball-weight is NOT restored "
+                        "automatically (it's a runtime attribute this script "
+                        "applies via callback, not a persisted Ultralytics train "
+                        "arg) - pass the same value the interrupted run used, or "
+                        "the loss regime changes mid-run.")
     args = p.parse_args()
 
     from ultralytics import YOLO
@@ -114,18 +139,32 @@ def main():
         print(f"[train_class_weighted] applied class_weights={weights.tolist()} "
               f"to trainer.model on {trainer.device}")
 
+    # Resume also needs the weights re-applied: Ultralytics rebuilds the
+    # trainer/model from the checkpoint and re-fires on_train_start, but
+    # class_weights itself lives only on the in-memory model object, not
+    # in the checkpoint's train_args - without this callback firing again,
+    # a resumed run would silently drop back to uniform class weighting.
     model.add_callback("on_train_start", _apply_class_weights)
 
-    model.train(
-        data=args.data,
-        imgsz=args.imgsz,
-        epochs=args.epochs,
-        patience=args.patience,
-        batch=args.batch,
-        pretrained=args.pretrained,
-        project=args.project,
-        name=args.name,
-    )
+    if args.resume:
+        # Resuming: Ultralytics reads data/imgsz/epochs/batch/etc. back out
+        # of the checkpoint's own train_args and ignores what's passed here
+        # for those - only resume=True and the checkpoint path (already in
+        # args.model, used above) matter for continuing training state.
+        print(f"[train_class_weighted] resuming from {args.model} "
+              "(data/imgsz/epochs/batch/etc. come from the checkpoint, not this invocation)")
+        model.train(resume=True)
+    else:
+        model.train(
+            data=args.data,
+            imgsz=args.imgsz,
+            epochs=args.epochs,
+            patience=args.patience,
+            batch=args.batch,
+            pretrained=args.pretrained,
+            project=args.project,
+            name=args.name,
+        )
 
 
 if __name__ == "__main__":
