@@ -100,6 +100,26 @@ def extract_frames(video_path: Path, start_secs: float, count: int, interval_sec
 
 
 def tile_frame(img_path: Path, out_dir: Path) -> list[Path]:
+    """Resize filter: Image.BILINEAR (reverted here 2026-09-15 after a
+    same-day round-trip to Image.LANCZOS and back - see that commit's
+    history for the full reasoning). Briefly changed to LANCZOS because
+    tile_yolo_dataset.py (which builds the TRAINING data) uses it and
+    measured 2-6x higher ball confidence with it. Reverted once RECO's
+    actual production inference was checked directly: wgpu_preprocess.rs
+    (GPU), detectors/cpu.rs (CPU fallback), and npp_interop.rs
+    (TensorRT/NPP) all use bilinear resize, not Lanczos - i.e. the
+    training pipeline and RECO's own shipped detector already disagree
+    on this, independently of this script. Since this script's whole
+    point is comparing checkpoints against REAL production-like
+    inference, matching production's filter is the right call even
+    though it under-reports confidence relative to what training-time
+    LANCZOS would show. User confirmed BILINEAR as the standing choice
+    for this project's Python tooling 2026-09-15 ("alles moet dan vanaf
+    nu BILINEAR zijn"). The LANCZOS-vs-BILINEAR mismatch between
+    tile_yolo_dataset.py and RECO's production code remains a real, NOT
+    yet resolved inconsistency - see
+    project_ball_confidence_dip_tool.md - just not one this script
+    should paper over by picking the training-side filter instead."""
     from PIL import Image
 
     im = Image.open(img_path)

@@ -95,7 +95,21 @@ def tile_one_image(img_path: Path, label_path: Path, out_img_dir: Path, out_lbl_
 
     tiles_written = 0
     for tile_name, crop_x0 in TILES:
-        crop = im.crop((crop_x0, 0, crop_x0 + CROP_SIZE, CROP_SIZE)).resize((TILE_SIZE, TILE_SIZE), Image.LANCZOS)
+        # Resize filter: Image.BILINEAR (changed from Image.LANCZOS
+        # 2026-09-15). RECO's own production inference (GPU compute
+        # shader in wgpu_preprocess.rs, CPU fallback in detectors/cpu.rs,
+        # TensorRT/NPP path in npp_interop.rs) uses bilinear resize
+        # exclusively - training data generated with a different filter
+        # (LANCZOS) was a real, if subtle, train/inference mismatch: a
+        # checkpoint trained on LANCZOS-sharpened tiles sees measurably
+        # crisper edges at train time than the bilinear-softened input it
+        # actually gets fed in production. Round7 and every earlier
+        # checkpoint were trained on LANCZOS tiles - this only affects
+        # FUTURE training rounds' dataset generation, not anything
+        # already trained. User confirmed this standing choice
+        # 2026-09-15 ("alles moet dan vanaf nu BILINEAR zijn") after
+        # RECO's actual production code was checked directly.
+        crop = im.crop((crop_x0, 0, crop_x0 + CROP_SIZE, CROP_SIZE)).resize((TILE_SIZE, TILE_SIZE), Image.BILINEAR)
         out_lines = []
         for cls, cx, cy, w, h in boxes:
             transformed = transform_box(cx, cy, w, h, crop_x0)

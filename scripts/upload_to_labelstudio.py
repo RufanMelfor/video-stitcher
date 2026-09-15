@@ -106,27 +106,64 @@ class LabelStudio:
 
 
 def to_result(boxes, width, height, from_name, to_name):
-    """YOLO centre-xywh (normalised) -> Label Studio top-left xywh (percent)."""
+    """YOLO centre-xywh (normalised) -> Label Studio top-left xywh (percent).
+
+    `score` (added 2026-09-15, optional per box - see read_label) is a
+    top-level field on the result item, per Label Studio's own
+    prediction-region format - it's what the UI uses to show/sort by
+    confidence, distinct from `value` (the region's geometry/label
+    itself). Omitted entirely when a box has no confidence (e.g. a
+    dataset from before find_ball_confidence_dips.py started writing
+    `.conf` sidecars, or person/referee boxes, which never carried per-
+    box confidence through this pipeline) - Label Studio treats a
+    missing score the same as it always has (no confidence shown), so
+    this is purely additive."""
     res = []
     for b in boxes:
         cx, cy, w, h = b["xywhn"]
-        res.append({
+        item = {
             "from_name": from_name, "to_name": to_name, "type": "rectanglelabels",
             "original_width": width, "original_height": height, "image_rotation": 0,
             "value": {"x": max(0.0, (cx - w / 2) * 100), "y": max(0.0, (cy - h / 2) * 100),
                       "width": w * 100, "height": h * 100, "rotation": 0,
                       "rectanglelabels": [CLASSES[b["cls"]]]},
-        })
+        }
+        if b.get("conf") is not None:
+            item["score"] = b["conf"]
+        res.append(item)
     return res
 
 
 def read_label(path: Path):
+    """Read a YOLO-format label file. Also reads an optional sibling
+    `.conf` file (same stem, `.conf` instead of `.txt` - written by
+    find_ball_confidence_dips.py since 2026-09-15, one confidence float
+    per label LINE in the same order) if present, attaching each box's
+    confidence for to_result() to surface as a Label Studio `score`.
+    Deliberately a separate file, not a 6th .txt column - see
+    find_ball_confidence_dips.py's format_label_lines doc comment: the
+    .txt itself is standard 5-column YOLO format consumed by this
+    project's actual training pipeline, and a 6th column risks breaking
+    or being silently misinterpreted there. A missing, shorter, or
+    unparseable .conf file is not an error - it just means no score gets
+    attached (boxes keep working exactly as before this feature
+    existed)."""
     boxes = []
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         cls, cx, cy, w, h = line.split()
         boxes.append({"cls": int(cls), "xywhn": [float(cx), float(cy), float(w), float(h)]})
+
+    conf_path = path.with_suffix(".conf")
+    if conf_path.exists():
+        conf_lines = [ln for ln in conf_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        if len(conf_lines) == len(boxes):
+            for b, c in zip(boxes, conf_lines):
+                try:
+                    b["conf"] = float(c)
+                except ValueError:
+                    pass  # malformed line - leave this box without a score rather than fail the upload
     return boxes
 
 
