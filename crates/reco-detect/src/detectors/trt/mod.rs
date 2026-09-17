@@ -434,9 +434,24 @@ impl TrtGpuDetector {
                 width: self.new_w as i32,
                 height: self.new_h as i32,
             };
+            let src_roi = NppiRect {
+                x: 0,
+                y: 0,
+                width: width as i32,
+                height: height as i32,
+            };
 
-            npp_resize_c3(self.rgb_u8, width, height, self.resized_u8, is, is, dst_roi)
-                .map_err(|e| DetectorError::InferenceFailed(format!("NPP resize: {e}")))?;
+            npp_resize_c3(
+                self.rgb_u8,
+                width,
+                height,
+                src_roi,
+                self.resized_u8,
+                is,
+                is,
+                dst_roi,
+            )
+            .map_err(|e| DetectorError::InferenceFailed(format!("NPP resize: {e}")))?;
         }
 
         // Step 3: Normalize u8 HWC -> f32 CHW (identical to OrtGpuDetector).

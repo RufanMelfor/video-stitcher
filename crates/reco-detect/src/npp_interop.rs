@@ -485,12 +485,19 @@ pub fn npp_nv12_to_rgb(
 
 /// Resize a 3-channel (RGB) u8 image on the GPU with bilinear interpolation.
 ///
-/// Both `src` and `dst` are CUDA device pointers. The source is resized
+/// Both `src` and `dst` are CUDA device pointers. `src_roi` selects which
+/// sub-rectangle of the `src_w x src_h` source buffer to read from (pass
+/// `NppiRect { x: 0, y: 0, width: src_w as i32, height: src_h as i32 }`
+/// for "the whole source", matching this function's original
+/// whole-frame-only behavior) - added to let tiled dual-crop callers
+/// resize one 2880x2880 crop of a larger source frame directly, without
+/// an extra crop-to-a-separate-buffer copy first. The source is resized
 /// into the destination ROI region, allowing letterbox placement.
 pub fn npp_resize_c3(
     src: CUdeviceptr,
     src_w: u32,
     src_h: u32,
+    src_roi: NppiRect,
     dst: CUdeviceptr,
     dst_w: u32,
     dst_h: u32,
@@ -498,12 +505,6 @@ pub fn npp_resize_c3(
 ) -> Result<(), NppError> {
     let npp = npp()?;
     let src_size = NppiSize {
-        width: src_w as i32,
-        height: src_h as i32,
-    };
-    let src_roi = NppiRect {
-        x: 0,
-        y: 0,
         width: src_w as i32,
         height: src_h as i32,
     };
