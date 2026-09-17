@@ -197,7 +197,10 @@ fn box_iou(a: &Detection, b: &Detection) -> f32 {
 
 /// Greedy IoU non-maximum suppression: keep highest-confidence boxes,
 /// drop any later box overlapping a kept one beyond `iou_thresh`.
-fn greedy_nms(mut dets: Vec<Detection>, iou_thresh: f32) -> Vec<Detection> {
+///
+/// `pub(crate)` so tiled-inference callers (`trt::merge_tile_detections`)
+/// can reuse it for cross-tile dedup - see that function's doc comment.
+pub(crate) fn greedy_nms(mut dets: Vec<Detection>, iou_thresh: f32) -> Vec<Detection> {
     dets.sort_by(|a, b| {
         b.confidence
             .partial_cmp(&a.confidence)
