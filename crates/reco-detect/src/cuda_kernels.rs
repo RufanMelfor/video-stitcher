@@ -309,10 +309,11 @@ const NV12_TO_RGB_CHW_PTX: &[u8] = b"
     .param .u32 pad_x,
     .param .u32 pad_y,
     .param .f32 scale,
-    .param .u32 flip180
+    .param .u32 flip180,
+    .param .u32 crop_x0
 )
 {
-    .reg .u32 %ox, %oy, %dw, %dh, %px, %py, %sw, %sh, %ypitch;
+    .reg .u32 %ox, %oy, %dw, %dh, %px, %py, %sw, %sh, %ypitch, %cx0;
     .reg .u32 %sx0, %sy0, %sx1, %sy1;
     .reg .u32 %tmp, %tmp2, %plane, %didx;
     .reg .u64 %yp, %uvp, %dp, %addr;
@@ -363,10 +364,18 @@ const NV12_TO_RGB_CHW_PTX: &[u8] = b"
     @%p bra done;
 
     // map to source coords (nearest for now, bilinear TODO)
+    // crop_x0 shifts the read into a horizontal sub-rectangle of the
+    // full src_w-wide source buffer (tiled dual-crop inference: each
+    // tile's own crop_x0 selects which 2880px-wide crop of the
+    // 3840px-wide camera frame this call reads from) - added for
+    // project_production_tiled_inference_gap.md; 0 for every existing
+    // whole-frame caller, so behavior there is unchanged.
+    ld.param.u32 %cx0, [crop_x0];
     sub.u32 %tmp, %ox, %px;
     cvt.rn.f32.u32 %srcx, %tmp;
     div.rn.f32 %srcx, %srcx, %inv_scale;
     cvt.rzi.u32.f32 %sx0, %srcx;
+    add.u32 %sx0, %sx0, %cx0;
     sub.u32 %tmp2, %sw, 1;
     min.u32 %sx0, %sx0, %tmp2;
 
@@ -505,6 +514,13 @@ fn get_nv12_kernel() -> Result<&'static CudaKernel, CudaInteropError> {
 /// with dimensions `(dst_w, dst_h)` and content region offset
 /// `(pad_x, pad_y)` at scale factor `scale`. Padding pixels must be
 /// pre-filled (grey 114/255 = 0.447) by the caller at init time.
+///
+/// `crop_x0` shifts the read horizontally within the `src_w`-wide
+/// source buffer, for tiled dual-crop inference (each tile's own
+/// `crop_x0` selects which sub-rectangle of the full camera frame this
+/// call reads from - see `TileGeom` in `detectors::ort_gpu`, mirrored
+/// from `detectors::trt`). Pass `0` for the existing whole-frame
+/// behavior (every pre-tiling caller does this, unchanged).
 #[allow(clippy::too_many_arguments)]
 pub fn nv12_to_rgb_chw_fullrange(
     y_ptr: CUdeviceptr,
@@ -519,6 +535,7 @@ pub fn nv12_to_rgb_chw_fullrange(
     pad_y: u32,
     scale: f32,
     rotation: i32,
+    crop_x0: u32,
 ) -> Result<(), CudaInteropError> {
     reco_core::interop::cuda::cuda_ensure_context()?;
     let kernel = get_nv12_kernel()?;
@@ -538,8 +555,9 @@ pub fn nv12_to_rgb_chw_fullrange(
     let mut py_val = pad_y;
     let mut sc_val = scale;
     let mut flip_val: u32 = if rotation == 180 { 1 } else { 0 };
+    let mut crop_x0_val = crop_x0;
 
-    let mut args: [*mut c_void; 12] = [
+    let mut args: [*mut c_void; 13] = [
         (&mut y_val as *mut u64).cast(),
         (&mut uv_val as *mut u64).cast(),
         (&mut dst_val as *mut u64).cast(),
@@ -552,6 +570,7 @@ pub fn nv12_to_rgb_chw_fullrange(
         (&mut py_val as *mut u32).cast(),
         (&mut sc_val as *mut f32).cast(),
         (&mut flip_val as *mut u32).cast(),
+        (&mut crop_x0_val as *mut u32).cast(),
     ];
 
     unsafe {

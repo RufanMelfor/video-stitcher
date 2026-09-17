@@ -46,14 +46,6 @@ pub struct OrtGpuDetector {
     input_size: u32,
     confidence_threshold: f32,
     labels: Vec<String>,
-    // Pre-computed letterbox parameters (constant for fixed frame dimensions).
-    scale: f32,
-    #[allow(dead_code)]
-    new_w: u32,
-    #[allow(dead_code)]
-    new_h: u32,
-    pad_x: f32,
-    pad_y: f32,
     // Pre-allocated GPU scratch buffers.
     rgb_u8: CUdeviceptr,
     /// Separate destination for the 180-degree mirror step. NPP's
@@ -72,6 +64,15 @@ pub struct OrtGpuDetector {
     // lifetime; constructing one per inference showed up on the
     // per-frame alloc audit (plan M7 item 5).
     cuda_memory_info: SendMemoryInfo,
+    // Tiled dual-crop geometry (see `TileGeom` doc comment in
+    // `detectors::mod`, shared with `trt::TrtGpuDetector`) - see
+    // project_production_tiled_inference_gap.md for why this replaced
+    // the whole-frame letterbox approach (this struct used to also
+    // carry scale/pad_x/pad_y/new_w/new_h for that path - removed, this
+    // detector has only ever had the one detect_gpu_raw path, unlike
+    // TrtGpuDetector's other 3 non-tiled paths which still need theirs).
+    tile_left: super::TileGeom,
+    tile_right: super::TileGeom,
 }
 
 impl OrtGpuDetector {
@@ -110,15 +111,6 @@ impl OrtGpuDetector {
 
         let (session, input_size, labels) =
             crate::ort_session::create_ort_session(model_path.as_ref(), labels)?;
-
-        // Pre-compute letterbox parameters.
-        let (fw, fh) = (frame_width as f32, frame_height as f32);
-        let is = input_size as f32;
-        let scale = (is / fw).min(is / fh);
-        let new_w = (fw * scale).round() as u32;
-        let new_h = (fh * scale).round() as u32;
-        let pad_x = (input_size - new_w) as f32 / 2.0;
-        let pad_y = (input_size - new_h) as f32 / 2.0;
 
         // Allocate GPU scratch buffers (checked arithmetic to prevent overflow).
         let rgb_size = (frame_width as usize)
@@ -159,15 +151,11 @@ impl OrtGpuDetector {
         cuda_memset_d8(resized_u8, 114, resized_size)?;
 
         log::info!(
-            "OrtGpuDetector ready: input={}x{}, frame={}x{}, scale={:.3}, pad=({:.1},{:.1}), \
-             GPU scratch={:.1}MB, 10bit={}",
+            "OrtGpuDetector ready: input={}x{}, frame={}x{}, GPU scratch={:.1}MB, 10bit={}",
             input_size,
             input_size,
             frame_width,
             frame_height,
-            scale,
-            pad_x,
-            pad_y,
             (rgb_size + resized_size + tensor_size) as f64 / 1024.0 / 1024.0,
             is_10bit,
         );
@@ -182,16 +170,21 @@ impl OrtGpuDetector {
             .map_err(|e| format!("CUDA MemoryInfo: {e}"))?,
         );
 
+        let (tile_left, tile_right) =
+            super::TileGeom::build_pair(frame_width, frame_height, input_size);
+        log::info!(
+            "OrtGpuDetector: tiled dual-crop geometry - L crop_x0=0 R crop_x0={} crop={}x{} scale={:.3}",
+            tile_right.crop_x0,
+            tile_left.crop_w,
+            tile_left.crop_h,
+            tile_left.scale,
+        );
+
         let mut detector = Self {
             session,
             input_size,
             confidence_threshold,
             labels,
-            scale,
-            new_w,
-            new_h,
-            pad_x,
-            pad_y,
             rgb_u8,
             rgb_scratch,
             resized_u8,
@@ -199,6 +192,8 @@ impl OrtGpuDetector {
             nv12_8bit_y,
             nv12_8bit_uv,
             cuda_memory_info,
+            tile_left,
+            tile_right,
         };
 
         // Warmup: force TRT EP to eagerly build the engine and initialize
@@ -293,70 +288,36 @@ impl OrtGpuDetector {
             (y_ptr, y_pitch, uv_ptr, uv_pitch)
         };
 
-        // Combined NV12 -> float32 RGB CHW in one kernel pass.
-        // Uses BT.709 full-range coefficients matching GoPro/action-cam
-        // yuvj420p output. Replaces the NPP NV12-to-RGB (BT.601
-        // video-range) + NPP resize + normalize pipeline that was
-        // producing a 10x detection count difference vs CPU ORT (#284).
-        {
-            reco_core::profile_scope!("nv12_to_rgb_chw");
-            crate::cuda_kernels::nv12_to_rgb_chw_fullrange(
-                nv12_y,
-                nv12_uv,
-                self.tensor_f32,
-                nv12_y_pitch as u32,
-                width,
-                height,
-                self.input_size,
-                self.input_size,
-                self.pad_x as u32,
-                self.pad_y as u32,
-                self.scale,
-                rotation,
-            )
-            .map_err(|e| DetectorError::InferenceFailed(format!("NV12->RGB CHW: {e}")))?;
-        }
-
-        // Step 4: Wrap GPU buffer as ORT tensor and run inference.
-        let outputs = {
-            reco_core::profile_scope!("gpu_ort_inference");
-
-            let sz = self.input_size as i64;
-            let tensor: TensorRefMut<'_, f32> = unsafe {
-                TensorRefMut::from_raw(
-                    self.cuda_memory_info.0.clone(),
-                    self.tensor_f32 as *mut c_void,
-                    Shape::new([1i64, 3, sz, sz]),
-                )
-            }
-            .map_err(|e| DetectorError::InferenceFailed(format!("GPU tensor wrap: {e}")))?;
-
-            self.session
-                .run(ort::inputs![tensor])
-                .map_err(|e| DetectorError::InferenceFailed(format!("ort run: {e}")))?
-        };
-
-        // Step 5: Extract output and postprocess on CPU without
-        // materializing an intermediate Vec<f32>. `outputs` owns the
-        // backing buffer; `slice` borrows from it. Postprocess runs
-        // to completion before we drop `outputs`.
-        let (shape, slice) = outputs[0]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| DetectorError::InferenceFailed(format!("output extract: {e}")))?;
-        let n = shape[1] as usize;
-
-        let detections = postprocess(
-            slice,
-            n,
+        // Steps 2-4 (combined NV12->RGB+resize -> ORT inference ->
+        // postprocess) run once per tile via tiled_detect_from_nv12,
+        // matching tile_yolo_dataset.py's training-time crop geometry
+        // (two overlapping 2880x2880 crops, no letterbox) instead of the
+        // old single whole-frame letterbox resize - see
+        // project_production_tiled_inference_gap.md for why (measured
+        // 7.8-15.8pp of lost ball detection rate from the mismatch).
+        let left = self.tile_left;
+        let right = self.tile_right;
+        let left_dets = self.tiled_detect_from_nv12(
             camera,
-            self.confidence_threshold,
-            self.scale,
-            self.pad_x,
-            self.pad_y,
+            left,
+            nv12_y,
+            nv12_uv,
+            nv12_y_pitch as u32,
             width,
             height,
-        );
-        drop(outputs);
+            rotation,
+        )?;
+        let right_dets = self.tiled_detect_from_nv12(
+            camera,
+            right,
+            nv12_y,
+            nv12_uv,
+            nv12_y_pitch as u32,
+            width,
+            height,
+            rotation,
+        )?;
+        let detections = super::merge_tile_detections(left_dets, right_dets);
 
         if !detections.is_empty() {
             log::debug!(
@@ -385,6 +346,85 @@ impl OrtGpuDetector {
         }
 
         Ok(detections)
+    }
+
+    /// Run the combined NV12->RGB+resize kernel + ORT inference for one
+    /// tile, and return that tile's detections remapped to full-camera-
+    /// frame-normalized coordinates (see `super::remap_tile_to_frame`).
+    /// No letterbox padding - `pad_x`/`pad_y` are always 0 here since
+    /// each tile's crop is already square.
+    #[allow(clippy::too_many_arguments)]
+    fn tiled_detect_from_nv12(
+        &mut self,
+        camera: CameraId,
+        tile: super::TileGeom,
+        nv12_y: CUdeviceptr,
+        nv12_uv: CUdeviceptr,
+        nv12_y_pitch: u32,
+        frame_w: u32,
+        frame_h: u32,
+        rotation: i32,
+    ) -> Result<Vec<Detection>, DetectorError> {
+        {
+            reco_core::profile_scope!("nv12_to_rgb_chw_tile");
+            crate::cuda_kernels::nv12_to_rgb_chw_fullrange(
+                nv12_y,
+                nv12_uv,
+                self.tensor_f32,
+                nv12_y_pitch,
+                frame_w,
+                frame_h,
+                self.input_size,
+                self.input_size,
+                0,
+                0,
+                tile.scale,
+                rotation,
+                tile.crop_x0,
+            )
+            .map_err(|e| DetectorError::InferenceFailed(format!("NV12->RGB CHW tile: {e}")))?;
+        }
+
+        let outputs = {
+            reco_core::profile_scope!("gpu_ort_inference");
+
+            let sz = self.input_size as i64;
+            let tensor: TensorRefMut<'_, f32> = unsafe {
+                TensorRefMut::from_raw(
+                    self.cuda_memory_info.0.clone(),
+                    self.tensor_f32 as *mut c_void,
+                    Shape::new([1i64, 3, sz, sz]),
+                )
+            }
+            .map_err(|e| DetectorError::InferenceFailed(format!("GPU tensor wrap: {e}")))?;
+
+            self.session
+                .run(ort::inputs![tensor])
+                .map_err(|e| DetectorError::InferenceFailed(format!("ort run: {e}")))?
+        };
+
+        let (shape, slice) = outputs[0]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| DetectorError::InferenceFailed(format!("output extract: {e}")))?;
+        let n = shape[1] as usize;
+
+        let tile_dets = postprocess(
+            slice,
+            n,
+            camera,
+            self.confidence_threshold,
+            tile.scale,
+            0.0,
+            0.0,
+            tile.crop_w,
+            tile.crop_h,
+        );
+        drop(outputs);
+
+        Ok(tile_dets
+            .into_iter()
+            .map(|d| super::remap_tile_to_frame(d, tile, frame_w))
+            .collect())
     }
 }
 

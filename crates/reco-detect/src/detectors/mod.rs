@@ -198,8 +198,8 @@ fn box_iou(a: &Detection, b: &Detection) -> f32 {
 /// Greedy IoU non-maximum suppression: keep highest-confidence boxes,
 /// drop any later box overlapping a kept one beyond `iou_thresh`.
 ///
-/// `pub(crate)` so tiled-inference callers (`trt::merge_tile_detections`)
-/// can reuse it for cross-tile dedup - see that function's doc comment.
+/// `pub(crate)` so tiled-inference callers (`merge_tile_detections`,
+/// below) can reuse it for cross-tile dedup.
 pub(crate) fn greedy_nms(mut dets: Vec<Detection>, iou_thresh: f32) -> Vec<Detection> {
     dets.sort_by(|a, b| {
         b.confidence
@@ -213,6 +213,161 @@ pub(crate) fn greedy_nms(mut dets: Vec<Detection>, iou_thresh: f32) -> Vec<Detec
         }
     }
     keep
+}
+
+/// One tile's crop-and-resize geometry: a `crop_w x crop_h` sub-rectangle
+/// of the full camera frame, starting at `(crop_x0, 0)`, resized (no
+/// letterbox - the crop is already square) into the model's
+/// `input_size x input_size` input. Mirrors `tile_yolo_dataset.py`'s
+/// `CROP_SIZE=2880`/`TILES=[("L",0),("R",ORIG_W-CROP_SIZE)]` exactly -
+/// the two crops overlap by `2*crop_w - frame_w` pixels (1920px of a
+/// 2880px crop, given a 3840px frame) so a box near the seam legitimately
+/// appears in both tiles; `merge_tile_detections` dedupes that with NMS.
+///
+/// Shared by `trt::TrtGpuDetector` and `ort_gpu::OrtGpuDetector` - both
+/// backends' tiled dual-crop inference builds the same two tiles for the
+/// same 3840x2880 camera frames, only the GPU preprocessing call that
+/// consumes `crop_x0`/`scale` differs (NPP `npp_resize_c3`'s `src_roi`
+/// for TRT, the PTX kernel's `crop_x0` param for ORT).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TileGeom {
+    pub(crate) crop_x0: u32,
+    pub(crate) crop_w: u32,
+    pub(crate) crop_h: u32,
+    pub(crate) scale: f32,
+}
+
+impl TileGeom {
+    /// Build the two tiles for a `frame_w x frame_h` source frame,
+    /// resized into an `input_size x input_size` model input. Matches
+    /// `tile_yolo_dataset.py`'s `CROP_SIZE = min(frame_w, frame_h)` /
+    /// `TILES = [("L", 0), ("R", frame_w - CROP_SIZE)]` assumption that
+    /// the crop is exactly as tall as the frame (a square crop of the
+    /// frame's shorter dimension) - true for this project's fixed
+    /// 3840x2880 camera frames (crop_size=2880=frame_h) but asserted
+    /// rather than silently mis-cropped if a future frame size breaks
+    /// that assumption.
+    pub(crate) fn build_pair(frame_w: u32, frame_h: u32, input_size: u32) -> (TileGeom, TileGeom) {
+        let crop_size = frame_h;
+        debug_assert!(
+            frame_w >= crop_size,
+            "tile crop_size ({crop_size}) must fit within frame_w ({frame_w})"
+        );
+        let scale = input_size as f32 / crop_size as f32;
+        let left = TileGeom {
+            crop_x0: 0,
+            crop_w: crop_size,
+            crop_h: crop_size,
+            scale,
+        };
+        let right = TileGeom {
+            crop_x0: frame_w.saturating_sub(crop_size),
+            crop_w: crop_size,
+            crop_h: crop_size,
+            scale,
+        };
+        (left, right)
+    }
+}
+
+/// Remap a tile-local detection (normalized `[0,1]` relative to that
+/// tile's own `crop_w x crop_h` crop) back to full-camera-frame-normalized
+/// `[0,1]` coordinates. `center_y`/`height` are unchanged - tiles in this
+/// project only split horizontally (see `TileGeom::build_pair`'s doc
+/// comment), so a tile's vertical extent already equals the frame's.
+/// Everything downstream (`RoiFilteredDetector`, `map_detections_to_panorama`)
+/// assumes `Detection` coordinates are already full-camera-frame-normalized
+/// - this must run before a tile's detections reach any consumer.
+pub(crate) fn remap_tile_to_frame(mut d: Detection, tile: TileGeom, frame_w: u32) -> Detection {
+    let frame_w = frame_w as f32;
+    let crop_x0 = tile.crop_x0 as f32;
+    let crop_w = tile.crop_w as f32;
+    d.center_x = ((crop_x0 + d.center_x * crop_w) / frame_w).clamp(0.0, 1.0);
+    d.width = (d.width * crop_w / frame_w).clamp(0.0, 1.0);
+    d
+}
+
+/// Merge two tiles' already frame-remapped detections and drop
+/// duplicates in the overlap band via the same greedy IoU NMS
+/// `postprocess_balldet` already uses for its own pre-NMS output.
+pub(crate) fn merge_tile_detections(left: Vec<Detection>, right: Vec<Detection>) -> Vec<Detection> {
+    let mut all = left;
+    all.extend(right);
+    greedy_nms(all, 0.45)
+}
+
+#[cfg(test)]
+mod tile_tests {
+    use super::*;
+
+    fn det(center_x: f32, center_y: f32, width: f32, height: f32) -> Detection {
+        Detection {
+            camera: CameraId::Left,
+            class_id: 1,
+            confidence: 0.9,
+            center_x,
+            center_y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn build_pair_matches_tile_yolo_dataset_geometry() {
+        let (left, right) = TileGeom::build_pair(3840, 2880, 1920);
+        assert_eq!(left.crop_x0, 0);
+        assert_eq!(left.crop_w, 2880);
+        assert_eq!(right.crop_x0, 960);
+        assert_eq!(right.crop_w, 2880);
+        assert!((left.scale - 1920.0 / 2880.0).abs() < 1e-6);
+        assert_eq!(left.scale, right.scale);
+    }
+
+    #[test]
+    fn remap_left_tile_center_to_frame_space() {
+        let (left, _) = TileGeom::build_pair(3840, 2880, 1920);
+        let d = remap_tile_to_frame(det(0.5, 0.5, 0.1, 0.1), left, 3840);
+        assert!((d.center_x - 0.375).abs() < 1e-6, "got {}", d.center_x);
+        assert_eq!(d.center_y, 0.5);
+    }
+
+    #[test]
+    fn remap_right_tile_center_to_frame_space() {
+        let (_, right) = TileGeom::build_pair(3840, 2880, 1920);
+        let d = remap_tile_to_frame(det(0.5, 0.5, 0.1, 0.1), right, 3840);
+        assert!((d.center_x - 0.625).abs() < 1e-6, "got {}", d.center_x);
+    }
+
+    #[test]
+    fn remap_width_scales_by_crop_fraction() {
+        let (left, _) = TileGeom::build_pair(3840, 2880, 1920);
+        let d = remap_tile_to_frame(det(0.5, 0.5, 1.0, 0.2), left, 3840);
+        assert!((d.width - 0.75).abs() < 1e-6, "got {}", d.width);
+    }
+
+    #[test]
+    fn merge_dedupes_overlap_band_seam_detection() {
+        let (left, right) = TileGeom::build_pair(3840, 2880, 1920);
+        let left_hit = remap_tile_to_frame(det(0.6667, 0.5, 0.05, 0.05), left, 3840);
+        let right_hit = remap_tile_to_frame(det(0.3333, 0.5, 0.05, 0.05), right, 3840);
+        assert!((left_hit.center_x - right_hit.center_x).abs() < 1e-3);
+
+        let merged = merge_tile_detections(vec![left_hit], vec![right_hit]);
+        assert_eq!(
+            merged.len(),
+            1,
+            "seam-crossing duplicate should be deduped by NMS, got {merged:?}"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_non_overlapping_detections_from_both_tiles() {
+        let (left, right) = TileGeom::build_pair(3840, 2880, 1920);
+        let l = remap_tile_to_frame(det(0.1, 0.1, 0.05, 0.05), left, 3840);
+        let r = remap_tile_to_frame(det(0.9, 0.9, 0.05, 0.05), right, 3840);
+        let merged = merge_tile_detections(vec![l], vec![r]);
+        assert_eq!(merged.len(), 2);
+    }
 }
 
 /// Read class labels from a sidecar `.labels` file (one name per line).
