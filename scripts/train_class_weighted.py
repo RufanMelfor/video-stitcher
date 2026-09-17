@@ -94,6 +94,23 @@ def main():
     p.add_argument("--epochs", type=int, default=300)
     p.add_argument("--patience", type=int, default=100)
     p.add_argument("--batch", type=int, default=4)
+    p.add_argument("--workers", type=int, default=8,
+                   help="Ultralytics DataLoader worker count. Ultralytics spawns a "
+                        "SEPARATE worker pool per DataLoader (train + val), so this "
+                        "is not a hard cap on total subprocesses - on Windows with "
+                        "the 'spawn' multiprocessing start method, worker processes "
+                        "from a prior run/resume attempt are not always guaranteed "
+                        "torn down before a new one starts, so repeated --resume "
+                        "attempts in one session can accumulate far more live "
+                        "worker processes than this number suggests (observed: 24 "
+                        "worker processes from a single run with workers=8, ~26GB "
+                        "combined RSS, causing a system-RAM OOM in a DataLoader "
+                        "worker's cv2.imdecode call - see "
+                        "project_training_folder_consolidation.md's round9 entries). "
+                        "Lower this (e.g. 2) if that happens; Ultralytics' own "
+                        "check_resume() allowlists 'workers' as an override it will "
+                        "apply even when --resume reads everything else from the "
+                        "checkpoint's saved train_args.")
     p.add_argument("--project", default=None, help="Ultralytics 'project' dir (runs land under <project>/<name>)")
     p.add_argument("--name", default="full_patience100")
     p.add_argument("--pretrained", action="store_true",
@@ -152,8 +169,10 @@ def main():
         # for those - only resume=True and the checkpoint path (already in
         # args.model, used above) matter for continuing training state.
         print(f"[train_class_weighted] resuming from {args.model} "
-              "(data/imgsz/epochs/batch/etc. come from the checkpoint, not this invocation)")
-        model.train(resume=True)
+              "(data/imgsz/epochs/batch/etc. come from the checkpoint, not this "
+              f"invocation; --workers={args.workers} IS applied - see check_resume's "
+              "override allowlist)")
+        model.train(resume=True, workers=args.workers)
     else:
         model.train(
             data=args.data,
@@ -161,6 +180,7 @@ def main():
             epochs=args.epochs,
             patience=args.patience,
             batch=args.batch,
+            workers=args.workers,
             pretrained=args.pretrained,
             project=args.project,
             name=args.name,

@@ -36,6 +36,11 @@ merge results) - not wired into any production path yet as of
 2026-08-21 (see docs/YOLO26_Training.md / SESSION_HANDOFF.md). This script
 only prepares the training data.
 
+Incremental: if --out already has both tiles (_L and _R) for a source
+image, that image is skipped. This lets --out be one long-lived shared
+dataset that successive rounds add new raw images to and re-run the
+same tiling command against, without re-tiling already-tiled images.
+
 Usage:
   python3 tile_yolo_dataset.py --in training/merged_v1 --out training/merged_v1_tiled_1920
 """
@@ -145,13 +150,17 @@ def main():
         out_lbl_dir.mkdir(parents=True, exist_ok=True)
         split_images = 0
         split_tiles = 0
+        split_skipped = 0
         for img_path in sorted(img_dir.glob("*.jpg")):
+            if all((out_img_dir / f"{img_path.stem}_{name}.jpg").exists() for name, _ in TILES):
+                split_skipped += 1
+                continue
             label_path = lbl_dir / f"{img_path.stem}.txt"
             split_tiles += tile_one_image(img_path, label_path, out_img_dir, out_lbl_dir)
             split_images += 1
         total_images += split_images
         total_tiles += split_tiles
-        print(f"{split}: {split_images} source images -> {split_tiles} tiles")
+        print(f"{split}: {split_images} source images -> {split_tiles} tiles ({split_skipped} already tiled, skipped)")
 
     data_yaml = args.out / "data.yaml"
     names_block = "\n".join(f"  {i}: {name}" for i, name in enumerate(class_names))

@@ -1,3 +1,52 @@
+# Session handoff - 2026-09-16 (TGR_PC), newest: training/ consolidated into one growing dataset, round8 deleted, round9 full-training command ready to launch
+
+## READ THIS FIRST - 2026-09-16 entry (latest)
+
+**Ready-to-run command for tomorrow's full training** (round9, ball-weight
+4.0, warm-started from current production checkpoint):
+
+```
+python scripts/train_class_weighted.py ^
+  --data "D:\VOETBAL_VIDEO\RECO\training\merged_v1_tiled_1920\data.yaml" ^
+  --model "D:\VOETBAL_VIDEO\RECO\training\merged_v1_tiled_1920\runs\full_patience100\weights\best.pt" ^
+  --imgsz 1920 --epochs 300 --patience 100 --batch 2 ^
+  --ball-weight 4.0 ^
+  --project "D:\VOETBAL_VIDEO\RECO\training\round9_tiled_1920\runs" --name full_patience100
+```
+
+(PowerShell: replace the `^` line continuations with `` ` ``, or paste as
+one line.)
+
+A 2-epoch smoke test with this EXACT config already ran clean this
+session (0.53h, no errors, GPU mem stable at 7.42/8GB on the RTX 3060 Ti,
+val metrics computed successfully) - output at
+`training/round9_tiled_1920/runs/smoke_test/`. Safe to delete that folder
+before the full run if `--name full_patience100` isn't distinct enough to
+avoid confusion (Ultralytics would append `-2` etc. to `name` rather than
+overwrite, since `exist_ok` isn't passed, so it's not strictly required).
+
+**Dataset state:** `merged_v1_tiled_1920` is now THE one shared, growing
+tiled dataset - 1384 train + 248 val, fully verified (1:1 image/label
+match, valid classes/coords, no corrupt images, no train/val leakage). It
+absorbed round7_tiled_1920's unique content AND all 139 newly-finished
+Label Studio project 24 annotations this session. See
+[[project_training_folder_consolidation]] for the full history/reasoning.
+
+**round8 was deleted** (PC-sleep-interrupted at epoch 21/300, user judged
+it not worth keeping - see [[project_pc_sleep_crash_round8_interrupted]]).
+Its old `round7_tiled_1920`-pointing checkpoint is gone too (that whole
+folder was merged into `merged_v1_tiled_1920` and removed). round9 is a
+fresh warm-start from `merged_v1_tiled_1920`'s own checkpoint, not a
+resume of round8.
+
+**Post-round9 plan (once it's shipped/evaluated):** A/B test cumulative-
+dataset continued training vs. new-frames-only continued training, per
+[[project_training_folder_consolidation]]'s "Post-round8 training plan"
+section (renumber that reasoning to round9/round10 mentally - not yet
+renamed in that memory file).
+
+---
+
 # Session handoff - 2026-09-12 (TGR_PC), newest: disk cleanup across D:\VOETBAL_VIDEO\RECO\training, D:\CLAUDE, D:\VOETBAL_VIDEO\RECO root, and C:\Users\Rufan\AppData\Local\Temp\claude - several GB freed, nothing git-tracked touched
 
 ## READ THIS FIRST - 2026-09-12 entry (latest, same day)
