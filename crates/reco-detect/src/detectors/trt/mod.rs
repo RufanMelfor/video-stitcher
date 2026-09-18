@@ -67,6 +67,11 @@ pub struct TrtGpuDetector {
     // sends Cuda frames (buffers stay 0).
     cpu_upload_y: CUdeviceptr,
     cpu_upload_uv: CUdeviceptr,
+    // Host-side scratch for interleaving YUV420P's separate U/V planes
+    // into NV12's packed UV layout before upload (see
+    // `detect_cpu_yuv420p_upload`). Lazy-allocated, zero-cost when the
+    // caller only ever sends NV12/Cuda frames.
+    yuv420p_uv_scratch: Vec<u8>,
     // RGBA detection buffers for Bayer demosaic path. Lazy-allocated.
     cpu_upload_rgba: CUdeviceptr,
     resized_rgba: CUdeviceptr,
@@ -260,6 +265,7 @@ impl TrtGpuDetector {
             nv12_8bit_uv,
             cpu_upload_y: 0,
             cpu_upload_uv: 0,
+            yuv420p_uv_scratch: Vec::new(),
             cpu_upload_rgba: 0,
             resized_rgba: 0,
             output_buf,
@@ -630,12 +636,15 @@ impl UnifiedDetector for TrtGpuDetector {
     ) -> Result<Vec<Detection>, DetectorError> {
         // CUDA-residency backend: accept `Cuda(GpuNv12Frame)` for
         // the zero-copy fast path, AND accept `Cpu(RawFrame)` with
-        // NV12 chroma via a transparent host→device upload so live
-        // camera sources (nvarguscamerasrc + appsink delivering
-        // CPU-resident NV12) can drive detection without a parallel
-        // CPU backend. Yuv420p Cpu frames and other variants fall
-        // through to `UnsupportedFrameKind` for the dispatcher to
-        // route elsewhere.
+        // either NV12 or YUV420P chroma via a transparent host->device
+        // upload (YUV420P's separate U/V planes are interleaved into
+        // NV12 layout on the host first - see
+        // `detect_cpu_yuv420p_upload`) so both live-camera NV12 sources
+        // (nvarguscamerasrc + appsink) and software-decoded YUV420P
+        // sources (this crate's own D3D11VA/FFmpeg staging path on
+        // Windows) can drive detection without a parallel CPU backend.
+        // Other variants fall through to `UnsupportedFrameKind` for the
+        // dispatcher to route elsewhere.
         match frame {
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             DetectorFrame::Cuda(gpu_frame) => self.detect_gpu_raw(camera, gpu_frame),
@@ -644,7 +653,9 @@ impl UnifiedDetector for TrtGpuDetector {
                 ChromaFormat::Nv12 { uv } => {
                     self.detect_cpu_nv12_upload(camera, raw.y, uv, raw.width, raw.height)
                 }
-                ChromaFormat::Yuv420p { .. } => Err(DetectorError::UnsupportedFrameKind),
+                ChromaFormat::Yuv420p { u, v } => {
+                    self.detect_cpu_yuv420p_upload(camera, raw.y, u, v, raw.width, raw.height)
+                }
             },
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             DetectorFrame::Rgba {
@@ -755,6 +766,50 @@ impl TrtGpuDetector {
             is_10bit: false,
         };
         self.detect_gpu_raw(camera, &gpu_frame)
+    }
+
+    /// CPU-resident YUV420P detection (software-decoded sources, e.g.
+    /// this crate's own D3D11VA/FFmpeg staging path on Windows, which
+    /// delivers separate U/V planes rather than NV12's interleaved UV -
+    /// see `ChromaFormat`'s doc comment). Interleaves U/V into a scratch
+    /// buffer on the host (cheap: `width*height/4` byte pairs) and
+    /// delegates to the already-tested NV12 upload path rather than
+    /// writing a second GPU color-conversion kernel.
+    fn detect_cpu_yuv420p_upload(
+        &mut self,
+        camera: CameraId,
+        y_host: &[u8],
+        u_host: &[u8],
+        v_host: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<Detection>, DetectorError> {
+        let chroma_w = width as usize / 2;
+        let chroma_h = height as usize / 2;
+        let chroma_len = chroma_w * chroma_h;
+        if u_host.len() < chroma_len || v_host.len() < chroma_len {
+            return Err(DetectorError::InferenceFailed(format!(
+                "CPU YUV420P upload: chroma plane too small (U {}<{}, V {}<{})",
+                u_host.len(),
+                chroma_len,
+                v_host.len(),
+                chroma_len
+            )));
+        }
+
+        self.yuv420p_uv_scratch.resize(chroma_len * 2, 0);
+        for i in 0..chroma_len {
+            self.yuv420p_uv_scratch[i * 2] = u_host[i];
+            self.yuv420p_uv_scratch[i * 2 + 1] = v_host[i];
+        }
+
+        // Borrow ends before the call (scratch is read, not mutated, by
+        // detect_cpu_nv12_upload) - satisfies the borrow checker via an
+        // explicit copy out of self rather than a raw pointer.
+        let uv = std::mem::take(&mut self.yuv420p_uv_scratch);
+        let result = self.detect_cpu_nv12_upload(camera, y_host, &uv, width, height);
+        self.yuv420p_uv_scratch = uv;
+        result
     }
 
     /// Zero-copy RGBA detection: data is already on CUDA (shared texture).
