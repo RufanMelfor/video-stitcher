@@ -1,12 +1,61 @@
 # Session handoff - 2026-09-18 (TGR_PC), newest: ball-tracking/panner session - four new autocam settings, two of which actually matter (Ball coast time + Ball hold time); ROOT CAUSE of the remaining problem is detection scale, not tuning
 
-## READ THIS FIRST - 2026-09-18 entry (latest)
+## READ THIS FIRST - 2026-09-18 code-review pass (latest)
 
-**Nothing is committed.** 13 files modified, all of today's work is
-uncommitted in the working tree. `crates/reco-detect/src/detectors/trt/mod.rs`
-and part of `panners/field.rs` were already modified before this session
-(tiled inference + the 2026-09-17 pendulum fix) - do not attribute those
-to today.
+Everything below was committed later the same day, and a review pass on
+top of it added four fixes. Working tree is clean; branch
+`feat/tiled-inference-trt` is at `c0b2b862`, pushed to both `github`
+(tracking) and `fork`.
+
+Review findings, newest first:
+
+- `c0b2b862` **reco-io: Matroska write-while-read was broken.**
+  `flush_to_disk` only ran `avio_flush`, never asking the muxer to emit
+  its open cluster, so a file stayed at its 549-byte header across every
+  flush (measured, 30 frames / GOP 10) and a concurrent reader got
+  `End of file`. Restored `av_write_frame(ctx, NULL)`, skipped for
+  fragmented MP4 (which reads it as "close fragment" and then clashes
+  with `write_trailer`, AVERROR -105 - the reason it had been dropped
+  for all containers). Fixes the pre-existing failure of
+  `matroska_reader_sees_partial_writes`. Affects the replay-during-
+  recording path; reco-gui does not use it.
+- `aa0f1cfc` reco-core: gated the CUDA shared-memory test to Linux
+  (`cuMemCreate` needs a POBJECT_ATTRIBUTES we pass as null on Windows;
+  the only production caller is Linux-only) and documented the gap.
+- `ff5a376b` reco-autocam: a merge had left a duplicated `#[test]`
+  (failing clippy) and orphaned a doc comment onto the wrong test. No
+  behaviour change.
+- `c73d0acd` **reco-detect: cross-tile NMS ignored class_id.**
+  `merge_tile_detections` fed multi-class `postprocess` output through
+  geometry-only NMS, so a ball at a player's feet was dropped as a
+  "duplicate" of that player - in the tiles' overlap band only. Now runs
+  per class. Verified failing before the fix. Matters for the tiled work
+  below once `tensorrt-native` / Linux is in play.
+
+**Impact on reco-gui: none.** Its own diff is one `cargo fmt` line; the
+reco-autocam changes are whitespace-only (verified with `git diff -w`);
+the NMS fix lives in `TrtGpuDetector`/`OrtGpuDetector`, both inactive in
+the Windows GUI build (`--features tensorrt` is `ort/tensorrt`, the ORT
+execution provider - NOT `tensorrt-native`); and reco-gui never calls
+`flush_to_disk`.
+
+Environment limits on TGR_PC (not regressions, both documented):
+`reco-obs` cannot link on Windows without OBS import libraries - use
+`cargo test --workspace --exclude reco-obs`, as the project's own
+Windows CI job does. And `cargo test -p reco-io --doc` needs the FFmpeg
+DLLs inside `crates/reco-io/` (rustdoc's `--test-run-directory`); do not
+commit them. A build.rs fix for the reco-obs frontend-api half was
+written and deliberately reverted - untestable here, revisit on Linux.
+
+Gates after the fixes: 734 tests pass, `cargo fmt --all --check` clean,
+`cargo clippy --workspace --exclude reco-obs --all-targets -D warnings`
+clean.
+
+## The 2026-09-18 ball-tracking session (context for the above)
+
+`crates/reco-detect/src/detectors/trt/mod.rs` and part of
+`panners/field.rs` were already modified before that session (tiled
+inference + the 2026-09-17 pendulum fix) - do not attribute those to it.
 
 ### The user-visible problem and where it actually came from
 
