@@ -546,6 +546,9 @@ pub struct VideoEncoder {
     height: u32,
     finished: bool,
     encoder_name: String,
+    /// Which container is being written - `flush_to_disk` needs it to
+    /// decide whether `av_write_frame(ctx, NULL)` is safe here.
+    container: Container,
     /// Reusable frame buffers to avoid per-frame allocation.
     rgba_frame: VideoFrame,
     yuv_frame: VideoFrame,
@@ -935,6 +938,7 @@ impl VideoEncoder {
                         height,
                         finished: false,
                         encoder_name: name.to_string(),
+                        container: config.container,
                         rgba_frame: VideoFrame::new(Pixel::RGBA, width, height),
                         yuv_frame: VideoFrame::new(staging_pixel_format(*pixel_fmt), width, height),
                         hardware_upload,
@@ -1818,20 +1822,38 @@ impl VideoEncoder {
     /// they've actually hit disk. Call periodically (e.g. every
     /// keyframe) from the stacked-video replay path.
     ///
-    /// `av_write_frame(ctx, NULL)` prompts the muxer to emit any
-    /// queued packets; `avio_flush` then forces the AVIO layer to
-    /// write its buffer to the OS. Both are safe to call multiple
-    /// times and at any point after `write_header`.
+    /// `av_write_frame(ctx, NULL)` prompts the muxer to emit whatever
+    /// it still holds; `avio_flush` then forces the AVIO layer to write
+    /// its buffer to the OS. Both are safe to call repeatedly at any
+    /// point after `write_header`.
+    ///
+    /// The muxer flush is skipped for fragmented MP4, whose
+    /// `frag_keyframe` mode reads it as "close the current fragment"
+    /// and then clashes with `write_trailer` on finish (observed as
+    /// AVERROR -105). It is required for Matroska, which otherwise
+    /// keeps its cluster open and writes nothing: encoded packets do
+    /// reach the muxer (every `send_frame` is followed by
+    /// `receive_and_write_packets`), but they sit in the open cluster,
+    /// so the file stayed at its 549-byte header after 30 frames and a
+    /// concurrent reader got `End of file`. Plain MP4 gets it too and
+    /// is unaffected - it has no fragments to close, and a reader
+    /// cannot open it mid-write anyway (no `moov` until finish).
     pub fn flush_to_disk(&mut self) -> Result<(), EncodeError> {
-        // SAFETY: `octx` is a live output context (created in
-        // `new`, never dropped until `Drop` runs). `avio_flush` is
-        // safe on any live AVIO and doesn't alter muxer state -
-        // just forces the output-layer buffer to the file
-        // descriptor. We intentionally avoid
-        // `av_write_frame(ctx, NULL)` because fMP4's
-        // `frag_keyframe` mode treats that as "close current
-        // fragment" which clashes with the subsequent
-        // `write_trailer` on finish (observed as AVERROR -105).
+        // SAFETY: `octx` is a live output context (created in `new`,
+        // never dropped until `Drop` runs), so both calls below get a
+        // valid context. `av_write_frame` with a null packet is the
+        // documented "flush the muxer" request and is valid any time
+        // after `write_header`; the error is logged rather than
+        // propagated because a muxer that declines to flush early is
+        // not a recording failure - `finish` still writes everything.
+        if !matches!(self.container, Container::Mp4Fragmented) {
+            unsafe {
+                let rc = ffmpeg::sys::av_write_frame(self.octx.as_mut_ptr(), std::ptr::null_mut());
+                if rc < 0 {
+                    log::debug!("av_write_frame(NULL) during flush_to_disk returned {rc}");
+                }
+            }
+        }
         unsafe {
             let pb = (*self.octx.as_mut_ptr()).pb;
             if !pb.is_null() {
