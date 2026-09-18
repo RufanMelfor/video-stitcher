@@ -489,6 +489,31 @@ pub fn get_cuda_device_uuid() -> Result<[u8; 16], CudaInteropError> {
 /// 3. `cuMemMap` + `cuMemSetAccess` to make it usable from CUDA
 ///
 /// The returned `CudaSharedMemory` owns the allocation and will clean up on drop.
+///
+/// # Platform support
+///
+/// Linux only in practice. The Windows branch compiles but
+/// `cuMemCreate` rejects it with `CUDA_ERROR_INVALID_VALUE`: CUDA
+/// requires a `POBJECT_ATTRIBUTES` in `CUmemAllocationProp`'s
+/// `win32HandleMetaData` whenever `CU_MEM_HANDLE_TYPE_WIN32` is
+/// requested (`cuda.h`: "In all other cases, this field is required to
+/// be zero"), and this passes null. Making it work needs that
+/// security-attributes object built and freed around the call.
+///
+/// Nothing calls this on Windows today - the only production caller,
+/// `interop::vulkan`, is Linux-only - so the gap is recorded rather
+/// than filled. Two more things would need attention alongside it:
+///
+/// - `CUmemAllocationProp::_reserved` is `[u64; 8]`, but the real
+///   struct ends in an 8-byte `allocFlags` (`compressionType`,
+///   `gpuDirectRDMACapable`, `usage`, 4 reserved bytes), making this
+///   definition 56 bytes too long. Harmless while the tail stays
+///   zeroed and CUDA reads only the leading fields, but it is not the
+///   ABI, and it would bite if a future field were added there.
+/// - `Drop` deliberately leaves `shared_handle` open because Vulkan
+///   takes ownership of the exported fd on Linux. A Windows consumer
+///   would need its own ownership rule (and likely a `CloseHandle`),
+///   decided when one actually exists.
 pub fn allocate_shared_memory(size: usize) -> Result<CudaSharedMemory, CudaInteropError> {
     let cuda = cuda()?;
 
@@ -953,6 +978,12 @@ mod tests {
         }
     }
 
+    /// Linux-only: [`allocate_shared_memory`]'s exportable-handle path
+    /// has no working Windows implementation yet (see that function's
+    /// doc comment), and its only production caller - `interop::vulkan`
+    /// - is itself Linux-only. Running this on Windows only asserted
+    /// that a known-unimplemented path fails.
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_shared_memory_allocation() {
         if !is_cuda_available() {
