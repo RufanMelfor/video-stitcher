@@ -17,7 +17,26 @@ Tier 1 (PR #267) shipped 2026-04-18 with BGRA input, interactive pan/zoom, and a
 cargo build --release -p reco-obs
 ```
 
-Output: `libreco_obs.so` (Linux), `reco_obs.dll` (Windows), `libreco_obs.dylib` (macOS). Drop into OBS's `obs-plugins/64bit/` directory.
+Needs the libobs headers: `libobs-dev` (Ubuntu) or `OBS_INCLUDE_DIR`
+pointing at the directory containing `obs.h`.
+
+Output: `libreco_obs.so` (Linux), `libreco_obs.dylib` (macOS). Drop into
+OBS's `obs-plugins/64bit/` directory.
+
+### Windows
+
+Not currently buildable, and excluded from the Windows CI job for the
+same reason. Headers alone are not enough: linking a Windows DLL
+requires every symbol to resolve at link time, so the build needs OBS's
+import libraries (`obs.lib`, `obs-frontend-api.lib`) on top of the
+headers. A headers-only SDK tree fails with `LNK1181` /
+`LNK2019: unresolved external symbol obs_*`. ELF and Mach-O leave those
+symbols undefined until OBS loads the plugin, which is why Linux and
+macOS build from headers alone.
+
+Supplying the import libraries means installing OBS Studio (or its
+official dev package) and pointing the linker at its `lib/` directory.
+`build.rs` does not look for them yet, so that path is untested.
 
 ## Not yet shipped
 
