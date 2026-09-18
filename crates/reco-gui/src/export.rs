@@ -732,8 +732,7 @@ pub fn run_export(
                     detection_interval: autocam.detection_interval,
                     player_anchor_rad: autocam.player_anchor_rad,
                     ball_coast_secs: autocam.ball_coast_secs,
-                    ball_acquire_max_dist_from_cluster: autocam
-                        .ball_acquire_max_dist_from_cluster,
+                    ball_acquire_max_dist_from_cluster: autocam.ball_acquire_max_dist_from_cluster,
                     ball_acquire_established_frames: autocam.ball_acquire_established_frames,
                     ball_jump_confidence: autocam.ball_jump_confidence,
                     ball_max_speed: autocam.ball_max_speed,

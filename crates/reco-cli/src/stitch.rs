@@ -537,9 +537,9 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                         reco_autocam::trackers::ball::DEFAULT_COAST_FRAMES as f32 / 30.0,
                     ),
                     ball_acquire_max_dist_from_cluster: ball_acquire_max_dist.unwrap_or(0.0),
-                    ball_acquire_established_frames: ball_acquire_established_frames.unwrap_or(
-                        reco_autocam::trackers::ball::DEFAULT_ACQUIRE_ESTABLISHED_FRAMES,
-                    ) as u32,
+                    ball_acquire_established_frames: ball_acquire_established_frames
+                        .unwrap_or(reco_autocam::trackers::ball::DEFAULT_ACQUIRE_ESTABLISHED_FRAMES)
+                        as u32,
                     ball_jump_confidence: ball_jump_confidence
                         .unwrap_or(reco_autocam::trackers::ball::DEFAULT_JUMP_CONFIDENCE),
                     ball_max_speed: ball_max_speed.unwrap_or(

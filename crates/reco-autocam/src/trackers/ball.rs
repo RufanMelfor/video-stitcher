@@ -503,8 +503,7 @@ impl BallTracker {
                 // `jump_confidence` for why neither "always reject" nor
                 // "always allow" works here.
                 if dist > self.max_jump_rad
-                    && (self.current_players.is_empty()
-                        || det.confidence < self.jump_confidence)
+                    && (self.current_players.is_empty() || det.confidence < self.jump_confidence)
                 {
                     None
                 } else {
@@ -1126,10 +1125,7 @@ mod tests {
         );
         // Measured match-ball geometry: below the horizon line.
         let match_ball = det(CameraId::Right, -1.16, -0.16, 0.79, 0.5, 0.5);
-        assert_eq!(
-            t.update(&[match_ball], 33.3)[0].state,
-            TrackState::Tracking
-        );
+        assert_eq!(t.update(&[match_ball], 33.3)[0].state, TrackState::Tracking);
     }
 
     /// The ceiling also protects an established track: a stray ball
