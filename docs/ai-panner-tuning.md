@@ -36,7 +36,8 @@ notes for known hard cases.
 Tracking mode:                      field
 Detect every N frames:              3
 Ball anchor range:                  0.3-0.5 rad     (default 0.20)
-Ball coast time:                    2.5s            (default 0.67s) - see note below
+Ball coast time:                    8s              (default 0.67s) - see note below
+Ball hold time:                     8s              (default 0, new 2026-09-18)
 Style preset:                       action
 
 Framing:                            action
@@ -57,6 +58,14 @@ FOV Wide:                           65-70deg        (action preset default 48deg
 Zoom smoothing (fov_alpha):         0.05-0.08       (default 0.01)
 Aim smoothing (cluster_alpha):      0.05-0.08       (default 0.012)
 Reactivity (lookahead):             1.5             (default 2.5, action preset 3.0) - see note below
+
+Stray-ball guards (2026-09-18)
+------------------------------
+Ball max speed:                     0.13 rad/frame  (default 0.13)
+Ball height limit:                  site-specific   (default 0 = off) - see below
+Ball jump confidence:               0.5             (default 0.5)
+Ball acquire range:                 0               (leave off)
+Player height limit:                0               (leave off)
 ```
 
 Why each of these, briefly: **Cluster mode -> trimmed_mean** fixes the
@@ -93,6 +102,42 @@ real CLI A/B render, with ball-tracking presence and *typical*
 (non-peak) smoothness unchanged - that asymmetry (peaks down, average
 unchanged) is the expected signature of this specific parameter, not a
 fluke.
+
+**Ball coast time 8s + Ball hold time 8s** (validated 2026-09-18 on two
+real 60s windows of the same J011 match, `03 Berghem_Sport - sv O.S.S`).
+These two are the pair that actually matters; everything else in the
+stray-ball block below is situational.
+
+They solve different halves of the same symptom - "the camera drifts off
+the ball and comes back". **Ball coast time** governs how long the
+*tracker* keeps reporting a position through a detection gap; **Ball hold
+time** governs how long the *camera* keeps using that last position after
+the tracker has given up entirely. Before this, a lost ball immediately
+released the aim to the player cluster, so every gap longer than the
+coast budget produced a visible swing away and back.
+
+That swing is almost always wasted motion: measured across both windows,
+a ball that disappears reappears a median of **1.4 deg** (near play) to
+**8 deg** (far play) from where it vanished, and within half a frame
+width in **65-91%** of cases. Holding the aim keeps the shot still *and*
+leaves the camera already pointed at the ball when it returns.
+
+The 8s coast figure comes from the gap distribution, not taste: the
+problem window had 17 detection gaps >0.1s, the longest 7.9s. 2.5s
+bridged 10 of them, 5s bridged 11, **8s bridged all 17**. Measured effect
+on that window (camera-to-ball error / ball inside frame):
+
+```
+coast 5s, hold 0   25 deg   48%     <- what the GUI shipped with
+coast 8s, hold 0   23 deg   47%
+coast 8s, hold 3   19 deg   47%
+coast 8s, hold 8   13 deg   65%     <- recommended
+```
+
+The calm window was unchanged by all four (22 deg / 33%), so this is a
+free win there rather than a trade. Total camera travel also *fell*
+(4.82 -> 3.79 rad), i.e. the shot gets steadier, not busier. The GUI
+slider maxed at 5s until 2026-09-18; it now goes to 15s.
 
 **Reduce lookahead memory (8-bit) - currently required for 10-bit
 sources, not just a VRAM fallback.** With it off, a 10-bit source (e.g.
@@ -474,6 +519,73 @@ Source: `FieldPannerConfig::{broadcast, action, frame_all}` in
   outside the pitch) - that's the ROI filter working as intended, not a
   coast-time problem.
 
+## When a second ball is in view (2026-09-18)
+
+On a rig that also sees a neighbouring pitch, a warm-up or adjacent-match
+ball can enter the field ROI and steal the camera. Investigated in depth
+on `03 Berghem_Sport - sv O.S.S` 120-180s, where the tracker spent 30% of
+the window on the wrong ball.
+
+**What actually works**
+
+- **Ball max speed** (default `0.13` rad per processed frame). A real
+  ball cannot cross the panorama between two frames, so anything faster
+  is a *different* ball and is rejected. This is physics, not a
+  heuristic, which is why it generalises. Measured: the tracker was
+  flipping ~1.6 rad back and forth within 0.3s, at one point abandoning
+  a 0.90-confidence detection for a 0.28 one. Rapid flips 3 -> 0 with no
+  loss of tracking time. Results were flat across 0.08-0.20, so the exact
+  value is not delicate.
+- **Ball height limit** (default `0` = off). A ball on a further pitch
+  sits *higher* in frame and is ~half the size. On this camera every
+  stray-ball track sat at pitch +0.17..+0.25 with detection size ~0.005,
+  while the match ball sat at -0.16..-0.31 at roughly twice that. Setting
+  `0.12` cut time-on-wrong-ball from 30% to **1%**.
+
+  **This one is site-specific and cuts both ways.** Play at the far end
+  of your *own* pitch also sits high in frame: in the same window, 22% of
+  genuine match-ball detections were above a 0.15 ceiling, and a ball
+  rolling away from the camera gets smaller and higher in exactly the
+  same way a foreign ball does. Start at 0, lower it only as far as the
+  wrong-ball problem requires, and check an AI Debug export to see where
+  your own far touchline actually sits. On a rig with no neighbouring
+  pitch in view, leave it off.
+
+**What was measured and rejected** - recorded so these aren't re-tried:
+
+- **Detector confidence** cannot separate the two balls: both were
+  detected at 0.79-0.80. Lowering the threshold 0.20 -> 0.05 *worsened*
+  things (our ball 21% -> 22%, the stray ball 30% -> 46%).
+- **Proximity to the player cluster** is actively backwards here. The
+  stray ball had 5 players within 0.40 rad; the real match ball had 2 -
+  the kids playing with the other ball are tracked people too. The
+  `Ball acquire range` slider implements this idea; it is off by default
+  and should stay off unless a site proves otherwise.
+- **Motion / "the ball is stationary"** fails because the match ball is
+  frequently stationary too (throw-ins, restarts, dead time).
+- **Player height limit** appears to help but does so for the wrong
+  reason: at 0.10 it leaves a median of *one* player, so the cluster
+  collapses and the panner falls back to ball-only follow in 61% of
+  frames. That flatters this particular window and would misbehave the
+  moment play moves upfield. Off by default; not recommended.
+
+**The real limit is detection, not tuning.** Production preprocessing
+scales the whole 3840x2880 frame into the model's 1920x1920 square, so a
+ball measuring 32x34 px in the source reaches the model at **16x17 px**,
+with 25% of the input wasted on letterbox padding. When the ball is seen
+at all its confidence is high (median 0.83) - the model is not unsure, it
+simply misses small balls. This is why neither `detection_interval` 1 vs
+3 (21% detection rate either way) nor any confidence threshold moves the
+needle, and it caps what panner tuning can achieve. Tiled inference would
+present the same ball at ~21x23 px; the code exists for the TensorRT/CUDA
+path but production on Windows runs the wgpu path, which has no tiling -
+see `crates/reco-detect/src/detectors/trt/mod.rs` and
+`crates/reco-detect/src/wgpu_preprocess.rs`.
+Exporting the model at a non-square 1440x1920 input does *not* work
+around it: `CpuYoloDetector::input_size` is a single square dimension, so
+reco reads such a model as 1440x1440 and scales the ball down further
+(tested 2026-09-18, also ~4x slower).
+
 ## Extra parameters (not yet exposed in the GUI)
 
 A few `FieldPannerConfig` fields have no Export-dialog control today and
@@ -482,6 +594,7 @@ can currently only be changed via a config file / CLI flag consuming
 `pitch_near`/`pitch_far`/`distance_bias_max`, `edge_bias_max`,
 `max_velocity_rad_per_sec`, `velocity_alpha`,
 `pitch_bias`, `ball_presence_decay`/`ball_presence_attack`,
+`max_player_pitch` (GUI: "Player height limit", off by default),
 `velocity_fov_bias_max`, `ball_frame_margin_deg`,
 `lead_gain`/`lead_alpha`,
 `keep_fraction` (trimmed-mean only). See the field-level doc comments in

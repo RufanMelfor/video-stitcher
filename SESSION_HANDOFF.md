@@ -1,3 +1,165 @@
+# Session handoff - 2026-09-18 (TGR_PC), newest: ball-tracking/panner session - four new autocam settings, two of which actually matter (Ball coast time + Ball hold time); ROOT CAUSE of the remaining problem is detection scale, not tuning
+
+## READ THIS FIRST - 2026-09-18 entry (latest)
+
+**Nothing is committed.** 13 files modified, all of today's work is
+uncommitted in the working tree. `crates/reco-detect/src/detectors/trt/mod.rs`
+and part of `panners/field.rs` were already modified before this session
+(tiled inference + the 2026-09-17 pendulum fix) - do not attribute those
+to today.
+
+### The user-visible problem and where it actually came from
+
+Reported: "the camera drifts off to the other ball and comes back", and
+later "at 22s it goes wrong and stays wrong". Two different windows of
+`03 Berghem_Sport - sv O.S.S1920`: **120-180s** (calm) and **1660-1720s**
+(the hard one).
+
+The user's own diagnosis was right and mine was wrong twice. Worth
+recording both corrections:
+
+1. I claimed 94% of detected players were "on a neighbouring pitch" and
+   the ROI was letting them through. **False.** They are the user's own
+   players, inside the ROI, just further from the camera - on a
+   downward-tilted rig the far half of your own pitch sits high in frame.
+   The user caught this ("hoe kan dit als alleen spelers binnen de ROI
+   getracked mogen worden"). The ROI works: it drops 23% of detections,
+   and running without it makes everything worse (players/frame 18 -> 28,
+   ball in frame 16% -> 9%).
+2. The "Player height limit" I built on the back of that wrong story
+   appears to help only because at 0.10 it leaves a median of **one**
+   player, collapsing the cluster so the panner falls back to ball-only
+   follow in 61% of frames. It flatters one window and would misbehave
+   the moment play moves upfield. Off by default, do not recommend.
+
+### What actually fixed it
+
+**Ball coast time 8s + Ball hold time 8s.** `ball_hold_secs` is new
+(the user's idea: "na een ball coasting niet meteen weg draaien, maar
+gewoon wachten tot er weer een bal beschikbaar is"). Coast governs how
+long the *tracker* reports a position; hold governs how long the *camera*
+keeps using the last one after the tracker gives up.
+
+Justification, measured on 1660-1720s: a ball that disappears reappears a
+median of 1.4 deg (near) to 8 deg (far) from where it vanished, within
+half a frame width in 65-91% of cases - so swinging to the cluster and
+back is wasted motion. 17 detection gaps >0.1s, longest 7.9s; 2.5s
+bridged 10, 5s bridged 11, 8s bridged all 17.
+
+```
+coast 5s hold 0   err 25 deg   ball in frame 48%   pan travel 4.82
+coast 8s hold 0       23 deg                 47%             3.95
+coast 8s hold 3       19 deg                 47%             3.91
+coast 8s hold 8       13 deg                 65%             3.79   <- recommended
+```
+
+Calm window unchanged by all four (22 deg / 33%), so this is free, not a
+trade. Camera travel *fell*, i.e. steadier shot.
+
+### The real ceiling: detection scale (not fixable by tuning)
+
+`WgpuPreprocessor` scales the whole 3840x2880 frame into the model's
+1920x1920 square: `scale=0.500, pad=(0.0,240.0)`. A ball measuring 32x34
+px in the source reaches the model at **16x17 px**, and 25% of the input
+is black padding. When the ball *is* seen, confidence is high (median
+0.83) - the model is not unsure, it misses small balls.
+
+Consequences measured today, all dead ends:
+- `detection_interval` 1 vs 3: **identical** 21% ball-detection rate.
+  Export speed 15 vs 37 fps, so interval 3-5 is free.
+- Lowering `confidence_threshold` 0.20 -> 0.05 made it **worse**: our
+  ball 21% -> 22%, the stray ball 30% -> 46%.
+- Re-exporting the model at a non-square 1440x1920 input **does not
+  work**: `CpuYoloDetector::input_size` is a single square dimension, so
+  reco reads it as 1440x1440, scaling the ball down further, and it ran
+  ~4x slower (6.0 vs 22.7 fps). Test model was deleted at user request.
+- Tiling would present the ball at ~21x23 px (1.33x) but costs ~2x
+  inference (detection is 89% of export time). **User explicitly declined
+  building it into the wgpu path**: "nee niet bouwen, want dat gaf eerder
+  allerlei problemen met zich mee tijdens het pad bouwen."
+
+Remaining route if this is ever picked up again: training data with more
+small, far, rolling balls - the model fails below ~0.008 relative size.
+
+### Separating two balls: what works and what was ruled out
+
+The 120-180s window has a second ball (adjacent pitch). Five signals were
+measured; only one generalises.
+
+- **Ball max speed** (default 0.13 rad/frame) - WORKS. Physics: a real
+  ball cannot cross the panorama between frames. Rapid flips 3 -> 0, no
+  loss of tracking time. Flat across 0.08-0.20, so not delicate.
+  Implemented tick-based, not wall-clock: `timestamp_ms` carries
+  processing time (median 8ms, outliers >200ms on 33ms frames), which
+  would make the limit depend on machine load.
+- **Ball height limit** (default 0 = off) - WORKS but is site-specific.
+  Stray tracks sat at pitch +0.17..+0.25, size ~0.005; the match ball at
+  -0.16..-0.31 at twice that. 0.12 cut time-on-wrong-ball 30% -> 1%.
+  BUT 22% of genuine match-ball detections sit above a 0.15 ceiling, and
+  a ball rolling away looks identical to a foreign one. Verified it was
+  NOT the cause of the 1660-1720s failure (detections identical with and
+  without it).
+- **Confidence** - cannot separate them: 0.79 vs 0.80.
+- **Proximity to player cluster** - actively backwards: the stray ball
+  had 5 players within 0.40 rad, the match ball 2. (`Ball acquire range`
+  implements this; leave off.)
+- **Motion / stationary** - fails, the match ball is often stationary too.
+
+### Also found
+
+- The panner's `max_velocity_rad_per_sec` is 0.18 (~10 deg/s) and the
+  camera sits at ~8% of it (median 0.014 rad/s), reaching the cap in only
+  42 of 1797 frames. It is not the limiter people assume.
+- `cluster_mode` density vs trimmed_mean: density's centre jumps >0.2 rad
+  43 times vs trimmed_mean's 6, but in the *camera* output both give zero
+  direction reversals and identical p99 acceleration - velocity smoothing
+  absorbs it. Performance identical (seg2: both 13 deg / 65%). Use
+  trimmed_mean, it is what the user's calibration had.
+- The user reported the camera "springt tijdens een langzame bal". Not
+  reproduced in either window; the largest steps (0.81 deg/frame) are the
+  velocity cap during genuine fast pans. **Needs a timestamp from the
+  user to investigate further.**
+- GUI vs CLI parity trap: the CLI does NOT read `cluster_mode` /
+  `cluster_bandwidth_rad` from the calibration (no flags exist), so CLI
+  runs silently use density/0.30 while the GUI uses the saved values.
+  This caused a real "my GUI differs from your video" report. Work
+  around it by editing a copy of the calibration.
+
+### Code changes (all uncommitted)
+
+New in `trackers/ball.rs`: `with_max_ball_speed` (tick-based jump limit),
+`with_jump_confidence`, `with_max_ball_pitch`, `with_acquire_cluster_gate`.
+New in `panners/field.rs`: `ball_hold_secs`, `max_player_pitch`.
+Plumbed through `AutocamConfig`, `AutocamDefaults` (calibration JSON,
+all `#[serde(default)]` so old files load), GUI sliders, and CLI flags
+(`--ball-max-speed`, `--ball-jump-confidence`, `--ball-max-pitch`,
+`--ball-acquire-max-dist`, `--ball-acquire-established-frames`,
+`--ball-hold-secs`, `--max-player-pitch`).
+
+98 reco-autocam tests pass (was 78), clippy clean. Also: "Ball coast
+time" slider max raised 5 -> 15s, and the mouse wheel no longer changes
+"Detect every N frames" (a TouchArea swallows the wheel - it was
+retuning detection while scrolling the panel).
+
+`docs/ai-panner-tuning.md` updated with all of the above (488 -> 600
+lines), including the rejected approaches so they are not re-tried.
+
+### Recommended settings
+
+Already in the user's Calibration.json except the last two:
+detection_interval 3-5, player_anchor_rad 0.5, confidence 0.20,
+ball_weight 0.6, ball_max_dist_from_cluster 1.0, fov 35/60/50.16,
+cluster_mode trimmed_mean, bandwidth 0.35, dead_zone 0.15,
+cluster_alpha 0.08-0.15, fov_alpha 0.04, ball_max_pitch 0.12,
+ball_max_speed 0.13, ball_jump_confidence 0.5,
+**ball_coast_secs 8**, **ball_hold_secs 8** (these two still need
+setting), ball_acquire_max_dist 0, max_player_pitch 0.
+
+Calibration backup before today's edits:
+`Calibration.json.bak_20260918_voor_video7` in the match folder.
+Test videos: `D:\CLAUDE\cli_ball_tests_20260918\` (12 clips, numbered in
+the order they were produced; 11 and 12 are the current best).
+
 # Session handoff - 2026-09-16 (TGR_PC), newest: training/ consolidated into one growing dataset, round8 deleted, round9 full-training command ready to launch
 
 ## READ THIS FIRST - 2026-09-16 entry (latest)
