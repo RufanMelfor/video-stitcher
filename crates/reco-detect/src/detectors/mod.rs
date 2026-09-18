@@ -290,10 +290,36 @@ pub(crate) fn remap_tile_to_frame(mut d: Detection, tile: TileGeom, frame_w: u32
 /// Merge two tiles' already frame-remapped detections and drop
 /// duplicates in the overlap band via the same greedy IoU NMS
 /// `postprocess_balldet` already uses for its own pre-NMS output.
+///
+/// NMS runs *per class*. `greedy_nms`/`box_iou` compare geometry only,
+/// which is correct at the `postprocess_balldet` call site (every
+/// candidate there is `BALL_CLASS_ID`) but wrong here: this merges the
+/// output of the multi-class `postprocess`, where a ball at a player's
+/// feet overlaps that player's box far beyond the 0.45 threshold. The
+/// lower-confidence box of such a pair - routinely the ball, being
+/// small and harder to detect - would then be silently dropped, in the
+/// overlap band only, making it look like a tile-geometry bug rather
+/// than a merge bug. Splitting by class keeps cross-tile dedup working
+/// (a second view of one object always carries the same `class_id`)
+/// while letting different classes overlap freely.
 pub(crate) fn merge_tile_detections(left: Vec<Detection>, right: Vec<Detection>) -> Vec<Detection> {
     let mut all = left;
     all.extend(right);
-    greedy_nms(all, 0.45)
+
+    let mut classes: Vec<u16> = all.iter().map(|d| d.class_id).collect();
+    classes.sort_unstable();
+    classes.dedup();
+
+    let mut merged = Vec::with_capacity(all.len());
+    for class_id in classes {
+        let of_class: Vec<Detection> = all
+            .iter()
+            .filter(|d| d.class_id == class_id)
+            .copied()
+            .collect();
+        merged.extend(greedy_nms(of_class, 0.45));
+    }
+    merged
 }
 
 #[cfg(test)]
@@ -301,10 +327,21 @@ mod tile_tests {
     use super::*;
 
     fn det(center_x: f32, center_y: f32, width: f32, height: f32) -> Detection {
+        det_class(1, 0.9, center_x, center_y, width, height)
+    }
+
+    fn det_class(
+        class_id: u16,
+        confidence: f32,
+        center_x: f32,
+        center_y: f32,
+        width: f32,
+        height: f32,
+    ) -> Detection {
         Detection {
             camera: CameraId::Left,
-            class_id: 1,
-            confidence: 0.9,
+            class_id,
+            confidence,
             center_x,
             center_y,
             width,
@@ -358,6 +395,56 @@ mod tile_tests {
             1,
             "seam-crossing duplicate should be deduped by NMS, got {merged:?}"
         );
+    }
+
+    /// A ball close to a distant player's box overlaps it beyond the NMS
+    /// threshold - far up the pitch a player's box is only a little
+    /// bigger than the ball's. Class-agnostic NMS dropped whichever of
+    /// the two was less confident, in practice the ball (small, low
+    /// confidence - the very detections this project fights to keep,
+    /// see project_production_tiled_inference_gap.md). The ball then
+    /// vanished in the tiles' overlap band only, while the same ball a
+    /// few hundred px left or right survived.
+    #[test]
+    fn merge_keeps_a_ball_overlapping_a_player_box() {
+        // Distant player and a ball at their feet, nearly coincident
+        // boxes of similar size: IoU lands well over the 0.45 threshold.
+        let player = det_class(0, 0.90, 0.500, 0.500, 0.012, 0.030);
+        let ball = det_class(1, 0.40, 0.501, 0.504, 0.010, 0.026);
+        let iou = box_iou(&player, &ball);
+        assert!(
+            iou > 0.45,
+            "test setup: boxes must overlap beyond the NMS threshold, got {iou}"
+        );
+
+        let merged = merge_tile_detections(vec![player], vec![ball]);
+        assert_eq!(
+            merged.len(),
+            2,
+            "a ball overlapping a player must survive cross-tile merge, got {merged:?}"
+        );
+        assert!(merged.iter().any(|d| d.class_id == 1), "ball was dropped");
+    }
+
+    /// Per-class NMS must still dedupe same-class duplicates.
+    #[test]
+    fn merge_dedupes_same_class_duplicates_across_classes() {
+        let ball_l = det_class(1, 0.80, 0.5, 0.5, 0.04, 0.05);
+        let ball_r = det_class(1, 0.60, 0.5, 0.5, 0.04, 0.05);
+        let player_l = det_class(0, 0.90, 0.2, 0.5, 0.05, 0.20);
+        let player_r = det_class(0, 0.70, 0.2, 0.5, 0.05, 0.20);
+
+        let merged = merge_tile_detections(vec![ball_l, player_l], vec![ball_r, player_r]);
+        assert_eq!(
+            merged.len(),
+            2,
+            "one ball + one player expected, got {merged:?}"
+        );
+        assert_eq!(merged.iter().filter(|d| d.class_id == 1).count(), 1);
+        assert_eq!(merged.iter().filter(|d| d.class_id == 0).count(), 1);
+        // The higher-confidence copy of each class wins.
+        let ball = merged.iter().find(|d| d.class_id == 1).unwrap();
+        assert!((ball.confidence - 0.80).abs() < 1e-6);
     }
 
     #[test]
