@@ -163,6 +163,41 @@ pub struct AutocamConfig {
     /// 0.67s at 30fps, usually too short for a real throw-in/out-of-
     /// bounds retrieval).
     pub ball_coast_secs: Option<f32>,
+    /// Max distance (radians) at which the ball tracker may *start* a
+    /// new track from the dominant player group's centre. Guards
+    /// against acquiring a stray ball from an adjacent pitch, which the
+    /// player-anchor gate cannot catch on its own because the people
+    /// playing with that ball are tracked players too. `None` (the
+    /// default) disables the gate; it never constrains an already
+    /// established track. See
+    /// [`trackers::ball::BallTracker::with_acquire_cluster_gate`].
+    pub ball_acquire_max_dist_from_cluster: Option<f32>,
+    /// Consecutively tracked frames before
+    /// [`ball_acquire_max_dist_from_cluster`](Self::ball_acquire_max_dist_from_cluster)
+    /// arms itself, so a kickoff is never blocked. `None` keeps
+    /// [`trackers::ball::DEFAULT_ACQUIRE_ESTABLISHED_FRAMES`].
+    pub ball_acquire_established_frames: Option<u64>,
+    /// Confidence a ball detection needs to be followed across a jump
+    /// longer than the tracker's max-jump radius while player anchors
+    /// are active. Stops the tracker teleporting between two different
+    /// balls on a weak detection. `None` keeps
+    /// [`trackers::ball::DEFAULT_JUMP_CONFIDENCE`]; `0.0` disables the
+    /// check. See
+    /// [`trackers::ball::BallTracker::with_jump_confidence`].
+    pub ball_jump_confidence: Option<f32>,
+    /// Apparent ball speed limit in radians of panorama per tracker
+    /// tick (one processed frame).
+    /// Rejects a "jump" no real ball could make, which is the only
+    /// signal that separates two equally-confident different balls.
+    /// `None` keeps [`trackers::ball::DEFAULT_MAX_BALL_SPEED_RAD_PER_TICK`];
+    /// `0.0` disables it. See
+    /// [`trackers::ball::BallTracker::with_max_ball_speed`].
+    pub ball_max_speed_rad_per_tick: Option<f32>,
+    /// Reject ball detections above this world pitch (radians) - a
+    /// neighbouring pitch's ball sits higher in frame than this
+    /// match's play can. `None` accepts everything. See
+    /// [`trackers::ball::BallTracker::with_max_ball_pitch`].
+    pub ball_max_pitch: Option<f32>,
 }
 
 impl AutocamConfig {
@@ -179,6 +214,11 @@ impl AutocamConfig {
             player_anchor_max_rad: None,
             player_anchor_max_rad_near: None,
             ball_coast_secs: None,
+            ball_acquire_max_dist_from_cluster: None,
+            ball_acquire_established_frames: None,
+            ball_jump_confidence: None,
+            ball_max_speed_rad_per_tick: None,
+            ball_max_pitch: None,
         }
     }
 
@@ -617,7 +657,51 @@ pub fn setup_autocam(
                             .ball_coast_secs
                             .map(|secs| (secs * fps).round() as u32)
                             .unwrap_or(crate::trackers::ball::DEFAULT_COAST_FRAMES),
+                    )
+                    .with_jump_confidence(
+                        config
+                            .ball_jump_confidence
+                            .unwrap_or(crate::trackers::ball::DEFAULT_JUMP_CONFIDENCE),
+                    )
+                    .with_max_ball_speed(
+                        config
+                            .ball_max_speed_rad_per_tick
+                            .unwrap_or(crate::trackers::ball::DEFAULT_MAX_BALL_SPEED_RAD_PER_TICK),
+                    )
+                    .with_max_ball_pitch(
+                        config
+                            .ball_max_pitch
+                            .unwrap_or(crate::trackers::ball::DEFAULT_MAX_BALL_PITCH),
+                    )
+                    .with_acquire_cluster_gate(
+                        config.ball_acquire_max_dist_from_cluster,
+                        // Share the panner's own notion of "the main
+                        // group" so aim and acquisition never disagree.
+                        config
+                            .field_panner_config
+                            .as_ref()
+                            .map(|c| c.cluster_bandwidth_rad)
+                            .unwrap_or(
+                                crate::trackers::ball::DEFAULT_ACQUIRE_CLUSTER_BANDWIDTH_RAD,
+                            ),
+                        config.ball_acquire_established_frames.unwrap_or(
+                            crate::trackers::ball::DEFAULT_ACQUIRE_ESTABLISHED_FRAMES,
+                        ),
                     );
+                if let Some(max_pitch) = config.ball_max_pitch {
+                    log::info!(
+                        "Ball pitch ceiling: detections above pitch {max_pitch:.2}rad are ignored                          (a neighbouring pitch's ball sits higher in frame)"
+                    );
+                }
+                if let Some(max_dist) = config.ball_acquire_max_dist_from_cluster {
+                    log::info!(
+                        "Ball acquisition gate: a new track must start within {max_dist:.2}rad of \
+                         the main player group, once a track has held for {} frames",
+                        config.ball_acquire_established_frames.unwrap_or(
+                            crate::trackers::ball::DEFAULT_ACQUIRE_ESTABLISHED_FRAMES
+                        )
+                    );
+                }
                 target.set_ball_tracker(Box::new(ball_tracker));
 
                 // Attach the player provider only when the model actually

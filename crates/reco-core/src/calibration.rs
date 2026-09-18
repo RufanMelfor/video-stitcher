@@ -714,6 +714,54 @@ pub struct AutocamDefaults {
     /// (which would mean "never coast").
     #[serde(default = "default_ball_coast_secs")]
     pub ball_coast_secs: f32,
+    /// Max panorama distance (radians) at which the ball tracker may
+    /// *start* a new track from the main player group - see
+    /// `reco_autocam::AutocamConfig::ball_acquire_max_dist_from_cluster`.
+    /// Rejects a stray ball from an adjacent pitch, which the
+    /// player-anchor gate lets through because the people playing with
+    /// it are tracked players too. `0.0` (the default, and what older
+    /// saved data reads as) disables the gate; it never constrains an
+    /// already established track.
+    #[serde(default)]
+    pub ball_acquire_max_dist_from_cluster: f32,
+    /// Consecutively tracked frames before
+    /// `ball_acquire_max_dist_from_cluster` arms itself, so the first
+    /// acquisition of a match (a kickoff, always from the centre) is
+    /// never blocked. Defaults to the tracker's own value when absent.
+    #[serde(default = "default_ball_acquire_established_frames")]
+    pub ball_acquire_established_frames: u32,
+    /// Confidence needed to follow a ball detection across a long
+    /// jump - see `reco_autocam::AutocamConfig::ball_jump_confidence`.
+    #[serde(default = "default_ball_jump_confidence")]
+    pub ball_jump_confidence: f32,
+    /// Apparent ball speed limit in radians per processed frame - see
+    /// `reco_autocam::AutocamConfig::ball_max_speed_rad_per_tick`.
+    /// This is what stops the tracker flipping between two different
+    /// balls; `0.0` disables it.
+    #[serde(default = "default_ball_max_speed")]
+    pub ball_max_speed: f32,
+    /// Ignore ball detections above this world pitch (radians) - a
+    /// neighbouring pitch's ball sits higher in frame than this
+    /// match's own play can. `0.0` (the default, and what older saved
+    /// data reads as) disables the filter. See
+    /// `reco_autocam::AutocamConfig::ball_max_pitch`.
+    #[serde(default)]
+    pub ball_max_pitch: f32,
+    /// Ignore players above this world pitch when forming the camera's
+    /// action cluster - cuts out a neighbouring pitch's warm-up crowd,
+    /// which can otherwise outnumber the match and pull the camera off
+    /// it entirely. `0.0` (the default, and what older saved data
+    /// reads as) counts every player. See
+    /// `reco_autocam::panners::FieldPannerConfig::max_player_pitch`.
+    #[serde(default)]
+    pub max_player_pitch: f32,
+    /// Seconds the camera keeps aiming at the ball's last known
+    /// position after the tracker loses it, instead of swinging back to
+    /// the players - see
+    /// `reco_autocam::panners::FieldPannerConfig::ball_hold_secs`.
+    /// `0.0` (the default) releases immediately.
+    #[serde(default)]
+    pub ball_hold_secs: f32,
     /// Detector confidence floor - see
     /// `reco_autocam::AutocamConfig::confidence_threshold`. A raw
     /// detection (any class) below this score never reaches the
@@ -805,6 +853,22 @@ fn default_ball_coast_secs() -> f32 {
 /// is the right value for data saved before this field existed).
 fn default_confidence_threshold() -> f32 {
     0.10
+}
+
+fn default_ball_jump_confidence() -> f32 {
+    // Mirrors reco_autocam::trackers::ball::DEFAULT_JUMP_CONFIDENCE.
+    0.5
+}
+
+fn default_ball_max_speed() -> f32 {
+    // Mirrors reco_autocam::trackers::ball::DEFAULT_MAX_BALL_SPEED_RAD_PER_TICK.
+    0.13
+}
+
+fn default_ball_acquire_established_frames() -> u32 {
+    // Mirrors reco_autocam::trackers::ball::DEFAULT_ACQUIRE_ESTABLISHED_FRAMES
+    // for the same crate-graph reason as `default_ball_coast_secs`.
+    45
 }
 
 /// Scoreboard overlay settings saved alongside a calibration, so opening
@@ -1554,6 +1618,13 @@ mod tests {
             detection_interval: 3,
             player_anchor_rad: 0.35,
             ball_coast_secs: 1.5,
+            ball_acquire_max_dist_from_cluster: 0.0,
+            ball_acquire_established_frames: 45,
+            ball_jump_confidence: 0.5,
+            ball_max_speed: 0.13,
+            ball_max_pitch: 0.0,
+            max_player_pitch: 0.0,
+            ball_hold_secs: 0.0,
             lookahead_secs: 0.5,
             lookahead_reduced_bit_depth: true,
             preset: "action".into(),

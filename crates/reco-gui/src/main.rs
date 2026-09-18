@@ -3065,6 +3065,13 @@ fn snapshot_autocam_defaults(app: &RecoApp) -> reco_core::calibration::AutocamDe
         detection_interval: app.get_export_detection_interval() as u32,
         player_anchor_rad: app.get_export_player_anchor_rad(),
         ball_coast_secs: app.get_export_ball_coast_secs(),
+        ball_acquire_max_dist_from_cluster: app.get_export_ball_acquire_max_dist(),
+        ball_acquire_established_frames: app.get_export_ball_acquire_established_frames() as u32,
+        ball_jump_confidence: app.get_export_ball_jump_confidence(),
+        ball_max_speed: app.get_export_ball_max_speed(),
+        ball_max_pitch: app.get_export_ball_max_pitch(),
+        max_player_pitch: app.get_export_max_player_pitch(),
+        ball_hold_secs: app.get_export_ball_hold_secs(),
         lookahead_secs: app.get_export_lookahead_secs() as f64,
         lookahead_reduced_bit_depth: app.get_export_lookahead_reduced_bit_depth(),
         preset: app.get_export_panner_preset().to_string(),
@@ -3100,6 +3107,13 @@ fn apply_autocam_defaults(app: &RecoApp, ac: &reco_core::calibration::AutocamDef
     app.set_export_detection_interval(ac.detection_interval as i32);
     app.set_export_player_anchor_rad(ac.player_anchor_rad);
     app.set_export_ball_coast_secs(ac.ball_coast_secs);
+    app.set_export_ball_acquire_max_dist(ac.ball_acquire_max_dist_from_cluster);
+    app.set_export_ball_acquire_established_frames(ac.ball_acquire_established_frames as f32);
+    app.set_export_ball_jump_confidence(ac.ball_jump_confidence);
+    app.set_export_ball_max_speed(ac.ball_max_speed);
+    app.set_export_ball_max_pitch(ac.ball_max_pitch);
+    app.set_export_max_player_pitch(ac.max_player_pitch);
+    app.set_export_ball_hold_secs(ac.ball_hold_secs);
     app.set_export_lookahead_secs(ac.lookahead_secs as f32);
     app.set_export_lookahead_reduced_bit_depth(ac.lookahead_reduced_bit_depth);
     app.set_export_panner_preset(ac.preset.clone().into());
@@ -7568,6 +7582,14 @@ fn main() -> anyhow::Result<()> {
             detection_interval: app.get_export_detection_interval() as u32,
             player_anchor_rad: app.get_export_player_anchor_rad(),
             ball_coast_secs: app.get_export_ball_coast_secs(),
+            ball_acquire_max_dist_from_cluster: app.get_export_ball_acquire_max_dist(),
+            ball_acquire_established_frames: app.get_export_ball_acquire_established_frames()
+                as u32,
+            ball_jump_confidence: app.get_export_ball_jump_confidence(),
+            ball_max_speed: app.get_export_ball_max_speed(),
+            ball_max_pitch: app.get_export_ball_max_pitch(),
+            max_player_pitch: app.get_export_max_player_pitch(),
+            ball_hold_secs: app.get_export_ball_hold_secs(),
             confidence_threshold: app.get_export_confidence_threshold(),
             lookahead_secs: app.get_export_lookahead_secs() as f64,
             lookahead_reduced_bit_depth: app.get_export_lookahead_reduced_bit_depth(),

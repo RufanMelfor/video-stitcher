@@ -96,6 +96,29 @@ pub struct AutocamUiConfig {
     /// brief field-ROI exit) before declaring the track lost. See
     /// `reco_autocam::AutocamConfig::ball_coast_secs`.
     pub ball_coast_secs: f32,
+    /// Max panorama distance (radians) at which a *new* ball track may
+    /// start from the main player group; `0` disables the gate. See
+    /// `reco_autocam::AutocamConfig::ball_acquire_max_dist_from_cluster`.
+    pub ball_acquire_max_dist_from_cluster: f32,
+    /// Tracked frames before the acquisition gate arms itself. See
+    /// `reco_autocam::AutocamConfig::ball_acquire_established_frames`.
+    pub ball_acquire_established_frames: u32,
+    /// Confidence needed to follow a long jump; `0` disables. See
+    /// `reco_autocam::AutocamConfig::ball_jump_confidence`.
+    pub ball_jump_confidence: f32,
+    /// Apparent ball speed limit, radians per processed frame; `0`
+    /// disables. See
+    /// `reco_autocam::AutocamConfig::ball_max_speed_rad_per_tick`.
+    pub ball_max_speed: f32,
+    /// Ball detection pitch ceiling (radians); `0` disables. See
+    /// `reco_autocam::AutocamConfig::ball_max_pitch`.
+    pub ball_max_pitch: f32,
+    /// Player pitch ceiling for the action cluster; `0` disables. See
+    /// `reco_autocam::panners::FieldPannerConfig::max_player_pitch`.
+    pub max_player_pitch: f32,
+    /// Seconds to hold the aim on a lost ball; `0` releases at once.
+    /// See `reco_autocam::panners::FieldPannerConfig::ball_hold_secs`.
+    pub ball_hold_secs: f32,
     /// Detector confidence floor `[0,1]` - a raw detection (any class)
     /// below this score never reaches the tracker. See
     /// `reco_autocam::AutocamConfig::confidence_threshold`. Applies to
@@ -343,6 +366,13 @@ pub fn run_export(
                 "detection_interval": autocam.detection_interval,
                 "player_anchor_rad": autocam.player_anchor_rad,
                 "ball_coast_secs": autocam.ball_coast_secs,
+                "ball_acquire_max_dist_from_cluster": autocam.ball_acquire_max_dist_from_cluster,
+                "ball_acquire_established_frames": autocam.ball_acquire_established_frames,
+                "ball_jump_confidence": autocam.ball_jump_confidence,
+                "ball_max_speed": autocam.ball_max_speed,
+                "ball_max_pitch": autocam.ball_max_pitch,
+                "max_player_pitch": autocam.max_player_pitch,
+                "ball_hold_secs": autocam.ball_hold_secs,
                 "confidence_threshold": autocam.confidence_threshold,
                 "lookahead_secs": autocam.lookahead_secs,
                 "lookahead_reduced_bit_depth": autocam.lookahead_reduced_bit_depth,
@@ -702,6 +732,14 @@ pub fn run_export(
                     detection_interval: autocam.detection_interval,
                     player_anchor_rad: autocam.player_anchor_rad,
                     ball_coast_secs: autocam.ball_coast_secs,
+                    ball_acquire_max_dist_from_cluster: autocam
+                        .ball_acquire_max_dist_from_cluster,
+                    ball_acquire_established_frames: autocam.ball_acquire_established_frames,
+                    ball_jump_confidence: autocam.ball_jump_confidence,
+                    ball_max_speed: autocam.ball_max_speed,
+                    ball_max_pitch: autocam.ball_max_pitch,
+                    max_player_pitch: autocam.max_player_pitch,
+                    ball_hold_secs: autocam.ball_hold_secs,
                     lookahead_secs: autocam.lookahead_secs,
                     lookahead_reduced_bit_depth: autocam.lookahead_reduced_bit_depth,
                     preset: autocam.preset.clone(),
@@ -760,6 +798,14 @@ pub fn run_export(
                 fov_default: ac.fov_default,
                 fov_alpha: ac.fov_alpha,
                 cluster_alpha: ac.cluster_alpha,
+                // 0 means "off"; the panner's own "count everyone" is
+                // infinity, so translate rather than passing 0 through.
+                max_player_pitch: if ac.max_player_pitch > 0.0 {
+                    ac.max_player_pitch
+                } else {
+                    f32::INFINITY
+                },
+                ball_hold_secs: ac.ball_hold_secs,
                 // Preset is the base; the visible knobs above overlay it
                 // (they mirror the preset until the user tweaks them).
                 ..reco_autocam::panners::FieldPannerConfig::from_preset_name(&ac.preset)
@@ -773,6 +819,21 @@ pub fn run_export(
                 .with_player_anchor_rad(ac.player_anchor_rad)
                 .with_ball_coast_secs(ac.ball_coast_secs)
                 .with_confidence_threshold(ac.confidence_threshold);
+            // 0 is the "off" encoding everywhere this value travels
+            // (slider, saved calibration, CLI flag).
+            autocam_config.ball_acquire_max_dist_from_cluster =
+                Some(ac.ball_acquire_max_dist_from_cluster).filter(|d| *d > 0.0);
+            autocam_config.ball_acquire_established_frames =
+                Some(ac.ball_acquire_established_frames as u64);
+            autocam_config.ball_jump_confidence = Some(ac.ball_jump_confidence);
+            autocam_config.ball_max_speed_rad_per_tick = Some(ac.ball_max_speed);
+            // 0 means "off"; the tracker's own "accept everything" is
+            // infinity, so translate rather than passing 0 through.
+            autocam_config.ball_max_pitch = if ac.ball_max_pitch > 0.0 {
+                Some(ac.ball_max_pitch)
+            } else {
+                None
+            };
             autocam_config.field_panner_config = Some(panner_cfg);
             let autocam_config = if let Some(roi) = field_roi.as_ref() {
                 autocam_config.with_field_roi(roi.clone())
