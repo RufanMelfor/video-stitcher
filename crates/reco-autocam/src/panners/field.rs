@@ -1533,19 +1533,6 @@ mod tests {
         );
     }
 
-    /// A coasting ball far outside `ball_max_dist_from_cluster` must
-    /// still hold the aim, instead of the camera swinging back to the
-    /// player cluster. The tracker's coast budget ("Ball coast time")
-    /// is what decides how long the ball stays relevant; this panner
-    /// must not run a second, shorter clock of its own via
-    /// `ball_presence` decay. Regression test for a real symptom: a
-    /// ball rolling outside the field ROI polygon loses its detections
-    /// (the ROI filter drops them before any tracker sees them), so the
-    /// tracker coasts - but the aim snapped back to the players anyway.
-    ///
-    /// See also [`tracking_ball_beyond_cluster_distance_still_holds_aim`]
-    /// for the Tracking-state half of this same fix.
-    #[test]
     /// With `ball_hold_secs` set, a ball the tracker has given up on
     /// still holds the aim for that long instead of releasing it to the
     /// cluster - the ball usually reappears close to where it vanished,
@@ -1573,7 +1560,10 @@ mod tests {
             out = p.decide(&w, &ctx(i, &cal));
         }
         let held = out.yaw;
-        assert!(held > 0.5, "setup: aim should sit near the ball, got {held}");
+        assert!(
+            held > 0.5,
+            "setup: aim should sit near the ball, got {held}"
+        );
 
         // Ball goes Lost. Within the hold window the aim must not run
         // back to the cluster at 0.0.
@@ -1635,6 +1625,18 @@ mod tests {
         );
     }
 
+    /// A coasting ball far outside `ball_max_dist_from_cluster` must
+    /// still hold the aim, instead of the camera swinging back to the
+    /// player cluster. The tracker's coast budget ("Ball coast time")
+    /// is what decides how long the ball stays relevant; this panner
+    /// must not run a second, shorter clock of its own via
+    /// `ball_presence` decay. Regression test for a real symptom: a
+    /// ball rolling outside the field ROI polygon loses its detections
+    /// (the ROI filter drops them before any tracker sees them), so the
+    /// tracker coasts - but the aim snapped back to the players anyway.
+    ///
+    /// See also [`tracking_ball_beyond_cluster_distance_still_holds_aim`]
+    /// for the Tracking-state half of this same fix.
     #[test]
     fn coasting_ball_beyond_cluster_distance_still_holds_aim() {
         let mut p = FieldPanner::with_config(

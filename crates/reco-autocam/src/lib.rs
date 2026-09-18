@@ -684,9 +684,9 @@ pub fn setup_autocam(
                             .unwrap_or(
                                 crate::trackers::ball::DEFAULT_ACQUIRE_CLUSTER_BANDWIDTH_RAD,
                             ),
-                        config.ball_acquire_established_frames.unwrap_or(
-                            crate::trackers::ball::DEFAULT_ACQUIRE_ESTABLISHED_FRAMES,
-                        ),
+                        config
+                            .ball_acquire_established_frames
+                            .unwrap_or(crate::trackers::ball::DEFAULT_ACQUIRE_ESTABLISHED_FRAMES),
                     );
                 if let Some(max_pitch) = config.ball_max_pitch {
                     log::info!(
@@ -697,9 +697,9 @@ pub fn setup_autocam(
                     log::info!(
                         "Ball acquisition gate: a new track must start within {max_dist:.2}rad of \
                          the main player group, once a track has held for {} frames",
-                        config.ball_acquire_established_frames.unwrap_or(
-                            crate::trackers::ball::DEFAULT_ACQUIRE_ESTABLISHED_FRAMES
-                        )
+                        config
+                            .ball_acquire_established_frames
+                            .unwrap_or(crate::trackers::ball::DEFAULT_ACQUIRE_ESTABLISHED_FRAMES)
                     );
                 }
                 target.set_ball_tracker(Box::new(ball_tracker));
