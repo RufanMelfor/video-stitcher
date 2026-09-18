@@ -1236,6 +1236,13 @@ export component RecoApp inherits Window {
     // own equivalent (kept as the slider's own literal default, same
     // convention as export-player-anchor-rad above).
     in-out property <float> export-ball-coast-secs: 0.67;
+    in-out property <float> export-ball-acquire-max-dist: 0.0;
+    in-out property <float> export-ball-jump-confidence: 0.5;
+    in-out property <float> export-ball-max-speed: 0.13;
+    in-out property <float> export-ball-max-pitch: 0.0;
+    in-out property <float> export-ball-hold-secs: 0.0;
+    in-out property <float> export-max-player-pitch: 0.0;
+    in-out property <float> export-ball-acquire-established-frames: 45;
     // A raw detection (any class) below this score never reaches the
     // tracker. 0.10 was the old hardcoded Field/Sweep floor - kept as
     // the slider's own literal default for the same reason as
@@ -1298,6 +1305,13 @@ export component RecoApp inherits Window {
     changed export-detection-interval => { root.autocam-settings-changed(); }
     changed export-player-anchor-rad => { root.autocam-settings-changed(); }
     changed export-ball-coast-secs => { root.autocam-settings-changed(); }
+    changed export-ball-acquire-max-dist => { root.autocam-settings-changed(); }
+    changed export-ball-jump-confidence => { root.autocam-settings-changed(); }
+    changed export-ball-max-speed => { root.autocam-settings-changed(); }
+    changed export-ball-max-pitch => { root.autocam-settings-changed(); }
+    changed export-ball-hold-secs => { root.autocam-settings-changed(); }
+    changed export-max-player-pitch => { root.autocam-settings-changed(); }
+    changed export-ball-acquire-established-frames => { root.autocam-settings-changed(); }
     changed export-confidence-threshold => { root.autocam-settings-changed(); }
     changed export-panner-preset => { root.autocam-settings-changed(); }
     changed export-lookahead-secs => { root.autocam-settings-changed(); }
@@ -6163,18 +6177,29 @@ export component RecoApp inherits Window {
                                     tip: "Runs AI detection every Nth frame; frames in between reuse the last detection. Higher = cheaper but staler positions during fast action.";
                                     Text { text: "Detect every N frames"; color: #ccc; font-size: 12px; }
                                 }
-                                ComboBox {
-                                    model: ["1", "3", "5", "10", "15", "30"];
-                                    current-index: root.export-detection-interval == 1 ? 0
-                                                 : root.export-detection-interval == 5 ? 2
-                                                 : root.export-detection-interval == 10 ? 3
-                                                 : root.export-detection-interval == 15 ? 4
-                                                 : root.export-detection-interval == 30 ? 5
-                                                 : 1;
-                                    selected(v) => {
-                                        root.export-detection-interval =
-                                            v == "1" ? 1 : v == "5" ? 5 : v == "10" ? 10
-                                            : v == "15" ? 15 : v == "30" ? 30 : 3;
+                                // The wheel must not change this value: it sits
+                                // in a scrolling panel, so scrolling past it
+                                // silently retuned detection. This TouchArea
+                                // swallows the wheel over the ComboBox and
+                                // forwards nothing, leaving click/keyboard
+                                // selection untouched.
+                                TouchArea {
+                                    height: interval-box.preferred-height;
+                                    scroll-event(e) => { return accept; }
+                                    interval-box := ComboBox {
+                                        width: 100%;
+                                        model: ["1", "3", "5", "10", "15", "30"];
+                                        current-index: root.export-detection-interval == 1 ? 0
+                                                     : root.export-detection-interval == 5 ? 2
+                                                     : root.export-detection-interval == 10 ? 3
+                                                     : root.export-detection-interval == 15 ? 4
+                                                     : root.export-detection-interval == 30 ? 5
+                                                     : 1;
+                                        selected(v) => {
+                                            root.export-detection-interval =
+                                                v == "1" ? 1 : v == "5" ? 5 : v == "10" ? 10
+                                                : v == "15" ? 15 : v == "30" ? 30 : 3;
+                                        }
                                     }
                                 }
                             }
@@ -6194,10 +6219,79 @@ export component RecoApp inherits Window {
                             label: "Ball coast time";
                             tip: "A ball leaving the field ROI looks identical to the tracker as \"no detection this frame\" - the ROI filter drops it before the tracker ever sees it. A ball already being tracked keeps holding its last known position for up to this long before the track is declared lost, same as any other brief detection gap - long enough to bridge a throw-in or a ball briefly rolling out of bounds and being brought back. A ball never tracked in the first place (e.g. a kid's ball just outside the pitch) never starts this countdown, so raising it doesn't make the panner more likely to trigger on that.";
                             minimum: 0.2;
-                            maximum: 5.0;
+                            maximum: 15.0;
                             value <=> root.export-ball-coast-secs;
                             suffix: " s";
                             decimals: 2;
+                        }
+
+                        LabeledSlider {
+                            label: "Ball hold time";
+                            tip: "After the tracker gives up on the ball, keep the camera pointed at its last known position for this long instead of swinging back to the players. A ball that disappears is usually just briefly undetected and comes back close to where it vanished - measured on real footage within half a frame width in 65-91% of cases - so swinging away only to return reads as the camera drifting off and coming back. Holding keeps the shot still and the camera is already in the right place when the ball returns. Works on top of \"Ball coast time\": that one decides how long the tracker keeps reporting a position, this one how long the camera keeps using the last one afterwards. Set to 0 for the old behaviour.";
+                            minimum: 0.0;
+                            maximum: 15.0;
+                            value <=> root.export-ball-hold-secs;
+                            suffix: " s";
+                            decimals: 1;
+                        }
+
+                        LabeledSlider {
+                            label: "Ball max speed";
+                            tip: "Stops the camera jumping to a different ball - a warm-up or neighbouring-pitch ball that is detected just as confidently as your own. A real ball cannot cross the pitch between two frames, so any \"move\" faster than this is treated as a different ball and ignored. Measured on real footage this removed every rapid back-and-forth flip between two balls. The allowance grows while the ball is missing, so a ball that was genuinely lost for a moment can still be picked up again anywhere. Lower = stricter. Set to 0 to switch the check off.";
+                            minimum: 0.0;
+                            maximum: 0.5;
+                            value <=> root.export-ball-max-speed;
+                            suffix: " rad/frame";
+                            decimals: 2;
+                        }
+
+                        LabeledSlider {
+                            label: "Player height limit";
+                            tip: "Ignores people higher up in the picture than your own pitch reaches, when the camera decides where the action is. If a neighbouring field is in view, everyone warming up over there is detected as a player too and can easily outnumber your match - on the test footage 94% of all detected people were on the other field, so the camera followed THAT group and your own ball was only in frame 16% of the time. Cutting them out moved the camera from 47 to 13 degrees off your ball. Set to 0 to count everyone. Use an AI Debug export to see where your own far touchline sits.";
+                            minimum: 0.0;
+                            maximum: 0.6;
+                            value <=> root.export-max-player-pitch;
+                            suffix: " rad";
+                            decimals: 2;
+                        }
+
+                        LabeledSlider {
+                            label: "Ball height limit";
+                            tip: "Ignores balls that sit higher up in the picture than your own pitch reaches - typically a ball being played on a neighbouring field behind yours, which is further away and so appears higher and smaller. On the test match this removed every jump to the wrong ball. WARNING: raise this carefully. Play on the far side of your OWN pitch also sits high in the picture, so a value that is too low will make the camera ignore real play at the far end. Start at 0 (off), then lower it only as far as needed. Check an AI Debug export to see how high your own far touchline sits.";
+                            minimum: 0.0;
+                            maximum: 0.6;
+                            value <=> root.export-ball-max-pitch;
+                            suffix: " rad";
+                            decimals: 2;
+                        }
+
+                        LabeledSlider {
+                            label: "Ball jump confidence";
+                            tip: "How sure the AI must be about a ball that suddenly appears far from where the ball was, before the tracker will follow it. Weak, flickering detections on the far side of the pitch no longer drag the camera along, while a clear detection still does. Works together with \"Ball max speed\"; that one is the stronger guard. Set to 0 to switch this check off.";
+                            minimum: 0.0;
+                            maximum: 0.95;
+                            value <=> root.export-ball-jump-confidence;
+                            decimals: 2;
+                        }
+
+                        LabeledSlider {
+                            label: "Ball acquire range";
+                            tip: "Guards against locking onto a ball that isn't part of this match - a warm-up or neighbouring-pitch ball that drifts into the field ROI. \"Ball anchor range\" can't catch that on its own, because the kids playing with that ball are tracked people too, so the ball looks properly anchored. This limits how far from the main group of players a brand-new ball track may START. It never restricts a ball that is already being tracked: a breakaway, a long clearance or a goal kick still gets followed anywhere, and a coasting ball still holds the aim. Set to 0 to switch the whole check off.";
+                            minimum: 0.0;
+                            maximum: 3.0;
+                            value <=> root.export-ball-acquire-max-dist;
+                            suffix: " rad";
+                            decimals: 2;
+                        }
+
+                        LabeledSlider {
+                            label: "Ball acquire arm delay";
+                            tip: "How many tracked frames the ball must be held before \"Ball acquire range\" starts applying. Until then any acquisition is allowed, so the first ball of the match - a kickoff, always from the centre circle - is never blocked. After the tracker has proven it can hold the real ball this long, a brand-new track appearing far from everyone is far more likely to be somebody else's ball. Only matters when \"Ball acquire range\" is above 0.";
+                            minimum: 0;
+                            maximum: 300;
+                            value <=> root.export-ball-acquire-established-frames;
+                            suffix: " frames";
+                            decimals: 0;
                         }
 
                         LabeledSlider {

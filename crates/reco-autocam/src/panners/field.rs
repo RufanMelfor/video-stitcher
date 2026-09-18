@@ -85,6 +85,41 @@ pub enum ClusterMode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FieldPannerConfig {
+    /// Ignore players above this world pitch when forming the action
+    /// cluster.
+    ///
+    /// On a rig that also sees a neighbouring pitch, everyone warming
+    /// up over there is detected as a player too, and they can easily
+    /// outnumber the match: measured on 2026-09-12 footage, 94% of all
+    /// player detections sat above pitch 0, so the "densest group" was
+    /// the other field and the camera tracked it instead of the match -
+    /// leaving the real ball inside the frame only 16% of the time.
+    /// Capping the pitch cut that group out and brought the cluster
+    /// from 47 deg away from the real ball to 13 deg.
+    ///
+    /// `f32::INFINITY` (the default) counts every player, preserving
+    /// the original behaviour.
+    pub max_player_pitch: f32,
+    /// Seconds to keep aiming at the ball's last known position after
+    /// the tracker gives up on it, before releasing the aim back to the
+    /// player cluster. `0.0` releases immediately (the original
+    /// behaviour).
+    ///
+    /// A lost ball is usually not gone, just briefly undetected -
+    /// measured on 2026-09-12 footage it reappeared a median of 1.4 deg
+    /// (near play) to 8 deg (far play) from where it vanished, and
+    /// within half a frame width in 65-91% of cases. Swinging to the
+    /// cluster in the meantime therefore gives up a good aim point only
+    /// to have to come back, which reads on screen as the camera
+    /// drifting off and returning. Holding instead keeps the shot
+    /// still, and the aim is already close when the ball returns.
+    ///
+    /// This is deliberately separate from
+    /// [`ball_coast_secs`](crate::AutocamConfig::ball_coast_secs): that
+    /// one decides how long the *tracker* keeps reporting a position,
+    /// this one decides how long the *camera* keeps using the last one
+    /// after the tracker has stopped.
+    pub ball_hold_secs: f32,
     /// How the action cluster is selected - see [`ClusterMode`]. Default
     /// [`ClusterMode::Density`]; set `trimmed_mean` to fall back.
     pub cluster_mode: ClusterMode,
@@ -216,6 +251,8 @@ pub struct FieldPannerConfig {
 impl Default for FieldPannerConfig {
     fn default() -> Self {
         Self {
+            max_player_pitch: f32::INFINITY,
+            ball_hold_secs: 0.0,
             cluster_mode: ClusterMode::Density,
             cluster_bandwidth_rad: 0.30,
             keep_fraction: 0.8,
@@ -363,6 +400,10 @@ pub struct FieldPanner {
     ema_yaw: f32,
     ema_pitch: f32,
     ema_initialized: bool,
+    /// Frames the aim has been held on a lost ball's last position, and
+    /// the budget in frames derived from `ball_hold_secs`.
+    ball_hold_frames: u32,
+    ball_hold_budget: u32,
     velocity_yaw: f32,
     velocity_pitch: f32,
     max_velocity: f32,
@@ -404,6 +445,7 @@ impl FieldPanner {
         let config = config.sanitized();
         let current_fov = config.fov_default;
         let max_velocity = config.max_velocity_rad_per_sec / fps;
+        let ball_hold_budget = (config.ball_hold_secs * fps).round().max(0.0) as u32;
         Self {
             config,
             yaw: 0.0,
@@ -412,6 +454,8 @@ impl FieldPanner {
             ema_yaw: 0.0,
             ema_pitch: 0.0,
             ema_initialized: false,
+            ball_hold_frames: 0,
+            ball_hold_budget,
             velocity_yaw: 0.0,
             velocity_pitch: 0.0,
             max_velocity,
@@ -455,6 +499,7 @@ impl FieldPanner {
         players
             .iter()
             .filter(|p| !matches!(p.state, TrackState::Lost))
+            .filter(|p| p.pitch <= self.config.max_player_pitch)
             .map(|p| (p.yaw, p.pitch, p.confidence))
             .collect()
     }
@@ -818,18 +863,36 @@ impl Panner for FieldPanner {
                 .as_ref()
                 .is_some_and(|b| !matches!(b.state, TrackState::Lost));
 
-        let ball_near_cluster = ball_detected
-            && cluster.as_ref().is_some_and(|c| {
-                let b = world.ball.as_ref().unwrap();
-                let dist = ((b.yaw - c.yaw).powi(2) + (b.pitch - c.pitch).powi(2)).sqrt();
-                dist < self.config.ball_max_dist_from_cluster
-            });
+        // Any non-Lost ball (Tracking OR Coasting) keeps presence alive,
+        // regardless of distance to the player cluster. `Lost` - the
+        // tracker's own coast-timeout - is the only signal that should
+        // swing the aim back to the cluster; `ball_max_dist_from_cluster`
+        // already gates candidate matching inside `BallTracker::score`
+        // (a different, independent mechanism), so re-applying it here
+        // double-gates the same ball.
+        //
+        // An earlier version of this gate required proximity to the
+        // cluster even while Tracking, which broke down for a ball that
+        // repeatedly enters/exits the field ROI polygon (whose filter
+        // drops detections before any tracker sees them): each brief
+        // re-acquisition between coast periods was itself far from the
+        // cluster, so presence kept decaying on those frames even though
+        // the ball was never actually lost - net effect, presence still
+        // trended to zero and the aim swung back anyway.
+        let ball_near_cluster = ball_detected;
 
         if ball_near_cluster {
             let b = world.ball.as_ref().unwrap();
             self.last_ball_yaw = b.yaw;
             self.last_ball_pitch = b.pitch;
             self.ball_presence += self.config.ball_presence_attack * (1.0 - self.ball_presence);
+            self.ball_hold_frames = 0;
+        } else if self.ball_hold_frames < self.ball_hold_budget {
+            // The ball is lost, but a lost ball is usually just briefly
+            // undetected and comes back near where it went: hold the aim
+            // on its last position instead of swinging to the cluster
+            // and back. See `FieldPannerConfig::ball_hold_secs`.
+            self.ball_hold_frames = self.ball_hold_frames.saturating_add(1);
         } else {
             self.ball_presence *= self.config.ball_presence_decay;
         }
@@ -1066,6 +1129,7 @@ impl Panner for FieldPanner {
         self.velocity_yaw = 0.0;
         self.velocity_pitch = 0.0;
         self.ball_presence = 0.0;
+        self.ball_hold_frames = 0;
         self.last_ball_yaw = 0.0;
         self.last_ball_pitch = 0.0;
         self.lead_yaw = 0.0;
@@ -1465,6 +1529,190 @@ mod tests {
         assert!(
             (out.yaw - 0.414).abs() < 0.03,
             "lost ball must not pull, got {}",
+            out.yaw
+        );
+    }
+
+    /// A coasting ball far outside `ball_max_dist_from_cluster` must
+    /// still hold the aim, instead of the camera swinging back to the
+    /// player cluster. The tracker's coast budget ("Ball coast time")
+    /// is what decides how long the ball stays relevant; this panner
+    /// must not run a second, shorter clock of its own via
+    /// `ball_presence` decay. Regression test for a real symptom: a
+    /// ball rolling outside the field ROI polygon loses its detections
+    /// (the ROI filter drops them before any tracker sees them), so the
+    /// tracker coasts - but the aim snapped back to the players anyway.
+    ///
+    /// See also [`tracking_ball_beyond_cluster_distance_still_holds_aim`]
+    /// for the Tracking-state half of this same fix.
+    #[test]
+    /// With `ball_hold_secs` set, a ball the tracker has given up on
+    /// still holds the aim for that long instead of releasing it to the
+    /// cluster - the ball usually reappears close to where it vanished,
+    /// so swinging away and back reads as the camera drifting off.
+    #[test]
+    fn lost_ball_holds_the_aim_for_the_configured_time() {
+        let mut p = FieldPanner::with_config(
+            30.0,
+            FieldPannerConfig {
+                dead_zone_rad: 0.0,
+                ball_weight: 0.6,
+                ball_hold_secs: 2.0,
+                ..Default::default()
+            },
+        );
+        let cal = cal();
+        let mut w = tight_world();
+
+        // Pull the aim onto a ball far from the cluster.
+        let mut b = ball(1.20, 0.0);
+        b.state = TrackState::Tracking;
+        w.ball = Some(b);
+        let mut out = p.decide(&w, &ctx(0, &cal));
+        for i in 1..200 {
+            out = p.decide(&w, &ctx(i, &cal));
+        }
+        let held = out.yaw;
+        assert!(held > 0.5, "setup: aim should sit near the ball, got {held}");
+
+        // Ball goes Lost. Within the hold window the aim must not run
+        // back to the cluster at 0.0.
+        let mut lost = ball(1.20, 0.0);
+        lost.state = TrackState::Lost;
+        w.ball = Some(lost);
+        for i in 200..250 {
+            out = p.decide(&w, &ctx(i, &cal));
+        }
+        assert!(
+            out.yaw > held - 0.05,
+            "inside the hold window the aim must stay put, went {held} -> {}",
+            out.yaw
+        );
+
+        // Well past the window it releases as before.
+        for i in 250..500 {
+            out = p.decide(&w, &ctx(i, &cal));
+        }
+        assert!(
+            out.yaw < held - 0.1,
+            "after the hold expires the aim must return to the cluster, got {}",
+            out.yaw
+        );
+    }
+
+    /// Default is off: a lost ball releases immediately, as it always did.
+    #[test]
+    fn lost_ball_releases_immediately_by_default() {
+        let mut p = FieldPanner::with_config(
+            30.0,
+            FieldPannerConfig {
+                dead_zone_rad: 0.0,
+                ball_weight: 0.6,
+                ..Default::default()
+            },
+        );
+        let cal = cal();
+        let mut w = tight_world();
+        let mut b = ball(1.20, 0.0);
+        b.state = TrackState::Tracking;
+        w.ball = Some(b);
+        let mut out = p.decide(&w, &ctx(0, &cal));
+        for i in 1..200 {
+            out = p.decide(&w, &ctx(i, &cal));
+        }
+        let held = out.yaw;
+
+        let mut lost = ball(1.20, 0.0);
+        lost.state = TrackState::Lost;
+        w.ball = Some(lost);
+        for i in 200..400 {
+            out = p.decide(&w, &ctx(i, &cal));
+        }
+        assert!(
+            out.yaw < held - 0.1,
+            "without a hold time the aim must release at once, got {} (was {held})",
+            out.yaw
+        );
+    }
+
+    #[test]
+    fn coasting_ball_beyond_cluster_distance_still_holds_aim() {
+        let mut p = FieldPanner::with_config(
+            30.0,
+            FieldPannerConfig {
+                dead_zone_rad: 0.0,
+                ball_weight: 0.6,
+                // Far tighter than the ball's distance below, so the
+                // distance gate alone would reject it outright.
+                ball_max_dist_from_cluster: 0.2,
+                ..Default::default()
+            },
+        );
+        let cal = cal();
+        let mut w = tight_world();
+
+        // Ball is tracked well outside the cluster-distance gate.
+        let mut b = ball(1.20, 0.0);
+        b.state = TrackState::Coasting;
+        w.ball = Some(b);
+
+        let mut out = p.decide(&w, &ctx(0, &cal));
+        for i in 1..200 {
+            out = p.decide(&w, &ctx(i, &cal));
+        }
+
+        assert!(
+            out.yaw > 0.5,
+            "a coasting ball must keep pulling the aim toward it, got {}",
+            out.yaw
+        );
+    }
+
+    /// A ball that keeps being briefly re-acquired (`TrackState::Tracking`,
+    /// not `Coasting`) while still far outside `ball_max_dist_from_cluster`
+    /// must also hold the aim - not just a steadily-coasting one.
+    ///
+    /// Regression test for the gap the first coasting fix left open: a
+    /// ball repeatedly crossing the field ROI polygon boundary alternates
+    /// between `Coasting` (no detection reached the tracker at all) and a
+    /// brief fresh `Tracking` re-acquisition (a detection did reach it,
+    /// still far from the cluster) every time it briefly re-enters the
+    /// ROI. Gating presence on distance-to-cluster during those Tracking
+    /// frames let presence keep decaying on each one even though the ball
+    /// was never `Lost`, so the aim swung back to the cluster anyway
+    /// despite the earlier coasting-only fix.
+    #[test]
+    fn tracking_ball_beyond_cluster_distance_still_holds_aim() {
+        let mut p = FieldPanner::with_config(
+            30.0,
+            FieldPannerConfig {
+                dead_zone_rad: 0.0,
+                ball_weight: 0.6,
+                ball_max_dist_from_cluster: 0.2,
+                ..Default::default()
+            },
+        );
+        let cal = cal();
+        let mut w = tight_world();
+
+        let mut out = p.decide(&w, &ctx(0, &cal));
+        for i in 1..200 {
+            // Alternate Coasting/Tracking every other frame, mirroring a
+            // ball that keeps dipping in and out of the ROI - both states
+            // stay far outside ball_max_dist_from_cluster (0.2).
+            let mut b = ball(1.20, 0.0);
+            b.state = if i % 2 == 0 {
+                TrackState::Coasting
+            } else {
+                TrackState::Tracking
+            };
+            w.ball = Some(b);
+            out = p.decide(&w, &ctx(i, &cal));
+        }
+
+        assert!(
+            out.yaw > 0.5,
+            "a ball pendulum between Tracking/Coasting must keep pulling the aim toward it, got {}",
             out.yaw
         );
     }

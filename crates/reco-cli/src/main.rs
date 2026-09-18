@@ -465,6 +465,69 @@ enum Commands {
         #[arg(long = "ball-coast-secs")]
         ball_coast_secs: Option<f32>,
 
+        /// Max panorama distance (radians) at which a *new* ball track
+        /// may be started from the main group of players. Rejects a
+        /// stray ball belonging to a neighbouring pitch: the
+        /// player-anchor gate alone can't, because the people playing
+        /// with that ball are tracked players too. Only ever applies to
+        /// a fresh acquisition - an established track still follows the
+        /// ball anywhere (breakaway, long clearance), and a coasting
+        /// ball still holds the aim. Default 0 (off).
+        #[arg(long = "ball-acquire-max-dist")]
+        ball_acquire_max_dist: Option<f32>,
+
+        /// Consecutively tracked frames before
+        /// `--ball-acquire-max-dist` arms itself, so the first
+        /// acquisition of a match (a kickoff, always from the centre)
+        /// is never blocked. Default: 45 (~1.5s at detection-interval 3
+        /// on 30fps). 0 arms it immediately.
+        #[arg(long = "ball-acquire-established-frames")]
+        ball_acquire_established_frames: Option<u64>,
+
+        /// Confidence a ball detection needs before the tracker will
+        /// follow it across a jump longer than its max-jump radius.
+        /// Without this a weak detection on the far side of the
+        /// panorama can yank an established track onto a different
+        /// ball (e.g. a neighbouring pitch's). Default 0.5; 0 disables
+        /// the check.
+        #[arg(long = "ball-jump-confidence")]
+        ball_jump_confidence: Option<f32>,
+
+        /// How far the ball may appear to move per processed frame,
+        /// in radians of panorama. A second ball elsewhere in frame
+        /// shows up as an impossible jump where real play does not, so
+        /// this is what stops the tracker flipping between two equally
+        /// convincing balls. The allowance grows with the gap since the
+        /// last sighting, so a genuinely lost ball can still be
+        /// re-acquired far away. Default 0.13 (~4 rad/s at 30fps);
+        /// 0 disables.
+        #[arg(long = "ball-max-speed")]
+        ball_max_speed: Option<f32>,
+
+        /// Ignore ball detections above this world pitch (radians).
+        /// A ball on a neighbouring pitch appears above this match's
+        /// near touchline and smaller; measured on real footage every
+        /// stray-ball track sat at pitch +0.17..+0.25 while the match
+        /// ball sat at -0.16..-0.31. Unset accepts everything.
+        #[arg(long = "ball-max-pitch")]
+        ball_max_pitch: Option<f32>,
+
+        /// Ignore players above this world pitch when forming the
+        /// action cluster. On a rig that also sees a neighbouring
+        /// field, its warm-up crowd is detected as players too and can
+        /// outnumber the match, pulling the camera off it entirely.
+        /// Unset counts everyone.
+        #[arg(long = "max-player-pitch")]
+        max_player_pitch: Option<f32>,
+
+        /// Seconds to keep aiming at the ball's last known position
+        /// after the tracker loses it, instead of swinging back to the
+        /// players. A lost ball usually reappears close to where it
+        /// vanished, so holding avoids the camera drifting off and
+        /// returning. Default 0 (release immediately).
+        #[arg(long = "ball-hold-secs")]
+        ball_hold_secs: Option<f32>,
+
         /// Zoom-target smoothing rate (EMA alpha per frame, `(0,1]`) -
         /// how fast the dynamic FOV catches up to its computed target.
         /// Default 0.01 has a ~3s time constant at 30fps, often too slow
@@ -1204,6 +1267,13 @@ fn main() -> anyhow::Result<()> {
             panner_preset,
             player_anchor_rad,
             ball_coast_secs,
+            ball_acquire_max_dist,
+            ball_acquire_established_frames,
+            ball_jump_confidence,
+            ball_max_speed,
+            ball_max_pitch,
+            max_player_pitch,
+            ball_hold_secs,
             fov_alpha,
             cluster_alpha,
             confidence_threshold,
@@ -1253,6 +1323,13 @@ fn main() -> anyhow::Result<()> {
                 panner_preset: panner_preset.as_deref(),
                 player_anchor_rad,
                 ball_coast_secs,
+                ball_acquire_max_dist,
+                ball_acquire_established_frames,
+                ball_jump_confidence,
+                ball_max_speed,
+                ball_max_pitch,
+                max_player_pitch,
+                ball_hold_secs,
                 fov_alpha,
                 cluster_alpha,
                 confidence_threshold,

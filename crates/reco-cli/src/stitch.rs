@@ -111,6 +111,28 @@ pub struct StitchArgs<'a> {
     /// Ball tracker's coast-budget override (seconds). See
     /// `reco_autocam::AutocamConfig::ball_coast_secs`.
     pub ball_coast_secs: Option<f32>,
+    /// Max distance (radians) a *new* ball track may start from the
+    /// main player group. See
+    /// `reco_autocam::AutocamConfig::ball_acquire_max_dist_from_cluster`.
+    pub ball_acquire_max_dist: Option<f32>,
+    /// Tracked frames before the acquisition gate arms itself. See
+    /// `reco_autocam::AutocamConfig::ball_acquire_established_frames`.
+    pub ball_acquire_established_frames: Option<u64>,
+    /// Confidence needed to follow a long jump. See
+    /// `reco_autocam::AutocamConfig::ball_jump_confidence`.
+    pub ball_jump_confidence: Option<f32>,
+    /// Apparent ball speed limit (rad per tick). See
+    /// `reco_autocam::AutocamConfig::ball_max_speed_rad_per_tick`.
+    pub ball_max_speed: Option<f32>,
+    /// Ball detection pitch ceiling (radians). See
+    /// `reco_autocam::AutocamConfig::ball_max_pitch`.
+    pub ball_max_pitch: Option<f32>,
+    /// Player pitch ceiling for the action cluster. See
+    /// `reco_autocam::panners::FieldPannerConfig::max_player_pitch`.
+    pub max_player_pitch: Option<f32>,
+    /// Seconds to hold the aim on a lost ball. See
+    /// `reco_autocam::panners::FieldPannerConfig::ball_hold_secs`.
+    pub ball_hold_secs: Option<f32>,
     /// Zoom-target smoothing rate override. See
     /// `reco_autocam::panners::FieldPannerConfig::fov_alpha`.
     pub fov_alpha: Option<f32>,
@@ -204,6 +226,13 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                 "panner_config_path": args.panner_config_path,
                 "player_anchor_rad": args.player_anchor_rad,
                 "ball_coast_secs": args.ball_coast_secs,
+                "ball_acquire_max_dist": args.ball_acquire_max_dist,
+                "ball_acquire_established_frames": args.ball_acquire_established_frames,
+                "ball_jump_confidence": args.ball_jump_confidence,
+                "ball_max_speed": args.ball_max_speed,
+                "ball_max_pitch": args.ball_max_pitch,
+                "max_player_pitch": args.max_player_pitch,
+                "ball_hold_secs": args.ball_hold_secs,
                 "confidence_threshold": args.confidence_threshold,
             }
         }
@@ -412,6 +441,11 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         let allow_fallback = args.allow_no_tracking;
         let player_anchor_rad = args.player_anchor_rad;
         let ball_coast_secs = args.ball_coast_secs;
+        let ball_acquire_max_dist = args.ball_acquire_max_dist;
+        let ball_acquire_established_frames = args.ball_acquire_established_frames;
+        let ball_jump_confidence = args.ball_jump_confidence;
+        let ball_max_speed = args.ball_max_speed;
+        let ball_max_pitch = args.ball_max_pitch;
         let confidence_threshold = args.confidence_threshold;
         let async_detect = args.async_detect;
         let lookahead_secs = args.lookahead;
@@ -463,13 +497,23 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         // so if no preset/config file was given but one of these flags
         // was, start from FieldPannerConfig::default() so it has a base
         // to land on (matches setup_autocam's own fallback base).
-        let panner_cfg = if args.fov_alpha.is_some() || args.cluster_alpha.is_some() {
+        let panner_cfg = if args.fov_alpha.is_some()
+            || args.cluster_alpha.is_some()
+            || args.max_player_pitch.is_some()
+            || args.ball_hold_secs.is_some()
+        {
             let mut c = panner_cfg.unwrap_or_default();
             if let Some(a) = args.fov_alpha {
                 c.fov_alpha = a;
             }
             if let Some(a) = args.cluster_alpha {
                 c.cluster_alpha = a;
+            }
+            if let Some(a) = args.max_player_pitch {
+                c.max_player_pitch = a;
+            }
+            if let Some(a) = args.ball_hold_secs {
+                c.ball_hold_secs = a;
             }
             Some(c)
         } else {
@@ -492,6 +536,18 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                     ball_coast_secs: ball_coast_secs.unwrap_or(
                         reco_autocam::trackers::ball::DEFAULT_COAST_FRAMES as f32 / 30.0,
                     ),
+                    ball_acquire_max_dist_from_cluster: ball_acquire_max_dist.unwrap_or(0.0),
+                    ball_acquire_established_frames: ball_acquire_established_frames.unwrap_or(
+                        reco_autocam::trackers::ball::DEFAULT_ACQUIRE_ESTABLISHED_FRAMES,
+                    ) as u32,
+                    ball_jump_confidence: ball_jump_confidence
+                        .unwrap_or(reco_autocam::trackers::ball::DEFAULT_JUMP_CONFIDENCE),
+                    ball_max_speed: ball_max_speed.unwrap_or(
+                        reco_autocam::trackers::ball::DEFAULT_MAX_BALL_SPEED_RAD_PER_TICK,
+                    ),
+                    ball_max_pitch: ball_max_pitch.unwrap_or(0.0),
+                    max_player_pitch: args.max_player_pitch.unwrap_or(0.0),
+                    ball_hold_secs: args.ball_hold_secs.unwrap_or(0.0),
                     lookahead_secs: args.lookahead,
                     lookahead_reduced_bit_depth: args.lookahead_reduced_bit_depth,
                     preset: args.panner_preset.unwrap_or("").to_string(),
@@ -547,6 +603,14 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
             }
             autocam_config.player_anchor_max_rad = player_anchor_rad;
             autocam_config.ball_coast_secs = ball_coast_secs;
+            // 0 means "off" on the CLI too, matching the saved-calibration
+            // encoding, so `--ball-acquire-max-dist 0` disables the gate.
+            autocam_config.ball_acquire_max_dist_from_cluster =
+                ball_acquire_max_dist.filter(|d| *d > 0.0);
+            autocam_config.ball_acquire_established_frames = ball_acquire_established_frames;
+            autocam_config.ball_jump_confidence = ball_jump_confidence;
+            autocam_config.ball_max_speed_rad_per_tick = ball_max_speed;
+            autocam_config.ball_max_pitch = ball_max_pitch;
             let autocam_config = if let Some(roi) = field_roi {
                 autocam_config.with_field_roi(roi)
             } else {
