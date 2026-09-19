@@ -1284,6 +1284,7 @@ export component RecoApp inherits Window {
     in-out property <float> export-dead-zone: 0.20;
     in-out property <float> export-ball-weight: 0.20;
     in-out property <float> export-ball-max-dist-from-cluster: 0.5;
+    in-out property <float> export-ball-frame-margin-deg: 3.0;
     in-out property <float> export-fov-tight: 22.0;
     in-out property <float> export-fov-wide: 58.0;
     in-out property <float> export-fov-default: 40.0;
@@ -1324,6 +1325,7 @@ export component RecoApp inherits Window {
     changed export-dead-zone => { root.autocam-settings-changed(); }
     changed export-ball-weight => { root.autocam-settings-changed(); }
     changed export-ball-max-dist-from-cluster => { root.autocam-settings-changed(); }
+    changed export-ball-frame-margin-deg => { root.autocam-settings-changed(); }
     changed export-fov-tight => { root.autocam-settings-changed(); }
     changed export-fov-wide => { root.autocam-settings-changed(); }
     changed export-fov-default => { root.autocam-settings-changed(); }
@@ -6489,13 +6491,23 @@ export component RecoApp inherits Window {
                                 }
                             }
 
+                            LabeledSlider {
+                                label: "Ball margin";
+                                tip: "How much room is kept between the ball and the edge of the frame. The zoom widens until the ball sits at least this far inside the picture, so it is never flush against the border. Larger keeps more air around the ball (the camera zooms out sooner); smaller lets it drift closer to the edge. This only sets a floor on the zoom - it never pans the camera - and Wide above still caps it, so a ball far outside the Wide field of view leaves frame regardless.";
+                                minimum: 0.0;
+                                maximum: 15.0;
+                                value <=> root.export-ball-frame-margin-deg;
+                                suffix: " deg";
+                                decimals: 1;
+                            }
+
                             // What those three numbers actually frame.
                             // Degrees of field of view mean nothing on
                             // their own; the two boxes show the widest and
                             // tightest shot the director can choose, drawn
                             // on the current preview frame.
                             Tip {
-                                tip: "The two boxes show what the panner frames at its widest and tightest zoom, drawn on the current preview frame. Sizes are relative to the preview's own field of view, so they move if you zoom the preview itself. The upscale figure under each is how far the render is pushed past what the lens actually resolves: above roughly 1.5x the picture starts to look soft no matter which encoder settings you pick.";
+                                tip: "The boxes show what the panner frames at its widest and tightest zoom, drawn on the current preview frame. The thin grey box is Default: the shot the camera opens on before it has detected anyone, not a third limit - the zoom leaves it as soon as tracking starts. Sizes are relative to the preview's own field of view, so they move if you zoom the preview itself. The upscale figure under each is how far the render is pushed past what the lens actually resolves: above roughly 1.5x the picture starts to look soft no matter which encoder settings you pick.";
                                 Text { text: "Zoom range"; color: #ccc; font-size: 12px; }
                             }
 
@@ -6531,6 +6543,9 @@ export component RecoApp inherits Window {
                                              / Math.tan(root.fov * 0.5deg));
                                 property <float> frac-tight:
                                     min(1.0, Math.tan(root.export-fov-tight * 0.5deg)
+                                             / Math.tan(root.fov * 0.5deg));
+                                property <float> frac-default:
+                                    min(1.0, Math.tan(root.export-fov-default * 0.5deg)
                                              / Math.tan(root.fov * 0.5deg));
 
                                 Image {
@@ -6575,6 +6590,38 @@ export component RecoApp inherits Window {
                                             x: 4px;
                                             y: 2px;
                                             text: "Widest " + round(root.export-fov-wide) + " deg";
+                                            color: #101010;
+                                            font-size: 10px;
+                                            font-weight: 600;
+                                        }
+                                    }
+                                }
+
+                                // Not a third bound - the FOV the panner
+                                // opens on before any player is detected.
+                                // Deliberately lighter than the two bounds
+                                // so it does not read as a third limit.
+                                Rectangle {
+                                    width: zoom-range.content-w * zoom-range.frac-default;
+                                    height: zoom-range.content-h * zoom-range.frac-default;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    background: transparent;
+                                    border-width: 1px;
+                                    border-color: #b8b8b8;
+
+                                    Rectangle {
+                                        x: 3px;
+                                        y: parent.height - self.height - 3px;
+                                        width: label-default.width + 8px;
+                                        height: label-default.height + 4px;
+                                        background: #b8b8b8;
+                                        border-radius: 3px;
+
+                                        label-default := Text {
+                                            x: 4px;
+                                            y: 2px;
+                                            text: "Start " + round(root.export-fov-default) + " deg";
                                             color: #101010;
                                             font-size: 10px;
                                             font-weight: 600;

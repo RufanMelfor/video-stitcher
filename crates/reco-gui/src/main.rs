@@ -3082,6 +3082,7 @@ fn snapshot_autocam_defaults(app: &RecoApp) -> reco_core::calibration::AutocamDe
         dead_zone_rad: app.get_export_dead_zone(),
         ball_weight: app.get_export_ball_weight(),
         ball_max_dist_from_cluster: app.get_export_ball_max_dist_from_cluster(),
+        ball_frame_margin_deg: app.get_export_ball_frame_margin_deg(),
         fov_tight: app.get_export_fov_tight(),
         fov_wide: app.get_export_fov_wide(),
         fov_default: app.get_export_fov_default(),
@@ -3124,6 +3125,7 @@ fn apply_autocam_defaults(app: &RecoApp, ac: &reco_core::calibration::AutocamDef
     app.set_export_dead_zone(ac.dead_zone_rad);
     app.set_export_ball_weight(ac.ball_weight);
     app.set_export_ball_max_dist_from_cluster(ac.ball_max_dist_from_cluster);
+    app.set_export_ball_frame_margin_deg(ac.ball_frame_margin_deg);
     app.set_export_fov_tight(ac.fov_tight);
     app.set_export_fov_wide(ac.fov_wide);
     app.set_export_fov_default(ac.fov_default);
@@ -7467,6 +7469,7 @@ fn main() -> anyhow::Result<()> {
             app.set_export_dead_zone(cfg.dead_zone_rad);
             app.set_export_ball_weight(cfg.ball_weight);
             app.set_export_ball_max_dist_from_cluster(cfg.ball_max_dist_from_cluster);
+            app.set_export_ball_frame_margin_deg(cfg.ball_frame_margin_deg);
             app.set_export_fov_tight(cfg.fov_tight);
             app.set_export_fov_wide(cfg.fov_wide);
             app.set_export_fov_default(cfg.fov_default);
@@ -7602,6 +7605,7 @@ fn main() -> anyhow::Result<()> {
             dead_zone_rad: app.get_export_dead_zone(),
             ball_weight: app.get_export_ball_weight(),
             ball_max_dist_from_cluster: app.get_export_ball_max_dist_from_cluster(),
+            ball_frame_margin_deg: app.get_export_ball_frame_margin_deg(),
             fov_tight: app.get_export_fov_tight(),
             fov_wide: app.get_export_fov_wide(),
             fov_default: app.get_export_fov_default(),

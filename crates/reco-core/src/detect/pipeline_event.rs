@@ -555,6 +555,7 @@ mod tests {
                 dead_zone_rad: 0.05,
                 ball_weight: 0.35,
                 ball_max_dist_from_cluster: 1.0,
+                ball_frame_margin_deg: 5.0,
                 fov_tight: 20.0,
                 fov_wide: 70.0,
                 fov_default: 34.0,
@@ -570,6 +571,7 @@ mod tests {
         assert!(json.contains(r#""model_path":"yolo26n_v2_3class_1280_b4_e300.onnx""#));
         assert!(json.contains(r#""tracking_mode":"field""#));
         assert!(json.contains(r#""ball_max_dist_from_cluster":1.0"#));
+        assert!(json.contains(r#""ball_frame_margin_deg":5.0"#));
         assert!(json.contains(r#""fov_alpha":0.05"#));
         assert!(json.contains(r#""cluster_alpha":0.05"#));
         // model_path must serialize before config's fields - "which

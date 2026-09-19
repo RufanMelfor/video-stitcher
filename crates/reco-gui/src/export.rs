@@ -162,6 +162,10 @@ pub struct AutocamUiConfig {
     /// cluster and still blend into the aim; beyond it the ball is treated
     /// as off-the-action and ignored (Action framing only).
     pub ball_max_dist_from_cluster: f32,
+    /// Extra margin (degrees, each side) held around the ball when the
+    /// panner widens the FOV to keep it in frame. A floor on the zoom,
+    /// not an aim input; still bounded by `fov_wide`.
+    pub ball_frame_margin_deg: f32,
     /// Tight / wide / default field-of-view, degrees.
     pub fov_tight: f32,
     pub fov_wide: f32,
@@ -384,6 +388,7 @@ pub fn run_export(
                 "dead_zone_rad": autocam.dead_zone_rad,
                 "ball_weight": autocam.ball_weight,
                 "ball_max_dist_from_cluster": autocam.ball_max_dist_from_cluster,
+                "ball_frame_margin_deg": autocam.ball_frame_margin_deg,
                 "fov_tight": autocam.fov_tight,
                 "fov_wide": autocam.fov_wide,
                 "fov_default": autocam.fov_default,
@@ -749,6 +754,7 @@ pub fn run_export(
                     dead_zone_rad: autocam.dead_zone_rad,
                     ball_weight: autocam.ball_weight,
                     ball_max_dist_from_cluster: autocam.ball_max_dist_from_cluster,
+                    ball_frame_margin_deg: autocam.ball_frame_margin_deg,
                     fov_tight: autocam.fov_tight,
                     fov_wide: autocam.fov_wide,
                     fov_default: autocam.fov_default,
@@ -791,6 +797,7 @@ pub fn run_export(
                 dead_zone_rad: ac.dead_zone_rad,
                 ball_weight: ac.ball_weight,
                 ball_max_dist_from_cluster: ac.ball_max_dist_from_cluster,
+                ball_frame_margin_deg: ac.ball_frame_margin_deg,
                 lock_pitch: ac.lock_pitch,
                 fov_tight: ac.fov_tight,
                 fov_wide: ac.fov_wide,

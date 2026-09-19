@@ -568,6 +568,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                     dead_zone_rad: fp.dead_zone_rad,
                     ball_weight: fp.ball_weight,
                     ball_max_dist_from_cluster: fp.ball_max_dist_from_cluster,
+                    ball_frame_margin_deg: fp.ball_frame_margin_deg,
                     fov_tight: fp.fov_tight,
                     fov_wide: fp.fov_wide,
                     fov_default: fp.fov_default,

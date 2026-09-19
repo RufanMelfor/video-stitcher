@@ -682,6 +682,17 @@ pub struct AutocamDefaults {
     /// cluster and still blend into the aim ("Ball reach").
     #[serde(default)]
     pub ball_max_dist_from_cluster: f32,
+    /// Extra margin (degrees, each side) held around the ball when the
+    /// panner widens the FOV to keep it in frame ("Ball margin") - see
+    /// `reco_autocam::panners::FieldPannerConfig::ball_frame_margin_deg`.
+    /// A floor on the zoom, not an aim input: the FOV is widened to at
+    /// least `2 * (ball offset + this)`, so the ball never sits flush
+    /// against the viewport edge. Still bounded by `fov_wide`, which
+    /// wins when the ball is far enough out. Defaults to the panner's
+    /// own margin when absent from older saved data, not `0.0` (which
+    /// would let the ball touch the frame edge).
+    #[serde(default = "default_ball_frame_margin_deg")]
+    pub ball_frame_margin_deg: f32,
     /// Tight / wide / default field-of-view, degrees.
     #[serde(default)]
     pub fov_tight: f32,
@@ -838,6 +849,12 @@ fn default_cluster_alpha() -> f32 {
 /// [`default_fov_alpha`].
 fn default_lookahead_reactivity() -> f32 {
     2.5
+}
+
+/// `FieldPannerConfig::default().ball_frame_margin_deg` - a literal
+/// mirror for the same crate-graph reason as [`default_ball_coast_secs`].
+fn default_ball_frame_margin_deg() -> f32 {
+    3.0
 }
 
 fn default_ball_coast_secs() -> f32 {
@@ -1635,6 +1652,7 @@ mod tests {
             dead_zone_rad: 0.05,
             ball_weight: 0.35,
             ball_max_dist_from_cluster: 1.0,
+            ball_frame_margin_deg: 5.0,
             fov_tight: 20.0,
             fov_wide: 70.0,
             fov_default: 34.0,
@@ -1650,12 +1668,33 @@ mod tests {
         assert_eq!(ac.cluster_mode, "trimmed_mean");
         assert!((ac.player_anchor_rad - 0.35).abs() < 1e-6);
         assert!((ac.ball_max_dist_from_cluster - 1.0).abs() < 1e-6);
+        assert!((ac.ball_frame_margin_deg - 5.0).abs() < 1e-6);
         assert!((ac.fov_wide - 70.0).abs() < 1e-6);
         assert!(ac.lookahead_reduced_bit_depth);
         assert!((ac.fov_alpha - 0.05).abs() < 1e-6);
         assert!((ac.cluster_alpha - 0.05).abs() < 1e-6);
         assert!((ac.confidence_threshold - 0.3).abs() < 1e-6);
         assert!((ac.lookahead_reactivity - 1.5).abs() < 1e-6);
+    }
+
+    /// A calibration saved before `ball_frame_margin_deg` existed must
+    /// read as the panner's own margin, not `0.0`. Zero is a legal value
+    /// (ball allowed flush against the frame edge), so a plain
+    /// `#[serde(default)]` would silently change the framing of every
+    /// pre-existing calibration instead of leaving it alone.
+    #[test]
+    fn autocam_defaults_ball_frame_margin_falls_back_for_old_files() {
+        let old = r#"{
+            "tracking_mode": "field",
+            "ball_max_dist_from_cluster": 1.0,
+            "fov_wide": 70.0
+        }"#;
+        let ac: AutocamDefaults = serde_json::from_str(old).unwrap();
+        assert!(
+            (ac.ball_frame_margin_deg - 3.0).abs() < 1e-6,
+            "old calibrations must inherit the panner's 3 deg margin, got {}",
+            ac.ball_frame_margin_deg
+        );
     }
 
     #[test]

@@ -727,6 +727,7 @@ mod tests {
             dead_zone_rad: 0.08,
             ball_weight: 0.35,
             ball_max_dist_from_cluster: 1.0,
+            ball_frame_margin_deg: 5.0,
             fov_tight: 20.0,
             fov_wide: 65.0,
             fov_default: 34.0,
