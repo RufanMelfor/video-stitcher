@@ -109,8 +109,21 @@ impl OrtGpuDetector {
 
         cuda_ensure_context()?;
 
-        let (session, input_size, labels) =
+        let (session, model_input, labels) =
             crate::ort_session::create_ort_session(model_path.as_ref(), labels)?;
+
+        // This backend's NPP resize and TileGeom crops are square by
+        // construction. Non-square input is a Windows/wgpu + TensorRT
+        // feature for now (2026-09-19); refuse it here rather than
+        // silently using the height for both axes, which is exactly the
+        // bug `crate::InputSize` was introduced to remove.
+        if !model_input.is_square() {
+            return Err(format!(
+                "OrtGpuDetector (CUDA) requires a square model input, got {model_input}.                  Non-square models are supported on the wgpu/TensorRT path."
+            )
+            .into());
+        }
+        let input_size = model_input.height;
 
         // Allocate GPU scratch buffers (checked arithmetic to prevent overflow).
         let rgb_size = (frame_width as usize)

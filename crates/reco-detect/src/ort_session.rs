@@ -180,13 +180,14 @@ pub fn reco_cache_dir(subdir: &str) -> PathBuf {
 /// [`OrtGpuDetector`](crate::OrtGpuDetector) to avoid duplicating
 /// the builder + EP setup + model metadata extraction logic.
 ///
-/// Returns `(session, input_size, labels)` where `input_size` is extracted
-/// from the model's BCHW input shape and `labels` are auto-detected from
-/// the model's `names` metadata (or `fallback_labels` if provided).
+/// Returns `(session, input_size, labels)` where `input_size` is both
+/// dimensions of the model's BCHW input shape and `labels` are
+/// auto-detected from the model's `names` metadata (or
+/// `fallback_labels` if provided).
 pub fn create_ort_session(
     model_path: &Path,
     fallback_labels: Vec<String>,
-) -> Result<(Session, u32, Vec<String>), SessionError> {
+) -> Result<(Session, crate::InputSize, Vec<String>), SessionError> {
     // Session::builder() must not run when the runtime cannot load: ort's
     // failing init self-deadlocks building its own error (#446), so the
     // gate's cached verdict is the only safe way to learn availability.
@@ -308,22 +309,36 @@ pub fn create_ort_session(
 
     let session = builder.commit_from_file(model_path)?;
 
-    // Extract input size from model metadata (BCHW layout).
+    // Extract both input dimensions from model metadata (BCHW layout:
+    // shape[2] is height, shape[3] width). Reading height alone silently
+    // mis-sized every non-square export - see `crate::input_size`.
     let input_size = match session.inputs()[0].dtype() {
         ort::value::ValueType::Tensor { shape, .. } => {
             let h = shape[2];
-            if h > 0 {
-                h as u32
-            } else {
-                log::warn!("Model input has dynamic height, defaulting to 1280");
-                1280
+            let w = if shape.len() > 3 { shape[3] } else { h };
+            match (w > 0, h > 0) {
+                (true, true) => crate::InputSize::new(w as u32, h as u32),
+                // A dynamic axis carries no size; falling back per-axis
+                // would invent an aspect ratio the model never had.
+                _ => {
+                    log::warn!("Model input has a dynamic axis ({w}x{h}), defaulting to 1280x1280");
+                    crate::InputSize::square(1280)
+                }
             }
         }
         _ => {
             log::warn!("Could not determine model input size from metadata, defaulting to 1280");
-            1280
+            crate::InputSize::square(1280)
         }
     };
+    log::info!(
+        "Model input: {input_size}{}",
+        if input_size.is_square() {
+            ""
+        } else {
+            " (non-square)"
+        }
+    );
 
     // Auto-detect labels from model metadata if not provided.
     let labels = if fallback_labels.is_empty() {

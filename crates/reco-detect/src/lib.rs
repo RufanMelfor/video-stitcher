@@ -13,6 +13,7 @@
 //! The NCNN backend is gated behind `ncnn`.
 
 pub mod detectors;
+pub mod input_size;
 #[cfg(feature = "ort")]
 pub mod ort_session;
 #[cfg(feature = "ort")]
@@ -47,7 +48,6 @@ pub mod metal_compute;
 pub mod wgpu_preprocess;
 
 // Re-export detector types at crate root for convenience.
-#[cfg(feature = "ort")]
 pub use detectors::cpu::CpuYoloDetector;
 #[cfg(all(feature = "ort", target_os = "macos"))]
 pub use detectors::metal::MetalYoloDetector;
@@ -57,6 +57,8 @@ pub use detectors::ncnn::NcnnYoloDetector;
 pub use detectors::ort_gpu::OrtGpuDetector;
 #[cfg(feature = "tensorrt-native")]
 pub use detectors::trt::TrtGpuDetector;
+#[cfg(feature = "ort")]
+pub use input_size::{InputSize, Letterbox};
 
 // Re-export shared utilities.
 pub use detectors::postprocess;

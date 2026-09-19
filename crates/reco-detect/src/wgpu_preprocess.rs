@@ -107,7 +107,7 @@ pub struct WgpuPreprocessor {
     output_buffer: wgpu::Buffer,
     staging_buffer: wgpu::Buffer,
     uniform_buffer: wgpu::Buffer,
-    input_size: u32,
+    input_size: crate::InputSize,
     tensor_bytes: usize,
     frame_width: u32,
     frame_height: u32,
@@ -118,7 +118,7 @@ impl WgpuPreprocessor {
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        input_size: u32,
+        input_size: crate::InputSize,
         frame_width: u32,
         frame_height: u32,
     ) -> Self {
@@ -201,7 +201,7 @@ impl WgpuPreprocessor {
             ..Default::default()
         });
 
-        let tensor_bytes = (input_size * input_size * 3) as usize * 4;
+        let tensor_bytes = input_size.tensor_len() * 4;
 
         let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("detect_output"),
@@ -217,20 +217,19 @@ impl WgpuPreprocessor {
             mapped_at_creation: false,
         });
 
-        let fw = frame_width as f32;
-        let fh = frame_height as f32;
-        let is = input_size as f32;
-        let scale = (is / fw).min(is / fh);
-        let new_w = (fw * scale).round();
-        let new_h = (fh * scale).round();
+        // The shader already indexes with dst_w/dst_h independently
+        // (see its `content_w`/`idx` maths), so a non-square input needs
+        // nothing from it beyond honest uniforms.
+        let lb = input_size.letterbox(frame_width, frame_height);
+        let scale = lb.scale;
 
         let uniforms = Uniforms {
             src_w: frame_width,
             src_h: frame_height,
-            dst_w: input_size,
-            dst_h: input_size,
-            pad_x: (is - new_w) / 2.0,
-            pad_y: (is - new_h) / 2.0,
+            dst_w: input_size.width,
+            dst_h: input_size.height,
+            pad_x: lb.pad_x,
+            pad_y: lb.pad_y,
             scale,
             flip180: 0,
         };
@@ -244,10 +243,9 @@ impl WgpuPreprocessor {
         queue.write_buffer(&uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
         log::info!(
-            "WgpuPreprocessor: {}x{} -> {}x{}, scale={:.3}, pad=({:.1},{:.1}), tensor={:.1}MB",
+            "WgpuPreprocessor: {}x{} -> {}, scale={:.3}, pad=({:.1},{:.1}), tensor={:.1}MB",
             frame_width,
             frame_height,
-            input_size,
             input_size,
             scale,
             uniforms.pad_x,
@@ -324,8 +322,8 @@ impl WgpuPreprocessor {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(
-                self.input_size.div_ceil(16),
-                self.input_size.div_ceil(16),
+                self.input_size.width.div_ceil(16),
+                self.input_size.height.div_ceil(16),
                 1,
             );
         }
@@ -364,8 +362,8 @@ impl WgpuPreprocessor {
         floats
     }
 
-    /// Model input size (square dimension).
-    pub fn input_size(&self) -> u32 {
+    /// Model input dimensions - width and height may differ.
+    pub fn input_size(&self) -> crate::InputSize {
         self.input_size
     }
 

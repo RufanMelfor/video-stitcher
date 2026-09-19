@@ -47,13 +47,19 @@ fn main() {
     let (mut session1, input_size1, _) =
         reco_detect::ort_session::create_ort_session(batch1_path.as_ref(), Vec::new())
             .expect("load batch1 model");
-    assert_eq!(input_size1 as usize, sz, "batch1 model input size mismatch");
+    assert_eq!(
+        input_size1.height as usize, sz,
+        "batch1 model input size mismatch"
+    );
 
     println!("Loading batch=2 model: {batch2_path}");
     let (mut session2, input_size2, _) =
         reco_detect::ort_session::create_ort_session(batch2_path.as_ref(), Vec::new())
             .expect("load batch2 model");
-    assert_eq!(input_size2 as usize, sz, "batch2 model input size mismatch");
+    assert_eq!(
+        input_size2.height as usize, sz,
+        "batch2 model input size mismatch"
+    );
 
     // Warmup both (TensorRT engine JIT-compile / cache load happens on
     // the first call(s) - exclude that from the timed measurement).

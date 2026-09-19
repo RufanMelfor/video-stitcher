@@ -33,11 +33,11 @@ use super::{postprocess, postprocess_balldet};
 /// in pixel coordinates).
 pub struct CpuYoloDetector {
     session: Session,
-    input_size: u32,
+    input_size: crate::InputSize,
     confidence_threshold: f32,
     labels: Vec<String>,
-    /// Pre-allocated preprocess scratch for `3 * input_size * input_size`
-    /// f32 (4.9 MB at sz=640). Fresh allocation per frame was one of the
+    /// Pre-allocated preprocess scratch for the model's full CHW tensor
+    /// (4.9 MB at 640x640). Fresh allocation per frame was one of the
     /// M7 plan §M7.5 hotspots; this buffer is filled in place and handed
     /// to `TensorRef::from_array_view` without moving ownership.
     rgb_chw_buf: Vec<f32>,
@@ -68,15 +68,13 @@ impl CpuYoloDetector {
             crate::ort_session::create_ort_session(path.as_ref(), labels)?;
 
         log::info!(
-            "CpuYoloDetector loaded: input={}x{}, {} classes, conf_thresh={}",
-            input_size,
+            "CpuYoloDetector loaded: input={}, {} classes, conf_thresh={}",
             input_size,
             labels.len(),
             confidence_threshold,
         );
 
-        let sz = input_size as usize;
-        let rgb_chw_buf = vec![114.0 / 255.0_f32; 3 * sz * sz];
+        let rgb_chw_buf = vec![114.0 / 255.0_f32; input_size.tensor_len()];
 
         Ok(Self {
             session,
@@ -96,30 +94,27 @@ impl CpuYoloDetector {
         &self.labels
     }
 
-    /// Model input size (square dimension, e.g. 640 or 1280).
-    pub fn input_size(&self) -> u32 {
+    /// Model input dimensions. Width and height may differ - see
+    /// [`crate::InputSize`].
+    pub fn input_size(&self) -> crate::InputSize {
         self.input_size
     }
 
     /// Fill `self.rgb_chw_buf` from a raw YUV frame: flat RGB float32 in
-    /// CHW layout, letterboxed to `input_size x input_size`, normalized
+    /// CHW layout, letterboxed into the model's input, normalized
     /// to `[0, 1]`. The buffer is reused across frames so no allocation
     /// happens per call.
     ///
     /// Returns `(scale, pad_x, pad_y)` for mapping detection coordinates
     /// back to the original frame.
     fn preprocess(&mut self, frame: &RawFrame<'_>) -> (f32, f32, f32) {
-        let (fw, fh) = (frame.width as f32, frame.height as f32);
-        let is = self.input_size as f32;
+        let lb = self.input_size.letterbox(frame.width, frame.height);
+        let (scale, pad_x, pad_y) = (lb.scale, lb.pad_x, lb.pad_y);
+        let (new_w, new_h) = (lb.content_w, lb.content_h);
 
-        // Letterbox: scale to fit, then pad.
-        let scale = (is / fw).min(is / fh);
-        let new_w = (fw * scale).round() as u32;
-        let new_h = (fh * scale).round() as u32;
-        let pad_x = (self.input_size - new_w) as f32 / 2.0;
-        let pad_y = (self.input_size - new_h) as f32 / 2.0;
-
-        let sz = self.input_size as usize;
+        // Row stride of the CHW tensor is its width, not one shared
+        // dimension - the two differ on a non-square model.
+        let row = self.input_size.width as usize;
 
         // Refill grey pad. Resetting the whole buffer is cheaper than
         // tracking which pixels were last written — at 640×640×3 f32
@@ -130,7 +125,7 @@ impl CpuYoloDetector {
 
         let pad_x_i = pad_x as u32;
         let pad_y_i = pad_y as u32;
-        let plane = sz * sz;
+        let plane = self.input_size.plane();
 
         let w_max = frame.width - 1;
         let h_max = frame.height - 1;
@@ -178,9 +173,9 @@ impl CpuYoloDetector {
                 let ox = (pad_x_i + dx) as usize;
                 let oy = (pad_y_i + dy) as usize;
 
-                self.rgb_chw_buf[oy * sz + ox] = r / 255.0;
-                self.rgb_chw_buf[plane + oy * sz + ox] = g / 255.0;
-                self.rgb_chw_buf[2 * plane + oy * sz + ox] = b / 255.0;
+                self.rgb_chw_buf[oy * row + ox] = r / 255.0;
+                self.rgb_chw_buf[plane + oy * row + ox] = g / 255.0;
+                self.rgb_chw_buf[2 * plane + oy * row + ox] = b / 255.0;
             }
         }
 
@@ -225,9 +220,12 @@ impl CpuYoloDetector {
             self.preprocess(frame)
         };
 
-        let sz = self.input_size as usize;
+        let (tw, th) = (
+            self.input_size.width as usize,
+            self.input_size.height as usize,
+        );
         let input_tensor =
-            TensorRef::from_array_view(([1, 3, sz, sz], self.rgb_chw_buf.as_slice()))
+            TensorRef::from_array_view(([1, 3, th, tw], self.rgb_chw_buf.as_slice()))
                 .map_err(|e| DetectorError::InferenceFailed(format!("tensor build: {e}")))?;
 
         let outputs = {
@@ -300,14 +298,14 @@ impl CpuYoloDetector {
         &mut self,
         camera: CameraId,
         data: &[f32],
-        input_size: u32,
+        input_size: crate::InputSize,
         src_width: u32,
         src_height: u32,
     ) -> Result<Vec<Detection>, DetectorError> {
         reco_core::profile_scope!("yolo_detect_preprocessed");
 
-        let sz = input_size as usize;
-        let expected = 3 * sz * sz;
+        let (tw, th) = (input_size.width as usize, input_size.height as usize);
+        let expected = input_size.tensor_len();
         if data.len() != expected {
             return Err(DetectorError::InferenceFailed(format!(
                 "PreprocessedChw: expected {expected} floats, got {}",
@@ -315,7 +313,7 @@ impl CpuYoloDetector {
             )));
         }
 
-        let input_tensor = TensorRef::from_array_view(([1, 3, sz, sz], data))
+        let input_tensor = TensorRef::from_array_view(([1, 3, th, tw], data))
             .map_err(|e| DetectorError::InferenceFailed(format!("tensor build: {e}")))?;
 
         let outputs = {
@@ -336,12 +334,8 @@ impl CpuYoloDetector {
         let n = shape[1] as usize;
 
         // Recompute letterbox params to match the preprocessor's layout
-        let fw = src_width as f32;
-        let fh = src_height as f32;
-        let is = input_size as f32;
-        let scale = (is / fw).min(is / fh);
-        let pad_x = (is - (fw * scale).round()) / 2.0;
-        let pad_y = (is - (fh * scale).round()) / 2.0;
+        let lb = input_size.letterbox(src_width, src_height);
+        let (scale, pad_x, pad_y) = (lb.scale, lb.pad_x, lb.pad_y);
 
         let detections = postproc(
             slice,
@@ -381,10 +375,17 @@ impl UnifiedDetector for CpuYoloDetector {
             DetectorFrame::Cpu(raw) => self.detect_raw(camera, raw),
             DetectorFrame::PreprocessedChw {
                 data,
-                input_size,
+                input_w,
+                input_h,
                 src_width,
                 src_height,
-            } => self.detect_preprocessed(camera, data, *input_size, *src_width, *src_height),
+            } => self.detect_preprocessed(
+                camera,
+                data,
+                crate::InputSize::new(*input_w, *input_h),
+                *src_width,
+                *src_height,
+            ),
             _ => Err(DetectorError::UnsupportedFrameKind),
         }
     }

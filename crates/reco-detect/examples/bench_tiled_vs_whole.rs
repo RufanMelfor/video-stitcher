@@ -52,7 +52,11 @@ fn main() {
     let (mut session, input_size, _) =
         reco_detect::ort_session::create_ort_session(model_path.as_ref(), Vec::new())
             .expect("load model");
-    assert_eq!(input_size as usize, sz, "model input size mismatch");
+    assert_eq!(input_size.height as usize, sz, "model input size mismatch");
+    assert!(
+        input_size.is_square(),
+        "this benchmark assumes a square model"
+    );
 
     // Warmup: TensorRT engine JIT-compile / cache load happens on the
     // first call(s) - exclude that from the timed measurement. Run 4

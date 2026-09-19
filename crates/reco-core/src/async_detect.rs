@@ -146,7 +146,8 @@ impl AsyncDetectThread {
             for p in job.pending {
                 let frame = DetectorFrame::PreprocessedChw {
                     data: &p.tensor,
-                    input_size: p.input_size,
+                    input_w: p.input_w,
+                    input_h: p.input_h,
                     src_width: p.src_width,
                     src_height: p.src_height,
                 };
@@ -245,7 +246,8 @@ mod tests {
         PendingDetection {
             camera,
             tensor: vec![0.0; 3 * 4 * 4],
-            input_size: 4,
+            input_w: 4,
+            input_h: 4,
             src_width: 8,
             src_height: 8,
         }

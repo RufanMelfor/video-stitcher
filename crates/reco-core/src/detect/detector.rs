@@ -183,10 +183,16 @@ pub enum DetectorFrame<'a> {
     /// letterbox, and normalize are done on the GPU. The detector skips
     /// all preprocessing and runs inference directly on this data.
     PreprocessedChw {
-        /// Float32 CHW data, `3 * input_size * input_size` elements.
+        /// Float32 CHW data, `3 * input_w * input_h` elements.
         data: &'a [f32],
-        /// Model input size (square dimension).
-        input_size: u32,
+        /// Model input tensor width. May differ from `input_h`: the
+        /// cameras are 4:3, so a matching model wastes no tensor on
+        /// letterbox padding. reco-core cannot name
+        /// `reco_detect::InputSize` (wrong way round in the crate
+        /// graph), so the two axes travel separately.
+        input_w: u32,
+        /// Model input tensor height.
+        input_h: u32,
         /// Original source frame width (for detection coordinate mapping).
         src_width: u32,
         /// Original source frame height (for detection coordinate mapping).
@@ -386,12 +392,14 @@ pub struct PendingDetection {
     /// Which camera this job came from - carried through to the
     /// resulting [`Detection::camera`] field.
     pub camera: CameraId,
-    /// Owned CHW float32 tensor, `3 * input_size * input_size`
-    /// elements - safe to move across threads (unlike the GPU texture
-    /// views the frame originally referenced).
+    /// Owned CHW float32 tensor, `3 * input_w * input_h` elements -
+    /// safe to move across threads (unlike the GPU texture views the
+    /// frame originally referenced).
     pub tensor: Vec<f32>,
-    /// Model input size (square dimension).
-    pub input_size: u32,
+    /// Model input tensor width - see `RawFrame::PreprocessedChw`.
+    pub input_w: u32,
+    /// Model input tensor height.
+    pub input_h: u32,
     /// Original source frame width (for detection coordinate mapping).
     pub src_width: u32,
     /// Original source frame height (for detection coordinate mapping).

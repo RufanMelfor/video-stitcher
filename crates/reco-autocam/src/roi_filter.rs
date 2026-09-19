@@ -404,7 +404,8 @@ mod tests {
                 job: reco_core::detect::detector::PendingDetection {
                     camera: det.camera,
                     tensor: vec![],
-                    input_size: 1,
+                    input_w: 1,
+                    input_h: 1,
                     src_width: 1,
                     src_height: 1,
                 },

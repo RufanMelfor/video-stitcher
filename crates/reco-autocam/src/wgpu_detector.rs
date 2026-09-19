@@ -32,7 +32,7 @@ pub struct WgpuPreprocessingDetector {
     /// specific case - acceptable since [`WgpuPreprocessor::new`] is a
     /// cheap one-time pipeline/buffer setup, not a per-frame cost.
     preprocessor: Option<WgpuPreprocessor>,
-    input_size: u32,
+    input_size: reco_detect::InputSize,
     device: wgpu::Device,
     queue: wgpu::Queue,
 }
@@ -49,7 +49,7 @@ impl WgpuPreprocessingDetector {
         inner: Box<dyn UnifiedDetector>,
         device: wgpu::Device,
         queue: wgpu::Queue,
-        input_size: u32,
+        input_size: reco_detect::InputSize,
         frame_width: u32,
         frame_height: u32,
     ) -> Self {
@@ -115,7 +115,8 @@ impl UnifiedDetector for WgpuPreprocessingDetector {
                 let tensor = preprocessor.preprocess(&device, &queue, y_view, uv_view, rotation);
                 let inner_frame = DetectorFrame::PreprocessedChw {
                     data: &tensor,
-                    input_size: preprocessor.input_size(),
+                    input_w: preprocessor.input_size().width,
+                    input_h: preprocessor.input_size().height,
                     src_width: width,
                     src_height: height,
                 };
@@ -158,7 +159,8 @@ impl UnifiedDetector for WgpuPreprocessingDetector {
                     job: PendingDetection {
                         camera,
                         tensor,
-                        input_size: preprocessor.input_size(),
+                        input_w: preprocessor.input_size().width,
+                        input_h: preprocessor.input_size().height,
                         src_width: width,
                         src_height: height,
                     },
