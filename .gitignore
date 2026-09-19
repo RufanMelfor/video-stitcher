@@ -40,3 +40,7 @@ calibration_adjusted.json
 
 # Logs
 *.log
+
+# Generated HTML reading copies of docs/*.md (run docs/build_html.py)
+docs/panner-nl.html
+docs/panner-en.html

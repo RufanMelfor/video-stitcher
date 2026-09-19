@@ -1,399 +1,461 @@
 # AI camera tracking & panner tuning
 
-Reference for the **AI Tracking** section of the Export dialog (`reco-gui`).
-Explains what each control actually does and how to tune it for football.
-Grounded in `crates/reco-autocam/src/panners/field.rs` and
-`crates/reco-autocam/src/tracking_mode.rs` - not guessed.
+Reference for the **AI Tracking** section of the Export dialog
+(`reco-gui`). Grounded in `crates/reco-autocam/src/panners/field.rs` and
+`crates/reco-autocam/src/trackers/ball.rs` - measured, not guessed.
 
-## Recommended starting settings
+**Read this first:** [Start here](#start-here) has the settings.
+Everything below it is the evidence, in collapsible blocks - open one
+only when a value surprises you or you need to change it.
 
-Validated end-to-end (2026-08-12) against a real corner-breakaway clip -
-the values below fix "camera won't follow the ball into a corner /
-breakaway" as far as settings alone can. Start here, don't hand-tune
-from scratch. These are also saved per-calibration once you hit **Save
-calibration** in the Export dialog - see
-[`Calibration::autocam_defaults`](../crates/reco-core/src/calibration.rs).
+---
 
-Every slider in this section also auto-saves as your app-level "last
-used" default the moment you change it - no Save calibration click
-needed. Restarting `reco-gui` restores these values before any video or
-calibration is loaded; opening a calibration that has its own saved
-`autocam_defaults` then overrides them, same priority as before. See
-[`GuiSettings::autocam_defaults`](../crates/reco-gui/src/settings.rs).
+## Start here
 
-Model: `yolo26n_v2` is the production checkpoint as of this writing, but
-`yolo26s_v3` (round 3, ONNX-exported) tested dramatically better in a
-real in-app run on the same clip - raw ball detections 19.7% -> 48.7% of
-frames. Not yet promoted to "the" default - see `docs/YOLO26_Training.md`.
-Even `yolo26s_v3` genuinely misses the ball for extended stretches on
-this clip though - frames 720-898 (the last ~6s of the validated
-100-130s 03 Club A window) have zero raw ball detections at all, confirmed
-2026-08-12 across all three `ball_weight` A/B renders. A real model
-recall gap, not something any panner setting fixes - see the training
-notes for known hard cases.
+Copy these, then adjust only what your footage disagrees with.
+
+### Tracking
+
+| Setting | Value | Default |
+|---|---|---|
+| Tracking mode | `field` | `field` |
+| Detect every N frames | 3 | 3 |
+| Detection confidence | 0.10-0.20 | 0.10 |
+| Ball anchor range | 0.3-0.5 rad | 0.20 |
+| Ball coast time | 8s | 0.67s |
+| Ball hold time | 8s | 0 |
+
+### Framing
+
+| Setting | Value | Default |
+|---|---|---|
+| Style preset | `action` | - |
+| Framing | `action` | `action` |
+| Pitch - Lock (horizontal-only) | off | off |
+| Lookahead | 0.5s | 0.5s |
+| Reduce lookahead memory (8-bit) | **on** for 10-bit sources | off |
+
+### Advanced panner
+
+| Setting | Value | Default |
+|---|---|---|
+| Cluster mode | `trimmed_mean` | `density` |
+| Cluster bandwidth | 0.3-0.35 rad | 0.3 |
+| Ball weight | 0.5-0.6 | 0.35 (action) |
+| Ball reach | 1.0 rad | 0.5 |
+| Ball margin | 5 deg (Ball mode), 3 (Field) | 3.0 |
+| Dead-zone | 0.05-0.08 rad | 0.12 (action) |
+| FOV Tight / Default / Wide | 20 / 34 / 65-70 deg | 20 / 34 / 48 |
+| Zoom smoothing (`fov_alpha`) | 0.05-0.08 | 0.01 |
+| Aim (cluster) (`cluster_alpha`) | 0.05-0.20 | 0.012 |
+| Reactivity (lookahead) | 1.5 | 2.5 |
+
+### Stray-ball guards
+
+| Setting | Value | Default |
+|---|---|---|
+| Ball max speed | 0.13 rad/frame | 0.13 |
+| **Ball height limit** | **measure per rig** | 0 (off) |
+| Ball jump confidence | 0.5 | 0.5 |
+| Ball acquire range | 0 (off) | 0 |
+| Player height limit | 0 (off) | 0 |
+
+> **Ball height limit is the one setting you must never copy between
+> cameras.** A value from another rig can silently discard most of your
+> ball detections.
+> [How to measure it](#ball-height-limit-measure-it-per-rig).
+
+---
+
+## Fix a symptom
+
+| Symptom | Try this |
+|---|---|
+| Camera loses the ball for long stretches | [Ball height limit](#ball-height-limit-measure-it-per-rig) first - measure it |
+| Won't follow a breakaway / into a corner | [Five settings, in order](#camera-wont-follow-a-breakaway) |
+| Drifts off the ball and swings back | Ball coast time + Ball hold time to 8s |
+| Loses the ball at the touchline (throw-in) | Ball coast time 2.5s+ |
+| Jittery on static play | Raise Dead-zone (0.15 fixed a real case), or raise Lookahead |
+| Every small ball move drags the frame | Raise Dead-zone first, then lower Ball weight |
+| Camera "gives up" mid-breakaway | Raise Zoom + Aim smoothing to 0.05-0.08 |
+| Zooms too far in/out | Adjust FOV Tight/Wide - they are bounds, not targets |
+| Follows the wrong ball | [Second ball in view](#when-a-second-ball-is-in-view) |
+| Cluster gets lost in midfield | Cluster bandwidth 0.35-0.4 |
+
+---
+
+## Ball height limit: measure it per rig
+
+**Default 0 = off.** A ball on a neighbouring pitch sits higher in frame
+and is about half the size, so a ceiling on world pitch can exclude it.
+That works - but the correct value is a property of *your camera mount*,
+not of football.
+
+Two real rigs, same software:
+
+| Rig | Match ball sits at | Correct ceiling |
+|---|---|---|
+| `03 Away_Club - sv O.S.S` | pitch **-0.16 .. -0.31** | 0.12 |
+| `05 GVV Away-Club` | pitch **+0.28 .. +0.357** | 0.40 |
+
+Copying `0.12` to the second rig put the ceiling *below the entire ball
+distribution*. It discarded **81.8% of all ball detections** before the
+tracker saw them, leaving one continuous **40.3s** stretch with no ball.
+The symptom looked like a panner problem ("camera loses the ball after
+20 seconds"), which is why this deserves its own section.
+
+**To measure it:**
+
+1. Export with `--events trace.jsonl`.
+2. Read the `pitch` of every ball entry in `detections_raw`. Rejected
+   detections still appear there, so one run with the filter set wrong
+   still gives you the right answer.
+3. Set the ceiling just above the observed maximum.
+4. Leave it at `0` if no neighbouring pitch is in view.
+
+<details>
+<summary>Measured effect (500-560s, all else identical)</summary>
+
+| Ball height limit | Tracking | Coasting | No ball | Longest gap |
+|---|---|---|---|---|
+| 0.12 (inherited from other rig) | 11.7% | 20.2% | 68.1% | 40.3s |
+| 0.40 (measured on this rig) | 56.7% | 42.4% | 0.8% | 0.5s |
+
+Four panner variants (dead-zone 0.15 -> 0.04, cluster_alpha 0.12 -> 0.25,
+fov_tight 38 -> 32, ball margin 5 -> 8) produced **bit-identical**
+tracking numbers. That is the cleanest possible proof that no panner
+control compensates for this: the ball was already gone before the
+panner ran.
+
+Validated across 160-220s, 500-560s, 720-780s and 1420-1460s - no ball
+detection anywhere above 0.40. The detector was never the problem: 1565
+ball detections, mean confidence 0.55.
+
+Coasting stays high (42-63%) after the fix because the ball is still only
+~16x17 px at the model. Ball coast/hold time at 8s absorbs that.
+(2026-09-19)
+</details>
+
+---
+
+## Camera won't follow a breakaway
+
+Five settings gate each other **in this order**. Raising one without the
+others will not fix it.
+
+1. **Ball anchor range** -> 0.3-0.5. If the tracker rejects the far
+   detection, nothing downstream matters. Confirm via `--events` that
+   the ball's `state` reads `Tracking`, not `Coasting`/`Lost`.
+2. **Ball reach** -> 1.0. Lets the panner pull the aim toward it.
+3. **FOV Wide** -> 65-70 deg. The widen-for-ball calculation clamps to
+   this; at 48 deg the ball-carrier and the group do not both fit.
+4. **Zoom + Aim smoothing** -> 0.05-0.08. The defaults have a ~3s time
+   constant; a breakaway is over before the camera arrives.
+5. **Ball weight** -> 0.5. Only if the ball separates *vertically*
+   (toward the near touchline). Below this the aim target itself never
+   gets close enough.
+
+<details>
+<summary>How each was verified</summary>
+
+**Ball anchor range** - raw-detection logs showed the model detecting a
+breakaway ball at 0.97 confidence while the tracker coasted, because the
+detection sat outside the gate.
+
+**FOV Wide** - controlled A/B render, same clip and moment, everything
+else constant: at 48 deg both subjects do not fit; at 70 deg they do.
+
+**Smoothing** - real trace on a corner breakaway: FOV climbed 38.7 ->
+39.9 deg over the ~20 frames the ball stayed trackable, with the target
+well past 65 deg. Aim pitch barely moved while the ball's pitch shifted
+0.24 rad.
+
+**Ball weight** - CLI A/B render: at 0.35 the *computed aim target* never
+gets close enough on a vertical break. Not a gate or smoothing problem.
+Cost: +30-33% average frame-to-frame pose delta vs 0.35 - real, but far
+short of the visible wobble `1.0` causes. (2026-08-12)
+
+This is Action framing's designed trade-off - an isolated ball is
+rejected by default so a stray detection cannot drag the camera off play.
+If ball plays matter more than staying with the crowd, **Tracking mode ->
+ball** is often the better fit for that match.
+</details>
+
+---
+
+## Ball coast time + Ball hold time
+
+The pair that matters most after Ball height limit. Both to **8s**.
+
+They solve different halves of "the camera drifts off the ball and comes
+back". **Coast time** = how long the *tracker* keeps reporting a position
+through a detection gap. **Hold time** = how long the *camera* keeps
+using that last position after the tracker gives up.
+
+<details>
+<summary>Why 8s, and the measured effect</summary>
+
+From the gap distribution, not taste: the problem window had 17 detection
+gaps >0.1s, the longest 7.9s. 2.5s bridged 10, 5s bridged 11, **8s
+bridged all 17**.
 
 ```
-Tracking mode:                      field
-Detect every N frames:              3
-Ball anchor range:                  0.3-0.5 rad     (default 0.20)
-Ball coast time:                    8s              (default 0.67s) - see note below
-Ball hold time:                     8s              (default 0, new 2026-09-18)
-Style preset:                       action
-
-Framing:                            action
-Pitch - Lock (horizontal-only):     off
-Lookahead:                          0.5s
-Reduce lookahead memory (8-bit):    on for a 10-bit source (see note below), off otherwise
-
-Advanced panner
-----------------
-Cluster mode:                       trimmed_mean
-Ball weight:                        0.5             (action preset default 0.35)
-Dead-zone:                          0.05-0.08 rad
-Cluster bandwidth:                  0.3 rad         (preset default, not separately tuned)
-Ball reach:                         1.0 rad         (default 0.5)
-FOV Tight:                          20deg           (preset default, not separately tuned)
-FOV Default:                        34deg           (preset default, not separately tuned)
-FOV Wide:                           65-70deg        (action preset default 48deg)
-Zoom smoothing (fov_alpha):         0.05-0.08       (default 0.01)
-Aim smoothing (cluster_alpha):      0.05-0.08       (default 0.012)
-Reactivity (lookahead):             1.5             (default 2.5, action preset 3.0) - see note below
-
-Stray-ball guards (2026-09-18)
-------------------------------
-Ball max speed:                     0.13 rad/frame  (default 0.13)
-Ball height limit:                  site-specific   (default 0 = off) - see below
-Ball jump confidence:               0.5             (default 0.5)
-Ball acquire range:                 0               (leave off)
-Player height limit:                0               (leave off)
+coast 5s, hold 0   25 deg off ball   48% in frame   <- old GUI default
+coast 8s, hold 0   23 deg            47%
+coast 8s, hold 3   19 deg            47%
+coast 8s, hold 8   13 deg            65%            <- recommended
 ```
 
-Why each of these, briefly: **Cluster mode -> trimmed_mean** fixes the
-multi-second freeze during ball-less stretches. **Dead-zone** is needed
-alongside `trimmed_mean`, tested together. **Ball weight 0.5** (raised
-from the action preset's 0.35, validated 2026-08-12 against real
-100-130s 03 Club A footage) - at 0.35 the aim blend still leans too hard on
-the player-cluster centroid when the ball separates from it vertically
-(e.g. breaking toward the near touchline while players stay upfield):
-the *computed target* itself never gets close enough to the ball, which
-then drifts out of frame regardless of how fast smoothing reacts - not
-a smoothing problem, a blend-weight one. 0.5 keeps the ball in frame for
-the entire tested breakaway; 0.6 also works with no further benefit
-found. Cost: frame-to-frame camera movement rises with it (+33% mean,
-+32% p95 delta per frame at 0.5 vs 0.35 in the same test) - some real
-wobble tradeoff, though nowhere near `1.0`, which is what actually
-caused visible wobble regardless of model quality. **Ball reach** lets
-the panner pull toward a genuinely isolated ball instead of ignoring it.
-**FOV Wide** - without raising this, the ball-reach widen logic clamps
-before it can actually open the shot up. **Zoom/Aim smoothing** - even
-with Ball reach and FOV Wide raised, the *default* smoothing rates are
-often too slow to actually reach the wider/repositioned target before a
-brief breakaway is over (see below) - raise these if the camera visibly
-"gives up" following a fast ball event partway through. **Reactivity
-(lookahead) 1.5** (down from the `action` preset's 3.0, validated
-2026-09-03 on a real XFT-UHTF match) fixes a different symptom: the
-camera visibly "sprinting" to top speed instead of easing there on a
-large, sudden target move (e.g. the ball crossing ~10m). This
-multiplier raises both the base chase's velocity clamp and its ramp-up
-rate whenever lookahead is active, so a high value overshoots hard
-before the centered-smoother can remove the resulting jitter. Lowering
-it to 1.5 cut peak per-frame jump and peak half-second swing ~45% in a
-real CLI A/B render, with ball-tracking presence and *typical*
-(non-peak) smoothness unchanged - that asymmetry (peaks down, average
-unchanged) is the expected signature of this specific parameter, not a
-fluke.
+The calm window was unchanged by all four (22 deg / 33%), so this is free
+rather than a trade. Total camera travel also *fell* (4.82 -> 3.79 rad):
+the shot gets steadier, not busier.
 
-**Ball coast time 8s + Ball hold time 8s** (validated 2026-09-18 on two
-real 60s windows of the same youth match, `03 Away_Club - sv O.S.S`).
-These two are the pair that actually matters; everything else in the
-stray-ball block below is situational.
+The swing this prevents is wasted motion - a ball that disappears
+reappears a median of **1.4 deg** (near play) to **8 deg** (far play)
+from where it vanished, within half a frame width in **65-91%** of cases.
 
-They solve different halves of the same symptom - "the camera drifts off
-the ball and comes back". **Ball coast time** governs how long the
-*tracker* keeps reporting a position through a detection gap; **Ball hold
-time** governs how long the *camera* keeps using that last position after
-the tracker has given up entirely. Before this, a lost ball immediately
-released the aim to the player cluster, so every gap longer than the
-coast budget produced a visible swing away and back.
+A ball that was never tracked (kids warming up outside the pitch) never
+starts the countdown, so raising these does not make false triggers more
+likely. (2026-09-18)
+</details>
 
-That swing is almost always wasted motion: measured across both windows,
-a ball that disappears reappears a median of **1.4 deg** (near play) to
-**8 deg** (far play) from where it vanished, and within half a frame
-width in **65-91%** of cases. Holding the aim keeps the shot still *and*
-leaves the camera already pointed at the ball when it returns.
+---
 
-The 8s coast figure comes from the gap distribution, not taste: the
-problem window had 17 detection gaps >0.1s, the longest 7.9s. 2.5s
-bridged 10 of them, 5s bridged 11, **8s bridged all 17**. Measured effect
-on that window (camera-to-ball error / ball inside frame):
+## When a second ball is in view
 
-```
-coast 5s, hold 0   25 deg   48%     <- what the GUI shipped with
-coast 8s, hold 0   23 deg   47%
-coast 8s, hold 3   19 deg   47%
-coast 8s, hold 8   13 deg   65%     <- recommended
-```
+A warm-up or adjacent-match ball entering the field ROI can steal the
+camera. On `03 Away_Club - sv O.S.S` 120-180s the tracker spent 30%
+of the window on the wrong ball.
 
-The calm window was unchanged by all four (22 deg / 33%), so this is a
-free win there rather than a trade. Total camera travel also *fell*
-(4.82 -> 3.79 rad), i.e. the shot gets steadier, not busier. The GUI
-slider maxed at 5s until 2026-09-18; it now goes to 15s.
+**What works:**
 
-**Reduce lookahead memory (8-bit) - currently required for 10-bit
-sources, not just a VRAM fallback.** With it off, a 10-bit source (e.g.
-DJI Action 4 HEVC, `P010`) under the default zero-copy decode path hits
-a reproducible crash: wgpu's Dx12 backend rejects the lookahead pool's
-plane copy with `Source format (P010) and destination format
-(R16Unorm) are not copy-compatible`. Confirmed 2026-08-12 stitching a
-real clip with `--lookahead 0.5` and no `--lookahead-reduced-bit-depth`
-- see [`VramPool::copy_from_d3d11`](../crates/reco-core/src/session/vram_pool.rs)'s
-doc comment for the full repro and root-cause notes. Not yet fixed -
-until it is, leave this **on** for any 10-bit source with lookahead
-enabled (or pass `--no-zero-copy`, at a real decode speed cost, or
-`--lookahead 0` to disable lookahead entirely). 8-bit sources are
-unaffected either way.
+- **Ball max speed** (0.13 rad/frame). A real ball cannot cross the
+  panorama between two frames, so anything faster is a different ball.
+  Physics, not a heuristic - which is why it generalises. Results were
+  flat across 0.08-0.20, so the value is not delicate.
+- **Ball height limit** - cut time-on-wrong-ball from 30% to 1%, but
+  [measure it per rig](#ball-height-limit-measure-it-per-rig).
 
-The three ball-related *gates* filter each other, in this order: **Ball
-anchor range -> Ball reach -> FOV Wide**. Ball anchor range decides
-whether the *tracker* accepts a far detection at all; Ball reach decides
-whether the *panner* lets it pull the aim; FOV Wide decides whether the
-*shot* can actually widen enough to show it. Raising only one without
-the others won't fully fix a missed breakaway - see the "Camera won't
-follow the ball into a corner" bullet further down for the full
-reasoning and how each was verified (not just recommended by guess).
+<details>
+<summary>What was measured and rejected (do not re-try)</summary>
 
-**Ball weight is not a gate but decides how hard the aim actually chases
-the ball once it clears all three** - validated 2026-08-12 that even with
-every gate above open, `ball_weight 0.35` still isn't enough on its own:
-if the ball separates far enough from the player cluster *vertically*
-(a near-touchline break, not just a horizontal one), the blend keeps the
-computed aim target too close to the cluster and the ball drifts out of
-frame anyway. See the "Ball weight" entry above and the "Camera won't
-follow the ball into a corner" checklist below (now 5 settings, not 4).
+- **Detector confidence** cannot separate the two balls: both detected at
+  0.79-0.80. Lowering 0.20 -> 0.05 made it *worse* (our ball 21% -> 22%,
+  stray ball 30% -> 46%).
+- **Proximity to the player cluster** is backwards here: the stray ball
+  had 5 players within 0.40 rad, the real ball had 2 - the kids playing
+  with the other ball are tracked people too. This is what `Ball acquire
+  range` implements; leave it off.
+- **Motion / "the ball is stationary"** fails because the match ball is
+  frequently stationary too (throw-ins, restarts, dead time).
+- **Player height limit** appears to help for the wrong reason: at 0.10
+  it leaves a median of one player, the cluster collapses and the panner
+  falls back to ball-only follow in 61% of frames. Flatters that window,
+  misbehaves the moment play moves upfield. (2026-09-18)
+</details>
 
-**Every settings table above is also written into the events JSONL.**
-When "Record pipeline events" (`--events` on the CLI) is on *and* AI
-tracking is enabled, the very first line of the output file is a
-`{"kind":"run_config", ...}` record with every field from the tables
-above - so a trace file is self-describing without cross-referencing
-the export command or GUI state separately. See
-[`PipelineEvent::RunConfig`](../crates/reco-core/src/detect/pipeline_event.rs).
+<details>
+<summary>The real limit is detection, not tuning</summary>
 
-## Top-level controls
+Production preprocessing scales the whole 3840x2880 frame into the
+model's 1920x1920 square, so a ball measuring 32x34 px in the source
+reaches the model at **16x17 px**, with 25% of the input wasted on
+letterbox padding.
 
-**Tracking mode** - `field` (default): follows the player cluster + ball
-together; falls back to ball-only if the model has no player class.
-`ball`: follows only the ball (higher confidence floor, tighter max-jump
-gate). `sweep`: no AI at all - a fixed sinusoidal left-right pan, useful
-only as a debug/baseline mode.
+When the ball is seen at all, confidence is high (median 0.83) - the
+model is not unsure, it misses small balls. This is why neither
+`detection_interval` 1 vs 3 (21% detection rate either way) nor any
+confidence threshold moves the needle, and it caps what panner tuning can
+achieve.
 
-**Detect every N frames** - how often the detector actually runs; frames
-in between reuse the last detection. Lower = fresher positions during
-fast action, higher = cheaper. `3` (every ~0.1s at 30fps) is a good
-default; push higher only if you need the compute back - real-world
-tested 2026-08-29 on a live export, going 3 -> 10 nearly tripled
-framerate (19 -> 52fps), by far the single biggest performance lever
-in the whole panner. The tracking-quality cost of that specific change
-has not been separately re-validated - treat the fps win as confirmed
-and the tracking-quality impact as unknown, not zero.
+Tiled inference would present the same ball at ~21x23 px; the code exists
+for the TensorRT/CUDA path but production on Windows runs the wgpu path,
+which has no tiling. Exporting at a non-square 1440x1920 input does *not*
+help: `CpuYoloDetector::input_size` is a single square dimension, so reco
+reads it as 1440x1440 and scales the ball down further (tested
+2026-09-18, also ~4x slower).
+</details>
 
-**Ball anchor range** (radians, `player_anchor_max_rad`) - a gate inside
-the ball *tracker* (`crates/reco-autocam/src/trackers/ball.rs`), upstream
-of everything else in this doc. A raw ball detection is only accepted at
-all if it lies within this distance of at least one currently-tracked
-player; farther detections are dropped as likely false positives (a
-ball-shaped object in the crowd or background) before the panner ever
-sees them. `0.20 rad` (~11deg) is the default. This runs *before* Ball
-reach (below), so a genuine, isolated ball - the exact breakaway/corner
-scenario Ball reach and FOV Wide are meant to handle - can be silently
-discarded here first, making those two settings look like they aren't
-working. Confirmed via raw-detection log inspection (not guessed): the
-model correctly detected a breakaway ball at 0.97 confidence while the
-tracker was coasting/losing it, because the detection sat outside this
-gate. Widen it (0.3-0.5+) if the panner never seems to acquire a ball
-that's genuinely far from the pack; keep it tight if the model
-false-positives on background clutter.
+---
 
-**Ball anchor range - near/far ramp (CLI-only, no GUI slider yet)** -
-a single flat radius under-covers a real, anchored ball close to a
-downward-tilted rig: the same real-world "teammate right next to the
-ball" distance maps to a much *larger* panorama (yaw, pitch) gap near
-the camera (steep viewing angle) than it does far up the pitch
-(shallow angle, near the horizon). Observed on real XFT-UHTF footage:
-a 90%-confidence ball only 1-2deg outside a 17deg flat gate near
-mid-pitch, next to a real ball ~25deg from its nearest teammate close
-to the camera. `--player-anchor-rad-near` sets a separate radius
-applied at world pitch <= -0.05rad (near the camera), linearly ramping
-to `--player-anchor-rad`'s value (the "far" end, applied at pitch >=
-0.20rad) in between; has no effect unless `--player-anchor-rad` is
-also set. **Tested and rejected at 30deg** (2026-09-03): admits a
-static white field-marker disc sitting on the touchline as a false
-"ball" for 65+ seconds straight. The mechanism itself is sound
-infrastructure - only that specific wide value is rejected. Do not
-raise this without new evidence; re-validating a smaller near-value
-against the same static-marker case is the open next step. See
-[`BallTracker::with_player_anchor_rad_near_far`](../crates/reco-autocam/src/trackers/ball.rs).
+## What each control does
 
-**Ball coast time** (seconds, `ball_coast_secs`) - how long an
-already-tracked ball holds its last known position after detections
-stop arriving, before the track is declared lost. Reported by the user
-2026-08-14: a ball that rolls or is kicked outside the calibrated field
-ROI polygon (see [ROI filtering](../crates/reco-autocam/src/roi_filter.rs))
-looks identical to the tracker as "no detection this frame" - the ROI
-filter drops it before the tracker ever sees it, same as if the model
-had simply missed it. Without this setting the track goes
-`Coasting` -> `Lost` almost immediately, so the camera never follows a
-player stepping over the line to retrieve the ball. This is not new
-tracking logic: [`BallTracker`](../crates/reco-autocam/src/trackers/ball.rs)
-already used a fixed coast budget
-([`DEFAULT_COAST_FRAMES = 20`](../crates/reco-autocam/src/trackers/ball.rs),
-via the reusable [`Coaster`](../crates/reco-autocam/src/trackers/filters/coaster.rs)
-frame-countdown helper) to bridge any brief detection gap, regardless of
-cause - it just wasn't tunable or exposed before. Raising it only
-extends how long an *already-tracked* ball is held onto; a ball that was
-never tracked in the first place (e.g. kids warming up with a ball just
-outside the pitch) never starts this countdown, so raising it doesn't
-make the panner more likely to trigger on that case. Default is `0.67s`
-(the pre-existing 20-frame budget at 30fps). Functionally verified
-end-to-end 2026-08-14 (the value threads through correctly into the
-events JSONL run_config record via `--ball-coast-secs`); user-confirmed
-on real footage 2026-08-15 that `2.5s` "works nicely" for the
-ROI-crossing scenario - informal confirmation on the user's own match
-footage, not a controlled A/B render like the other settings on this
-page, but a real result rather than a guess. Start at `2.5s`; confirm
-via `--events` that the ball's `state` stays `Coasting` rather than
-flipping to `Lost` during the crossing if you need to tune further.
+<details>
+<summary>Tracking mode, Detect every N frames, Detection confidence</summary>
 
-**Detection confidence** (`[0,1]`, `confidence_threshold`) - a raw
-detection of any class (person, ball, referee) below this score never
-reaches the tracker at all; it's the floor the detector itself applies
-before anything downstream (Ball anchor range, the panner, ...) ever
-sees a candidate. Default `0.10`. Added 2026-08-29 after the per-export sidecar log
-(`.log` file next to the output, see `reco_io::export_log`) made a
-real pattern visible in its timeline: dozens of `BallTracker:
-acquired ... conf=0.10-0.20` events over one export, each one a fresh,
-mostly-unsmoothed raw ball position landing straight in the aim blend
-(`ball_weight`) - a plausible source of visible camera wobble distinct
-from the smoothing-rate causes above. Competitive reference: a
-locally-installed competing product's own runtime log shows
-`detectorConfidenceThreshold=0.55`, 5.5x this default - not proof 0.55
-is correct here (different model/pipeline), but a real data point if
-raising this. **Replaces a previously hidden, hardcoded
-behavior**: Ball tracking mode used to silently force this to `0.25`
-regardless of anything else; it no longer does, and Field/Sweep's old
-literal `0.10` is now just this slider's own default for every mode. If
-you were relying on Ball mode's old implicit 0.25 floor, set this
-explicitly now. Not yet A/B-validated on real footage - raise it a
-notch (e.g. `0.2-0.3`) and check the export log's `BallTracker:
-acquired` lines for fewer very-low-confidence entries, and watch
-whether a genuinely faint real ball goes missing as the trade-off.
+**Tracking mode** - `field` (default) follows the player cluster + ball
+together, falling back to ball-only if the model has no player class.
+`ball` follows only the ball (no player cluster at all, `ball_weight`
+forced to 1.0, tighter max-jump gate). `sweep` is a fixed sinusoidal pan,
+for debugging only.
 
-**Style preset** - a one-shot action that overwrites every slider below
-(framing, cluster mode, lock-pitch, cluster bandwidth, dead-zone, ball
-weight, ball reach, FOV) with a tuned bundle. You can still tweak any
-slider afterward; picking a different preset later re-overwrites
-everything. See [Presets](#presets) below for the exact values each one
-sets.
+**Detect every N frames** - how often the detector runs; frames in
+between reuse the last detection. `3` (~0.1s at 30fps) is a good default.
+Going 3 -> 10 nearly tripled framerate (19 -> 52fps) on a live export -
+by far the biggest performance lever in the panner. The tracking-quality
+cost of that specific change has not been re-validated: treat the fps win
+as confirmed and the quality impact as unknown, not zero. (2026-08-29)
 
-**Framing** - independent of the preset buttons, this is the actual
-algorithm switch: `action` aims at the (optionally confidence-weighted)
-player cluster with edge-push/pitch-bias/ball-blend and dynamic zoom.
-`frame_all` aims at the plain geometric midpoint of every player's
-bounding box - no trim, no weighting, no ball pull - the "whole team in
-frame" mode (training footage, frisbee, etc.).
+**Detection confidence** - floor the detector applies before anything
+downstream sees a candidate. Default `0.10`. Replaces a previously
+hidden behaviour where Ball mode silently forced `0.25`; if you relied on
+that, set it explicitly now. A competing product's runtime log shows
+`0.55`, 5.5x this default - not proof, but a data point if raising it.
+</details>
 
-**Pitch - Lock (horizontal-only)** - off (default) lets the camera's tilt
-track the action's vertical position too. On holds tilt fixed and pans in
-yaw only.
+<details>
+<summary>Ball anchor range (and the near/far ramp)</summary>
 
-**Lookahead (smoothness)** - buffers N seconds of future frames so the
-panner can smooth over past+future and lead the play slightly instead of
-reacting frame-by-frame. `0.5s` is a safe middle value; higher is
-smoother but costs more VRAM (the export dialog's risk-coloured slider
-warns if it won't fit the loaded source resolution).
+A gate inside the ball *tracker*, upstream of everything else here. A raw
+ball detection is only accepted if it lies within this distance of at
+least one tracked player. Default `0.20 rad` (~11 deg).
 
-## Advanced panner
+This runs *before* Ball reach, so a genuine isolated ball - the exact
+breakaway case Ball reach and FOV Wide exist for - can be silently
+discarded here first, making those two look broken.
 
-**Cluster mode** - `density` (default): centers on the densest
-concentration of players (most neighbors within `cluster_bandwidth_rad`)
-and keeps that group - a distant knot of players can't drag the aim away
-from the real action. `trimmed_mean`: averages *all* players, trimming
-the farthest outliers - simpler, but a distant group can still pull the
-mean before trimming kicks in.
+**Near/far ramp (CLI-only).** A flat radius under-covers a ball close to
+a downward-tilted rig: the same real-world distance maps to a much larger
+panorama gap near the camera than far up the pitch.
+`--player-anchor-rad-near` sets a separate radius at world pitch
+<= -0.05 rad, ramping to `--player-anchor-rad` at pitch >= 0.20 rad.
+**Tested and rejected at 30 deg** (2026-09-03): admits a static white
+field-marker disc as a false ball for 65+ seconds. The mechanism is
+sound; that specific wide value is not. Do not raise without new
+evidence.
+</details>
 
-**Ball weight** `[0-1]` - blend weight of the ball vs. the player cluster
-(Action framing only). Effective pull each frame is
-`ball_weight × ball_presence` (a value that ramps up while the ball is
-near the cluster and decays once it isn't), so it only tugs the camera
-while the ball is actually present and close to play. Forced to `1.0` in
-Ball tracking mode.
+<details>
+<summary>Cluster mode, Ball weight, Ball reach, Cluster bandwidth, Dead-zone</summary>
 
-**Ball reach** (radians, `ball_max_dist_from_cluster`) - how far the ball
-may be from the player cluster centroid and still blend into the aim
-(Action framing only). Beyond this radius the ball is treated as
-off-the-action - a stray detection or the far goal - and ignored, so it
-can't drag the camera off the play. `0.5 rad` is the default. Raise it if
-the camera won't follow a real, isolated ball (e.g. into a corner, on a
-long ball or a breakaway); lower it to keep the camera glued to the
-crowd even when the ball briefly separates.
+**Cluster mode** - `density` centers on the densest concentration of
+players, so a distant knot cannot drag the aim away. `trimmed_mean`
+averages all players and trims outliers - simpler, but a distant group
+can still pull the mean before trimming kicks in. `trimmed_mean` fixes
+the multi-second freeze during ball-less stretches, which is why it is
+recommended above; it was tested together with Dead-zone.
 
-**Cluster bandwidth** (radians) - neighborhood radius used by `density`
-mode to decide which players belong to "the" cluster. Wider pulls a
-looser/more spread-out formation into one group; narrower isolates a
-tight core (but can lose the cluster faster in open play). No effect
-under `trimmed_mean`.
+**Ball weight** - blend weight of ball vs player cluster (Action framing
+only). Effective pull is `ball_weight x ball_presence`, so it only tugs
+while the ball is actually present. Forced to `1.0` in Ball mode.
 
-**Dead-zone** (radians) - the camera holds still while the target stays
-within this radius of the current aim; larger errors are eased in
-instead of snapped to. Removes micro-wobble on near-static play. Larger
-= calmer but slightly slower to react (lookahead is what makes this
-affordable); smaller = more reactive but more prone to micro-adjustments.
+**Ball reach** - how far the ball may be from the cluster centroid and
+still blend into the aim. Beyond it, the ball is treated as
+off-the-action and ignored.
 
-**Field of view - Tight / Default / Wide** (degrees) - **not** three fixed
-zoom levels. They're the *bounds* of a continuously-varying zoom
-recomputed every frame from cluster spread plus distance/edge/velocity
-biases (Action framing) or bounding-box extent (FrameAll). Tight = how
-far in the panner may zoom on a compact cluster; Wide = how far out on
-spread-out play; Default is only the starting FOV before any players are
-detected. If a specific situation zooms in/out further than you'd like,
-adjust these bounds - not a "preferred" midpoint.
+**Cluster bandwidth** - neighbourhood radius for `density` mode. Wider
+pulls a spread formation into one group; narrower isolates a tight core.
+No effect under `trimmed_mean`.
 
-**Wide is also the ceiling on the ball-reach widen** - `target_fov` (the
-same function computing the bounds above) already widens the shot to
-keep a tracked ball in frame (`ball_offset` + `ball_frame_margin_deg`,
-doubled), but that computed value is then clamped to `fov_wide`. On a
-genuine breakaway the needed width can exceed the `action`/`broadcast`
-presets' 48-58° ceiling, so the shot never actually opens up enough to
-hold both the ball-carrier and the main group, even with **Ball reach**
-raised - see the corner-breakaway bullet below.
+**Dead-zone** - the camera holds still while the target stays within this
+radius; larger errors ease in rather than snap. Note it also *subtracts*
+from larger errors (`scale = (mag - dz) / mag`), so a high value delays
+the start of every move, not just small ones. At 0.15 rad (8.6 deg) a
+10 deg error leaves only 1.4 deg to act on.
+</details>
 
-**Zoom smoothing / Aim smoothing** (`fov_alpha` / `cluster_alpha`) - how
-fast the panner's *smoothed* zoom and aim catch up to their computed
-targets each frame, as an exponential-moving-average rate (not a delay
-or a cap). This is a completely separate lever from Lookahead: Lookahead
-controls how much future/past gets averaged into the target in the first
-place; these control how fast the presented value chases that target
-once computed. The defaults (`fov_alpha: 0.01`, `cluster_alpha: 0.012`)
-have a roughly **3-second time constant at 30fps** - confirmed via a
-real trace: on a corner-breakaway clip, FOV climbed only from 38.7° to
-39.9° (target was well past 65°+) over the ~20 frames the ball stayed
-trackable, and aim pitch barely moved at all while the ball's pitch
-shifted by 0.24 rad in the same window. The ball had already left frame
-before the smoothing caught up. Raise both if the camera "gives up" on a
-fast breakaway partway through despite Ball reach/FOV Wide being high
-enough; raise too far and the wobble those two settings were tuned to
-avoid can come back, since a snappier camera also more eagerly chases a
-noisy detection.
+<details>
+<summary>Field of view, and why Wide is also a ceiling</summary>
 
-**Dead-zone vs. frame margin - two different things, easy to conflate.**
-Dead-zone is a *reaction threshold*: how far the target must move before
-the camera moves at all (see above). It has nothing to do with how close
-a player/ball is allowed to get to the edge of frame. That's controlled
-by `ball_frame_margin_deg` (Action framing, widens the FOV to keep this
-much clearance around the ball) and `frame_all_margin_deg` (FrameAll,
-padding around the full player bounding box so nobody is clipped at the
-viewport edge) - see [Extra parameters](#extra-parameters-not-yet-exposed-in-the-gui);
-`ball_frame_margin_deg` has no GUI/CLI control today.
+Tight / Default / Wide are **not** three zoom levels. They are the bounds
+of a continuously-varying zoom recomputed every frame from cluster spread
+plus distance/edge/velocity biases. Default is only the starting FOV
+before any players are detected.
+
+`target_fov` already widens the shot to keep a tracked ball in frame
+(`ball_offset + ball margin`, doubled), but that value is then clamped to
+**FOV Wide**. On a real breakaway the needed width exceeds the
+action/broadcast presets' 48-58 deg ceiling, so the shot never opens up -
+even with Ball reach raised.
+</details>
+
+<details>
+<summary>Smoothing: Zoom, Aim (cluster), and Reactivity</summary>
+
+**Zoom / Aim smoothing** (`fov_alpha` / `cluster_alpha`) - how fast the
+smoothed zoom and aim catch up to their targets each frame, as an EMA
+rate. Separate from Lookahead: Lookahead controls how much future/past
+goes into the target; these control how fast the presented value chases
+it. Defaults have a ~3-second time constant at 30fps.
+
+**Reactivity (lookahead)** -> 1.5, down from the action preset's 3.0.
+Fixes the camera visibly "sprinting" to top speed instead of easing there
+on a large sudden target move. This multiplier raises both the velocity
+clamp and the ramp-up rate whenever lookahead is active, so a high value
+overshoots before the smoother can remove the jitter. Lowering it cut
+peak per-frame jump and peak half-second swing ~45% in a real A/B render,
+with ball presence and typical smoothness unchanged. That asymmetry
+(peaks down, average unchanged) is this parameter's signature.
+(2026-09-03)
+</details>
+
+<details>
+<summary>Dead-zone vs Ball margin - easy to conflate</summary>
+
+**Dead-zone** is a *reaction threshold*: how far the target must move
+before the camera moves at all. It has nothing to do with how close the
+ball gets to the edge of frame.
+
+**Ball margin** (`ball_frame_margin_deg`, slider added 2026-09-19,
+default 3.0 deg) widens the FOV to keep that much clearance around the
+ball. `frame_all_margin_deg` does the same for the player bounding box in
+FrameAll and still has no GUI control.
+
+**Ball margin rarely does anything in Field mode, by design.** It is a
+*floor* on the FOV - the zoom widens to at least
+`2 x (ball_offset + margin)` - and `ball_offset` is measured from the
+already ball-blended aim, so it is small whenever Ball weight is doing
+its job. With a normal cluster, `2 x spread` plus the biases is almost
+always larger, so `max()` picks that and the margin never binds. Measured
+on real footage: **3.0 and 15.0 produced identical framing.**
+
+It bites in **Ball mode**, where there is no cluster, spread collapses
+and the FOV falls back to Tight. There the margin is the binding term and
+5-8 deg is sensible.
+</details>
+
+<details>
+<summary>Lookahead, and the 10-bit requirement</summary>
+
+**Lookahead** buffers N seconds of future frames so the panner can smooth
+over past+future and lead the play. `0.5s` is a safe middle; higher is
+smoother but costs VRAM.
+
+**Reduce lookahead memory (8-bit) is currently required for 10-bit
+sources**, not just a VRAM fallback. With it off, a 10-bit source (DJI
+Action 4 HEVC, `P010`) under zero-copy decode hits a reproducible crash:
+wgpu's Dx12 backend rejects the lookahead pool's plane copy with `Source
+format (P010) and destination format (R16Unorm) are not copy-compatible`.
+Not yet fixed - leave it **on** for any 10-bit source with lookahead, or
+pass `--no-zero-copy` (real decode cost) or `--lookahead 0`. 8-bit
+sources are unaffected. (2026-08-12)
+</details>
+
+<details>
+<summary>Jittery picture: two causes, two fixes</summary>
+
+**Children milling around a stationary ball** kept nudging the camera at
+a low dead-zone (0.048 rad). Raising to **0.15 rad** fixed it with no
+observed downside. (2026-09-03)
+
+**Every small ball movement drags the frame.** Unlike the player cluster,
+which is EMA-smoothed via `cluster_alpha` before reaching the aim, the
+ball's position is blended in **raw, with no smoothing of its own**:
+`target = cluster x (1 - w) + last_ball_pos x w`. So whenever the ball is
+confidently tracked, every frame's detection noise feeds straight into
+where the camera points.
+
+1. **Raise Dead-zone** (0.05 -> 0.09-0.10) - absorbs jiggle without
+   reducing how hard a real ball move pulls the aim.
+2. **If that is not enough, lower Ball weight** (0.5 -> 0.35). Trade-off:
+   0.5 is what the breakaway checklist recommends raising *to*.
+
+A cleaner fix would be a dedicated smoothing rate for the ball's own
+contribution, parallel to `cluster_alpha`. Not built. (reported
+2026-08-29, reasoned from code, not yet A/B-validated)
+</details>
+
+---
 
 ## Presets
 
@@ -402,200 +464,45 @@ viewport edge) - see [Extra parameters](#extra-parameters-not-yet-exposed-in-the
 | framing | Action | Action | Action | **FrameAll** |
 | confidence_weighted | true | true | true | **false** |
 | dead_zone_rad | 0.20 | 0.20 | **0.12** | 0.20 |
-| fov_tight / default / wide | 22 / 40 / 58 | 22 / 40 / 58 | **20 / 34 / 48** | 22 / 40 / **70** |
+| fov tight/default/wide | 22/40/58 | 22/40/58 | **20/34/48** | 22/40/**70** |
 | ball_weight | 0.50 | **0.20** | **0.35** | **0.0** |
 | ball_max_dist_from_cluster | 0.50 | 0.50 | 0.50 | 0.50 |
 | edge_push | 0.15 | 0.15 | **0.20** | 0.15 |
 | lookahead_reactivity | 2.5 | 2.5 | **3.0** | 2.5 |
 | frame_all_margin_deg | 8.0 | 8.0 | 8.0 | **10.0** |
 
-`broadcast` is the validated, calm default (only `ball_weight` lowered
-from the base default). `action` is tighter and more reactive across the
-board - smaller dead-zone, narrower/tighter FOV range, higher ball pull,
-more edge push. `frame_all` switches framing algorithm entirely.
+`broadcast` is the calm default. `action` is tighter and more reactive
+across the board. `frame_all` switches framing algorithm entirely.
 
-Source: `FieldPannerConfig::{broadcast, action, frame_all}` in
-`crates/reco-autocam/src/panners/field.rs`.
+Picking a preset **overwrites every slider below it**; you can still
+tweak afterward, but choosing another preset re-overwrites everything.
 
-## Practical tuning for football
+Source: `FieldPannerConfig::{broadcast, action, frame_all}`.
 
-- **Calm, few cuts (broadcast-style)**: leave the `broadcast` preset as-is,
-  or lower `ball_weight` further (0.10-0.15) for even less ball-chasing.
-- **Faster, more energetic follow on counters**: switch to the `action`
-  preset wholesale rather than hand-tuning individual sliders - it's a
-  tuned bundle, not a single knob.
-- **Cluster keeps "getting lost" during spread-out midfield play**:
-  raise `cluster bandwidth` (0.35-0.4 rad).
-  Increase [`min_cluster`](#extra-parameters-not-yet-exposed-in-the-gui)
-  if 2 players is too readily forming a cluster (not GUI-exposed today).
-- **Picture feels jittery/twitchy on static play**: raise `dead-zone`, or
-  raise `lookahead` for more lead-in smoothing. Confirmed 2026-09-03 on
-  real footage: a group of children milling around a stationary/
-  untracked ball kept restlessly nudging the camera at a low dead-zone
-  (0.048 rad on that calibration); raising to **0.15 rad** fixed it
-  with no observed downside.
-- **Picture wobbles/hops because the AI seems obsessed with the ball -
-  every small ball movement drags the frame** (reported 2026-08-29, not
-  yet A/B-validated - the advice below is reasoned from the code, not
-  yet confirmed on real footage): unlike the player cluster, which is
-  EMA-smoothed via `cluster_alpha` before it ever reaches the aim, the
-  ball's own position is blended into the aim **raw, with no smoothing
-  of its own** - `target = cluster * (1 - w) + last_ball_pos * w` where
-  `w = ball_weight * ball_presence` (see
-  [`FieldPanner::decide_with_lookahead`](../crates/reco-autocam/src/panners/field.rs)).
-  So whenever the ball is confidently tracked (`ball_presence` near 1),
-  every frame's raw detection noise - or a genuinely bouncing ball -
-  feeds straight into where the camera points, only softened afterward
-  by `dead-zone`/the velocity clamp. Two things to try, least invasive
-  first:
-  1. **Raise `dead-zone`** (e.g. 0.05 -> 0.09-0.10 rad) - absorbs small
-     ball-driven jiggle without reducing how hard a real, larger ball
-     movement pulls the aim. This is exactly the softening this setting
-     already exists for; lookahead being on already supports the added
-     latency.
-  2. **If that's not enough, lower `ball weight`** (e.g. 0.5 -> 0.35) -
-     directly reduces how much the raw, unsmoothed ball position can
-     pull the aim at all. Trade-off: 0.5 is the value this same doc
-     recommends raising *to* in the corner-breakaway checklist below,
-     specifically to stop the ball drifting out of frame on a vertical
-     break - lowering it risks reintroducing that.
-  A structurally cleaner fix, if tuning these two doesn't fully resolve
-  it without giving up ball-following strength, would be a dedicated
-  smoothing rate for the ball's own contribution (parallel to
-  `cluster_alpha`) - not built, since the sliders above haven't been
-  tried yet.
-- **Camera zooms further in/out than desired in a specific situation**:
-  adjust the FOV Tight/Wide bounds directly - they're bounds, not
-  targets, so widening/narrowing them changes the *range* the dynamic
-  zoom is allowed to explore.
-- **Camera won't follow the ball into a corner / on a breakaway**: check
-  five settings together, in this order (each gates or determines the
-  next):
-  1. **Ball anchor range** - if the tracker never accepts the far
-     detection in the first place, nothing downstream matters. Widen it
-     (0.3-0.5+) first and confirm via `--events`/the events JSONL that
-     the ball's `state` goes `Tracking` rather than staying
-     `Coasting`/`Lost` during the breakaway.
-  2. Raise `ball reach` (`ball_max_dist_from_cluster`) above its 0.5 rad
-     default - **and**
-  3. raise FOV Wide too (try 65-70°). Ball reach alone only unlocks
-  the aim-pull toward the ball; the shot still needs `fov_wide` high
-  enough for the widen-for-ball calculation (see above) to actually reach
-  its target instead of clamping. Verified via a controlled A/B render on
-  the same clip/moment, every other setting held constant: at `fov_wide:
-  48°` (the `action` preset's default) the ball-carrier and the main
-  group don't both fit; at `70°` they do. This is Action framing's
-  designed trade-off - a genuine, isolated ball far from the main group
-  is rejected by default so a stray detection or the far goal can't drag
-  the camera off the play; raising both knobs trusts the detector more
-  and accepts occasionally chasing a false positive. If ball plays like
-  this matter more than staying with the crowd, switching **Tracking
-  mode -> ball** for that match is often a better fit.
-  4. If the ball still leaves frame despite all three above being raised
-     correctly, check **Zoom/Aim smoothing** (`fov_alpha`/`cluster_alpha`)
-     - confirmed via a real trace that the *default* smoothing rates
-     (~3s time constant) are often too slow to reach the wider/repositioned
-     target before a brief breakaway is already over, even though the
-     target itself computed correctly. Raise both to ~0.05-0.08.
-  5. If the ball still drops out specifically when it separates from the
-     player cluster **vertically** (breaking toward the near touchline,
-     not just sideways) even with all four above raised and smoothing
-     already fast, raise **Ball weight** (0.5, up from the `action`
-     preset's 0.35). Verified via a real CLI A/B render (same clip, same
-     everything else) that at 0.35 the computed aim target itself never
-     gets close enough to the ball in this scenario - not a gate or a
-     smoothing-speed problem, the blend simply leans too hard on the
-     cluster centroid. Trade-off: raises overall camera movement
-     (+30-33% average frame-to-frame pose delta at 0.5 vs 0.35 in the
-     same test) - real, but well short of the visible wobble `1.0` causes.
-- **Camera loses the ball the moment it crosses the field ROI line**
-  (e.g. a player stepping over the touchline to retrieve it, or a
-  throw-in) **and never follows the retrieval**: this is a different
-  cause from the corner-breakaway checklist above - the ball is being
-  filtered out by the ROI polygon, not rejected by a panner gate. Raise
-  **Ball coast time** to `2.5s` (see above) so an already-tracked ball
-  holds its last position long enough to bridge the gap. Doesn't help a
-  ball that was never tracked to begin with (e.g. a second ball just
-  outside the pitch) - that's the ROI filter working as intended, not a
-  coast-time problem.
+---
 
-## When a second ball is in view (2026-09-18)
+## Where settings are stored
 
-On a rig that also sees a neighbouring pitch, a warm-up or adjacent-match
-ball can enter the field ROI and steal the camera. Investigated in depth
-on `03 Away_Club - sv O.S.S` 120-180s, where the tracker spent 30% of
-the window on the wrong ball.
+- **Per calibration** - hit **Save calibration** in the Export dialog.
+  See `Calibration::autocam_defaults`.
+- **App-level "last used"** - every slider auto-saves the moment you
+  change it, no click needed. Restored on restart, then overridden by a
+  calibration that has its own saved values. See
+  `GuiSettings::autocam_defaults`.
+- **In the export** - with `--events` on and AI tracking enabled, the
+  first line of the JSONL is a `{"kind":"run_config", ...}` record with
+  every field above, so a trace is self-describing. See
+  `PipelineEvent::RunConfig`.
 
-**What actually works**
+## Extra parameters (not exposed in the GUI)
 
-- **Ball max speed** (default `0.13` rad per processed frame). A real
-  ball cannot cross the panorama between two frames, so anything faster
-  is a *different* ball and is rejected. This is physics, not a
-  heuristic, which is why it generalises. Measured: the tracker was
-  flipping ~1.6 rad back and forth within 0.3s, at one point abandoning
-  a 0.90-confidence detection for a 0.28 one. Rapid flips 3 -> 0 with no
-  loss of tracking time. Results were flat across 0.08-0.20, so the exact
-  value is not delicate.
-- **Ball height limit** (default `0` = off). A ball on a further pitch
-  sits *higher* in frame and is ~half the size. On this camera every
-  stray-ball track sat at pitch +0.17..+0.25 with detection size ~0.005,
-  while the match ball sat at -0.16..-0.31 at roughly twice that. Setting
-  `0.12` cut time-on-wrong-ball from 30% to **1%**.
-
-  **This one is site-specific and cuts both ways.** Play at the far end
-  of your *own* pitch also sits high in frame: in the same window, 22% of
-  genuine match-ball detections were above a 0.15 ceiling, and a ball
-  rolling away from the camera gets smaller and higher in exactly the
-  same way a foreign ball does. Start at 0, lower it only as far as the
-  wrong-ball problem requires, and check an AI Debug export to see where
-  your own far touchline actually sits. On a rig with no neighbouring
-  pitch in view, leave it off.
-
-**What was measured and rejected** - recorded so these aren't re-tried:
-
-- **Detector confidence** cannot separate the two balls: both were
-  detected at 0.79-0.80. Lowering the threshold 0.20 -> 0.05 *worsened*
-  things (our ball 21% -> 22%, the stray ball 30% -> 46%).
-- **Proximity to the player cluster** is actively backwards here. The
-  stray ball had 5 players within 0.40 rad; the real match ball had 2 -
-  the kids playing with the other ball are tracked people too. The
-  `Ball acquire range` slider implements this idea; it is off by default
-  and should stay off unless a site proves otherwise.
-- **Motion / "the ball is stationary"** fails because the match ball is
-  frequently stationary too (throw-ins, restarts, dead time).
-- **Player height limit** appears to help but does so for the wrong
-  reason: at 0.10 it leaves a median of *one* player, so the cluster
-  collapses and the panner falls back to ball-only follow in 61% of
-  frames. That flatters this particular window and would misbehave the
-  moment play moves upfield. Off by default; not recommended.
-
-**The real limit is detection, not tuning.** Production preprocessing
-scales the whole 3840x2880 frame into the model's 1920x1920 square, so a
-ball measuring 32x34 px in the source reaches the model at **16x17 px**,
-with 25% of the input wasted on letterbox padding. When the ball is seen
-at all its confidence is high (median 0.83) - the model is not unsure, it
-simply misses small balls. This is why neither `detection_interval` 1 vs
-3 (21% detection rate either way) nor any confidence threshold moves the
-needle, and it caps what panner tuning can achieve. Tiled inference would
-present the same ball at ~21x23 px; the code exists for the TensorRT/CUDA
-path but production on Windows runs the wgpu path, which has no tiling -
-see `crates/reco-detect/src/detectors/trt/mod.rs` and
-`crates/reco-detect/src/wgpu_preprocess.rs`.
-Exporting the model at a non-square 1440x1920 input does *not* work
-around it: `CpuYoloDetector::input_size` is a single square dimension, so
-reco reads such a model as 1440x1440 and scales the ball down further
-(tested 2026-09-18, also ~4x slower).
-
-## Extra parameters (not yet exposed in the GUI)
-
-A few `FieldPannerConfig` fields have no Export-dialog control today and
-can currently only be changed via a config file / CLI flag consuming
-`reco-autocam` directly: `min_cluster`, `edge_push`,
+Changeable only via a config file or CLI flag consuming `reco-autocam`
+directly: `min_cluster`, `edge_push`,
 `pitch_near`/`pitch_far`/`distance_bias_max`, `edge_bias_max`,
-`max_velocity_rad_per_sec`, `velocity_alpha`,
-`pitch_bias`, `ball_presence_decay`/`ball_presence_attack`,
-`max_player_pitch` (GUI: "Player height limit", off by default),
-`velocity_fov_bias_max`, `ball_frame_margin_deg`,
-`lead_gain`/`lead_alpha`,
-`keep_fraction` (trimmed-mean only). See the field-level doc comments in
-`crates/reco-autocam/src/panners/field.rs` for what each does.
+`max_velocity_rad_per_sec`, `velocity_alpha`, `pitch_bias`,
+`ball_presence_decay`/`ball_presence_attack`, `velocity_fov_bias_max`,
+`lead_gain`/`lead_alpha`, `frame_all_margin_deg`, `keep_fraction`
+(trimmed-mean only).
+
+See the field-level doc comments in
+`crates/reco-autocam/src/panners/field.rs`.
