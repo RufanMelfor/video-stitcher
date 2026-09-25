@@ -137,6 +137,37 @@ fn probe_ort_dylib() -> Result<(), String> {
     Ok(())
 }
 
+/// A short, stable directory-name-safe key that identifies a specific
+/// model *file* (not just its path) - two exports written to the same
+/// path at different times get different keys.
+///
+/// Built from the file's size and modification time rather than its
+/// content: hashing a 30-80 MB ONNX file on every session creation
+/// would add real, measurable startup latency for no benefit here -
+/// this only needs to change whenever the file at `model_path` does,
+/// and mtime+size already changes on every overwrite (a re-export always
+/// rewrites the file). Falls back to a fixed key derived from the path
+/// alone if the file's metadata can't be read (missing file - the
+/// caller's own `commit_from_file` will surface that error clearly
+/// moments later), so a metadata-read failure degrades to the old
+/// shared-cache behavior rather than panicking.
+#[cfg(feature = "tensorrt")]
+fn model_cache_key(model_path: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match std::fs::metadata(model_path) {
+        Ok(meta) => {
+            meta.len().hash(&mut hasher);
+            if let Ok(modified) = meta.modified() {
+                modified.hash(&mut hasher);
+            }
+        }
+        Err(_) => model_path.hash(&mut hasher),
+    }
+    format!("{:016x}", hasher.finish())
+}
+
 /// Return a persistent cache directory for model engine/compilation caches.
 ///
 /// Resolves to `{platform_cache_dir}/reco/{subdir}`:
@@ -205,7 +236,27 @@ pub fn create_ort_session(
     // then CUDA EP, then fall back to CPU.
     #[cfg(feature = "tensorrt")]
     let mut builder = {
-        let trt_cache = reco_cache_dir("trt-cache");
+        // A per-model subdirectory, not the shared `trt-cache` root
+        // directly: TensorRT keys its own engine cache off a hash of
+        // the ONNX graph, and that key has been observed to collide
+        // between genuinely different models (different input shape,
+        // different training round) exported around the same time -
+        // see crates/reco-detect/FRICTION.md's "TensorRT's engine
+        // cache can silently serve a stale engine" entry. That handed
+        // back an engine compiled for a *different* model's tensor
+        // shape, which TensorRT then correctly rejected at inference
+        // time with every detection silently failing. Scoping the
+        // cache path per model makes that collision structurally
+        // impossible - two different models can never share a
+        // directory - without needing to know anything about how
+        // TensorRT derives its own internal key.
+        let trt_cache = reco_cache_dir("trt-cache").join(model_cache_key(model_path));
+        if let Err(e) = std::fs::create_dir_all(&trt_cache) {
+            log::warn!(
+                "Failed to create per-model TensorRT cache dir {}: {e}",
+                trt_cache.display()
+            );
+        }
         let trt_cache_str = trt_cache.to_string_lossy().into_owned();
         match builder.with_execution_providers([ort::ep::TensorRT::default()
             .with_fp16(true)

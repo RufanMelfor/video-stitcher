@@ -465,16 +465,19 @@ fn run_one_camera(
         0
     };
 
-    // Skip to the requested start, sequentially - frame-accurate by
-    // construction (see `dump_detection_frames.rs`'s identical
-    // convention: a lossy `-ss` seek lands on the nearest keyframe, not
-    // the exact frame, which matters for a fast-moving ball).
-    let skip = (start_frame as i64 + sync_offset_frames).max(0);
-    for _ in 0..skip {
-        if !dec.skip_one_frame()? {
-            log::warn!("raw-camera debug: {camera} source ended during start-frame skip");
-            return Ok(0);
-        }
+    // Reach the requested start frame-accurately (matters for a
+    // fast-moving ball and for `sync_offset_frames`, which is expressed
+    // in whole frames - see `seek_near_frame`'s doc comment for why a
+    // bare seek alone is not safe here) but without decoding every
+    // single frame from 0: seek close, then step the last stretch.
+    // 4 seconds covers a very long GOP with room to spare; on a typical
+    // ~1-2s GOP this still lands the seek within the same or adjacent
+    // keyframe, so the frame-accurate remainder is usually well under a
+    // second of stepping instead of up to `start_secs` of it.
+    let skip = (start_frame as i64 + sync_offset_frames).max(0) as u64;
+    if !dec.seek_near_frame(skip, fps, 4.0)? {
+        log::warn!("raw-camera debug: {camera} source ended during start-frame skip");
+        return Ok(0);
     }
 
     // Cut ranges resolve to the keep-windows they imply - same
@@ -732,13 +735,110 @@ impl FrameSource {
     }
 
     /// Decode and discard one frame, without the readback/conversion
-    /// work `next_frame` does - used for the start-time skip, where the
-    /// pixels are thrown away anyway. `Ok(false)` means the source ended.
+    /// work `next_frame` does - used for the tail end of the start-time
+    /// skip (see `seek_near_frame`), where the pixels are thrown away
+    /// anyway. `Ok(false)` means the source ended.
     fn skip_one_frame(&mut self) -> Result<bool, RawCameraDebugError> {
         match self {
-            Self::Cpu(s) => Ok(s.decoder.next_frame()?.is_some()),
+            // Must store into `s.current`, not just check `.is_some()`:
+            // `last_timestamp_us` reads `s.current`, and `seek_near_frame`
+            // relies on it advancing to detect progress past the seek
+            // target - leaving it stale here makes that loop see 0
+            // forever and decode-and-discard all the way to EOF.
+            Self::Cpu(s) => {
+                s.current = s.decoder.next_frame()?;
+                Ok(s.current.is_some())
+            }
+            // Goes through the raw decoder (skipping the GPU
+            // stage/readback `D3d11FrameSource::next_frame` does for a
+            // real frame, which would be wasted work here) but still
+            // records the timestamp into `scratch` so `last_timestamp_us`
+            // reflects this call, same as the CPU arm's `s.current`.
             #[cfg(target_os = "windows")]
-            Self::D3d11(s) => Ok(s.decoder.next_frame_d3d11()?.is_some()),
+            Self::D3d11(s) => match s.decoder.next_frame_d3d11()? {
+                Some(f) => {
+                    s.scratch.timestamp_us = f.timestamp_us;
+                    Ok(true)
+                }
+                None => Ok(false),
+            },
+        }
+    }
+
+    /// The timestamp of the last frame `skip_one_frame` or `next_frame`
+    /// returned, in microseconds (0 if nothing has been decoded from
+    /// this source yet). Used by `seek_near_frame` to tell how many
+    /// frames of frame-accurate stepping remain after a seek, without
+    /// ever decoding a frame the caller can't later retrieve through
+    /// the normal `next_frame` path.
+    fn last_timestamp_us(&self) -> i64 {
+        match self {
+            Self::Cpu(s) => s.current.as_ref().map(|f| f.timestamp_us).unwrap_or(0),
+            #[cfg(target_os = "windows")]
+            Self::D3d11(s) => s.scratch.timestamp_us,
+        }
+    }
+
+    /// Reach `target_frame` (an absolute frame index from the start of
+    /// the stream) quickly: a real seek to a little before it, then a
+    /// frame-accurate decode-and-discard for whatever handful of frames
+    /// remain between the seek's actual landing point and the target -
+    /// typically well under a GOP, not the full distance from frame 0.
+    /// Deliberately stops one frame short of `target_frame` itself: the
+    /// caller's next ordinary `next_frame()` call produces it, so this
+    /// never decodes a frame it can't hand back through the usual path
+    /// (unlike a "peek" that would consume it and have nowhere to put
+    /// it back, especially on the D3D11 path where a decoded frame is a
+    /// GPU texture slot, not an owned buffer that can be cached).
+    ///
+    /// Exists because a bare `seek_to_secs` alone is not safe here: it
+    /// lands on the nearest keyframe, not the exact frame, and this
+    /// module's callers rely on frame-exact positioning (the
+    /// `sync_offset_right` correction is expressed in whole frames -
+    /// see `run_one_camera`'s doc comment - so a keyframe-snap here
+    /// would reintroduce the very left/right drift that offset exists
+    /// to remove). Landing a little early and stepping forward
+    /// frame-by-frame keeps that exactness while skipping the decode
+    /// cost of everything before the seek target.
+    ///
+    /// `margin_secs` (typically ~2x the source's expected max GOP
+    /// length) is subtracted from the target time before seeking, to
+    /// make sure the seek lands at or before `target_frame` rather than
+    /// after it - `av_seek_frame` always seeks to a keyframe at or
+    /// before the requested timestamp, but subtracting a safety margin
+    /// guards against off-by-one rounding between `secs` and `fps`.
+    /// Returns `Ok(false)` if the source ends before `target_frame` is
+    /// reached.
+    fn seek_near_frame(
+        &mut self,
+        target_frame: u64,
+        fps: f64,
+        margin_secs: f64,
+    ) -> Result<bool, RawCameraDebugError> {
+        if target_frame == 0 {
+            // Nothing to seek to - the caller's first `next_frame()`
+            // already starts at the beginning of the stream.
+            return Ok(true);
+        }
+        let target_secs = target_frame as f64 / fps;
+        let seek_secs = (target_secs - margin_secs).max(0.0);
+        self.seek_to_secs(seek_secs)
+            .map_err(RawCameraDebugError::Decode)?;
+
+        // Step forward frame-by-frame from the seek's actual landing
+        // point (which may be earlier than `seek_secs` itself, since
+        // seeking snaps to a keyframe) to one frame short of
+        // `target_frame` - the caller's own subsequent `next_frame()`
+        // produces `target_frame` itself.
+        loop {
+            let frame_at_last =
+                (self.last_timestamp_us() as f64 / 1_000_000.0 * fps).round() as i64;
+            if frame_at_last >= target_frame as i64 - 1 {
+                return Ok(true);
+            }
+            if !self.skip_one_frame()? {
+                return Ok(false);
+            }
         }
     }
 
