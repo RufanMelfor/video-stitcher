@@ -76,6 +76,16 @@ pub enum ClusterMode {
     Density,
 }
 
+/// Reads [`FieldPannerConfig::max_player_pitch`], mapping JSON `null` to
+/// `f32::INFINITY` (the "no ceiling" default, which serde_json can only
+/// write as `null`).
+fn deserialize_pitch_ceiling<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<f32>::deserialize(deserializer)?.unwrap_or(f32::INFINITY))
+}
+
 /// All tunable parameters for the field panner.
 ///
 /// Safe defaults are tuned for football (soccer) at 30fps. Override
@@ -98,7 +108,11 @@ pub struct FieldPannerConfig {
     /// from 47 deg away from the real ball to 13 deg.
     ///
     /// `f32::INFINITY` (the default) counts every player, preserving
-    /// the original behaviour.
+    /// the original behaviour. JSON has no infinity, so serde_json
+    /// writes it as `null`; `null` reads back as `f32::INFINITY` so a
+    /// serialized config round-trips. Note `0.0` is a real ceiling at
+    /// the horizon (drops nearly every player), not "off".
+    #[serde(deserialize_with = "deserialize_pitch_ceiling")]
     pub max_player_pitch: f32,
     /// Seconds to keep aiming at the ball's last known position after
     /// the tracker gives up on it, before releasing the aim back to the
@@ -1142,6 +1156,27 @@ impl Panner for FieldPanner {
 mod tests {
     use super::*;
     use reco_core::geometry::CameraId;
+
+    #[test]
+    fn config_with_infinite_pitch_ceiling_round_trips_through_json() {
+        // The CLI merges --panner-config onto a preset via serde_json::Value;
+        // INFINITY serializes as null and must read back as INFINITY.
+        let base = FieldPannerConfig::action();
+        assert!(base.max_player_pitch.is_infinite());
+        let v = serde_json::to_value(&base).unwrap();
+        assert!(v["max_player_pitch"].is_null());
+        let back: FieldPannerConfig = serde_json::from_value(v).unwrap();
+        assert_eq!(back.max_player_pitch, f32::INFINITY);
+        assert_eq!(back, base);
+    }
+
+    #[test]
+    fn config_pitch_ceiling_absent_or_explicit() {
+        let absent: FieldPannerConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.max_player_pitch, f32::INFINITY);
+        let set: FieldPannerConfig = serde_json::from_str(r#"{"max_player_pitch": 0.12}"#).unwrap();
+        assert_eq!(set.max_player_pitch, 0.12);
+    }
 
     #[test]
     fn sanitized_orders_inverted_fov_and_no_panic() {

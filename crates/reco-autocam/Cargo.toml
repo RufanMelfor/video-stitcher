@@ -20,6 +20,9 @@ wgpu = "28"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 
+[dev-dependencies]
+serde_json = "1"
+
 [features]
 # Preserve pre-refactor behavior: autocam's default build still
 # enables the ort (CPU) backend so no existing consumer regresses.

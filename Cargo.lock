@@ -5637,6 +5637,7 @@ dependencies = [
  "reco-core",
  "reco-detect",
  "serde",
+ "serde_json",
  "tracing",
  "wgpu",
 ]
