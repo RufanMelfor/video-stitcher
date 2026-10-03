@@ -445,7 +445,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         let ball_acquire_established_frames = args.ball_acquire_established_frames;
         let ball_jump_confidence = args.ball_jump_confidence;
         let ball_max_speed = args.ball_max_speed;
-        let ball_max_pitch = args.ball_max_pitch;
+        let ball_max_pitch = pitch_ceiling(args.ball_max_pitch);
         let confidence_threshold = args.confidence_threshold;
         let async_detect = args.async_detect;
         let lookahead_secs = args.lookahead;
@@ -499,7 +499,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         // to land on (matches setup_autocam's own fallback base).
         let panner_cfg = if args.fov_alpha.is_some()
             || args.cluster_alpha.is_some()
-            || args.max_player_pitch.is_some()
+            || pitch_ceiling(args.max_player_pitch).is_some()
             || args.ball_hold_secs.is_some()
         {
             let mut c = panner_cfg.unwrap_or_default();
@@ -509,7 +509,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
             if let Some(a) = args.cluster_alpha {
                 c.cluster_alpha = a;
             }
-            if let Some(a) = args.max_player_pitch {
+            if let Some(a) = pitch_ceiling(args.max_player_pitch) {
                 c.max_player_pitch = a;
             }
             if let Some(a) = args.ball_hold_secs {
@@ -729,6 +729,14 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
     Ok(())
 }
 
+/// Normalize a `--ball-max-pitch` / `--max-player-pitch` value: `0` (or
+/// below) means "off", matching the GUI slider and the saved calibration.
+/// Passed through as-is, `0.0` would be a real ceiling at the horizon and
+/// reject nearly every ball/player.
+fn pitch_ceiling(v: Option<f32>) -> Option<f32> {
+    v.filter(|p| *p > 0.0)
+}
+
 fn parse_codec(s: &str) -> reco_io::output::Codec {
     s.parse().unwrap_or_else(|_| {
         log::warn!("Unknown codec '{s}', defaulting to H.264");
@@ -741,4 +749,17 @@ fn parse_quality(s: &str) -> reco_io::output::Quality {
         log::warn!("Unknown quality '{s}', defaulting to balanced");
         reco_io::output::Quality::Balanced
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pitch_ceiling;
+
+    #[test]
+    fn pitch_ceiling_zero_means_off() {
+        assert_eq!(pitch_ceiling(None), None);
+        assert_eq!(pitch_ceiling(Some(0.0)), None);
+        assert_eq!(pitch_ceiling(Some(-0.1)), None);
+        assert_eq!(pitch_ceiling(Some(0.12)), Some(0.12));
+    }
 }

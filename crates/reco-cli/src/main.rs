@@ -508,7 +508,8 @@ enum Commands {
         /// A ball on a neighbouring pitch appears above this match's
         /// near touchline and smaller; measured on real footage every
         /// stray-ball track sat at pitch +0.17..+0.25 while the match
-        /// ball sat at -0.16..-0.31. Unset accepts everything.
+        /// ball sat at -0.16..-0.31. Unset or 0 accepts everything (same
+        /// as the GUI slider's 0 = off).
         #[arg(long = "ball-max-pitch")]
         ball_max_pitch: Option<f32>,
 
@@ -516,7 +517,7 @@ enum Commands {
         /// action cluster. On a rig that also sees a neighbouring
         /// field, its warm-up crowd is detected as players too and can
         /// outnumber the match, pulling the camera off it entirely.
-        /// Unset counts everyone.
+        /// Unset or 0 counts everyone (same as the GUI slider's 0 = off).
         #[arg(long = "max-player-pitch")]
         max_player_pitch: Option<f32>,
 
