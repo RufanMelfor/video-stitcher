@@ -652,10 +652,12 @@ pub struct GoalGeometry {
 /// so opening it in a consumer (e.g. `reco-gui`'s Export dialog)
 /// re-populates the AI Tracking controls instead of resetting to
 /// hardcoded literals every session. Mirrors the tunable subset of
-/// `reco_autocam::AutocamConfig` + `panners::FieldPannerConfig` -
-/// deliberately excludes the model path (machine-local, already
-/// persisted separately) and the enabled toggle (a per-run choice, not
-/// a calibration property). Transitional (a detection/autocam concern).
+/// `reco_autocam::AutocamConfig` + `panners::FieldPannerConfig`, plus
+/// (optionally, since 2026-10) the model path and the AI tracking / async
+/// detect toggles, so a match re-opens exactly as it was exported. The
+/// model path is machine-local: consumers apply it only when the file
+/// exists on the current machine. Transitional (a detection/autocam
+/// concern).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AutocamDefaults {
     /// `"field"`, `"ball"`, or `"sweep"`.
@@ -816,6 +818,34 @@ pub struct AutocamDefaults {
     /// saved data, matching the `fov_alpha`/`cluster_alpha` convention.
     #[serde(default = "default_lookahead_reactivity")]
     pub lookahead_reactivity: f32,
+    /// Model the AI tracking used when this was saved. Machine-local: a
+    /// consumer applies it only if the file exists on this machine (the
+    /// user works from more than one PC with different paths) and keeps
+    /// its own model otherwise, with a warning. `None` in files saved
+    /// before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_path: Option<String>,
+    /// The "AI Tracking" on/off toggle at save time. `None` = not saved
+    /// (older file) - keep whatever the consumer has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// The "Async detect" toggle at save time. `None` = not saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub async_detect: Option<bool>,
+}
+
+/// Export output settings saved alongside a calibration, so re-opening a
+/// match restores the Export dialog's resolution, codec and quality.
+/// The bitrate follows from these three (see
+/// `reco_io::ffmpeg::encoder::nvenc_bitrate_mbps`), so it is not stored
+/// separately. Strings use the same spelling as the CLI / GUI
+/// (`"h264"`/`"hevc"`/`"av1"`, `"fast"`/`"balanced"`/`"high"`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExportDefaults {
+    pub width: u32,
+    pub height: u32,
+    pub codec: String,
+    pub quality: String,
 }
 
 /// Manual pitch safety margin for AI tracking (world-space radians) -
@@ -1058,6 +1088,10 @@ pub struct Calibration {
     /// reco-scoreboard concern).
     #[serde(default)]
     pub scoreboard: Option<ScoreboardSettings>,
+    /// Optional saved export output settings (resolution, codec,
+    /// quality). Transitional (an export concern).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_defaults: Option<ExportDefaults>,
 }
 
 /// Maximum calibration file size (1 MB).
@@ -1078,6 +1112,7 @@ impl Calibration {
             autocam_defaults: None,
             autocam_pitch_limits: None,
             scoreboard: None,
+            export_defaults: None,
         }
     }
 
@@ -1554,6 +1589,25 @@ mod tests {
     }
 
     #[test]
+    fn export_defaults_and_autocam_extras_round_trip() {
+        let mut cal = valid_cal();
+        cal.export_defaults = Some(ExportDefaults {
+            width: 2560,
+            height: 1440,
+            codec: "hevc".into(),
+            quality: "high".into(),
+        });
+        let json = serde_json::to_string(&cal).unwrap();
+        let back: Calibration = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.export_defaults, cal.export_defaults);
+        // Older files have neither field and must still load.
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v.as_object_mut().unwrap().remove("export_defaults");
+        let old: Calibration = serde_json::from_value(v).unwrap();
+        assert!(old.export_defaults.is_none());
+    }
+
+    #[test]
     fn parse_calibration_with_field_roi() {
         let mut cal: Calibration = serde_json::from_str(sample_json()).unwrap();
         cal.field_roi = Some(FieldRoi {
@@ -1677,6 +1731,9 @@ mod tests {
             cluster_alpha: 0.05,
             confidence_threshold: 0.3,
             lookahead_reactivity: 1.5,
+            model_path: None,
+            enabled: None,
+            async_detect: None,
         });
         let json = cal.to_json_pretty();
         let back: Calibration = serde_json::from_str(&json).unwrap();
@@ -1909,6 +1966,7 @@ mod tests {
             autocam_defaults: None,
             autocam_pitch_limits: None,
             scoreboard: None,
+            export_defaults: None,
         }
     }
 

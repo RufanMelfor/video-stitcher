@@ -2092,6 +2092,48 @@ fn scale_bitrate_mbps(base_mbps: u32, width: u32, height: u32) -> u32 {
     ((f64::from(base_mbps) * scale).round() as u32).max(1)
 }
 
+/// NVENC VBR bitrates at 1080p, as `(target b:v, peak maxrate)` in Mbps -
+/// the one table [`build_encoder_opts`] and [`nvenc_bitrate_mbps`] share,
+/// so what a GUI shows next to a quality preset is what the encoder does.
+/// HEVC is ~30% more efficient than H.264, AV1 another ~20% on top.
+fn nvenc_base_mbps(codec: crate::output::Codec, quality: Quality) -> (u32, u32) {
+    use crate::output::Codec;
+    match (codec, quality) {
+        (Codec::H264, Quality::Fast) => (8, 12),
+        (Codec::H264, Quality::Balanced) => (12, 18),
+        (Codec::H264, Quality::High) => (20, 30),
+        (Codec::HEVC, Quality::Fast) => (6, 10),
+        (Codec::HEVC, Quality::Balanced) => (9, 14),
+        (Codec::HEVC, Quality::High) => (15, 22),
+        (Codec::AV1, Quality::Fast) => (5, 8),
+        (Codec::AV1, Quality::Balanced) => (7, 11),
+        (Codec::AV1, Quality::High) => (12, 18),
+    }
+}
+
+/// Target and peak bitrate (Mbps) an NVENC export uses for `codec` at
+/// `quality` and `width`x`height` (the 1080p table scaled by pixel count,
+/// see `scale_bitrate_mbps`). Software encoders (libx264/libx265/...) are
+/// CRF-based and have no fixed bitrate, so this only describes the NVENC
+/// path - the one hardware-accelerated Windows exports take.
+pub fn nvenc_bitrate_mbps(
+    codec: crate::output::Codec,
+    quality: crate::output::Quality,
+    width: u32,
+    height: u32,
+) -> (u32, u32) {
+    let quality = match quality {
+        crate::output::Quality::Fast => Quality::Fast,
+        crate::output::Quality::Balanced => Quality::Balanced,
+        crate::output::Quality::High => Quality::High,
+    };
+    let (bv, max) = nvenc_base_mbps(codec, quality);
+    (
+        scale_bitrate_mbps(bv, width, height),
+        scale_bitrate_mbps(max, width, height),
+    )
+}
+
 fn build_encoder_opts(
     name: &str,
     quality_preset: Quality,
@@ -2123,11 +2165,12 @@ fn build_encoder_opts(
             // (10M / 15M across all quality presets) artificially capped
             // High output at ~15 Mbps even with cq=19. Scale the ceilings
             // with quality so "high" actually delivers the visual bump.
-            let (preset, cq, bv, maxrate) = match effective_preset {
-                Quality::Fast => ("p3", "28", 8, 12),
-                Quality::Balanced => ("p4", "23", 12, 18),
-                Quality::High => ("p5", "19", 20, 30),
+            let (preset, cq) = match effective_preset {
+                Quality::Fast => ("p3", "28"),
+                Quality::Balanced => ("p4", "23"),
+                Quality::High => ("p5", "19"),
             };
+            let (bv, maxrate) = nvenc_base_mbps(crate::output::Codec::H264, effective_preset);
             opts.set("preset", preset);
             opts.set("tune", "hq");
             opts.set("rc", "vbr");
@@ -2150,11 +2193,12 @@ fn build_encoder_opts(
         }
         "hevc_nvenc" => {
             // HEVC ~30% more efficient than H264, so ceilings scale down.
-            let (preset, cq, bv, maxrate) = match effective_preset {
-                Quality::Fast => ("p3", "28", 6, 10),
-                Quality::Balanced => ("p4", "23", 9, 14),
-                Quality::High => ("p5", "19", 15, 22),
+            let (preset, cq) = match effective_preset {
+                Quality::Fast => ("p3", "28"),
+                Quality::Balanced => ("p4", "23"),
+                Quality::High => ("p5", "19"),
             };
+            let (bv, maxrate) = nvenc_base_mbps(crate::output::Codec::HEVC, effective_preset);
             opts.set("preset", preset);
             opts.set("tune", "hq");
             opts.set("rc", "vbr");
@@ -2169,11 +2213,12 @@ fn build_encoder_opts(
         }
         "av1_nvenc" => {
             // AV1 another ~20% tighter than HEVC.
-            let (preset, cq, bv, maxrate) = match effective_preset {
-                Quality::Fast => ("p3", "32", 5, 8),
-                Quality::Balanced => ("p4", "27", 7, 11),
-                Quality::High => ("p5", "22", 12, 18),
+            let (preset, cq) = match effective_preset {
+                Quality::Fast => ("p3", "32"),
+                Quality::Balanced => ("p4", "27"),
+                Quality::High => ("p5", "22"),
             };
+            let (bv, maxrate) = nvenc_base_mbps(crate::output::Codec::AV1, effective_preset);
             opts.set("preset", preset);
             opts.set("tune", "hq");
             opts.set("rc", "vbr");
@@ -2406,6 +2451,44 @@ fn build_encoder_opts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nvenc_bitrate_matches_the_options_the_encoder_sets() {
+        // What a GUI shows next to a quality preset must be exactly what
+        // build_encoder_opts sends to NVENC.
+        use crate::output::{Codec, Quality as Q};
+        for (name, codec) in [
+            ("h264_nvenc", Codec::H264),
+            ("hevc_nvenc", Codec::HEVC),
+            ("av1_nvenc", Codec::AV1),
+        ] {
+            for (q, eq) in [
+                (Q::Fast, Quality::Fast),
+                (Q::Balanced, Quality::Balanced),
+                (Q::High, Quality::High),
+            ] {
+                for (w, h) in [(1920, 1080), (2560, 1440)] {
+                    let (bv, max) = nvenc_bitrate_mbps(codec, q, w, h);
+                    let opts = build_encoder_opts(name, eq, None, None, None, w, h);
+                    assert_eq!(
+                        opts.get("b:v"),
+                        Some(format!("{bv}M").as_str()),
+                        "{name} {q:?} {w}x{h}"
+                    );
+                    assert_eq!(
+                        opts.get("maxrate"),
+                        Some(format!("{max}M").as_str()),
+                        "{name} {q:?} {w}x{h}"
+                    );
+                }
+            }
+        }
+        // 1080p HEVC balanced: the familiar 9 / 14 Mbps.
+        assert_eq!(
+            nvenc_bitrate_mbps(Codec::HEVC, Q::Balanced, 1920, 1080),
+            (9, 14)
+        );
+    }
 
     fn segments_at(starts: &[f64]) -> Vec<AudioSegment> {
         starts

@@ -762,6 +762,9 @@ pub fn run_export(
                     cluster_alpha: autocam.cluster_alpha,
                     confidence_threshold: autocam.confidence_threshold,
                     lookahead_reactivity: autocam.lookahead_reactivity,
+                    model_path: None,
+                    enabled: None,
+                    async_detect: None,
                 },
             );
         }

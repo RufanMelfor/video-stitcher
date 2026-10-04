@@ -3156,6 +3156,75 @@ fn snapshot_autocam_defaults(app: &RecoApp) -> reco_core::calibration::AutocamDe
         // instead of an arbitrary placeholder.
         lookahead_reactivity: reco_autocam::panners::FieldPannerConfig::default()
             .lookahead_reactivity,
+        model_path: Some(app.get_export_model_path().to_string()).filter(|p| !p.is_empty()),
+        enabled: Some(app.get_export_autocam_enabled()),
+        async_detect: Some(app.get_export_async_detect()),
+    }
+}
+
+/// Whether the Export dialog's AI settings `current` differ from a
+/// calibration's stored `autocam_defaults`. Fields an older calibration
+/// never stored (`None`) are not counted as a difference, so loading such
+/// a file does not immediately flag it dirty.
+fn autocam_differs(
+    stored: Option<&reco_core::calibration::AutocamDefaults>,
+    current: &reco_core::calibration::AutocamDefaults,
+) -> bool {
+    let Some(stored) = stored else {
+        return true;
+    };
+    let mut cur = current.clone();
+    if stored.model_path.is_none() {
+        cur.model_path = None;
+    }
+    if stored.enabled.is_none() {
+        cur.enabled = None;
+    }
+    if stored.async_detect.is_none() {
+        cur.async_detect = None;
+    }
+    *stored != cur
+}
+
+/// Export output settings currently in the Export dialog.
+fn snapshot_export_defaults(app: &RecoApp) -> reco_core::calibration::ExportDefaults {
+    reco_core::calibration::ExportDefaults {
+        width: app.get_export_width().max(0) as u32,
+        height: app.get_export_height().max(0) as u32,
+        codec: app.get_export_codec().to_string(),
+        quality: app.get_export_quality().to_string(),
+    }
+}
+
+/// Apply saved export output settings to the Export dialog. Values that
+/// don't parse (hand-edited file) are skipped with a warning rather than
+/// written into the dialog.
+fn apply_export_defaults(app: &RecoApp, ed: &reco_core::calibration::ExportDefaults) {
+    if ed.width > 0 && ed.height > 0 {
+        app.set_export_width(ed.width as i32);
+        app.set_export_height(ed.height as i32);
+    } else {
+        log::warn!(
+            "Calibration export_defaults: invalid resolution {}x{}, ignored",
+            ed.width,
+            ed.height
+        );
+    }
+    if ed.codec.parse::<reco_io::output::Codec>().is_ok() {
+        app.set_export_codec(ed.codec.clone().into());
+    } else {
+        log::warn!(
+            "Calibration export_defaults: unknown codec {:?}, ignored",
+            ed.codec
+        );
+    }
+    if ed.quality.parse::<reco_io::output::Quality>().is_ok() {
+        app.set_export_quality(ed.quality.clone().into());
+    } else {
+        log::warn!(
+            "Calibration export_defaults: unknown quality {:?}, ignored",
+            ed.quality
+        );
     }
 }
 
@@ -3164,7 +3233,28 @@ fn snapshot_autocam_defaults(app: &RecoApp) -> reco_core::calibration::AutocamDe
 /// both for calibration-level restore (`try_init_and_update`) and
 /// app-level restore (last-used settings, applied at startup before
 /// any calibration is loaded).
-fn apply_autocam_defaults(app: &RecoApp, ac: &reco_core::calibration::AutocamDefaults) {
+///
+/// Returns the saved model path if it does not exist on this machine (the
+/// caller decides whether that is worth a warning); the dialog then keeps
+/// the model it already had.
+fn apply_autocam_defaults(
+    app: &RecoApp,
+    ac: &reco_core::calibration::AutocamDefaults,
+) -> Option<String> {
+    if let Some(enabled) = ac.enabled {
+        app.set_export_autocam_enabled(enabled);
+    }
+    if let Some(async_detect) = ac.async_detect {
+        app.set_export_async_detect(async_detect);
+    }
+    let mut missing_model = None;
+    if let Some(path) = ac.model_path.as_ref() {
+        if std::path::Path::new(path).is_file() {
+            app.set_export_model_path(path.clone().into());
+        } else {
+            missing_model = Some(path.clone());
+        }
+    }
     app.set_export_tracking_mode(ac.tracking_mode.clone().into());
     app.set_export_detection_interval(ac.detection_interval as i32);
     app.set_export_player_anchor_rad(ac.player_anchor_rad);
@@ -3193,6 +3283,7 @@ fn apply_autocam_defaults(app: &RecoApp, ac: &reco_core::calibration::AutocamDef
     app.set_export_fov_alpha(ac.fov_alpha);
     app.set_export_cluster_alpha(ac.cluster_alpha);
     app.set_export_confidence_threshold(ac.confidence_threshold);
+    missing_model
 }
 
 /// Curated banner-color presets shown in the SCOREBOARD card's ComboBox -
@@ -3208,6 +3299,33 @@ fn scoreboard_banner_color_hex(preset_name: &str) -> Option<&'static str> {
         "Purple" => Some("#241333"),
         _ => None,
     }
+}
+
+/// After a scoreboard edit: show Save calibration when the scoreboard now
+/// differs from the one the loaded calibration has stored (same idea as
+/// the AI sliders' changed-vs-calibration check).
+///
+/// Deferred to the next event-loop turn: it is called at the end of the
+/// scoreboard handlers, where the handler's own `AppState` borrow is
+/// usually still alive.
+fn flag_scoreboard_dirty(app_weak: &slint::Weak<RecoApp>, state: &Rc<RefCell<AppState>>) {
+    let app_weak = app_weak.clone();
+    let state = Rc::clone(state);
+    slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let Ok(s) = state.try_borrow() else {
+            return;
+        };
+        let current = snapshot_scoreboard_settings(&app, &s);
+        if s.calibration
+            .as_ref()
+            .is_some_and(|c| c.scoreboard.as_ref() != Some(&current))
+        {
+            app.set_cal_dirty(true);
+        }
+    });
 }
 
 /// Snapshot the current scoreboard state into a persistable
@@ -3576,13 +3694,17 @@ fn main() -> anyhow::Result<()> {
         // calibration with its own `autocam_defaults` still overrides
         // this once loaded (see the `RenderingSetup` branch below).
         if let Some(ac) = s.user_settings.autocam_defaults.as_ref() {
-            apply_autocam_defaults(&app, ac);
+            if let Some(missing) = apply_autocam_defaults(&app, ac) {
+                log::warn!(
+                    "Last session's AI model {missing} no longer exists - keeping the default"
+                );
+            }
             log::info!("Restored AI Tracking defaults from last session");
         }
-        // "AI Tracking"/"Async Detect" checkboxes: always app-level,
-        // never overridden by a calibration's own autocam_defaults (see
-        // GuiSettings::autocam_enabled's doc comment) - restored here
-        // unconditionally, not gated on autocam_defaults existing.
+        // "AI Tracking"/"Async Detect" checkboxes: app-level last-used
+        // state, restored here unconditionally at startup. A calibration
+        // loaded later overrides them with its own saved values (see
+        // `apply_autocam_defaults`).
         app.set_export_autocam_enabled(s.user_settings.autocam_enabled);
         app.set_export_async_detect(s.user_settings.async_detect_enabled);
 
@@ -5139,6 +5261,7 @@ fn main() -> anyhow::Result<()> {
             app.set_scoreboard_share_dialog_open(false);
         }
         persist_scoreboard_settings(&app, &mut s);
+        flag_scoreboard_dirty(&app_weak, &state_ref);
     });
 
     let app_weak = app.as_weak();
@@ -5208,6 +5331,7 @@ fn main() -> anyhow::Result<()> {
                 app.set_scoreboard_error_text(error.to_string().into());
             }
         }
+        flag_scoreboard_dirty(&app_weak, &state_ref);
     });
 
     let app_weak = app.as_weak();
@@ -5231,6 +5355,7 @@ fn main() -> anyhow::Result<()> {
         // load/on_load_scoreboard_events and the match-folder pick.
         refresh_derived_cut_ranges(&mut s, &app);
         persist_scoreboard_settings(&app, &mut s);
+        flag_scoreboard_dirty(&app_weak, &state_ref);
     });
 
     let app_weak = app.as_weak();
@@ -5272,6 +5397,7 @@ fn main() -> anyhow::Result<()> {
         // instead of leaving them stale from the old anchor.
         refresh_derived_cut_ranges(&mut s, &app);
         persist_scoreboard_settings(&app, &mut s);
+        flag_scoreboard_dirty(&app_weak, &state_ref);
     });
 
     let app_weak = app.as_weak();
@@ -5301,6 +5427,7 @@ fn main() -> anyhow::Result<()> {
         app.set_scoreboard_derive_highlights(false);
         refresh_derived_cut_ranges(&mut s, &app);
         persist_scoreboard_settings(&app, &mut s);
+        flag_scoreboard_dirty(&app_weak, &state_ref);
     });
 
     // The PAUZE checkbox or one of its two durations changed - persist
@@ -5410,6 +5537,7 @@ fn main() -> anyhow::Result<()> {
             );
         }
         persist_scoreboard_settings(&app, &mut s);
+        flag_scoreboard_dirty(&app_weak, &state_ref);
     });
 
     let app_weak = app.as_weak();
@@ -5436,6 +5564,7 @@ fn main() -> anyhow::Result<()> {
         // parameter interaction) sets this for the same reason.
         s.preview_dirty = true;
         persist_scoreboard_settings(&app, &mut s);
+        flag_scoreboard_dirty(&app_weak, &state_ref);
     });
 
     let app_weak = app.as_weak();
@@ -5476,6 +5605,7 @@ fn main() -> anyhow::Result<()> {
                 app.set_scoreboard_error_text(message.into());
             }
         }
+        flag_scoreboard_dirty(&app_weak, &state_ref);
     });
 
     let app_weak = app.as_weak();
@@ -5499,6 +5629,7 @@ fn main() -> anyhow::Result<()> {
         // as picking one does.
         s.preview_dirty = true;
         persist_scoreboard_settings(&app, &mut s);
+        flag_scoreboard_dirty(&app_weak, &state_ref);
     });
 
     let app_weak = app.as_weak();
@@ -5515,6 +5646,7 @@ fn main() -> anyhow::Result<()> {
         };
         s.preview_dirty = true;
         persist_scoreboard_settings(&app, &mut s);
+        flag_scoreboard_dirty(&app_weak, &state_ref);
     });
 
     let app_weak = app.as_weak();
@@ -5527,6 +5659,7 @@ fn main() -> anyhow::Result<()> {
         s.scoreboard_style.logo_size_px = Some(size);
         s.preview_dirty = true;
         persist_scoreboard_settings(&app, &mut s);
+        flag_scoreboard_dirty(&app_weak, &state_ref);
     });
 
     let app_weak = app.as_weak();
@@ -5551,6 +5684,7 @@ fn main() -> anyhow::Result<()> {
         s.scoreboard_style.banner_color = hex.map(str::to_string);
         s.preview_dirty = true;
         persist_scoreboard_settings(&app, &mut s);
+        flag_scoreboard_dirty(&app_weak, &state_ref);
     });
 
     // ── Auto-calibration callback ──
@@ -6838,10 +6972,12 @@ fn main() -> anyhow::Result<()> {
         if let Some(app) = app_weak.upgrade() {
             let ac = snapshot_autocam_defaults(&app);
             let sb = snapshot_scoreboard_settings(&app, &state_ref.borrow());
+            let ed = snapshot_export_defaults(&app);
             let mut s = state_ref.borrow_mut();
             if let Some(cal) = s.calibration.as_mut() {
                 cal.autocam_defaults = Some(ac);
                 cal.scoreboard = Some(sb);
+                cal.export_defaults = Some(ed);
             }
         }
         let save_result = state_ref.borrow().save_calibration();
@@ -7360,6 +7496,22 @@ fn main() -> anyhow::Result<()> {
             if let Some(model_path) = s.user_settings.ai_model_path.as_ref() {
                 app.set_export_model_path(model_path.to_string_lossy().to_string().into());
             }
+            // ...then let a loaded calibration's own saved output settings
+            // and model win, so opening a match restores what was saved
+            // with it (the model only if it exists on this machine).
+            if let Some(cal) = s.calibration.as_ref() {
+                if let Some(ed) = cal.export_defaults.as_ref() {
+                    apply_export_defaults(&app, ed);
+                }
+                if let Some(path) = cal
+                    .autocam_defaults
+                    .as_ref()
+                    .and_then(|ac| ac.model_path.as_ref())
+                    .filter(|p| std::path::Path::new(p).is_file())
+                {
+                    app.set_export_model_path(path.clone().into());
+                }
+            }
             let clip_secs = if s.playback.fps() > 0.0 {
                 s.playback.total_frames().unwrap_or(0) as f32 / s.playback.fps() as f32
             } else {
@@ -7422,9 +7574,14 @@ fn main() -> anyhow::Result<()> {
             app.set_export_model_path(path.to_string_lossy().to_string().into());
             // Remember across sessions so the user doesn't re-pick
             // the same ONNX every run. Save is best-effort.
-            let mut s = state_ref.borrow_mut();
-            s.user_settings.ai_model_path = Some(path);
-            s.user_settings.save();
+            {
+                let mut s = state_ref.borrow_mut();
+                s.user_settings.ai_model_path = Some(path);
+                s.user_settings.save();
+            }
+            // The model is part of the calibration's AI settings now -
+            // run the same changed-vs-calibration check the sliders use.
+            app.invoke_autocam_settings_changed();
         }
     });
 
@@ -7498,19 +7655,51 @@ fn main() -> anyhow::Result<()> {
             let differs_from_calibration = s
                 .calibration
                 .as_ref()
-                .is_some_and(|c| c.autocam_defaults.as_ref() != Some(&ac));
+                .is_some_and(|c| autocam_differs(c.autocam_defaults.as_ref(), &ac));
             if differs_from_calibration {
                 app.set_cal_dirty(true);
             }
             s.user_settings.set_autocam_defaults(ac);
-            // "AI Tracking"/"Async Detect" checkboxes: app-level only,
-            // deliberately not part of `AutocamDefaults` - see
-            // `GuiSettings::autocam_enabled`'s doc comment.
+            // "AI Tracking"/"Async Detect" checkboxes: also kept app-level
+            // (last-used state for the next app start), in addition to
+            // being part of the calibration's `AutocamDefaults`.
             s.user_settings.set_ai_toggle_defaults(
                 app.get_export_autocam_enabled(),
                 app.get_export_async_detect(),
             );
         }
+    });
+
+    // Export output (resolution / codec / quality) changed: flag the
+    // calibration dirty when it differs from what the calibration stored,
+    // the same way the AI sliders do, so Save calibration shows up.
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_export_output_changed(move || {
+        if let Some(app) = app_weak.upgrade() {
+            let ed = snapshot_export_defaults(&app);
+            let s = state_ref.borrow();
+            if s.calibration
+                .as_ref()
+                .is_some_and(|c| c.export_defaults.as_ref() != Some(&ed))
+            {
+                app.set_cal_dirty(true);
+            }
+        }
+    });
+
+    // Label for a Quality combo entry, with the bitrate it means for the
+    // current codec and resolution (same table the NVENC encoder uses).
+    app.on_quality_label(|quality, codec, width, height| {
+        let q: reco_io::output::Quality = quality.parse().unwrap_or_default();
+        let c: reco_io::output::Codec = codec.parse().unwrap_or_default();
+        let (bv, max) = reco_io::ffmpeg::encoder::nvenc_bitrate_mbps(
+            c,
+            q,
+            width.max(1) as u32,
+            height.max(1) as u32,
+        );
+        format!("{quality} ({bv}-{max} Mbps)").into()
     });
 
     let app_weak = app.as_weak();
@@ -9043,8 +9232,26 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                     .as_ref()
                     .and_then(|c| c.autocam_defaults.as_ref())
                 {
-                    apply_autocam_defaults(&app, ac);
+                    if let Some(missing) = apply_autocam_defaults(&app, ac) {
+                        log::warn!("Calibration's AI model {missing} not found on this machine");
+                        s.toasts.push(
+                            Severity::Warn,
+                            "AI model not found",
+                            format!(
+                                "The calibration was saved with {missing}, which does not exist on this PC - keeping your current model."
+                            ),
+                        );
+                        crate::toast::sync_to_ui(&s.toasts, &app);
+                    }
                     log::info!("Restored AI Tracking defaults from calibration");
+                }
+                if let Some(ed) = s
+                    .calibration
+                    .as_ref()
+                    .and_then(|c| c.export_defaults.as_ref())
+                {
+                    apply_export_defaults(&app, ed);
+                    log::info!("Restored export settings from calibration");
                 }
                 // apply_scoreboard_settings borrows `state` itself, so `s`
                 // has to be released for the duration of the call - it's

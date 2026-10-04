@@ -2762,6 +2762,7 @@ mod tests {
             autocam_defaults: None,
             autocam_pitch_limits: None,
             scoreboard: None,
+            export_defaults: None,
         }
     }
 
@@ -2902,6 +2903,7 @@ mod tests {
             autocam_defaults: None,
             autocam_pitch_limits: None,
             scoreboard: None,
+            export_defaults: None,
         };
         let viewport = ViewportConfig {
             fov_degrees: 75.0,

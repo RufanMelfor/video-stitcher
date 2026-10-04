@@ -1311,6 +1311,11 @@ export component RecoApp inherits Window {
     // persistence in `on_pick_export_model`) or the progress/status
     // fields below (not tuning parameters).
     callback autocam-settings-changed();
+    // Resolution / codec / quality changed in the Export dialog - Rust
+    // compares against the calibration's saved export_defaults.
+    callback export-output-changed();
+    // Quality combo label incl. the bitrate (quality, codec, width, height).
+    pure callback quality-label(string, string, int, int) -> string;
     changed export-autocam-enabled => { root.autocam-settings-changed(); }
     changed export-tracking-mode => { root.autocam-settings-changed(); }
     changed export-detection-interval => { root.autocam-settings-changed(); }
@@ -5915,6 +5920,7 @@ export component RecoApp inherits Window {
                                         root.export-width = 1920;
                                         root.export-height = 1080;
                                     }
+                                    root.export-output-changed();
                                 }
                             }
                         }
@@ -5941,7 +5947,10 @@ export component RecoApp inherits Window {
                                 current-index: root.export-codec == "hevc" ? 1
                                              : root.export-codec == "av1" ? 2
                                              : 0;
-                                selected(v) => { root.export-codec = v; }
+                                selected(v) => {
+                                    root.export-codec = v;
+                                    root.export-output-changed();
+                                }
                             }
                         }
 
@@ -5949,15 +5958,24 @@ export component RecoApp inherits Window {
                             spacing: 4px;
                             horizontal-stretch: 1;
                             Tip {
-                                tip: "Encoder quality preset - trades encode speed and file size for visual quality.";
+                                tip: "Encoder quality preset - trades encode speed and file size for visual quality. The numbers are the target and peak bitrate the hardware (NVENC) encoder uses for the chosen codec and resolution; the software fallback encoders are quality-based (CRF) and have no fixed bitrate.";
                                 Text { text: "Quality"; color: #ccc; font-size: 12px; }
                             }
                             ComboBox {
-                                model: ["fast", "balanced", "high"];
+                                model: [
+                                    root.quality-label("fast", root.export-codec, root.export-width, root.export-height),
+                                    root.quality-label("balanced", root.export-codec, root.export-width, root.export-height),
+                                    root.quality-label("high", root.export-codec, root.export-width, root.export-height),
+                                ];
                                 current-index: root.export-quality == "fast" ? 0
                                              : root.export-quality == "high" ? 2
                                              : 1;
-                                selected(v) => { root.export-quality = v; }
+                                selected(v) => {
+                                    root.export-quality = self.current-index == 0 ? "fast"
+                                                        : self.current-index == 2 ? "high"
+                                                        : "balanced";
+                                    root.export-output-changed();
+                                }
                             }
                         }
                     }

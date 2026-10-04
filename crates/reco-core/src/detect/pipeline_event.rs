@@ -563,6 +563,9 @@ mod tests {
                 cluster_alpha: 0.05,
                 confidence_threshold: 0.3,
                 lookahead_reactivity: 1.5,
+                model_path: None,
+                enabled: None,
+                async_detect: None,
             },
         };
         assert_eq!(ev.frame_index(), 0);

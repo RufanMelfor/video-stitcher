@@ -134,13 +134,9 @@ pub struct GuiSettings {
     pub last_match_folder: Option<PathBuf>,
 
     /// Last-used state of the Export dialog's "AI Tracking" master
-    /// checkbox. Deliberately separate from `autocam_defaults`
-    /// (`reco_core::calibration::AutocamDefaults` excludes this on
-    /// purpose - see that type's own doc comment: whether AI tracking
-    /// runs at all is a per-run choice, not something a shared
-    /// calibration file should force on everyone who opens it). This
-    /// field is purely an app-level convenience so the checkbox itself
-    /// doesn't reset to off on every restart.
+    /// checkbox, so it doesn't reset to off on every restart. A loaded
+    /// calibration's own `autocam_defaults.enabled` (saved since 2026-10)
+    /// takes precedence over this once that calibration is loaded.
     #[serde(default)]
     pub autocam_enabled: bool,
     /// Last-used state of the Export dialog's "Async Detect" checkbox.
@@ -735,6 +731,9 @@ mod tests {
             cluster_alpha: 0.05,
             confidence_threshold: 0.2,
             lookahead_reactivity: 2.5,
+            model_path: None,
+            enabled: None,
+            async_detect: None,
         };
         s.autocam_defaults = Some(ac);
         let json = serde_json::to_string(&s).unwrap();
