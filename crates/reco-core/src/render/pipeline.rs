@@ -770,6 +770,19 @@ impl StitchPipeline {
         self.show_seam_line = show;
     }
 
+    /// Preview-only overlap view: ghost one camera over the other's side of
+    /// the seam, or show their difference - a calibration aid. Like
+    /// `set_show_seam_line`, deliberately not part of `Calibration`. See
+    /// [`super::renderer::OverlapView`].
+    pub fn set_overlap_view(&mut self, view: super::renderer::OverlapView) {
+        self.renderer.set_overlap_view(view);
+    }
+
+    /// See [`Self::set_overlap_view`].
+    pub fn overlap_view(&self) -> super::renderer::OverlapView {
+        self.renderer.overlap_view()
+    }
+
     /// Set the ground-plane tilt correction for the x-plane (per-frame
     /// uniform; no scene rebuild). See
     /// [`crate::calibration::Topology::ground_tilt_x`].

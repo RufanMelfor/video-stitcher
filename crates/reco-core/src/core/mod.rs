@@ -520,6 +520,13 @@ impl StitchCore {
         self.executor.set_show_seam_line(show);
     }
 
+    /// Set the overlap-view calibration aid - see
+    /// [`crate::render::renderer::OverlapView`].
+    #[cfg(feature = "gpu")]
+    pub fn set_overlap_view(&mut self, view: crate::render::renderer::OverlapView) {
+        self.executor.set_overlap_view(view);
+    }
+
     /// Set the universal color grade (brightness/saturation/gamma)
     /// applied to the whole composited frame. `(1.0, 1.0, 1.0)` disables
     /// grading entirely (identity - the pass is skipped, no cost).

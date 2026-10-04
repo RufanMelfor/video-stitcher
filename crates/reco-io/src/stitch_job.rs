@@ -74,6 +74,8 @@ pub struct StitchJob {
     blend_flip_direction: bool,
     multiband_blend_enabled: bool,
     show_seam_line: bool,
+    /// Debug overlap view (ghost / difference) - see `Self::overlap_view`.
+    overlap_view: Option<reco_core::render::renderer::OverlapView>,
     seam_offset: f32,
     color_match_enabled: bool,
     /// Manual per-camera gamma overrides, independently optional.
@@ -349,6 +351,7 @@ impl StitchJob {
             blend_flip_direction: false,
             multiband_blend_enabled: false,
             show_seam_line: false,
+            overlap_view: None,
             seam_offset: 0.0,
             color_match_enabled: true,
             color_gamma: (None, None),
@@ -611,6 +614,14 @@ impl StitchJob {
     /// Default: false.
     pub fn show_seam_line(mut self, show: bool) -> Self {
         self.show_seam_line = show;
+        self
+    }
+
+    /// Debug overlay for checking calibration: ghost one camera over the
+    /// other's side of the seam, or render their difference. See
+    /// `reco_core::render::renderer::OverlapView`. Default: none.
+    pub fn overlap_view(mut self, view: reco_core::render::renderer::OverlapView) -> Self {
+        self.overlap_view = Some(view);
         self
     }
 
@@ -962,6 +973,10 @@ impl StitchJob {
         // failure; `StitchCore::set_show_seam_line` no-ops on CPU instead.
         if self.show_seam_line {
             session.core_mut().set_show_seam_line(true);
+        }
+        // Same reasoning as show_seam_line above: debug-only runtime state.
+        if let Some(view) = self.overlap_view {
+            session.core_mut().set_overlap_view(view);
         }
 
         session.telemetry_mut().set_gpu_name(gpu_name.clone());
@@ -1691,6 +1706,7 @@ impl StitchJob {
             }
         );
         let _ = writeln!(out, "Show seam line (debug): {}", self.show_seam_line);
+        let _ = writeln!(out, "Overlap view (debug): {:?}", self.overlap_view);
 
         let _ = writeln!(out, "\n--- Processing window ---");
         let _ = writeln!(

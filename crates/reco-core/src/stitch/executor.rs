@@ -542,6 +542,16 @@ impl Executor {
         }
     }
 
+    /// Set the overlap-view calibration aid (ghost / difference). A no-op
+    /// on the CPU executor, same as the seam line.
+    #[cfg(feature = "gpu")]
+    pub fn set_overlap_view(&mut self, view: crate::render::renderer::OverlapView) {
+        match self {
+            Executor::Cpu(_) => {}
+            Executor::Gpu(g) => g.pipeline.set_overlap_view(view),
+        }
+    }
+
     /// Set the universal color grade (brightness/saturation/gamma). A
     /// no-op on the CPU executor - it's a headless correctness oracle
     /// with no GPU compute pass to run the color grade shader on.

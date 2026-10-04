@@ -264,6 +264,18 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         show_seam_line: bool,
 
+        /// Calibration aid: "right-over-left" / "left-over-right" ghost one
+        /// camera semi-transparently over the other's side of the seam
+        /// (doubled lines = misaligned); "difference" shows |left - right|
+        /// wherever both cameras cover a pixel (near black = aligned).
+        /// Debug only - never use for a real export.
+        #[arg(long, value_parser = ["off", "right-over-left", "left-over-right", "difference"])]
+        overlap_view: Option<String>,
+
+        /// Opacity for --overlap-view, 0..1.
+        #[arg(long, default_value_t = 0.5)]
+        overlap_opacity: f32,
+
         /// Manual nudge of the seam position, in plane-local UV units
         /// (same space as `--blend`). `0.0` (default) = seam sits exactly
         /// where the calibration's geometry puts it. Positive/negative
@@ -1243,6 +1255,8 @@ fn main() -> anyhow::Result<()> {
             blend_flip_direction,
             multiband,
             show_seam_line,
+            overlap_view,
+            overlap_opacity,
             seam_offset,
             no_color_match,
             color_gamma_left,
@@ -1290,6 +1304,8 @@ fn main() -> anyhow::Result<()> {
                 blend_flip_direction,
                 multiband,
                 show_seam_line,
+                overlap_view: overlap_view.as_deref(),
+                overlap_opacity,
                 seam_offset,
                 no_color_match,
                 color_gamma_left,

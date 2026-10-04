@@ -410,6 +410,13 @@ struct AppState {
     /// through the camera-smoothing path but still need a re-render.
     /// Cleared by the timer after it renders.
     preview_dirty: bool,
+    /// "Show seam line" as last set from the UI - the overlap view below is
+    /// only applied while it is on.
+    show_seam_line: bool,
+    /// Overlap view selection (UI combo index 0..=3) and opacity, kept even
+    /// while "Show seam line" is off so turning it back on restores them.
+    overlap_view_mode: i32,
+    overlap_view_opacity: f32,
     /// Set when the user clicks "Remeasure now" in Color Mapping; the
     /// measurement itself only completes on the *next* render call, so
     /// this flags the timer tick to push a confirmation toast with the
@@ -744,6 +751,9 @@ impl AppState {
             pending_seek: None,
             last_render_at: None,
             preview_dirty: false,
+            show_seam_line: false,
+            overlap_view_mode: 0,
+            overlap_view_opacity: 0.5,
             color_match_remeasure_pending: false,
             export_interrupted: Arc::new(AtomicBool::new(false)),
             calibration_interrupted: Arc::new(AtomicBool::new(false)),
@@ -1440,8 +1450,39 @@ impl AppState {
 
     /// Show/hide the geometric seam-position debug line.
     fn set_show_seam_line(&mut self, show: bool) {
+        self.show_seam_line = show;
         if let Some(bridge) = self.bridge.as_mut() {
             bridge.engine_mut().pipeline_mut().set_show_seam_line(show);
+            self.preview_dirty = true;
+        }
+        self.apply_overlap_view();
+    }
+
+    /// Overlap view combo/slider changed (preview-only calibration aid).
+    fn set_overlap_view(&mut self, mode: i32, opacity: f32) {
+        self.overlap_view_mode = mode;
+        self.overlap_view_opacity = opacity;
+        self.apply_overlap_view();
+    }
+
+    /// Push the overlap view to the preview pipeline - off whenever "Show
+    /// seam line" is off, since the controls only show alongside it.
+    fn apply_overlap_view(&mut self) {
+        use reco_core::render::renderer::{OverlapView, OverlapViewMode};
+        let mode = match (self.show_seam_line, self.overlap_view_mode) {
+            (true, 1) => OverlapViewMode::RightOverLeft,
+            (true, 2) => OverlapViewMode::LeftOverRight,
+            (true, 3) => OverlapViewMode::Difference,
+            _ => OverlapViewMode::Off,
+        };
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge
+                .engine_mut()
+                .pipeline_mut()
+                .set_overlap_view(OverlapView {
+                    mode,
+                    opacity: self.overlap_view_opacity,
+                });
             self.preview_dirty = true;
         }
     }
@@ -6057,6 +6098,11 @@ fn main() -> anyhow::Result<()> {
     let state_ref = Rc::clone(&state);
     app.on_changed_show_seam_line(move |show| {
         state_ref.borrow_mut().set_show_seam_line(show);
+    });
+
+    let state_ref = Rc::clone(&state);
+    app.on_changed_overlap_view(move |mode, opacity| {
+        state_ref.borrow_mut().set_overlap_view(mode, opacity);
     });
 
     let state_ref = Rc::clone(&state);

@@ -33,6 +33,11 @@ pub struct StitchArgs<'a> {
     /// Draw a debug line at the exact geometric seam position. See
     /// `reco_core::render::pipeline::StitchPipeline::set_show_seam_line`.
     pub show_seam_line: bool,
+    /// `--overlap-view` (validated by clap) - see
+    /// `reco_core::render::renderer::OverlapView`.
+    pub overlap_view: Option<&'a str>,
+    /// `--overlap-opacity`.
+    pub overlap_opacity: f32,
     /// Manual seam nudge. See `reco_core::calibration::Topology::seam_offset`.
     pub seam_offset: f32,
     /// Disable auto exposure/color matching at the seam. See
@@ -267,6 +272,19 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
     // Per side, so giving one flag without the other leaves the other
     // camera's calibrated value alone instead of resetting it to identity.
     job = job.color_gamma(args.color_gamma_left, args.color_gamma_right);
+    if let Some(name) = args.overlap_view {
+        use reco_core::render::renderer::{OverlapView, OverlapViewMode};
+        let mode = match name {
+            "right-over-left" => OverlapViewMode::RightOverLeft,
+            "left-over-right" => OverlapViewMode::LeftOverRight,
+            "difference" => OverlapViewMode::Difference,
+            _ => OverlapViewMode::Off,
+        };
+        job = job.overlap_view(OverlapView {
+            mode,
+            opacity: args.overlap_opacity,
+        });
+    }
     if let Some(t) = args.start_time {
         job = job.start_time(t);
     }

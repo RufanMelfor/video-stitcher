@@ -20,6 +20,12 @@ struct CompositeUniforms {
     //    smoothstep re-derived from the wide mask around its 0.5 crossover.
     //    Smaller = sharper high-frequency transition.
     params: vec4<f32>,
+    // Preview-only overlap view (renderer.rs `OverlapView`):
+    // x: mode (0 off, 1 right over left, 2 left over right, 3 difference)
+    // y: opacity (0..1)
+    // z: 1.0 = the 2-band blend is on; 0.0 = this pass only runs for the
+    //    overlap view, so reproduce the plain single-band crossfade instead
+    overlap: vec4<f32>,
 }
 
 @group(0) @binding(0) var t_a: texture_2d<f32>;
@@ -75,7 +81,33 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         high = mix(b_high, a_high, m_narrow);
     }
 
-    let color = clamp(low + high, vec3<f32>(0.0), vec3<f32>(1.0));
+    var color = clamp(low + high, vec3<f32>(0.0), vec3<f32>(1.0));
+    // Mask value where 1 = the right camera's side of the seam.
+    let right_side = select(1.0 - m_wide, m_wide, u.params.x > 0.5);
+    if u.overlap.z < 0.5 {
+        // Multi-band blend off: plain crossfade of the full-res renders,
+        // close to the single-band stitch the user normally sees.
+        color = mix(a_full.rgb, b_full.rgb, smoothstep(0.5 - eps, 0.5 + eps, right_side));
+    }
+
+    // Overlap view (calibration aid). a = left camera, b = right camera,
+    // each with hard 0/1 coverage alpha from their own full-plane render.
+    let mode = u.overlap.x;
+    let opacity = u.overlap.y;
+    let a_cov = a_full.a > 0.5;
+    let b_cov = b_full.a > 0.5;
+    if mode > 0.5 && mode < 1.5 && b_cov && right_side < 0.5 {
+        // Right camera ghosted over the left camera's side.
+        color = mix(color, b_full.rgb, opacity);
+    } else if mode > 1.5 && mode < 2.5 && a_cov && right_side >= 0.5 {
+        // Left camera ghosted over the right camera's side.
+        color = mix(color, a_full.rgb, opacity);
+    } else if mode > 2.5 && a_cov && b_cov {
+        // Amplified per-channel difference: aligned = near black.
+        let diff = clamp(abs(a_full.rgb - b_full.rgb) * 3.0, vec3<f32>(0.0), vec3<f32>(1.0));
+        color = mix(color, diff, opacity);
+    }
+
     let coverage = max(a_full.a, b_full.a);
     return vec4<f32>(color, coverage);
 }

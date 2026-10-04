@@ -192,6 +192,77 @@ impl ColorCorrection {
     }
 }
 
+/// What the preview's overlap view shows - a calibration aid for judging
+/// alignment in the region both cameras cover. See [`OverlapView`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OverlapViewMode {
+    /// Normal stitched image.
+    #[default]
+    Off,
+    /// The right camera drawn semi-transparently over the left camera's
+    /// side of the seam (where it is normally hidden).
+    RightOverLeft,
+    /// The left camera drawn semi-transparently over the right camera's
+    /// side of the seam.
+    LeftOverRight,
+    /// `|left - right|` (amplified) wherever both cameras cover the pixel:
+    /// near-black where they agree, bright edges where alignment is off.
+    Difference,
+}
+
+impl OverlapViewMode {
+    /// SYNC_WITH `multiband_composite.wgsl`'s `u.overlap.x` comparisons.
+    fn shader_code(self) -> f32 {
+        match self {
+            Self::Off => 0.0,
+            Self::RightOverLeft => 1.0,
+            Self::LeftOverRight => 2.0,
+            Self::Difference => 3.0,
+        }
+    }
+}
+
+/// Preview-only overlap visualisation (`StitchPipeline::set_overlap_view`).
+/// Uses the multi-band path's separate per-camera renders, so the ghost and
+/// the difference are exact: they cover precisely the pixels the other
+/// camera covers, with no assumption about where the seam lies. Forces that
+/// path while active (with the plain single-band crossfade if multi-band is
+/// off), so it costs those extra passes only while it is switched on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverlapView {
+    pub mode: OverlapViewMode,
+    /// Ghost: how opaque the other camera is (0..1). Difference: how much
+    /// of the difference image replaces the normal one (0..1).
+    pub opacity: f32,
+}
+
+impl Default for OverlapView {
+    fn default() -> Self {
+        Self {
+            mode: OverlapViewMode::Off,
+            opacity: 0.5,
+        }
+    }
+}
+
+impl OverlapView {
+    /// Whether this changes the image at all.
+    pub fn is_active(&self) -> bool {
+        self.mode != OverlapViewMode::Off && self.opacity > 0.0
+    }
+
+    /// Opacity clamped to `[0, 1]` (non-finite -> default), since it comes
+    /// straight from a GUI slider.
+    fn sanitized(self) -> Self {
+        let opacity = if self.opacity.is_finite() {
+            self.opacity.clamp(0.0, 1.0)
+        } else {
+            Self::default().opacity
+        };
+        Self { opacity, ..self }
+    }
+}
+
 // ---- Multi-band (2-band) spatial seam blur ----
 //
 // See `Renderer::encode_multiband_stitch_pass` for the full algorithm.
@@ -216,6 +287,10 @@ struct CompositeUniforms {
     /// x: 1.0 if the right plane is the fading/mask plane, else 0.0.
     /// y: narrow-band smoothstep half-width. z, w: pad.
     params: [f32; 4],
+    /// x: [`OverlapViewMode`] as 0..=3, y: its opacity, z: 1.0 if the 2-band
+    /// blend itself is enabled (0.0 = this composite only runs for the
+    /// overlap view, so it reproduces the plain single-band crossfade). w: pad.
+    overlap: [f32; 4],
 }
 
 /// The size-dependent half of [`MultibandResources`]: textures, views, and
@@ -856,6 +931,9 @@ pub(crate) struct Renderer {
     /// Set by the zero-copy path when the source video has rotation metadata.
     /// The CPU decode path handles rotation by reversing buffers instead.
     flip_180: [bool; 2],
+    /// Preview-only calibration aid - see [`OverlapView`]. Off by default;
+    /// an export builds its own pipeline, so this never reaches a file.
+    overlap_view: OverlapView,
 }
 
 impl Renderer {
@@ -1051,6 +1129,7 @@ impl Renderer {
             sampler,
             device: device.clone(),
             flip_180: [false, false],
+            overlap_view: OverlapView::default(),
         }
     }
 
@@ -1390,6 +1469,17 @@ impl Renderer {
         self.flip_180 = [left, right];
     }
 
+    /// Set the preview-only overlap view (ghost / difference) - see
+    /// [`OverlapView`].
+    pub fn set_overlap_view(&mut self, view: OverlapView) {
+        self.overlap_view = view.sanitized();
+    }
+
+    /// The overlap view currently in force.
+    pub fn overlap_view(&self) -> OverlapView {
+        self.overlap_view
+    }
+
     /// Set full-range YUV mode for the shader.
     pub fn set_full_range(&mut self, full_range: bool) {
         self.is_full_range = full_range;
@@ -1678,6 +1768,7 @@ impl Renderer {
         target_width: u32,
         target_height: u32,
         aspect: f32,
+        multiband_blend: bool,
         encoder_label: &str,
     ) -> wgpu::CommandEncoder {
         self.multiband
@@ -2000,6 +2091,12 @@ impl Renderer {
         // Composite: reconstruct low + high bands into the real target.
         let composite_uniforms = CompositeUniforms {
             params: [if fading_is_right { 1.0 } else { 0.0 }, 0.04, 0.0, 0.0],
+            overlap: [
+                self.overlap_view.mode.shader_code(),
+                self.overlap_view.opacity,
+                if multiband_blend { 1.0 } else { 0.0 },
+                0.0,
+            ],
         };
         let composite_uniform_buffer =
             gpu.device
@@ -2067,7 +2164,9 @@ impl Renderer {
         show_seam_line: bool,
     ) -> wgpu::CommandBuffer {
         let aspect = self.output_width as f32 / self.output_height as f32;
-        let encoder = if multiband_enabled {
+        // The overlap view needs each camera rendered on its own, which only
+        // the multi-band path does - see `OverlapView`.
+        let encoder = if multiband_enabled || self.overlap_view.is_active() {
             self.encode_multiband_stitch_pass(
                 gpu,
                 scene,
@@ -2080,6 +2179,7 @@ impl Renderer {
                 self.output_width,
                 self.output_height,
                 aspect,
+                multiband_enabled,
                 "stitch_to_target_multiband",
             )
         } else {
@@ -2125,7 +2225,7 @@ impl Renderer {
         target_view: &wgpu::TextureView,
     ) {
         let aspect = viewport.config.width as f32 / viewport.config.height as f32;
-        let encoder = if multiband_enabled {
+        let encoder = if multiband_enabled || self.overlap_view.is_active() {
             self.encode_multiband_stitch_pass(
                 gpu,
                 scene,
@@ -2138,6 +2238,7 @@ impl Renderer {
                 viewport.config.width,
                 viewport.config.height,
                 aspect,
+                multiband_enabled,
                 "preview_frame_multiband",
             )
         } else {
