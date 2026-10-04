@@ -3508,6 +3508,40 @@ export component RecoApp inherits Window {
                     }
                 }
 
+                // Preview aspect-ratio pill, right of Reset in the same
+                // dark-pill style. Each click steps to the next ratio
+                // (auto -> 16:9 -> 4:3 -> 21:9 -> auto). Moved here from the
+                // transport bar's ComboBox.
+                if root.files-loaded && !root.lens-preview-active: Rectangle {
+                    x: parent.width / 2 + 156px;
+                    y: -34px;
+                    width: 70px;
+                    height: 26px;
+                    border-radius: 13px;
+                    background: #0d0f11d0;
+                    border-width: 1px;
+                    border-color: #2a2e33;
+
+                    aspect-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.preview-aspect = root.preview-aspect == "auto" ? "16:9"
+                                                : root.preview-aspect == "16:9" ? "4:3"
+                                                : root.preview-aspect == "4:3" ? "21:9"
+                                                : "auto";
+                            root.changed-preview-aspect(root.preview-aspect);
+                        }
+                    }
+
+                    Text {
+                        text: root.preview-aspect == "auto" ? "Auto" : root.preview-aspect;
+                        color: aspect-touch.has-hover ? #ccc : #9aa0a7;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
                 // Zone-type switcher (ROI vs GOAL), top-left of the preview
                 // while a zone-edit session is active - determines which
                 // polygon the click/drag/right-click gestures below apply
@@ -4984,40 +5018,6 @@ export component RecoApp inherits Window {
                             Text { text: "x"; color: #777; font-size: 10px; vertical-alignment: center; }
                         }
 
-                        // Record button
-                        Rectangle {
-                            width: rec-layout.preferred-width + 12px;
-                            border-radius: 5px;
-                            background: root.recording ? #4a1010 : rec-touch.has-hover ? #3a2020 : #2a1a1a;
-                            border-width: 1px;
-                            border-color: root.recording ? #e04040 : #553333;
-                            rec-touch := TouchArea {
-                                enabled: root.files-loaded && !root.export-in-progress;
-                                clicked => { root.toggle-recording(root.recording-codec, root.recording-quality); }
-                            }
-                            rec-layout := HorizontalLayout {
-                                padding-left: 8px;
-                                padding-right: 8px;
-                                spacing: 5px;
-                                Rectangle { width: 7px; height: 7px; y: (parent.height - self.height) / 2; border-radius: 4px; background: root.recording ? #ff3030 : #883030; }
-                                Text { text: root.recording ? "Stop" : "Rec*"; color: root.recording ? #ff6060 : #cc8888; font-size: 11px; font-weight: 600; vertical-alignment: center; }
-                            }
-                        }
-
-                        if !root.recording: ComboBox {
-                            model: ["fast", "balanced", "high"];
-                            current-value <=> root.recording-quality;
-                            enabled: root.files-loaded && !root.export-in-progress;
-                            width: 82px;
-                        }
-
-                        ComboBox {
-                            model: ["auto", "16:9", "4:3", "21:9"];
-                            current-value <=> root.preview-aspect;
-                            enabled: root.files-loaded;
-                            width: 78px;
-                            selected(v) => { root.changed-preview-aspect(v); }
-                        }
                     }
                 }
             }
