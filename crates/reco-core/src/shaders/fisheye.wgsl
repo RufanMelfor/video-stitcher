@@ -60,6 +60,11 @@ struct Uniforms {
     // top_tilt.w: PlaneLayout::top_tilt_band_width - same, for top_tilt's
     //   own band
     top_tilt: vec4<f32>,
+    // Overlap-fit color match (Topology::color_match_overlap_fit): per RGB
+    // channel out = rgb_gain * in^rgb_exp, after the manual gamma. xyz used,
+    // w unused. All 1.0 = identity (the default for every other mode).
+    rgb_gain: vec4<f32>,
+    rgb_exp: vec4<f32>,
 };
 
 // YUV420P plane textures (Y = full res R8Unorm, U/V = half res R8Unorm)
@@ -126,13 +131,24 @@ fn apply_gamma(rgb: vec3<f32>, inv_gamma: f32) -> vec3<f32> {
     return pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(inv_gamma));
 }
 
+// Overlap-fit tone match, SYNC_WITH `render::color_match::fit_overlap_pairs`
+// (which fits gain/exp on pixels that already went through apply_gamma).
+// Per channel, so it also corrects a white-balance difference that only
+// shows in the highlights (e.g. one camera's sky bluer than the other's).
+fn apply_rgb_tone(rgb: vec3<f32>, gain: vec3<f32>, expo: vec3<f32>) -> vec3<f32> {
+    if all(gain == vec3<f32>(1.0)) && all(expo == vec3<f32>(1.0)) {
+        return rgb;
+    }
+    return clamp(gain * pow(max(rgb, vec3<f32>(0.0)), expo), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 fn apply_color_transfer(
     rgb: vec3<f32>,
     scale: vec3<f32>,
     offset: vec3<f32>,
     inv_gamma: f32,
 ) -> vec3<f32> {
-    let corrected = apply_gamma(rgb, inv_gamma);
+    let corrected = apply_rgb_tone(apply_gamma(rgb, inv_gamma), u.rgb_gain.xyz, u.rgb_exp.xyz);
     // Skip if identity transform (scale=1, offset=0)
     if all(scale == vec3<f32>(1.0)) && all(offset == vec3<f32>(0.0)) {
         return corrected;

@@ -904,6 +904,19 @@ impl StitchPipeline {
         self.calibration.topology.color_match_auto_gamma
     }
 
+    /// Switch the experimental same-direction overlap fit on or off - see
+    /// [`crate::calibration::Topology::color_match_overlap_fit`]. Forces a
+    /// fresh (snapping) measurement so the switch is visible immediately.
+    pub fn set_color_match_overlap_fit(&mut self, enabled: bool) {
+        self.calibration.topology.color_match_overlap_fit = enabled;
+        self.force_color_match_remeasure();
+    }
+
+    /// See [`Self::set_color_match_overlap_fit`].
+    pub fn color_match_overlap_fit(&self) -> bool {
+        self.calibration.topology.color_match_overlap_fit
+    }
+
     /// Maximum luma offset the color match may apply. See
     /// [`crate::calibration::Topology::color_match_max_y_offset`].
     pub fn set_color_match_max_y_offset(&mut self, offset: f32) {
@@ -1281,7 +1294,10 @@ impl StitchPipeline {
     /// of settling on a stable value.
     fn color_match_params(&self) -> super::color_match::ColorMatchParams {
         let t = &self.calibration.topology;
-        let (gamma_left, gamma_right) = if t.color_match_auto_gamma {
+        // Overlap fit replaces auto gamma (both would correct the same tone
+        // difference - the double correction that motivated it), so only
+        // the manual gamma is in force there.
+        let (gamma_left, gamma_right) = if t.color_match_auto_gamma && !t.color_match_overlap_fit {
             let c = self.color_match.lock().unwrap().current();
             (c.left_gamma, c.right_gamma)
         } else {
@@ -1299,8 +1315,41 @@ impl StitchPipeline {
             blend_flip_direction: t.blend_flip_direction,
             gamma_left,
             gamma_right,
-            auto_gamma: t.color_match_auto_gamma,
+            auto_gamma: t.color_match_auto_gamma && !t.color_match_overlap_fit,
+            overlap_fit: t.color_match_overlap_fit,
         }
+    }
+
+    /// Everything besides `PositionKey`'s band fields that moves the
+    /// overlap pairs: the scene layout (intersect, axis offset, the plane
+    /// corrections, seam offset). Compared as-is, not hashed.
+    fn overlap_geometry_key(&self) -> [f32; 8] {
+        let t = &self.calibration.topology;
+        [
+            t.intersect as f32,
+            self.calibration.framing.axis_offset as f32,
+            t.x_rx as f32,
+            t.x_rz as f32,
+            t.x_ty as f32,
+            t.z_rx as f32,
+            t.z_rz as f32,
+            t.seam_offset,
+        ]
+    }
+
+    /// Same-direction overlap pairs for the current calibration - see
+    /// [`super::color_match::overlap_sample_pairs`].
+    fn overlap_pairs(
+        &self,
+        params: &super::color_match::ColorMatchParams,
+    ) -> (Vec<[u32; 2]>, Vec<[u32; 2]>) {
+        super::color_match::overlap_sample_pairs(
+            self.input_width,
+            self.input_height,
+            [&self.calibration.lenses[0], &self.calibration.lenses[1]],
+            &self.scene,
+            params,
+        )
     }
 
     /// `ColorCorrection` for whenever the automatic measurement did not
@@ -1351,6 +1400,16 @@ impl StitchPipeline {
             return self.identity_correction_with_static_gamma();
         }
         let params = self.color_match_params();
+        if params.overlap_fit {
+            let w = self.input_width;
+            return self.color_match.lock().unwrap().update_overlap(
+                super::color_match::yuv420p_sampler(left.y, left.u, left.v, w),
+                super::color_match::yuv420p_sampler(right.y, right.u, right.v, w),
+                || self.overlap_pairs(&params),
+                self.renderer.is_full_range(),
+                &params,
+            );
+        }
         self.color_match.lock().unwrap().update_yuv420p(
             (left.y, left.u, left.v),
             (right.y, right.u, right.v),
@@ -1373,6 +1432,16 @@ impl StitchPipeline {
             return self.identity_correction_with_static_gamma();
         }
         let params = self.color_match_params();
+        if params.overlap_fit {
+            let w = self.input_width;
+            return self.color_match.lock().unwrap().update_overlap(
+                super::color_match::nv12_sampler(left.y, left.uv, w),
+                super::color_match::nv12_sampler(right.y, right.uv, w),
+                || self.overlap_pairs(&params),
+                self.renderer.is_full_range(),
+                &params,
+            );
+        }
         self.color_match.lock().unwrap().update_nv12(
             (left.y, left.uv),
             (right.y, right.uv),
@@ -1408,15 +1477,43 @@ impl StitchPipeline {
 
         // 1. Pick up a finished measurement, if any. Runs first so a
         //    result is consumed on the earliest possible frame.
-        if let Some((left, right)) = gather.try_take(&self.gpu) {
+        let taken = gather.try_take(&self.gpu);
+        if let Some((left, right)) = &taken
+            && params.overlap_fit
+        {
+            // Same-direction pairs: index i of `left` and `right` is the
+            // same view ray (see `overlap_sample_pairs`). A gather taken
+            // before a mode switch has mismatched lengths - skip it.
+            if left.len() == right.len() {
+                let is_full_range = self.renderer.is_full_range();
+                let decode = |s: &[f32; 4], g: f32| {
+                    super::color_match::decode_rgb_normalized(
+                        s[0],
+                        s[1],
+                        s[2],
+                        is_full_range,
+                        super::color_match::inv_gamma(g),
+                    )
+                };
+                let l: Vec<[f32; 3]> = left.iter().map(|s| decode(s, params.gamma_left)).collect();
+                let r: Vec<[f32; 3]> = right
+                    .iter()
+                    .map(|s| decode(s, params.gamma_right))
+                    .collect();
+                self.color_match
+                    .lock()
+                    .unwrap()
+                    .apply_overlap_measurement(&l, &r, &params);
+            }
+        } else if let Some((left, right)) = &taken {
             let is_full_range = self.renderer.is_full_range();
             let left_mean = super::color_match::mean_of_normalized_samples(
-                &left,
+                left,
                 is_full_range,
                 params.gamma_left,
             );
             let right_mean = super::color_match::mean_of_normalized_samples(
-                &right,
+                right,
                 is_full_range,
                 params.gamma_right,
             );
@@ -1453,7 +1550,28 @@ impl StitchPipeline {
             input_width: self.input_width,
             input_height: self.input_height,
             flip_180: flip,
+            overlap_fit: params.overlap_fit,
+            geometry: self.overlap_geometry_key(),
         };
+        if params.overlap_fit {
+            if !gather.positions_current(&key) {
+                // The shader samples a rotated source at 1-uv instead of
+                // reversing the buffer, so the raw texel a position lands
+                // on has to be mirrored to match (same as below).
+                let mirror = |lens_index: usize, p: Vec<[u32; 2]>| {
+                    if flip[lens_index] {
+                        super::band_gather::mirrored_180(&p, self.input_width, self.input_height)
+                    } else {
+                        p
+                    }
+                };
+                let (l, r) = self.overlap_pairs(&params);
+                gather.set_positions(&self.gpu, &mirror(0, l), &mirror(1, r), key);
+            }
+            gather.dispatch(&self.gpu, left_y, left_uv, right_y, right_uv);
+            self.color_match.lock().unwrap().measurement_issued();
+            return;
+        }
         if !gather.positions_current(&key) {
             let positions = |lens_index: usize, is_right: bool| {
                 let p = super::color_match::band_sample_positions(

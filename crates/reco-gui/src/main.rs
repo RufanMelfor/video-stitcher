@@ -1527,6 +1527,23 @@ impl AppState {
         }
     }
 
+    /// Enable/disable the experimental same-direction overlap fit - see
+    /// `StitchPipeline::set_color_match_overlap_fit`.
+    fn set_color_match_overlap_fit(&mut self, enabled: bool) {
+        // Mirrored into `self.calibration` for the same reason as
+        // `set_color_match_auto_gamma`.
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.color_match_overlap_fit = enabled;
+        }
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge
+                .engine_mut()
+                .pipeline_mut()
+                .set_color_match_overlap_fit(enabled);
+            self.preview_dirty = true;
+        }
+    }
+
     /// Force an immediate color-match remeasure against the current frame,
     /// without waiting for the periodic interval (which only advances while
     /// rendering) or requiring a calibration change to trigger it.
@@ -1721,6 +1738,7 @@ impl AppState {
             pipeline.set_color_match_max_chroma_offset(DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET);
             pipeline.set_color_gamma(DEFAULT_COLOR_GAMMA, DEFAULT_COLOR_GAMMA);
             pipeline.set_color_match_auto_gamma(DEFAULT_COLOR_MATCH_AUTO_GAMMA);
+            pipeline.set_color_match_overlap_fit(false);
             // Vivid color grade / sharpening reset to identity/off too -
             // both live in this same Color Mapping panel.
             pipeline.set_color_grade(1.0, 1.0, 1.0);
@@ -1731,6 +1749,7 @@ impl AppState {
             cal.topology.color_gamma_left = DEFAULT_COLOR_GAMMA;
             cal.topology.color_gamma_right = DEFAULT_COLOR_GAMMA;
             cal.topology.color_match_auto_gamma = DEFAULT_COLOR_MATCH_AUTO_GAMMA;
+            cal.topology.color_match_overlap_fit = false;
             cal.topology.color_grade_brightness = 1.0;
             cal.topology.color_grade_saturation = 1.0;
             cal.topology.color_grade_gamma = 1.0;
@@ -6388,6 +6407,15 @@ fn main() -> anyhow::Result<()> {
 
     let state_ref = Rc::clone(&state);
     let app_weak = app.as_weak();
+    app.on_changed_color_match_overlap_fit(move |enabled| {
+        state_ref.borrow_mut().set_color_match_overlap_fit(enabled);
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+        }
+    });
+
+    let state_ref = Rc::clone(&state);
+    let app_weak = app.as_weak();
     app.on_changed_color_match_band_width(move |w| {
         state_ref.borrow_mut().set_color_match_band_width(w);
         if let Some(app) = app_weak.upgrade() {
@@ -6479,6 +6507,7 @@ fn main() -> anyhow::Result<()> {
             app.set_color_gamma_left(DEFAULT_COLOR_GAMMA);
             app.set_color_gamma_right(DEFAULT_COLOR_GAMMA);
             app.set_color_match_auto_gamma(DEFAULT_COLOR_MATCH_AUTO_GAMMA);
+            app.set_color_match_overlap_fit(false);
             app.set_vivid_enabled(false);
             app.set_color_grade_brightness(1.0);
             app.set_color_grade_saturation(1.0);
@@ -8931,6 +8960,10 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 .bridge
                 .as_ref()
                 .map(|b| b.engine().calibration().topology.color_match_auto_gamma);
+            let color_match_overlap_fit = s
+                .bridge
+                .as_ref()
+                .map(|b| b.engine().calibration().topology.color_match_overlap_fit);
             let color_grade = s.bridge.as_ref().map(|b| {
                 let t = &b.engine().calibration().topology;
                 (
@@ -9143,6 +9176,9 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 }
                 if let Some(v) = color_match_auto_gamma {
                     app.set_color_match_auto_gamma(v);
+                }
+                if let Some(v) = color_match_overlap_fit {
+                    app.set_color_match_overlap_fit(v);
                 }
                 if let Some((brightness, saturation, gamma)) = color_grade {
                     app.set_color_grade_brightness(brightness);
@@ -9416,6 +9452,10 @@ fn handle_calibration_result(
                         .bridge
                         .as_ref()
                         .map(|b| b.engine().calibration().topology.color_match_auto_gamma);
+                    let color_match_overlap_fit = state
+                        .bridge
+                        .as_ref()
+                        .map(|b| b.engine().calibration().topology.color_match_overlap_fit);
                     let color_grade = state.bridge.as_ref().map(|b| {
                         let t = &b.engine().calibration().topology;
                         (
@@ -9569,6 +9609,9 @@ fn handle_calibration_result(
                         }
                         if let Some(v) = color_match_auto_gamma {
                             app.set_color_match_auto_gamma(v);
+                        }
+                        if let Some(v) = color_match_overlap_fit {
+                            app.set_color_match_overlap_fit(v);
                         }
                         if let Some((brightness, saturation, gamma)) = color_grade {
                             app.set_color_grade_brightness(brightness);

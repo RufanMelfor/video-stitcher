@@ -1097,6 +1097,11 @@ export component RecoApp inherits Window {
     // reco-core's Topology::color_match_auto_gamma. Off = the sliders keep
     // their static, manually-tuned meaning exactly as before.
     in-out property <bool> color-match-auto-gamma: false;
+    // reco-core's Topology::color_match_overlap_fit (experimental): measure
+    // both cameras at the same view directions around the seam (sky
+    // included) and fit a per-channel gain + gamma instead of the band-mean
+    // offset. Overrides auto gamma while on.
+    in-out property <bool> color-match-overlap-fit: false;
     in-out property <bool> color-match-enabled: true;
     in-out property <float> color-match-band-width: 0.15;
     in-out property <float> color-match-grid-cols: 8;
@@ -1596,6 +1601,7 @@ export component RecoApp inherits Window {
     callback seam-hit-test(float, float, float, float) -> bool;
     callback changed-color-gamma(float, float); // left, right
     callback changed-color-match-auto-gamma(bool);
+    callback changed-color-match-overlap-fit(bool);
     callback changed-color-match-enabled(bool);
     callback changed-color-match-band-width(float);
     callback changed-color-match-grid-cols(float);
@@ -4041,6 +4047,15 @@ export component RecoApp inherits Window {
                             color: root.text-muted;
                             font-size: 10px;
                             wrap: word-wrap;
+                        }
+
+                        Tip {
+                            tip: "Experimental. Measures both cameras at exactly the same spots next to the seam - from the sky down to the near touchline - and fits a brightness + contrast correction per color channel, so sky and grass can both match (the classic auto match compares a different piece of the field per camera and can only shift the average). When on, the band width / grid / max offset settings and Auto gamma below are not used.";
+                            CheckBox {
+                                text: "Overlap fit (sky + grass, experimental)";
+                                checked <=> root.color-match-overlap-fit;
+                                toggled => { root.changed-color-match-overlap-fit(self.checked); }
+                            }
                         }
 
                         CalGroupBox {

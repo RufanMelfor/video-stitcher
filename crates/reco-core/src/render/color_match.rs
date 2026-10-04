@@ -107,6 +107,10 @@ pub(crate) struct ColorMatchParams {
     /// which plane `seam_offset` actually applies to - see this struct's
     /// `seam_offset` doc.
     pub(crate) blend_flip_direction: bool,
+    /// `Topology::color_match_overlap_fit` - measure same-direction pairs
+    /// and fit a per-channel gain/exponent instead of the band-mean offset.
+    /// See [`overlap_sample_pairs`] and [`fit_overlap_pairs`].
+    pub(crate) overlap_fit: bool,
 }
 
 impl Default for ColorMatchParams {
@@ -124,6 +128,7 @@ impl Default for ColorMatchParams {
             gamma_left: 1.0,
             gamma_right: 1.0,
             auto_gamma: false,
+            overlap_fit: false,
         }
     }
 }
@@ -156,6 +161,12 @@ pub(crate) struct ColorMatchState {
     /// on blindly.
     left_gamma: f32,
     right_gamma: f32,
+    /// Overlap-fit model (`params.overlap_fit`): smoothed per-RGB-channel
+    /// gain and exponent per camera. Identity (1.0) in the offset model.
+    left_rgb_gain: [f32; 3],
+    left_rgb_exp: [f32; 3],
+    right_rgb_gain: [f32; 3],
+    right_rgb_exp: [f32; 3],
 }
 
 impl Default for ColorMatchState {
@@ -174,6 +185,10 @@ impl Default for ColorMatchState {
             snap_next: true,
             left_gamma: 1.0,
             right_gamma: 1.0,
+            left_rgb_gain: [1.0; 3],
+            left_rgb_exp: [1.0; 3],
+            right_rgb_gain: [1.0; 3],
+            right_rgb_exp: [1.0; 3],
         }
     }
 }
@@ -223,7 +238,90 @@ impl ColorMatchState {
             right_offset: self.right_offset,
             left_gamma: self.left_gamma,
             right_gamma: self.right_gamma,
+            left_rgb_gain: self.left_rgb_gain,
+            left_rgb_exp: self.left_rgb_exp,
+            right_rgb_gain: self.right_rgb_gain,
+            right_rgb_exp: self.right_rgb_exp,
         }
+    }
+
+    /// Overlap-fit counterpart to [`Self::update_yuv420p`]/`update_nv12`:
+    /// every `measure_interval_frames` calls, sample both cameras at the
+    /// paired positions `pairs()` returns (left list, right list, same
+    /// order) and fold the fit in. `pairs` is only evaluated when a
+    /// measurement is actually due.
+    pub(crate) fn update_overlap(
+        &mut self,
+        sample_left: impl Fn(u32, u32) -> Option<(u8, u8, u8)>,
+        sample_right: impl Fn(u32, u32) -> Option<(u8, u8, u8)>,
+        pairs: impl FnOnce() -> (Vec<[u32; 2]>, Vec<[u32; 2]>),
+        is_full_range: bool,
+        params: &ColorMatchParams,
+    ) -> ColorCorrection {
+        self.interval = params.measure_interval_frames;
+        if self.measurement_due() {
+            self.measurement_issued();
+            let (lp, rp) = pairs();
+            let inv_l = inv_gamma(params.gamma_left);
+            let inv_r = inv_gamma(params.gamma_right);
+            let mut left = Vec::with_capacity(lp.len());
+            let mut right = Vec::with_capacity(rp.len());
+            for (l, r) in lp.iter().zip(&rp) {
+                if let (Some(a), Some(b)) = (sample_left(l[0], l[1]), sample_right(r[0], r[1])) {
+                    left.push(decode_rgb(a, is_full_range, inv_l));
+                    right.push(decode_rgb(b, is_full_range, inv_r));
+                }
+            }
+            self.apply_overlap_measurement(&left, &right, params);
+        }
+        self.current()
+    }
+
+    /// Fold one set of same-direction RGB pairs (already decoded, manual
+    /// gamma applied - the same pixels the shader feeds to
+    /// `apply_rgb_tone`) into the smoothed overlap-fit correction. Shared
+    /// by the CPU sampler and the GPU gather. A failed fit (too few usable
+    /// pairs) keeps the last correction rather than snapping to identity.
+    pub(crate) fn apply_overlap_measurement(
+        &mut self,
+        left: &[[f32; 3]],
+        right: &[[f32; 3]],
+        params: &ColorMatchParams,
+    ) {
+        // The offset model is not used in this mode; manual gamma still is.
+        self.left_offset = [0.0; 3];
+        self.right_offset = [0.0; 3];
+        self.left_gamma = params.gamma_left;
+        self.right_gamma = params.gamma_right;
+        let Some(fit) = fit_overlap_pairs(left, right) else {
+            log::debug!(
+                "color_match overlap_fit: too few usable pairs ({} given), keeping last correction",
+                left.len().min(right.len())
+            );
+            return;
+        };
+        let alpha = if self.snap_next {
+            self.snap_next = false;
+            1.0
+        } else {
+            params.ema_alpha
+        };
+        ema_toward(&mut self.left_rgb_gain, fit.left_gain, alpha);
+        ema_toward(&mut self.left_rgb_exp, fit.left_exp, alpha);
+        ema_toward(&mut self.right_rgb_gain, fit.right_gain, alpha);
+        ema_toward(&mut self.right_rgb_exp, fit.right_exp, alpha);
+        log::debug!(
+            "color_match overlap_fit: pairs={} used={:?} right~a*left^b a={:?} b={:?} \
+             -> left gain={:?} exp={:?} right gain={:?} exp={:?}",
+            left.len(),
+            fit.used,
+            fit.a,
+            fit.b,
+            self.left_rgb_gain,
+            self.left_rgb_exp,
+            self.right_rgb_gain,
+            self.right_rgb_exp,
+        );
     }
 
     /// Advance one frame, re-measuring and updating the smoothed correction
@@ -347,6 +445,12 @@ impl ColorMatchState {
             (left_mean[1] + right_mean[1]) * 0.5,
             (left_mean[2] + right_mean[2]) * 0.5,
         ];
+        // Offset model: the overlap-fit RGB terms are identity here, so a
+        // switch back from overlap mode never leaves a stale tone curve on.
+        self.left_rgb_gain = [1.0; 3];
+        self.left_rgb_exp = [1.0; 3];
+        self.right_rgb_gain = [1.0; 3];
+        self.right_rgb_exp = [1.0; 3];
         let new_left = clamp_offset(sub3(target, left_mean), params);
         let new_right = clamp_offset(sub3(target, right_mean), params);
         // See ColorMatchState::snap_next's doc: a forced remeasure (a
@@ -506,7 +610,7 @@ fn fit_gamma(raw: f32, target: f32) -> f32 {
 }
 
 /// Build a raw-byte sampler closure for tightly-packed YUV420P planes.
-fn yuv420p_sampler<'a>(
+pub(crate) fn yuv420p_sampler<'a>(
     y: &'a [u8],
     u: &'a [u8],
     v: &'a [u8],
@@ -522,7 +626,7 @@ fn yuv420p_sampler<'a>(
 
 /// Build a raw-byte sampler closure for tightly-packed NV12 planes
 /// (interleaved U,V at half resolution, `width` bytes per chroma row).
-fn nv12_sampler<'a>(
+pub(crate) fn nv12_sampler<'a>(
     y: &'a [u8],
     uv: &'a [u8],
     width: u32,
@@ -741,6 +845,35 @@ fn decode_transfer_yuv_normalized(
     is_full_range: bool,
     inv_gamma: f32,
 ) -> [f32; 3] {
+    let [r, g, b] = decode_rgb_normalized(y_n, u_n, v_n, is_full_range, inv_gamma);
+    [
+        0.2126 * r + 0.7152 * g + 0.0722 * b,
+        -0.1146 * r - 0.3854 * g + 0.5 * b,
+        0.5 * r - 0.4542 * g - 0.0458 * b,
+    ]
+}
+
+/// Byte-triple wrapper around [`decode_rgb_normalized`].
+fn decode_rgb((y, u, v): (u8, u8, u8), is_full_range: bool, inv_gamma: f32) -> [f32; 3] {
+    decode_rgb_normalized(
+        y as f32 / 255.0,
+        u as f32 / 255.0,
+        v as f32 / 255.0,
+        is_full_range,
+        inv_gamma,
+    )
+}
+
+/// Decode a normalized YCbCr triple to the RGB the shader has in hand right
+/// before `apply_rgb_tone`: SYNC_WITH `fisheye.wgsl`'s `sample_yuv` (range
+/// expansion, BT.709 matrix, clamp) followed by `apply_gamma`.
+pub(crate) fn decode_rgb_normalized(
+    y_n: f32,
+    u_n: f32,
+    v_n: f32,
+    is_full_range: bool,
+    inv_gamma: f32,
+) -> [f32; 3] {
     let (y, cb, cr) = if is_full_range {
         (y_n, u_n - 0.5, v_n - 0.5)
     } else {
@@ -758,17 +891,295 @@ fn decode_transfer_yuv_normalized(
     // SYNC_WITH `fisheye.wgsl`'s `apply_gamma`: same curve, same place in
     // the chain (on RGB, before the YUV transfer). Identity short-circuits
     // for the same reason it does there.
-    let (r, g, b) = if inv_gamma == 1.0 {
-        (r, g, b)
+    if inv_gamma == 1.0 {
+        [r, g, b]
     } else {
-        (r.powf(inv_gamma), g.powf(inv_gamma), b.powf(inv_gamma))
+        [r.powf(inv_gamma), g.powf(inv_gamma), b.powf(inv_gamma)]
+    }
+}
+
+// ---- Overlap-fit model (Topology::color_match_overlap_fit) ----
+
+/// Half-width, in the fading plane's texture uv (0..1 across the quad), of
+/// the strip around the visible seam that overlap pairs are taken from.
+/// Narrow on purpose: close to the seam both cameras see the same scene
+/// with the least parallax, and further out each camera is near its lens
+/// edge (vignetting). Measured on 05 match 05 this strip spans sky to near
+/// field with ~700 usable pairs at an 11x97 grid.
+const OVERLAP_HALF_WIDTH: f64 = 0.05;
+/// Pair grid across / along the strip. 11 x 48 = 528 pairs - well inside
+/// `band_gather`'s 2048-per-camera capacity, dense enough that the sky
+/// (often only the top quarter of the strip) still gets ~100 pairs.
+const OVERLAP_COLS: u32 = 11;
+const OVERLAP_ROWS: u32 = 48;
+/// Vertical extent of the strip in plane texture uv. The full height
+/// minus a sliver at each end, where the strip leaves both raw frames.
+const OVERLAP_V_RANGE: (f64, f64) = (0.02, 0.98);
+
+/// Same-direction sample positions for both cameras: for each point of a
+/// grid in a narrow strip around the *visible* seam, the raw-frame texel in
+/// the left camera and the raw-frame texel in the right camera that the
+/// renderer shows along the same view ray from the virtual camera.
+/// Returned as `(left, right)`, index-aligned; pairs where either position
+/// falls outside its raw frame are dropped from both lists.
+///
+/// Fixes both band-geometry problems of [`band_sample_positions`]:
+/// - the visible seam is found the way `fisheye.wgsl` finds it - at
+///   EXTENDED uv `seam_offset` (`uv = in.uv * 2 - 0.5`), i.e. texture uv
+///   `(seam_offset + 0.5) / 2` on the fading plane (SYNC_WITH
+///   `scene.rs`'s `right_seam_pivot_x`/`left_seam_pivot_x`);
+/// - the other camera's position comes from intersecting the same view ray
+///   with its plane (`scene.model_matrix_*`, `scene.camera_position`), so
+///   both cameras look at the same piece of scene instead of each at its
+///   own side of the seam.
+///
+/// Full height (sky included): at the same direction a sky difference is a
+/// real camera difference, not different content. Known approximation,
+/// same as `band_sample_positions`: the shader's ground/top tilt warp of the
+/// lookup y is not applied here (small on calibrated rigs, near field only).
+pub(crate) fn overlap_sample_pairs(
+    width: u32,
+    height: u32,
+    lenses: [&Lens; 2],
+    scene: &super::scene::SceneGeometry,
+    params: &ColorMatchParams,
+) -> (Vec<[u32; 2]>, Vec<[u32; 2]>) {
+    use nalgebra::Vector3;
+    let aspect = lenses[0].width as f64 / lenses[0].height as f64;
+    let m_left = scene.model_matrix_left().cast::<f64>();
+    let m_right = scene.model_matrix_right().cast::<f64>();
+    let cam = Vector3::new(
+        scene.camera_position[0] as f64,
+        scene.camera_position[1] as f64,
+        scene.camera_position[2] as f64,
+    );
+    // Default: the right plane fades over a fixed left (`is_fading_plane`).
+    let right_fades = is_fading_plane(true, params.blend_flip_direction);
+    let (m_fade, m_other) = if right_fades {
+        (m_right, m_left)
+    } else {
+        (m_left, m_right)
+    };
+    let seam_u = seam_texture_u(params.seam_offset, right_fades);
+    let to_raw = |u: f64, v: f64, lens: &Lens| -> Option<[u32; 2]> {
+        let (x, y) =
+            undistorted_to_distorted(u * width as f64, v * height as f64, width, height, lens);
+        (x >= 0.0 && y >= 0.0 && x < (width - 1) as f64 && y < (height - 1) as f64)
+            .then_some([x as u32, y as u32])
     };
 
-    [
-        0.2126 * r + 0.7152 * g + 0.0722 * b,
-        -0.1146 * r - 0.3854 * g + 0.5 * b,
-        0.5 * r - 0.4542 * g - 0.0458 * b,
-    ]
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for row in 0..OVERLAP_ROWS {
+        let v = OVERLAP_V_RANGE.0
+            + (row as f64 + 0.5) / OVERLAP_ROWS as f64 * (OVERLAP_V_RANGE.1 - OVERLAP_V_RANGE.0);
+        for col in 0..OVERLAP_COLS {
+            let t = (col as f64 + 0.5) / OVERLAP_COLS as f64;
+            let u = seam_u - OVERLAP_HALF_WIDTH + t * 2.0 * OVERLAP_HALF_WIDTH;
+            // Fading-plane texture uv -> quad-local -> world (renderer.rs
+            // `quad_vertices`: 1.0 wide, 1/aspect high, +y up).
+            let Some((ou, ov)) = same_ray_on_other_plane(u, v, &m_fade, &m_other, &cam, aspect)
+            else {
+                continue;
+            };
+            let (fade_lens, other_lens) = if right_fades {
+                (lenses[1], lenses[0])
+            } else {
+                (lenses[0], lenses[1])
+            };
+            let (Some(pf), Some(po)) = (to_raw(u, v, fade_lens), to_raw(ou, ov, other_lens)) else {
+                continue;
+            };
+            let (l, r) = if right_fades { (po, pf) } else { (pf, po) };
+            left.push(l);
+            right.push(r);
+        }
+    }
+    (left, right)
+}
+
+/// Texture-uv column of the visible seam on the fading plane: the shader's
+/// alpha threshold sits at EXTENDED uv `seam_offset` (`uv = in.uv*2 - 0.5`),
+/// i.e. texture uv `(seam_offset + 0.5) / 2` on the right plane, mirrored on
+/// the left. SYNC_WITH `scene.rs`'s `right_seam_pivot_x`/`left_seam_pivot_x`.
+fn seam_texture_u(seam_offset: f32, right_fades: bool) -> f64 {
+    let u = (seam_offset as f64 + 0.5) / 2.0;
+    if right_fades { u } else { 1.0 - u }
+}
+
+/// Where the view ray from the virtual camera through texture uv `(u, v)`
+/// of plane `m_from` hits plane `m_to`, as `m_to`'s texture uv (may lie
+/// outside `[0, 1]` - the raw frame can still cover it). Quad layout per
+/// `renderer.rs`'s `quad_vertices`: 1.0 wide, `1/aspect` high, +y up.
+/// `None` if the ray is parallel to `m_to` or hits it behind the camera.
+fn same_ray_on_other_plane(
+    u: f64,
+    v: f64,
+    m_from: &nalgebra::Matrix4<f64>,
+    m_to: &nalgebra::Matrix4<f64>,
+    cam: &nalgebra::Vector3<f64>,
+    aspect: f64,
+) -> Option<(f64, f64)> {
+    use nalgebra::{Point3, Vector3};
+    let p = m_from
+        .transform_point(&Point3::new(u - 0.5, (0.5 - v) / aspect, 0.0))
+        .coords;
+    let d = p - cam;
+    let origin = m_to.transform_point(&Point3::origin()).coords;
+    let normal = m_to.transform_vector(&Vector3::z());
+    let den = normal.dot(&d);
+    if den.abs() < 1e-12 {
+        return None;
+    }
+    let s = normal.dot(&(origin - cam)) / den;
+    if s <= 0.0 {
+        return None;
+    }
+    let local = m_to
+        .try_inverse()?
+        .transform_point(&Point3::from(cam + d * s));
+    Some((local.x + 0.5, 0.5 - local.y * aspect))
+}
+
+/// Result of [`fit_overlap_pairs`]: per RGB channel, the correction that
+/// maps each camera onto the midpoint of the pair (`gain * x^exp`), plus
+/// the raw relation `right ~= a * left^b` it was derived from and how many
+/// pairs each channel's fit kept (for the diagnostic log).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct OverlapFit {
+    pub(crate) left_gain: [f32; 3],
+    pub(crate) left_exp: [f32; 3],
+    pub(crate) right_gain: [f32; 3],
+    pub(crate) right_exp: [f32; 3],
+    pub(crate) a: [f32; 3],
+    pub(crate) b: [f32; 3],
+    pub(crate) used: [usize; 3],
+}
+
+/// Channel values outside this range carry no usable tone information:
+/// near 0 the pair is all noise/shadow, near 1 the value is clipped (a blown
+/// sky reads 1.0 in both cameras whatever their real difference).
+const FIT_RANGE: (f32, f32) = (0.03, 0.97);
+/// Fewest pairs per channel worth fitting at all.
+const FIT_MIN_PAIRS: usize = 24;
+/// Below this spread of `ln(left)` the exponent is not identifiable (only
+/// one tone in the strip, e.g. all grass) - fit a pure gain instead.
+const FIT_MIN_LOG_SPREAD: f64 = 0.15;
+/// Same safety clamps as the manual gamma sliders, for both `a` and `b`.
+const FIT_CLAMP: (f64, f64) = (0.5, 2.0);
+/// Exponent search step over `FIT_CLAMP`.
+const FIT_EXP_STEP: f64 = 0.005;
+
+/// Fit, per RGB channel, `right = a * left^b` on same-direction pairs, then
+/// split it symmetrically so both cameras move halfway: the midpoint in log
+/// space is `ln m = (ln l + ln r) / 2`, which gives
+///   left:  gain = sqrt(a),          exp = (1 + b) / 2
+///   right: gain = a^(-1 / (2b)),    exp = (1 + 1/b) / 2
+/// and `gain_l * l^exp_l == gain_r * r^exp_r` for every pair on the fit.
+///
+/// The error is minimised in plain value space, not log space: a log-space
+/// line was tried first and real footage (05 match 05, 4400s) showed why it
+/// is wrong - a handful of dark, mismatched pairs (shadows, near-camera
+/// structure with parallax) sit far out in `ln` space and dragged the fit
+/// to "right is darker" while every sky pair said right is ~30% brighter.
+/// In value space those pairs weigh what they look like: little.
+///
+/// `None` if any channel has fewer than [`FIT_MIN_PAIRS`] usable pairs.
+pub(crate) fn fit_overlap_pairs(left: &[[f32; 3]], right: &[[f32; 3]]) -> Option<OverlapFit> {
+    let mut out = OverlapFit {
+        left_gain: [1.0; 3],
+        left_exp: [1.0; 3],
+        right_gain: [1.0; 3],
+        right_exp: [1.0; 3],
+        a: [1.0; 3],
+        b: [1.0; 3],
+        used: [0; 3],
+    };
+    for c in 0..3 {
+        let pts: Vec<(f64, f64)> = left
+            .iter()
+            .zip(right)
+            .filter(|(l, r)| {
+                (FIT_RANGE.0..=FIT_RANGE.1).contains(&l[c])
+                    && (FIT_RANGE.0..=FIT_RANGE.1).contains(&r[c])
+            })
+            .map(|(l, r)| (l[c] as f64, r[c] as f64))
+            .collect();
+        let (a, b, used) = robust_power_law(&pts)?;
+        let ln_a = a.clamp(FIT_CLAMP.0, FIT_CLAMP.1).ln();
+        out.a[c] = ln_a.exp() as f32;
+        out.b[c] = b as f32;
+        out.used[c] = used;
+        out.left_gain[c] = (ln_a / 2.0).exp() as f32;
+        out.left_exp[c] = ((1.0 + b) / 2.0) as f32;
+        out.right_gain[c] = (-ln_a / (2.0 * b)).exp() as f32;
+        out.right_exp[c] = ((1.0 + 1.0 / b) / 2.0) as f32;
+    }
+    Some(out)
+}
+
+/// Least-squares `y = a * x^b` (values in `(0, 1)`), refit once without
+/// points more than 3 MAD-sigmas off the first fit - players, lines and
+/// near-field parallax are the outliers. For a fixed `b` the best `a` is
+/// closed-form (`sum(y x^b) / sum(x^2b)`), so `b` is a 1-D grid search over
+/// `FIT_CLAMP`: global, no iteration that can wander off. Falls back to
+/// `b = 1` (pure gain) when `x` has too little spread to pin `b` down.
+fn robust_power_law(pts: &[(f64, f64)]) -> Option<(f64, f64, usize)> {
+    fn fit(p: &[(f64, f64)]) -> (f64, f64) {
+        let lx: Vec<f64> = p.iter().map(|q| q.0.ln()).collect();
+        let n = lx.len() as f64;
+        let mean = lx.iter().sum::<f64>() / n;
+        let sd = (lx.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n).sqrt();
+        let a_for = |b: f64| {
+            let (mut num, mut den) = (0.0, 0.0);
+            for (q, l) in p.iter().zip(&lx) {
+                let xb = (b * l).exp();
+                num += q.1 * xb;
+                den += xb * xb;
+            }
+            num / den.max(1e-12)
+        };
+        if sd < FIT_MIN_LOG_SPREAD {
+            return (a_for(1.0), 1.0);
+        }
+        let steps = ((FIT_CLAMP.1 - FIT_CLAMP.0) / FIT_EXP_STEP).round() as usize;
+        let mut best = (f64::INFINITY, 1.0, 1.0);
+        for i in 0..=steps {
+            let b = FIT_CLAMP.0 + i as f64 * FIT_EXP_STEP;
+            let a = a_for(b);
+            let sse: f64 = p
+                .iter()
+                .zip(&lx)
+                .map(|(q, l)| (a * (b * l).exp() - q.1).powi(2))
+                .sum();
+            if sse < best.0 {
+                best = (sse, a, b);
+            }
+        }
+        (best.1, best.2)
+    }
+    if pts.len() < FIT_MIN_PAIRS {
+        return None;
+    }
+    let (a0, b0) = fit(pts);
+    let res: Vec<f64> = pts
+        .iter()
+        .map(|q| (a0 * q.0.powf(b0) - q.1).abs())
+        .collect();
+    let mut sorted = res.clone();
+    sorted.sort_by(f64::total_cmp);
+    let cut = (3.0 * 1.4826 * sorted[sorted.len() / 2]).max(0.01);
+    let kept: Vec<(f64, f64)> = pts
+        .iter()
+        .zip(&res)
+        .filter(|(_, r)| **r <= cut)
+        .map(|(p, _)| *p)
+        .collect();
+    if kept.len() < FIT_MIN_PAIRS {
+        return Some((a0, b0, pts.len()));
+    }
+    let (a1, b1) = fit(&kept);
+    Some((a1, b1, kept.len()))
 }
 
 #[cfg(test)]
@@ -1301,5 +1712,208 @@ mod tests {
             "a forced remeasure must snap straight to the fresh (here: zero) \
              correction, not blend 15% of it into the stale {converged:?}: got {after:?}"
         );
+    }
+
+    // ---- overlap fit ----
+
+    fn power_law_pairs(a: f32, b: f32) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+        let mut l = Vec::new();
+        let mut r = Vec::new();
+        for i in 0..200 {
+            let x = 0.05 + 0.85 * i as f32 / 199.0;
+            l.push([x; 3]);
+            r.push([a * x.powf(b); 3]);
+        }
+        (l, r)
+    }
+
+    #[test]
+    fn overlap_fit_recovers_a_power_law_and_meets_in_the_middle() {
+        let (l, r) = power_law_pairs(1.2, 0.8);
+        let fit = fit_overlap_pairs(&l, &r).expect("plenty of pairs");
+        for c in 0..3 {
+            assert!((fit.a[c] - 1.2).abs() < 1e-3, "a={:?}", fit.a);
+            assert!((fit.b[c] - 0.8).abs() < 1e-3, "b={:?}", fit.b);
+        }
+        // After correction both cameras land on the same value everywhere.
+        for (lv, rv) in l.iter().zip(&r) {
+            let lc = fit.left_gain[0] * lv[0].powf(fit.left_exp[0]);
+            let rc = fit.right_gain[0] * rv[0].powf(fit.right_exp[0]);
+            assert!((lc - rc).abs() < 1e-3, "left {lc} vs right {rc}");
+        }
+    }
+
+    #[test]
+    fn overlap_fit_is_not_dragged_by_dark_mismatched_pairs() {
+        // 05 match 05, 4400s: grass equal, sky ~30% brighter on the right,
+        // plus dark pairs where the right camera sees near-black structure.
+        // A log-space fit read this as "right is darker"; value space must not.
+        let mut l = Vec::new();
+        let mut r = Vec::new();
+        for i in 0..300 {
+            let g = 0.18 + 0.1 * (i as f32 / 300.0);
+            l.push([g; 3]);
+            r.push([g * 1.02; 3]);
+        }
+        for i in 0..60 {
+            let sky = 0.50 + 0.1 * (i as f32 / 60.0);
+            l.push([sky; 3]);
+            r.push([sky * 1.30; 3]);
+        }
+        for i in 0..30 {
+            l.push([0.20 + 0.003 * i as f32; 3]);
+            r.push([0.04; 3]);
+        }
+        let fit = fit_overlap_pairs(&l, &r).expect("fit");
+        let sky_r = fit.a[1] * 0.55f32.powf(fit.b[1]);
+        assert!(
+            sky_r > 0.55 * 1.15,
+            "sky must come out brighter on the right: {fit:?}"
+        );
+        let grass_r = fit.a[1] * 0.22f32.powf(fit.b[1]);
+        assert!(
+            (grass_r / 0.22 - 1.02).abs() < 0.08,
+            "grass ratio off: {fit:?}"
+        );
+    }
+
+    #[test]
+    fn overlap_fit_ignores_outliers() {
+        let (mut l, mut r) = power_law_pairs(1.1, 1.0);
+        // A player/line in one camera only: 10% of pairs wildly off.
+        for i in (0..l.len()).step_by(10) {
+            r[i] = [0.95; 3];
+            l[i] = [0.1; 3];
+        }
+        let fit = fit_overlap_pairs(&l, &r).expect("fit");
+        assert!(
+            (fit.a[1] - 1.1).abs() < 0.02 && (fit.b[1] - 1.0).abs() < 0.03,
+            "{fit:?}"
+        );
+    }
+
+    #[test]
+    fn overlap_fit_single_tone_falls_back_to_gain_only() {
+        // Only grass in the strip: no spread to pin an exponent down.
+        let l: Vec<[f32; 3]> = (0..60).map(|i| [0.20 + 0.0005 * i as f32; 3]).collect();
+        let r: Vec<[f32; 3]> = l.iter().map(|v| [v[0] * 1.1; 3]).collect();
+        let fit = fit_overlap_pairs(&l, &r).expect("fit");
+        assert_eq!(fit.b[0], 1.0);
+        assert!((fit.a[0] - 1.1).abs() < 1e-3, "{fit:?}");
+    }
+
+    #[test]
+    fn overlap_fit_needs_enough_pairs() {
+        let (l, r) = power_law_pairs(1.0, 1.0);
+        assert!(fit_overlap_pairs(&l[..FIT_MIN_PAIRS - 1], &r[..FIT_MIN_PAIRS - 1]).is_none());
+        // Clipped (blown) values are not usable either.
+        let l = vec![[1.0f32; 3]; 100];
+        assert!(fit_overlap_pairs(&l, &l).is_none());
+    }
+
+    fn scene_for(
+        intersect: f64,
+        seam_offset: f32,
+        axis: f64,
+    ) -> super::super::scene::SceneGeometry {
+        let topology: crate::calibration::Topology = serde_json::from_value(serde_json::json!({
+            "intersect": intersect, "x_ty": 0.0, "x_rz": 0.0, "z_rx": 0.0, "x_rx": 0.0,
+            "z_rz": 0.0, "blend_width": 0.05, "seam_offset": seam_offset
+        }))
+        .expect("topology");
+        let framing = crate::calibration::Framing {
+            axis_offset: axis,
+            tilt: 0.0,
+            roll: 0.0,
+        };
+        super::super::scene::SceneGeometry::new(&topology, &framing, 4.0 / 3.0)
+    }
+
+    #[test]
+    fn overlap_pairs_are_index_aligned() {
+        let lens = test_params();
+        let scene = scene_for(0.6555, 0.15, 0.195);
+        let params = ColorMatchParams {
+            seam_offset: 0.15,
+            ..ColorMatchParams::default()
+        };
+        let (l, r) = overlap_sample_pairs(640, 480, [&lens, &lens], &scene, &params);
+        assert_eq!(l.len(), r.len());
+        assert!(l.len() > 100, "only {} pairs", l.len());
+    }
+
+    #[test]
+    fn same_ray_maps_the_corner_onto_itself() {
+        // Symmetric L layout: the planes meet at right u=0.25 / left u=0.75
+        // (intersect 0.5). A point on that shared edge is on both planes,
+        // so the same-ray mapping must return the mirrored column, same v.
+        let scene = scene_for(0.5, 0.0, 0.25);
+        let (ml, mr) = (
+            scene.model_matrix_left().cast::<f64>(),
+            scene.model_matrix_right().cast::<f64>(),
+        );
+        let cam = nalgebra::Vector3::new(0.25, 0.0, 0.25);
+        for v in [0.1, 0.5, 0.9] {
+            let (u, ov) = same_ray_on_other_plane(0.25, v, &mr, &ml, &cam, 4.0 / 3.0).unwrap();
+            assert!(
+                // Model matrices are f32 - 1e-6 is their precision.
+                (u - 0.75).abs() < 1e-6 && (ov - v).abs() < 1e-6,
+                "v={v}: got ({u}, {ov})"
+            );
+        }
+    }
+
+    #[test]
+    fn same_ray_points_are_collinear_with_the_camera() {
+        let scene = scene_for(0.6555, 0.15, 0.195);
+        let (ml, mr) = (
+            scene.model_matrix_left().cast::<f64>(),
+            scene.model_matrix_right().cast::<f64>(),
+        );
+        let cam = nalgebra::Vector3::new(0.195, 0.0, 0.195);
+        let aspect = 4.0 / 3.0;
+        let world = |m: &nalgebra::Matrix4<f64>, u: f64, v: f64| {
+            m.transform_point(&nalgebra::Point3::new(u - 0.5, (0.5 - v) / aspect, 0.0))
+                .coords
+        };
+        for (u, v) in [(0.30, 0.2), (0.35, 0.6), (0.38, 0.95)] {
+            let (ou, ov) = same_ray_on_other_plane(u, v, &mr, &ml, &cam, aspect).unwrap();
+            let a = (world(&mr, u, v) - cam).normalize();
+            let b = (world(&ml, ou, ov) - cam).normalize();
+            assert!(
+                (a - b).norm() < 1e-6,
+                "({u},{v}) -> ({ou},{ov}) not on the same ray"
+            );
+        }
+    }
+
+    #[test]
+    fn seam_column_follows_the_shaders_extended_uv() {
+        // seam_offset is in EXTENDED uv, so the texture-uv seam moves by half
+        // of it - the old band moved by the full amount.
+        assert!((seam_texture_u(0.0, true) - 0.25).abs() < 1e-12);
+        assert!((seam_texture_u(0.2, true) - 0.35).abs() < 1e-6);
+        assert!((seam_texture_u(0.2, false) - 0.65).abs() < 1e-6);
+    }
+
+    #[test]
+    fn overlap_measurement_snaps_and_disables_the_offset_model() {
+        let mut state = ColorMatchState {
+            left_offset: [0.05, 0.0, 0.0],
+            ..ColorMatchState::default()
+        };
+        let params = ColorMatchParams {
+            overlap_fit: true,
+            ..ColorMatchParams::default()
+        };
+        let (l, r) = power_law_pairs(1.2, 0.8);
+        state.apply_overlap_measurement(&l, &r, &params);
+        let c = state.current();
+        assert_eq!(c.left_offset, [0.0; 3]);
+        let fit = fit_overlap_pairs(&l, &r).unwrap();
+        assert_eq!(c.left_rgb_gain, fit.left_gain, "first measurement snaps");
+        // Back to the offset model: the RGB terms return to identity.
+        state.apply_measurement([0.3; 3], [0.3; 3], &ColorMatchParams::default());
+        assert_eq!(state.current().right_rgb_exp, [1.0; 3]);
     }
 }

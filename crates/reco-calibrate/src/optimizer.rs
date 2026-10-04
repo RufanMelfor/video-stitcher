@@ -448,6 +448,7 @@ impl Optimizer for NelderMeadOptimizer {
             color_gamma_left: 1.0,
             color_gamma_right: 1.0,
             color_match_auto_gamma: false,
+            color_match_overlap_fit: false,
             // Not fitted by this optimizer - see fit_ground_tilt_manual.rs
             // and FRICTION.md points 18-20 for the separate manual-line
             // workflow that fits these.

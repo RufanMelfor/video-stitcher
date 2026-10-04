@@ -95,6 +95,11 @@ pub(crate) struct PositionKey {
     /// texel a given band position maps to, so a source whose rotation
     /// metadata differs from the last one must re-upload.
     pub(crate) flip_180: [bool; 2],
+    /// Overlap-fit mode uses same-direction pairs instead of the band grid.
+    pub(crate) overlap_fit: bool,
+    /// Scene layout the overlap pairs were derived from - see
+    /// `StitchPipeline::overlap_geometry_key`.
+    pub(crate) geometry: [f32; 8],
 }
 
 /// Mirror sample positions for a camera whose frame the shader flips.

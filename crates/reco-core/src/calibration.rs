@@ -368,6 +368,23 @@ pub struct Topology {
     #[serde(default)]
     pub color_match_auto_gamma: bool,
 
+    /// Experimental replacement for the band-mean offset model (off by
+    /// default). Samples BOTH cameras at the same view directions in a
+    /// strip around the visible seam, over the full height (sky included),
+    /// and fits a per-camera, per-RGB-channel `gain * x^exp` that maps each
+    /// camera onto the pair's midpoint - see
+    /// `render::color_match::overlap_sample_pairs` / `fit_overlap_pairs`.
+    ///
+    /// Why: on real footage (05 match 05, 2026-10-03) the two cameras showed
+    /// the *same* sky ~30% apart in brightness while the grass was only ~5%
+    /// apart, so no single offset or gamma could match both; and the old
+    /// band compared different scene regions per camera (it ignored the
+    /// shader's extended-uv seam). When on, `color_match_band_width`,
+    /// `_grid_*`, `_max_*_offset` and `color_match_auto_gamma` are not used;
+    /// interval and EMA alpha still apply.
+    #[serde(default)]
+    pub color_match_overlap_fit: bool,
+
     /// Ground-plane tilt correction for the x-plane (`lenses[1]`'s content -
     /// see `reco_calibrate::geometry`'s module doc for the x-plane/z-plane
     /// left/right swap convention). `tan(theta)` of an additional tilt
@@ -1868,6 +1885,7 @@ mod tests {
                 color_gamma_left: 1.0,
                 color_gamma_right: 1.0,
                 color_match_auto_gamma: false,
+                color_match_overlap_fit: false,
                 ground_tilt_x: 0.0,
                 ground_tilt_z: 0.0,
                 top_tilt_x: 0.0,

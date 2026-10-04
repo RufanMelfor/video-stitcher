@@ -63,6 +63,12 @@ pub(crate) struct GpuUniforms {
     pub(crate) lens_preview: [f32; 4],
     ground_tilt: [f32; 4],
     top_tilt: [f32; 4],
+    /// xyz: per-RGB-channel gain of the overlap-fit color match (see
+    /// [`ColorCorrection::left_rgb_gain`]); w unused. Identity = 1.
+    rgb_gain: [f32; 4],
+    /// xyz: per-RGB-channel exponent of the overlap-fit color match; w
+    /// unused. Identity = 1.
+    rgb_exp: [f32; 4],
 }
 
 /// Per-plane ground-plane tilt correction for [`build_gpu_uniforms`] and
@@ -123,12 +129,21 @@ pub struct TopTilt {
 /// right source for that path - `Default::default()`'s `1.0` exists only so
 /// the struct can derive `Default` at all, not as a implying "no gamma
 /// needed here".
+///
+/// The `*_rgb_gain`/`*_rgb_exp` fields carry the overlap-fit model
+/// (`Topology::color_match_overlap_fit`): per RGB channel
+/// `out = gain * in^exp`, applied after the manual gamma. Identity (all
+/// 1.0) whenever that mode is off, so the offset model above is unchanged.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ColorCorrection {
     pub left_offset: [f32; 3],
     pub right_offset: [f32; 3],
     pub left_gamma: f32,
     pub right_gamma: f32,
+    pub left_rgb_gain: [f32; 3],
+    pub left_rgb_exp: [f32; 3],
+    pub right_rgb_gain: [f32; 3],
+    pub right_rgb_exp: [f32; 3],
 }
 
 impl Default for ColorCorrection {
@@ -138,6 +153,41 @@ impl Default for ColorCorrection {
             right_offset: [0.0; 3],
             left_gamma: 1.0,
             right_gamma: 1.0,
+            left_rgb_gain: [1.0; 3],
+            left_rgb_exp: [1.0; 3],
+            right_rgb_gain: [1.0; 3],
+            right_rgb_exp: [1.0; 3],
+        }
+    }
+}
+
+impl ColorCorrection {
+    /// Write this correction's per-plane values (offset, gamma, RGB
+    /// gain/exponent) into a plane's uniforms. One place, so the two
+    /// stitch render paths cannot drift apart on which fields they copy.
+    pub(crate) fn write_uniforms(&self, left: &mut GpuUniforms, right: &mut GpuUniforms) {
+        for (u, off, g, gain, exp) in [
+            (
+                left,
+                self.left_offset,
+                self.left_gamma,
+                self.left_rgb_gain,
+                self.left_rgb_exp,
+            ),
+            (
+                right,
+                self.right_offset,
+                self.right_gamma,
+                self.right_rgb_gain,
+                self.right_rgb_exp,
+            ),
+        ] {
+            // color_offset_blend[3] holds blend_width - only Y/U/V here.
+            u.color_offset_blend[..3].copy_from_slice(&off);
+            // Sent as 1/gamma so the shader does one pow and no divide.
+            u.color_scale[3] = inv_gamma(g);
+            u.rgb_gain = [gain[0], gain[1], gain[2], 1.0];
+            u.rgb_exp = [exp[0], exp[1], exp[2], 1.0];
         }
     }
 }
@@ -1500,26 +1550,10 @@ impl Renderer {
         );
         right_uniforms.lens_preview[0] = calibration.lenses[1].correction;
 
-        // Per-camera color-transfer offset (see `ColorCorrection`'s doc).
-        // `color_offset_blend[3]` already holds `blend_width` from
-        // `build_gpu_uniforms` above - only overwrite the Y/U/V offset.
-        left_uniforms.color_offset_blend[0] = color_correction.left_offset[0];
-        left_uniforms.color_offset_blend[1] = color_correction.left_offset[1];
-        left_uniforms.color_offset_blend[2] = color_correction.left_offset[2];
-        right_uniforms.color_offset_blend[0] = color_correction.right_offset[0];
-        right_uniforms.color_offset_blend[1] = color_correction.right_offset[1];
-        right_uniforms.color_offset_blend[2] = color_correction.right_offset[2];
-
-        // Per-camera gamma, applied by the shader *before* the automatic
-        // offset above - manual (`Topology::color_gamma_left`/`_right`) or
-        // auto-fitted (`color_match_auto_gamma`), whichever `color_correction`
-        // already resolved to (see `ColorCorrection`'s doc - every caller
-        // must set these explicitly, there is no meaningful blind default).
-        // Sent as 1/gamma so the shader does one pow and no divide; a
-        // non-positive or non-finite value would make `pow` produce
-        // garbage across the whole frame, so it falls back to identity.
-        left_uniforms.color_scale[3] = inv_gamma(color_correction.left_gamma);
-        right_uniforms.color_scale[3] = inv_gamma(color_correction.right_gamma);
+        // Per-camera color correction (offset, gamma - manual or auto-fitted,
+        // whichever `color_correction` already resolved to - and the
+        // overlap-fit RGB gain/exponent). See `ColorCorrection`'s doc.
+        color_correction.write_uniforms(&mut left_uniforms, &mut right_uniforms);
 
         // Seam blend direction: which plane fades in over the other at the
         // seam. `false` (default) = right fades over a fixed left, drawn
@@ -1699,9 +1733,6 @@ impl Renderer {
             left_top_tilt,
         );
         left_uniforms.lens_preview[0] = calibration.lenses[0].correction;
-        left_uniforms.color_offset_blend[0] = color_correction.left_offset[0];
-        left_uniforms.color_offset_blend[1] = color_correction.left_offset[1];
-        left_uniforms.color_offset_blend[2] = color_correction.left_offset[2];
         left_uniforms.ground_tilt[3] = 0.0; // tex_a: hard FOV coverage, never fades.
 
         let right_mvp = projection * view * scene.model_matrix_right();
@@ -1717,21 +1748,11 @@ impl Renderer {
             right_top_tilt,
         );
         right_uniforms.lens_preview[0] = calibration.lenses[1].correction;
-        right_uniforms.color_offset_blend[0] = color_correction.right_offset[0];
-        right_uniforms.color_offset_blend[1] = color_correction.right_offset[1];
-        right_uniforms.color_offset_blend[2] = color_correction.right_offset[2];
         right_uniforms.ground_tilt[3] = 0.0; // tex_b: hard FOV coverage, never fades.
 
-        // Per-camera gamma, applied by the shader *before* the automatic
-        // offset above - manual (`Topology::color_gamma_left`/`_right`) or
-        // auto-fitted (`color_match_auto_gamma`), whichever `color_correction`
-        // already resolved to (see `ColorCorrection`'s doc - every caller
-        // must set these explicitly, there is no meaningful blind default).
-        // Sent as 1/gamma so the shader does one pow and no divide; a
-        // non-positive or non-finite value would make `pow` produce
-        // garbage across the whole frame, so it falls back to identity.
-        left_uniforms.color_scale[3] = inv_gamma(color_correction.left_gamma);
-        right_uniforms.color_scale[3] = inv_gamma(color_correction.right_gamma);
+        // Per-camera color correction - see the matching call in the
+        // single-pass path and `ColorCorrection`'s doc.
+        color_correction.write_uniforms(&mut left_uniforms, &mut right_uniforms);
 
         // Seam mask: a copy of whichever plane fades (see
         // `encode_stitch_pass`'s flip-convention comment), rendered with a
@@ -2389,6 +2410,10 @@ pub(crate) fn build_gpu_uniforms(
             ground_tilt.band_full,
             top_tilt.band_full,
         ],
+        // Overlap-fit RGB correction - identity unless a stitch render
+        // path writes a `ColorCorrection` over it.
+        rgb_gain: [1.0; 4],
+        rgb_exp: [1.0; 4],
     }
 }
 
@@ -2607,6 +2632,7 @@ mod tests {
                 color_gamma_left: 1.0,
                 color_gamma_right: 1.0,
                 color_match_auto_gamma: false,
+                color_match_overlap_fit: false,
                 ground_tilt_x: 0.0,
                 ground_tilt_z: 0.0,
                 top_tilt_x: 0.0,
@@ -2746,6 +2772,7 @@ mod tests {
                 color_gamma_left: 1.0,
                 color_gamma_right: 1.0,
                 color_match_auto_gamma: false,
+                color_match_overlap_fit: false,
                 ground_tilt_x: -0.007000000681728125,
                 ground_tilt_z: 0.0010000000474974513,
                 top_tilt_x: 0.0,
