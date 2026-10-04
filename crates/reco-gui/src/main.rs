@@ -1473,6 +1473,7 @@ impl AppState {
             (true, 1) => OverlapViewMode::RightOverLeft,
             (true, 2) => OverlapViewMode::LeftOverRight,
             (true, 3) => OverlapViewMode::Difference,
+            (true, 4) => OverlapViewMode::Both,
             _ => OverlapViewMode::Off,
         };
         if let Some(bridge) = self.bridge.as_mut() {

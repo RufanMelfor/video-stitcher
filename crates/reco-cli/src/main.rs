@@ -269,7 +269,7 @@ enum Commands {
         /// (doubled lines = misaligned); "difference" shows |left - right|
         /// wherever both cameras cover a pixel (near black = aligned).
         /// Debug only - never use for a real export.
-        #[arg(long, value_parser = ["off", "right-over-left", "left-over-right", "difference"])]
+        #[arg(long, value_parser = ["off", "right-over-left", "left-over-right", "difference", "both"])]
         overlap_view: Option<String>,
 
         /// Opacity for --overlap-view, 0..1.

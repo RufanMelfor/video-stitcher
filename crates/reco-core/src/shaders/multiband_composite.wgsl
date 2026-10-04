@@ -21,7 +21,8 @@ struct CompositeUniforms {
     //    Smaller = sharper high-frequency transition.
     params: vec4<f32>,
     // Preview-only overlap view (renderer.rs `OverlapView`):
-    // x: mode (0 off, 1 right over left, 2 left over right, 3 difference)
+    // x: mode (0 off, 1 right over left, 2 left over right, 3 difference,
+    //    4 both ghosts)
     // y: opacity (0..1)
     // z: 1.0 = the 2-band blend is on; 0.0 = this pass only runs for the
     //    overlap view, so reproduce the plain single-band crossfade instead
@@ -96,13 +97,15 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let opacity = u.overlap.y;
     let a_cov = a_full.a > 0.5;
     let b_cov = b_full.a > 0.5;
-    if mode > 0.5 && mode < 1.5 && b_cov && right_side < 0.5 {
+    let ghost_right = (mode > 0.5 && mode < 1.5) || mode > 3.5;
+    let ghost_left = (mode > 1.5 && mode < 2.5) || mode > 3.5;
+    if ghost_right && b_cov && right_side < 0.5 {
         // Right camera ghosted over the left camera's side.
         color = mix(color, b_full.rgb, opacity);
-    } else if mode > 1.5 && mode < 2.5 && a_cov && right_side >= 0.5 {
+    } else if ghost_left && a_cov && right_side >= 0.5 {
         // Left camera ghosted over the right camera's side.
         color = mix(color, a_full.rgb, opacity);
-    } else if mode > 2.5 && a_cov && b_cov {
+    } else if mode > 2.5 && mode < 3.5 && a_cov && b_cov {
         // Amplified per-channel difference: aligned = near black.
         let diff = clamp(abs(a_full.rgb - b_full.rgb) * 3.0, vec3<f32>(0.0), vec3<f32>(1.0));
         color = mix(color, diff, opacity);

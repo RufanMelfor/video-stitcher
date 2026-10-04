@@ -278,6 +278,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
             "right-over-left" => OverlapViewMode::RightOverLeft,
             "left-over-right" => OverlapViewMode::LeftOverRight,
             "difference" => OverlapViewMode::Difference,
+            "both" => OverlapViewMode::Both,
             _ => OverlapViewMode::Off,
         };
         job = job.overlap_view(OverlapView {

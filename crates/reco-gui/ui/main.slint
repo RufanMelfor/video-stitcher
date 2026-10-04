@@ -1084,7 +1084,7 @@ export component RecoApp inherits Window {
     in-out property <bool> show-seam-line: false;
     // Preview-only overlap view (reco-core renderer::OverlapView), shown
     // under "Show seam line": 0 off, 1 right over left, 2 left over right,
-    // 3 difference.
+    // 3 difference, 4 both ghosts.
     in-out property <int> overlap-view-mode: 0;
     in-out property <float> overlap-view-opacity: 0.5;
     // Tracked via key-scope's key-pressed/key-released (see below) so the
@@ -2260,12 +2260,12 @@ export component RecoApp inherits Window {
                                 }
 
                                 if root.show-seam-line: Tip {
-                                    tip: "Calibration aid, preview only (never in an export). Right over left / Left over right: shows that camera semi-transparently on the other camera's side of the seam - where the calibration is right, lines and goals line up; where it's off, you see them doubled. Difference: shows how much the two cameras differ wherever both see the same spot - near black = aligned, bright edges = misaligned. Judge on far-away things (far touchline, goals); close to the cameras some doubling is normal (parallax).";
+                                    tip: "Calibration aid, preview only (never in an export). Right over left / Left over right: shows that camera semi-transparently on the other camera's side of the seam - where the calibration is right, lines and goals line up; where it's off, you see them doubled. Difference: shows how much the two cameras differ wherever both see the same spot - near black = aligned, bright edges = misaligned. Both: both ghosts at once across the whole overlap - lines that cross the seam at an angle point to a roll error. Judge on far-away things (far touchline, goals); close to the cameras some doubling is normal (parallax).";
                                     HorizontalLayout {
                                         spacing: 6px;
                                         Text { text: "Overlap view"; color: root.text-muted; font-size: 11px; vertical-alignment: center; }
                                         ComboBox {
-                                            model: ["Off", "Right over left", "Left over right", "Difference"];
+                                            model: ["Off", "Right over left", "Left over right", "Difference", "Both (left + right)"];
                                             current-index <=> root.overlap-view-mode;
                                             selected(value) => { root.changed-overlap-view(root.overlap-view-mode, root.overlap-view-opacity); }
                                         }

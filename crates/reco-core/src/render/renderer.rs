@@ -208,6 +208,10 @@ pub enum OverlapViewMode {
     /// `|left - right|` (amplified) wherever both cameras cover the pixel:
     /// near-black where they agree, bright edges where alignment is off.
     Difference,
+    /// Both ghosts at once: the right camera over the left side and the
+    /// left camera over the right side, so the whole overlap shows both -
+    /// useful for roll, where lines diverge at an angle across the seam.
+    Both,
 }
 
 impl OverlapViewMode {
@@ -218,6 +222,7 @@ impl OverlapViewMode {
             Self::RightOverLeft => 1.0,
             Self::LeftOverRight => 2.0,
             Self::Difference => 3.0,
+            Self::Both => 4.0,
         }
     }
 }
