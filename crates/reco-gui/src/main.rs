@@ -2436,7 +2436,7 @@ fn refresh_derived_cut_ranges(s: &mut AppState, app: &RecoApp) {
             app.set_export_start_secs(start_secs);
             s.scoreboard_derived_start_secs = Some(start_secs);
         }
-        // Post-match trim (the "signal einde wedstrijd" - a --end-time
+        // Post-match trim (the "end of match" signal - a --end-time
         // seek, not a cut range, same reasoning as the pre-roll trim
         // above) - only when the log actually has a `match_end` event.
         if let Some(end_secs) = scoreboard_import::derived_end_secs(export, anchor, match_end_trail)

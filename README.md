@@ -210,7 +210,7 @@ cargo build --release
 `reco-cli.exe` at run time, not only at link time. `cargo build` does not copy
 them into `target/debug` or `target/release` automatically, so running a
 freshly built exe straight from `target/` without copying these DLLs next to
-it fails with `avformat-61.dll niet gevonden` (or similar) at startup. Copy
+it fails with `avformat-61.dll was not found` (or a similar message) at startup. Copy
 them from `$FFMPEG_DIR/bin` (or from an existing packaged release, e.g.
 `reco-gui-vX.Y.Z-windows-x86_64/`) into the same folder as the exe.
 
