@@ -4139,7 +4139,7 @@ export component RecoApp inherits Window {
                             }
 
                             LabeledSlider {
-                                tip: "Left camera's gamma, applied before the automatic match measures anything. Above 1.0 lifts the mid-tones, below 1.0 lowers them. Use this when the two cameras differ in contrast rather than in overall brightness - the automatic match can only shift the average, not reshape the curve. Unlike the automatic match, this also applies on hardware-decode exports. Updates live.";
+                                tip: "Left camera's gamma, applied before the automatic match measures anything. Above 1.0 lifts the mid-tones, below 1.0 lowers them. Use this when the two cameras differ in contrast rather than in overall brightness - the automatic match can only shift the average, not reshape the curve. Applies in the preview and in every export, whichever decode path is used. Updates live.";
                                 label: "Gamma left";
                                 minimum: 0.5;
                                 maximum: 2.0;
@@ -4162,7 +4162,7 @@ export component RecoApp inherits Window {
                         }
 
                         Tip {
-                            tip: "Periodically measures each camera's color in the seam-adjacent band of its raw frame and nudges both toward their shared average, so an exposure/white-balance mismatch between the two cameras doesn't show up as a color step at the seam. Independent of geometric alignment. Only affects live YUV420P/NV12 decode paths - a hardware-decode (zero-copy) export renders without it, so tune Manual Gamma above for anything that has to survive into the exported file.";
+                            tip: "Periodically measures each camera's color in the seam-adjacent band of its raw frame and nudges both toward their shared average, so an exposure/white-balance mismatch between the two cameras doesn't show up as a color step at the seam. Independent of geometric alignment. Works in the preview and in hardware-decode (zero-copy) exports alike.";
                             CheckBox {
                                 text: "Auto color match";
                                 checked <=> root.color-match-enabled;

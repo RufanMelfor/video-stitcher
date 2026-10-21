@@ -101,6 +101,10 @@ also offered upstream as pull requests; everything is Windows-tested only.
 New crates compared to upstream: `reco-scoreboard`, `reco-stitch-img` (image
 stitching benchmark tool).
 
+## Documentation
+
+The user manual starts at [docs/manual/](docs/manual/README.md): the most important settings, a full settings reference generated from the app, and the AI tracking tuning guide. It is a draft and is still being written.
+
 ## Quick start
 
 ```bash
