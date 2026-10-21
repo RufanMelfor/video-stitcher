@@ -16,6 +16,91 @@ Stitch two camera feeds into a seamless panoramic sports view with AI-powered au
 - **Live production** - GStreamer camera ingest (Linux / Jetson CSI), push-based `StitchCore::submit_frame_*` for OBS and live streams, replay ring buffer, stacked-video pack/unpack
 - **Cross-platform** - Linux / macOS / Windows desktop, NVIDIA Jetson Orin, cloud workers; mobile (iOS / Android) trait points land in this release, concrete impls follow
 
+## Tested hardware
+
+This fork has been developed and tested **only on Windows 11 with an NVIDIA
+GeForce RTX 3060 Ti (8 GB)**, using the TensorRT build and DJI Osmo Action 4
+footage (3840x2880 HEVC, 8/10-bit). Other operating systems (Linux, macOS),
+other GPUs (AMD, Intel, other NVIDIA cards) and other cameras are **untested**:
+they may work, but there is no guarantee and no support. The inherited
+Linux / macOS / Jetson / OBS code paths from upstream have not been exercised
+since this fork diverged.
+
+## What this fork adds
+
+This is a modified version of [reco-project/video-stitcher](https://github.com/reco-project/video-stitcher)
+(AGPL-3.0). It diverged at upstream's v0.5.x line (July 2026); later upstream
+fixes up to v0.5.4 were ported by hand. Roughly 350 commits and 80k added lines
+sit on top of upstream, covering the items below. Features marked *(PR)* are
+also offered upstream as pull requests; everything is Windows-tested only.
+
+**Seam, calibration and image quality**
+- Per-camera **color matching** measured on the seam band, with multi-band
+  blending, auto-fitted gamma, correction limits, and an experimental
+  *overlap fit* mode that uses both cameras' views of the same rays (sky
+  included). *(PR)*
+- **Vivid color grade** and **GPU sharpening** in the Color Mapping panel,
+  stored in the calibration.
+- Manual **ground / top-plane tilt** correction with adjustable band width,
+  split per-camera **Roll and Skew** sliders, **manual seam positioning** with
+  a draggable seam line. *(PR)*
+- **Overlap view** calibration aid: ghost the right over the left, the left
+  over the right, both at once, or a difference image (GUI and CLI).
+- Calibration tools in `reco-calibrate`: hand-click line-seam fitting,
+  photometric / row-profile experiments, live AKAZE detection preview.
+
+**AI tracking**
+- **Tiled dual-crop inference** (two overlapping crops per camera frame) for
+  TensorRT and ONNX GPU detectors, and non-square model input support.
+- **Async detection thread**: detection overlaps the render/encode loop.
+  Measured 1.24x export speed-up on the reference machine (356 s -> 287 s for
+  a 300 s clip; details in `docs/async-detect-benchmark-v054.md`).
+- Ball tracker fixes and tunables: hold and coast time, implausible-jump
+  rejection, player-anchor gate with near/far radius, ball reach, ball margin,
+  `fov_alpha` / `cluster_alpha`, AI pitch safety lines, visible per-mode
+  detection confidence. Settings are saved in the calibration and as app
+  defaults. See `docs/ai-panner-tuning.md`.
+- In-app **field ROI editor** (replaces the browser tool). *(PR)*
+- `reco ai-debug-raw`: side-by-side raw-camera export with detection boxes, and
+  an `events.jsonl` that starts with a `run_config` record of all AI settings.
+
+**Production workflow**
+- **Cut ranges** (skip stoppages) with a timeline UI, audio that follows the
+  cuts, and a "PAUZE" dip-to-black overlay at each cut.
+- **Goal highlight reel** export.
+- **Match Folder picker** (auto-fills left / right / calibration, suggests the
+  output path), **sync-offset detection** and an **audio waveform** panel. *(PR)*
+- Export quality presets with bitrate shown and a per-export `.log` sidecar.
+- Export settings embedded as container metadata, and an 8-bit lookahead
+  down-convert that halves lookahead VRAM for 10-bit sources. *(PR)*
+- **HTML scoreboard overlay** driven by the **Match Logger** phone web app
+  (`scripts/match-logger/`). The scoreboard runtime (`reco-scoreboard`,
+  `scoreboards/`) is the work of Bjorn Zelter ([@wendibus](https://github.com/wendibus),
+  upstream PR #474), ported onto this codebase by us; our additions are the
+  Match Logger replay, design-size / DPI fixes and calibration persistence.
+
+**GUI**
+- Slint renderer switched from femtovg to **Skia** (fixes wobbly text) *(PR)*,
+  flat restyle with grouped cards *(PR)*, click-to-open help badges *(PR)*, update-available
+  toolbar button *(PR)*, app icon, and a calibration file that also restores
+  the export and AI settings.
+
+**Training tooling (`scripts/`, `docs/YOLO26_Training.md`)**
+- A Label Studio based pipeline for fine-tuning the YOLO26 ball / person /
+  referee detector: frame mining by model failure, upload with pre-labels,
+  export and dataset merge / tiling, class-weighted training. The published
+  model is on Hugging Face: [Dura-S/reco-yolo26s-football](https://huggingface.co/Dura-S/reco-yolo26s-football).
+  Training frames are never published (amateur youth football).
+
+**Windows / build fixes**
+- DirectML execution provider actually compiled in, DirectML vs TensorRT
+  provider conflict, D3D11VA fast start-time seek and staging-frame safety,
+  concat-demuxer multi-segment seek, vendored crates that work around Windows
+  Defender blocking build scripts (`vendor/`, see `THIRD_PARTY_NOTICES.md`).
+
+New crates compared to upstream: `reco-scoreboard`, `reco-stitch-img` (image
+stitching benchmark tool).
+
 ## Quick start
 
 ```bash
@@ -78,7 +163,9 @@ LIBVA_MESSAGING_LEVEL=2 ./target/release/reco stitch left.mp4 right.mp4 -c match
 
 ## Architecture
 
-Nine Rust crates. Strict dependency direction keeps the engine reusable as a library.
+Eleven Rust crates (upstream's nine plus `reco-scoreboard` and `reco-stitch-img`; the
+deprecated `rig-calib` prototype is not counted). Strict dependency direction keeps the
+engine reusable as a library.
 
 ```
 reco-core        GPU stitching engine (wgpu). No I/O, no domain logic.
@@ -90,6 +177,8 @@ reco-control     Operator intent vocabulary (keyboard today; gopro/mobile/websoc
 reco-cli         Terminal consumer: stitch / calibrate / preview / camera / analyze / info.
 reco-gui         Slint desktop consumer with wgpu preview + export UI.
 reco-obs         OBS Studio source plugin (async-frame ingestion, BGRA, interactive pan/zoom).
+reco-scoreboard  HTML scoreboard package discovery + offscreen runtime (from upstream PR #474, B. Zelter).
+reco-stitch-img  Standalone GPU image stitcher for pipeline benchmarking.
 ```
 
 **Dependency direction:** consumers (`cli` / `gui` / `obs`) depend on the four library crates (`autocam`, `calibrate`, `detect`, `io`); all four depend on `reco-core`. `reco-control` is consumed by `cli` / `gui` / `obs`.
