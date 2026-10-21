@@ -9,12 +9,12 @@ Stitch two camera feeds into a seamless panoramic sports view with AI-powered au
 
 ## Features
 
-- **GPU-first pipeline** - Real-time stitching via wgpu 28 (Vulkan / Metal / DX12), 500+ fps on modern desktop GPUs
-- **Zero-copy decode** - NVDEC (Linux/Windows) and VideoToolbox (macOS) frames go directly to GPU textures, no CPU bounce
+- **GPU-first pipeline** - Real-time stitching via wgpu 28 (Vulkan / Metal / DX12). Upstream reports 500+ fps for stitching alone on modern desktop GPUs; on the tested RTX 3060 Ti a full export with AI tracking runs at roughly 18-31 fps (see `docs/async-detect-benchmark-v054.md`)
+- **Zero-copy decode** - Windows: D3D11VA (NVIDIA tested). NVDEC on Linux and VideoToolbox on macOS are upstream code, **untested in this fork**
 - **AI ball + player tracking** - YOLO detection on ONNX (CPU / CUDA / CoreML / NCNN) or native TensorRT `.engine`, with anticipatory lookahead smoothing and density-peak player clustering
 - **Automatic calibration** - AKAZE feature matching with IMU / audio cross-correlation for temporal sync, Gyroflow lens profiles
-- **Live production** - GStreamer camera ingest (Linux / Jetson CSI), push-based `StitchCore::submit_frame_*` for OBS and live streams, replay ring buffer, stacked-video pack/unpack
-- **Cross-platform** - Linux / macOS / Windows desktop, NVIDIA Jetson Orin, cloud workers; mobile (iOS / Android) trait points land in this release, concrete impls follow
+- **Live production** - *(upstream code, untested in this fork)* GStreamer camera ingest (Linux / Jetson CSI), push-based `StitchCore::submit_frame_*` for OBS and live streams, replay ring buffer, stacked-video pack/unpack
+- **Platforms** - **Windows 11 + NVIDIA (RTX 3060 Ti) is the only tested combination.** The Linux, macOS, Jetson and OBS code paths come from upstream and have not been built or run in this fork; some changes made here affect every platform (Skia renderer, patched `vendor/` crates) and may break those builds. See [Tested hardware](#tested-hardware).
 
 ## Tested hardware
 
