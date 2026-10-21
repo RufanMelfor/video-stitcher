@@ -42,7 +42,7 @@ original authorship wherever they were merged.
 
 `crates/reco-scoreboard/` and `scoreboards/` (manifest-driven package
 discovery, offscreen Chrome/CDP renderer, scoreboard SDK, designer and agent
-guides, the football and basketball reference packages) are the work of
+guides, the football reference package) are the work of
 **Bjorn Zelter** ([@wendibus](https://github.com/wendibus)), submitted upstream
 as pull request #474 of reco-project/video-stitcher. This fork ported them onto
 its own codebase and added Match Logger replay, design-size / DPI fixes and
@@ -69,4 +69,5 @@ Skia renderer, ONNX Runtime, NVIDIA TensorRT and CUDA, GStreamer, the
 `headless_chrome` crate and many more crates; see `Cargo.lock`. Crates under
 `vendor/` are patched copies of wgpu, wgpu-core, wgpu-hal, naga, serde,
 serde_core, serde_json, thiserror, aligned-vec, keyboard-types and
-khronos_api; each keeps its own license file (khronos_api is Apache-2.0).
+khronos_api; they keep their original licenses (khronos_api: Apache-2.0, per
+its Cargo.toml; the others ship their own license files).
