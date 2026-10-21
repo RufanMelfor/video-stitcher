@@ -255,6 +255,34 @@ cargo run --release -p reco-cli --features profiling -- \
 
 Reco collects no usage data, sends no telemetry, and makes no network requests except those you explicitly configure (RTMP streaming, etc.). All performance statistics shown in the Stats panel are computed locally in memory and never leave your machine.
 
+## Acknowledgements
+
+This fork exists because of other people's work. Thank you:
+
+- **Mohamed Taha Guelzim** and the **reco-project** community, authors of
+  [reco-project/video-stitcher](https://github.com/reco-project/video-stitcher):
+  the stitching engine, AI tracking, calibration and apps this fork is built on.
+  Also **Jordan Speicher** (audio start-time sync, VAAPI upload, quieter default
+  logging, responsive file dialogs, concat seeking) and **zzswanny**
+  (frame_all GUI options) for their upstream contributions.
+- **Bjorn Zelter** ([@wendibus](https://github.com/wendibus)): the HTML scoreboard
+  system (`reco-scoreboard`, `scoreboards/`, upstream PR #474), which we ported.
+- **[Gyroflow](https://github.com/gyroflow/gyroflow)** and **Adrian Eddy**:
+  the architecture that inspired our GPU interop, the CC0 lens-profile database
+  and the `telemetry-parser` crate used for IMU data.
+- **Adit-jain** ([soccana](https://huggingface.co/Adit-jain/soccana) on Hugging Face):
+  the football detection model we used to pre-label training frames.
+- **[Ultralytics](https://github.com/ultralytics/ultralytics)** (YOLO26 and the
+  training toolchain), **[Label Studio](https://github.com/HumanSignal/label-studio)**
+  (annotation), and the authors of
+  [SAHI](https://github.com/obss/sahi), whose tiled-inference idea our dual-crop
+  training and inference follow.
+- Open-source libraries we rely on, among them FFmpeg, wgpu, Slint and Skia,
+  ONNX Runtime, the `akaze` crate by Christopher22, headless_chrome, and the
+  Roboto font by Google. Notices and licenses: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+- Everyone who tested footage, reviewed thousands of training frames and gave
+  feedback on the forum.
+
 ## License
 
 **AGPL-3.0-only.** See [LICENSE](LICENSE). Contributor terms are in [CONTRIBUTING.md](CONTRIBUTING.md#contributor-license-agreement): by submitting a PR you grant the maintainer the right to relicense contributions, which keeps dual-licensing on the table for future commercial distribution.
