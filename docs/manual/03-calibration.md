@@ -1,0 +1,185 @@
+# 3. Calibration
+
+Calibration tells the program exactly how your two cameras sit relative to each
+other, so their pictures join into one without a visible seam. You usually do it
+once per rig setup and then reuse it.
+
+A calibration is stored in a small file (`.json`). It holds the alignment, the
+lens data, the colour settings you chose and, if you set them, your AI defaults,
+export defaults and scoreboard settings.
+
+## The short version
+
+1. Load the two videos (or a match folder, see [chapter 2](02-cameras-and-footage.md)).
+2. Click **Auto Calibrate** and wait.
+3. Look at the result with **Overlap view**. If it is good, click **Save
+   Calibration** and you are done.
+4. If something is slightly off, fine-tune with the sliders described below, and
+   save again.
+
+## Step 1: Auto Calibrate
+
+In the left panel, under *Calibration*, click **Auto Calibrate**. After a
+calibration exists the same button reads **Re-calibrate**. While it runs the
+button shows *Calibrating...* and the Debug log shows progress.
+
+What the program does:
+
+1. **Finds the time difference** between the two videos (the sync offset). It
+   first tries the cameras' motion-sensor data and falls back to comparing the
+   **sound**.
+2. **Identifies the lens** from its built-in database of lens profiles, so the
+   fisheye distortion can be corrected.
+3. **Finds matching points** in both pictures (AKAZE feature matching) and
+   solves for the alignment that makes them coincide.
+
+When it finishes, a short line under the buttons tells you whether both cameras
+carried usable motion-sensor data, or whether the program had to rely on audio
+only. With audio only the calibration still works, but the program had less to go
+on. Statistics such as the confidence and the number of matches are shown in the
+**Stats** section.
+
+> **Tip:** the calibration works best when the pictures contain plenty of detail
+> in the overlapping area. If a result is poor, see *Choosing the moment* below.
+
+<!-- screenshot: Files panel with the Auto Calibrate button and the status line -->
+
+## Step 2: Check the result
+
+The most useful check is the **Overlap view** (*Seam* section, preview only):
+
+- **Right over left** or **Left over right** shows one camera faintly on top of
+  the other. Where the calibration is right, lines and goals coincide. Where it
+  is wrong you see them twice.
+- **Difference** shows how much the two cameras differ wherever both see the same
+  spot. Nearly black means aligned. Bright edges mean misaligned.
+- **Both** shows both ghosts at once. Lines that cross the seam at an angle point
+  to a **roll** error.
+- **Overlap opacity** sets how strongly the ghost shows.
+
+Judge on things that are **far away**, such as the far touchline and the goals.
+Close to the cameras some doubling is normal because the cameras are not in the
+same place (parallax).
+
+Also switch on **Show seam line**. It draws a thin red line at the exact place
+where the two pictures meet. This is an aid only: it never appears in an export.
+
+<!-- screenshot: Overlap view in Difference mode, aligned and misaligned -->
+
+## Step 3: Fine-tune by hand
+
+Everything below is optional. Change one slider at a time and look at Overlap
+view after each change. The sliders under **Calibration** are grouped per camera.
+
+| Problem you see | What to try |
+|---|---|
+| Lines crossing the seam are turned against each other | **Roll** of the left or right camera |
+| The two pictures still look skewed against each other | **Skew**; or tick *Force extra skew fit* under *Advanced* and re-calibrate |
+| A step in ground lines close to the cameras | **Near-field tilt** (affects the bottom of the picture only) |
+| A step in distant things (goal frames, skyline) | **Far-field tilt** (affects the top of the picture only, manual only) |
+| The picture is shifted vertically between the cameras | **Vertical shift** (right camera) |
+| The vertical lines at the panorama edges lean | **Rig tilt** in *Rig alignment* |
+| The whole rig is tilted sideways | **Rig roll** in *Rig alignment* |
+| The seam is in an awkward place (for example through a player or the goal) | **Seam position**: moves the seam left or right independent of the calibration. You can also drag the red seam line on the preview |
+
+The **Intersect** and **Camera axis offset** sliders (under *Global parameters*)
+change how the two camera planes meet. Use them with care: pushing *Intersect*
+too far can open a **black gap**. *Seam position* is the safe way to move the
+seam.
+
+The reset buttons next to the sliders return a value to its default.
+
+Every one of these settings is explained in the
+[settings reference](settings-reference.md).
+
+## Step 4: Check the sync
+
+If the two videos are not exactly in step, players and the ball will look
+doubled near the seam while things move. Two tools help:
+
+- **Audio Sync Waveform** (right panel): shows the sound of the left camera in
+  blue and the right camera in orange around the playhead. **Aligned peaks mean
+  the cameras are in sync.** You can change the number of frames shown and the
+  height of the display.
+- **Sync offset** (*Rig alignment*, in frames): type a number and click **Apply**
+  to set it by hand, or click **Detect Sync Offset** to measure it again without
+  running a full calibration. This takes a minute or two on footage with a lot of
+  sensor data. It is the quick way to fix the sync after you re-cut footage.
+
+## Saving
+
+When you change a calibration value a **Save Calibration** button appears. Save
+when you are happy. Everything on the calibration (alignment, lens, colour
+settings, AI defaults, export defaults, scoreboard settings) is stored in the one
+file and restored when you load it again.
+
+## Choosing the moment
+
+Calibration uses frames spread over the video. If the automatic result is poor,
+the Advanced settings (right panel, *Calibration > Advanced*) let you point it at
+a better moment:
+
+- **Anchor frame** and **Sample window:** keep all sample frames within a given
+  number of seconds of one frame (or of the current playback position if the
+  anchor is empty). Choose a moment with a lot of texture on the pitch, such as
+  people or cones. A window of 0 means *off*.
+- **AKAZE threshold:** how sensitive the feature detector is. Lower finds more,
+  weaker features.
+- **Detect Y min / Detect Y max:** the part of the picture, top to bottom, where
+  features are searched.
+- **Full-resolution features:** more precise on 4K footage, but slower.
+- **Force extra skew fit:** solves the skew of one camera even when no motion
+  data suggests it.
+
+## Lens
+
+The **Lens** section shows the lens the program found. The **Lens correction**
+and **Lens preview (single camera)** options show one camera's own picture with
+its distortion handled, which is also where you draw the detection zones (below).
+If the automatic lens is wrong, use **Browse profiles...** to pick another lens
+profile or load one from a file. The individual lens values (focal length,
+optical centre, distortion coefficients k1 to k4) are filled from the profile
+and normally do not need touching.
+
+## Detection zones: field area, goals and AI limits
+
+These settings tell the AI where the pitch is, so people and balls outside it are
+ignored. They are in *Rig alignment > Detection zones* and are part of the
+calibration.
+
+- **Field ROI** (the playing area): click **Edit ROI / GOAL...** to open the lens
+  preview. Click to add points, drag a point to move it, right-click a point to
+  delete it. Use **Left** and **Right** to edit the other camera. **Paste ROI**
+  accepts a field area copied from another calibration. **If you export with AI
+  tracking and no field ROI, the program warns you**, because without it the
+  camera may frame badly.
+- **Goal geometry:** the same editor, in goal mode. A goal needs at least 4
+  points so that both width and height are defined.
+- **AI pitch limits:** tick **Show AI pitch limits** to draw two draggable lines
+  on the stitched preview. They mark how far up and down the AI camera may aim, a
+  manual safety margin that keeps it away from the black wedge near the seam.
+  They only affect AI tracking, not your own panning. **Clear** removes them.
+
+<!-- screenshot: the lens preview with the ROI polygon -->
+
+## Re-using a calibration
+
+A calibration stays valid as long as the two cameras do not move relative to each
+other and you keep the same lenses and settings. So you can reuse it for every
+match you record with the same rig. Two things differ per recording and are
+handled for you:
+
+- **The sync offset** (the cameras never start at exactly the same moment). When
+  you start a match from a *Default calibration* the program offers to detect it
+  for you: **Detect & Save**.
+- **Colour** depends on the light of that day, so check
+  [chapter 4](04-colour-and-sharpness.md) for each match.
+
+To set it up, calibrate a good match, save the calibration, and in *Preferences*
+choose it as your **Default calibration**. For a new match folder without a
+calibration the program then copies it in as the starting point. Because other
+sessions fall back to the default, saving over it asks for confirmation first.
+
+If you bump the rig, change the mounting or switch lenses, calibrate again.
+
+Continue with [chapter 4: colour and sharpness](04-colour-and-sharpness.md).
