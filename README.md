@@ -14,7 +14,7 @@ Stitch two camera feeds into a seamless panoramic sports view with AI-powered au
 - **AI ball + player tracking** - YOLO detection on ONNX (CPU / CUDA / CoreML / NCNN) or native TensorRT `.engine`, with anticipatory lookahead smoothing and density-peak player clustering
 - **Automatic calibration** - AKAZE feature matching with IMU / audio cross-correlation for temporal sync, Gyroflow lens profiles
 - **Live production** - *(upstream code, untested in this fork)* GStreamer camera ingest (Linux / Jetson CSI), push-based `StitchCore::submit_frame_*` for OBS and live streams, replay ring buffer, stacked-video pack/unpack
-- **Platforms** - **Windows 11 + NVIDIA (RTX 3060 Ti) is the only tested combination.** The Linux, macOS, Jetson and OBS code paths come from upstream and have not been built or run in this fork; some changes made here affect every platform (Skia renderer, patched `vendor/` crates) and may break those builds. See [Tested hardware](#tested-hardware).
+- **Platforms** - **Windows 11 + NVIDIA (RTX 3060 Ti) is the only tested combination.** The Linux, macOS, Jetson and OBS code paths come from upstream and have not been run in this fork, and **`reco-core` currently does not compile on Linux or macOS** (a Windows-only function is not gated, found by CI on 2026-10-21). Other changes made here also affect every platform (Skia renderer, patched `vendor/` crates). See [Tested hardware](#tested-hardware).
 
 ## Tested hardware
 
