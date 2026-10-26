@@ -354,6 +354,7 @@ fn tracker_receives_detections() {
             center_y: 0.5,
             width: 0.1,
             height: 0.1,
+            color: None,
         },
         Detection {
             camera: CameraId::Right,
@@ -363,6 +364,7 @@ fn tracker_receives_detections() {
             center_y: 0.7,
             width: 0.05,
             height: 0.05,
+            color: None,
         },
     ];
 
@@ -419,6 +421,7 @@ fn detection_interval_respected() {
         center_y: 0.5,
         width: 0.1,
         height: 0.1,
+        color: None,
     }];
 
     let detector = MockDetector::new(canned, Arc::clone(&call_count));
@@ -542,6 +545,7 @@ fn push_and_pull_share_one_ai_brain() {
         center_y: 0.5,
         width: 0.1,
         height: 0.1,
+        color: None,
     }];
 
     // Pull side: session.run over a mock source.

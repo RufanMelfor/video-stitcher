@@ -1,22 +1,18 @@
 # reco-minimap friction log
 
-## Detections carry no pixel colour, so players cannot be split into teams
+## Shirt colours only from the wgpu detector path
 
-**Symptom:** the minimap draws every player in one colour.
+**Symptom:** with a detector backend other than `WgpuPreprocessingDetector`
+(CPU decode, native CUDA/TensorRT, NCNN, Metal), `teams: auto` finds no
+colour samples and draws every player in one colour.
 
-**Cause:** the vendored tracker assigns teams from a torso colour sample per
-detection (`detect::Det::color`). `reco_core::detect::detector::Detection` and
-`MappedDetection` have no colour field. In an export, the detector sees GPU
-frames (`WgpuNv12`, `Cuda`, `PreprocessedChw`), so a consumer cannot sample
-pixels after the fact either.
+**Cause:** `Detection::color` (added for the minimap) is filled only by
+`reco_autocam::WgpuPreprocessingDetector`. Only there does the session hand
+the detector a CPU-readable RGB tensor; the other paths keep pixels on the
+GPU or inside the backend.
 
-**Current handling:** `reco::MinimapEngine` gives every player the same
-placeholder colour and one tracker group of `2 * players_per_team` slots.
-There is no consumer-side pixel readback.
-
-**What would fix it:** an optional per-detection colour sample (e.g. mean
-torso RGB) filled in by the detector backends from the frame they already
-hold.
+**What would fix it:** each backend sampling the same torso band from the
+frame it already holds.
 
 ## The session does not expose the model's class labels
 

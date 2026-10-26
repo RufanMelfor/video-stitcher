@@ -1313,6 +1313,7 @@ mod tests {
                         center_y: 0.5,
                         width: 0.1,
                         height: 0.1,
+                        color: None,
                     }]),
                     _ => Err(DetectorError::UnsupportedFrameKind),
                 }

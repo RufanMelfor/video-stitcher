@@ -352,6 +352,7 @@ impl super::StitchCore {
                     camera_center: (d.center_x, d.center_y),
                     camera_size: (d.width, d.height),
                     position,
+                    color: d.color,
                 }
             })
             .collect()

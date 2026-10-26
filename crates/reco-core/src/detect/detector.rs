@@ -78,6 +78,13 @@ pub struct Detection {
 
     /// Bounding box height in normalized image coordinates.
     pub height: f32,
+
+    /// Median RGB of the box's torso band (upper-middle part of the box),
+    /// when the detector backend samples it from the frame it ran on -
+    /// e.g. for telling teams apart by shirt colour. `None` when the
+    /// backend does not sample colours (it then costs nothing).
+    #[serde(default)]
+    pub color: Option<[u8; 3]>,
 }
 
 // `trait Detector` / `trait GpuDetector` / `trait MetalDetector` were
@@ -394,8 +401,10 @@ pub struct PendingDetection {
     pub camera: CameraId,
     /// Owned CHW float32 tensor, `3 * input_w * input_h` elements -
     /// safe to move across threads (unlike the GPU texture views the
-    /// frame originally referenced).
-    pub tensor: Vec<f32>,
+    /// frame originally referenced). Shared so the job's `finish` step
+    /// can still read the pixels after inference (e.g. to sample shirt
+    /// colours) without copying the tensor.
+    pub tensor: std::sync::Arc<Vec<f32>>,
     /// Model input tensor width - see `RawFrame::PreprocessedChw`.
     pub input_w: u32,
     /// Model input tensor height.
@@ -506,6 +515,7 @@ mod tests {
                     center_y: 0.5,
                     width: 0.1,
                     height: 0.1,
+                    color: None,
                 }]),
                 _ => Err(DetectorError::UnsupportedFrameKind),
             }

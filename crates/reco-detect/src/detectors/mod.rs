@@ -103,6 +103,7 @@ pub fn postprocess(
             center_y: cy.clamp(0.0, 1.0),
             width: w.clamp(0.0, 1.0),
             height: h.clamp(0.0, 1.0),
+            color: None,
         });
     }
 
@@ -177,6 +178,7 @@ pub fn postprocess_balldet(
             center_y: cy.clamp(0.0, 1.0),
             width: w.clamp(0.0, 1.0),
             height: h.clamp(0.0, 1.0),
+            color: None,
         });
     }
     greedy_nms(cands, 0.45)
@@ -346,6 +348,7 @@ mod tile_tests {
             center_y,
             width,
             height,
+            color: None,
         }
     }
 

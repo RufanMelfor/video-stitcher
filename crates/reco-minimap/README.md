@@ -1,8 +1,8 @@
 # reco-minimap
 
-Draws a top-down pitch minimap (players, referee, ball) in a corner of an
-export, from the same AI detections that drive the camera. It is off unless
-you switch it on.
+Draws a top-down pitch minimap (players in their team colour, referee,
+ball) in a corner of an export, from the same AI detections that drive the
+camera. It is off unless you switch it on.
 
 The tracking and drawing core is vendored from
 [wendibus/reco-minimap](https://github.com/wendibus/reco-minimap) (AGPL-3.0,
@@ -14,8 +14,16 @@ ffmpeg I/O, jersey OCR). `src/reco.rs` connects that core to a stitch session.
 - **GUI:** Export dialog -> "Pitch minimap (needs AI Tracking + minimap.json)".
   The export needs AI Tracking in Field or Ball mode with a model, and a
   `minimap.json` in the same folder as the calibration file. If either is
-  missing, the export does not start and the dialog says why.
-- **CLI:** `reco stitch ... --model <model> --minimap minimap.json`.
+  missing, the export does not start and the dialog says why. Below the
+  checkbox: corner, size and gap to the edge. These are remembered between
+  sessions.
+- **CLI:** `reco stitch ... --model <model> --minimap minimap.json`, with
+  `--minimap-corner top_left|top_right|bottom_left|bottom_right` (default
+  `bottom_right`), `--minimap-width 0.25` (share of the video width,
+  0.05-0.6) and `--minimap-margin 0.02` (share of the video height, 0-0.2).
+
+Where the minimap goes is an export setting. Everything about the match
+itself (field, field points, teams) is in `minimap.json`.
 
 ## `minimap.json`
 
@@ -34,12 +42,7 @@ Every field is required.
     { "camera": "right", "x": 0.4795, "y": 0.3222, "field_x": 64.0, "field_y": 0.0  },
     { "camera": "right", "x": 0.7855, "y": 0.5432, "field_x": 64.0, "field_y": 42.5 }
   ],
-  "placement": {
-    "corner": "bottom_right",
-    "width_fraction": 0.25,
-    "margin_fraction": 0.02,
-    "background_opacity": 0.75
-  }
+  "teams": { "mode": "auto" }
 }
 ```
 
@@ -52,9 +55,12 @@ Every field is required.
   near sideline on the camera side (`field_width_m`). With more than 4
   points, the fit also reports how well they agree.
 - `players_per_team` / `referees`: slot counts for the tracker.
-- `placement.corner`: `top_left`, `top_right`, `bottom_left` or
-  `bottom_right`. `width_fraction` is the minimap width as a share of the
-  output width.
+- `teams` sets how players are split into teams:
+  - `{ "mode": "auto" }` learns the two shirt colours from the first
+    seconds of the export.
+  - `{ "mode": "colors", "home": "#f06020", "away": "#2040c0" }` uses fixed
+    colours. The dots are then drawn in exactly these colours.
+  - `{ "mode": "off" }` draws every player in one colour.
 
 To check a setup without exporting, run:
 
@@ -74,7 +80,16 @@ where the fit puts every point on the field.
    with the rig tilt/roll (`reco_core::geometry::rig_frame`) and
    intersected with the plane below the camera.
 3. A homography fitted to `points` maps that plane to field metres.
-4. The vendored tracker (Kalman + Hungarian matching, fixed slots, ball
+4. Teams: the wgpu detector wrapper (`reco-autocam`) stores each box's
+   torso colour in `Detection::color`. It takes the median of the shirt
+   band, read from the same RGB tensor the model saw, so there is no extra
+   frame readback. In `auto` mode the first ~10 detection batches with at
+   least 150 on-field samples are held back. Their colours are split into
+   two teams (2-means in Lab), and the held batches are then replayed.
+   After that, each player gets the nearer shirt colour. A colour about
+   equally far from both shirts gets no team. A colour far from both
+   (e.g. a coach or referee in plain clothes) counts as a referee.
+5. The vendored tracker (Kalman + Hungarian matching, fixed slots, ball
    state machine) smooths the positions. The renderer draws an RGBA image
    at exactly the size it is shown at. `MinimapOverlay` hands that image to
    the overlay compositor.
@@ -83,10 +98,18 @@ The minimap is redrawn only when new detections arrive, not on every frame.
 
 ## Limits
 
-- **No teams.** reco's detections carry no shirt colour, so every player is
-  one white dot (see `FRICTION.md`).
-- **The referee** is yellow only when the model detects the `referee`
-  class. Otherwise referees are drawn as players.
+- **Team colours are measured colours.** Shirts in shade or backlight are
+  measured darker and greyer than they look. The minimap brightens them,
+  but a dark navy kit can still come out light grey. Set
+  `"mode": "colors"` for exact colours.
+- **Colour samples come only from the wgpu detector path**, which is what
+  the Windows TensorRT/DirectML exports use. With other backends (CPU
+  decode, native CUDA/TensorRT, NCNN, Metal) `auto` finds no samples and
+  falls back to one colour, with a warning in the log.
+- **Goalkeepers** in a third colour are drawn as referees: no keeper kit
+  colours are learned.
+- **The referee** is yellow when the model detects the `referee` class or
+  the colour is neither team's.
 - **The ball** shows only while the tracker considers it in play. A ball in
   the air is projected onto the ground, so it appears further away than it
   is.

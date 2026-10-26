@@ -106,6 +106,12 @@ pub struct StitchArgs<'a> {
     pub events_path: Option<&'a str>,
     /// Minimap setup JSON; draws the pitch minimap overlay when set.
     pub minimap_path: Option<&'a str>,
+    /// Minimap screen corner (`bottom_right` ...).
+    pub minimap_corner: &'a str,
+    /// Minimap width as a fraction of the output width.
+    pub minimap_width: f32,
+    /// Minimap gap to the frame edges as a fraction of the output height.
+    pub minimap_margin: f32,
     /// Precomputed trajectory CSV (overrides AI panner).
     pub trajectory_path: Option<&'a str>,
     /// FieldPanner tuning JSON (field mode); only present keys override.
@@ -812,8 +818,24 @@ fn build_minimap(
             "--minimap: model {model_path} names no person/player class (labels: {names:?})"
         )
     })?;
-    let engine =
-        reco_minimap::reco::MinimapEngine::new(&setup, cal, classes, (args.width, args.height))?;
+    let corner = reco_minimap::reco::Corner::from_name(args.minimap_corner).ok_or_else(|| {
+        anyhow::anyhow!(
+            "--minimap-corner {}: expected top_left, top_right, bottom_left or bottom_right",
+            args.minimap_corner
+        )
+    })?;
+    let placement = reco_minimap::reco::MinimapPlacement {
+        corner,
+        width_fraction: args.minimap_width,
+        margin_fraction: args.minimap_margin,
+    };
+    let engine = reco_minimap::reco::MinimapEngine::new(
+        &setup,
+        placement,
+        cal,
+        classes,
+        (args.width, args.height),
+    )?;
     let placement = engine.placement();
     let (sink, overlay, handle) = reco_minimap::reco::attach(engine);
     println!("Minimap: on ({path})");

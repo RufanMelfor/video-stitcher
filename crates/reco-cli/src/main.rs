@@ -444,6 +444,20 @@ enum Commands {
         #[arg(long, value_name = "MINIMAP_JSON")]
         minimap: Option<String>,
 
+        /// Screen corner of the minimap: top_left, top_right, bottom_left
+        /// or bottom_right.
+        #[arg(long, default_value = "bottom_right", value_name = "CORNER")]
+        minimap_corner: String,
+
+        /// Minimap width as a fraction of the output width (0.05 - 0.6).
+        #[arg(long, default_value_t = 0.25, value_name = "FRACTION")]
+        minimap_width: f32,
+
+        /// Gap between the minimap and the frame edges, as a fraction of
+        /// the output height (0 - 0.2).
+        #[arg(long, default_value_t = 0.02, value_name = "FRACTION")]
+        minimap_margin: f32,
+
         /// Precomputed trajectory CSV (frame,yaw,pitch,fov). Overrides
         /// AI tracking with poses read from the file.
         #[arg(long)]
@@ -1286,6 +1300,9 @@ fn main() -> anyhow::Result<()> {
             no_zero_copy,
             events,
             minimap,
+            minimap_corner,
+            minimap_width,
+            minimap_margin,
             trajectory,
             panner_config,
             panner_preset,
@@ -1345,6 +1362,9 @@ fn main() -> anyhow::Result<()> {
                 no_zero_copy,
                 events_path: events.as_deref(),
                 minimap_path: minimap.as_deref(),
+                minimap_corner: &minimap_corner,
+                minimap_width,
+                minimap_margin,
                 trajectory_path: trajectory.as_deref(),
                 panner_config_path: panner_config.as_deref(),
                 panner_preset: panner_preset.as_deref(),

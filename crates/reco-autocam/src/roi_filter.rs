@@ -244,6 +244,7 @@ mod tests {
             center_y: cy,
             width: w,
             height: h,
+            color: None,
         }
     }
 
@@ -403,7 +404,7 @@ mod tests {
             Ok(DetectSplit::Pending {
                 job: reco_core::detect::detector::PendingDetection {
                     camera: det.camera,
-                    tensor: vec![],
+                    tensor: std::sync::Arc::new(vec![]),
                     input_w: 1,
                     input_h: 1,
                     src_width: 1,

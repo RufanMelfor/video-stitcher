@@ -807,6 +807,7 @@ mod tests {
                 pitch,
                 fov_degrees: None,
             }),
+            color: None,
         }
     }
 

@@ -322,6 +322,7 @@ impl NcnnYoloDetector {
                     center_y: ncy.clamp(0.0, 1.0),
                     width: nw.clamp(0.0, 1.0),
                     height: nh.clamp(0.0, 1.0),
+                    color: None,
                 },
                 best_score,
             ));

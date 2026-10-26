@@ -235,6 +235,7 @@ mod tests {
                         center_y: 0.5,
                         width: 0.1,
                         height: 0.1,
+                        color: None,
                     }])
                 }
                 _ => Err(DetectorError::UnsupportedFrameKind),
@@ -245,7 +246,7 @@ mod tests {
     fn make_pending(camera: CameraId) -> PendingDetection {
         PendingDetection {
             camera,
-            tensor: vec![0.0; 3 * 4 * 4],
+            tensor: std::sync::Arc::new(vec![0.0; 3 * 4 * 4]),
             input_w: 4,
             input_h: 4,
             src_width: 8,

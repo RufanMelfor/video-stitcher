@@ -55,4 +55,8 @@ pub struct MappedDetection {
     /// Position in panorama space (yaw/pitch).
     /// `None` if the detection couldn't be mapped (e.g. outside camera FOV).
     pub position: Option<ViewportPosition>,
+
+    /// Torso colour sample, copied from [`Detection::color`](super::detector::Detection::color).
+    #[serde(default)]
+    pub color: Option<[u8; 3]>,
 }

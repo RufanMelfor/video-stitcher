@@ -174,6 +174,22 @@ pub struct GuiSettings {
     #[serde(default = "default_pause_overlay_hold_secs")]
     pub pause_overlay_hold_secs: f32,
 
+    /// Whether the export panel's "Pitch minimap" checkbox was on, and
+    /// where the minimap goes. App-level like the PAUZE settings: a house
+    /// style, while the per-match part (field size, field points, teams)
+    /// lives in the match folder's `minimap.json`.
+    #[serde(default)]
+    pub minimap_enabled: bool,
+    /// Minimap corner, `reco_minimap::reco::Corner::name` (`bottom_right` ...).
+    #[serde(default = "default_minimap_corner")]
+    pub minimap_corner: String,
+    /// Minimap width as a share of the video width.
+    #[serde(default = "default_minimap_width")]
+    pub minimap_width: f32,
+    /// Minimap gap to the frame edges as a share of the video height.
+    #[serde(default = "default_minimap_margin")]
+    pub minimap_margin: f32,
+
     /// Last-used AI Debug tab settings (model path, camera selection,
     /// confidence threshold, detection interval) - see
     /// `AiDebugSettings`'s own doc comment. Fully independent of the
@@ -244,6 +260,18 @@ fn default_pause_overlay_fade_secs() -> f32 {
 fn default_pause_overlay_hold_secs() -> f32 {
     4.0
 }
+/// Mirrors `export-minimap-corner`'s default (3) in main.slint.
+fn default_minimap_corner() -> String {
+    "bottom_right".into()
+}
+/// Mirrors `export-minimap-size`'s default in main.slint.
+fn default_minimap_width() -> f32 {
+    0.25
+}
+/// Mirrors `export-minimap-margin`'s default in main.slint.
+fn default_minimap_margin() -> f32 {
+    0.02
+}
 
 impl Default for GuiSettings {
     fn default() -> Self {
@@ -275,6 +303,10 @@ impl Default for GuiSettings {
             pause_overlay_enabled: false,
             pause_overlay_fade_secs: default_pause_overlay_fade_secs(),
             pause_overlay_hold_secs: default_pause_overlay_hold_secs(),
+            minimap_enabled: false,
+            minimap_corner: default_minimap_corner(),
+            minimap_width: default_minimap_width(),
+            minimap_margin: default_minimap_margin(),
             ai_debug_settings: None,
         }
     }
@@ -431,6 +463,16 @@ impl GuiSettings {
         self.pause_overlay_enabled = enabled;
         self.pause_overlay_fade_secs = fade_secs;
         self.pause_overlay_hold_secs = hold_secs;
+        self.save();
+    }
+
+    /// Persist the pitch minimap checkbox and placement (see
+    /// `Self::minimap_enabled`'s doc comment).
+    pub fn set_minimap(&mut self, enabled: bool, corner: &str, width: f32, margin: f32) {
+        self.minimap_enabled = enabled;
+        self.minimap_corner = corner.to_string();
+        self.minimap_width = width;
+        self.minimap_margin = margin;
         self.save();
     }
 

@@ -260,6 +260,7 @@ impl reco_core::telemetry::TelemetrySink for ExportTelemetrySink {
 #[cfg(feature = "autocam")]
 fn build_minimap(
     setup: &reco_minimap::reco::MinimapSetup,
+    placement: reco_minimap::reco::MinimapPlacement,
     cal: &Calibration,
     model_path: &str,
     output_size: (u32, u32),
@@ -279,8 +280,9 @@ fn build_minimap(
              so there is nothing to draw"
         )
     })?;
-    let engine = reco_minimap::reco::MinimapEngine::new(setup, cal, classes, output_size)
-        .map_err(|e| format!("Pitch minimap: {e}"))?;
+    let engine =
+        reco_minimap::reco::MinimapEngine::new(setup, placement, cal, classes, output_size)
+            .map_err(|e| format!("Pitch minimap: {e}"))?;
     let placement = engine.placement();
     let (sink, overlay, handle) = reco_minimap::reco::attach(engine);
     log::info!("Export: pitch minimap on");
@@ -313,8 +315,12 @@ pub fn run_export(
     // `StitchJob::pause_overlay`'s doc comment.
     pause_overlay: Option<(f32, f32)>,
     autocam: AutocamUiConfig,
-    // Pitch minimap, from `load_minimap_setup`; `None` = off.
-    minimap_setup: Option<reco_minimap::reco::MinimapSetup>,
+    // Pitch minimap (setup from `load_minimap_setup`, placement from the
+    // Export dialog); `None` = off.
+    minimap_setup: Option<(
+        reco_minimap::reco::MinimapSetup,
+        reco_minimap::reco::MinimapPlacement,
+    )>,
     scoreboard_package: Option<reco_scoreboard::ScoreboardPackage>,
     scoreboard_state: Option<serde_json::Value>,
     scoreboard_replay: Option<ScoreboardReplay>,
@@ -354,7 +360,15 @@ pub fn run_export(
     #[cfg(feature = "autocam")]
     let minimap = match minimap_setup
         .as_ref()
-        .map(|setup| build_minimap(setup, &cal, &autocam.model_path, (width, height)))
+        .map(|(setup, placement)| {
+            build_minimap(
+                setup,
+                *placement,
+                &cal,
+                &autocam.model_path,
+                (width, height),
+            )
+        })
         .transpose()
     {
         Ok(m) => m,

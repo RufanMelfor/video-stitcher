@@ -2216,6 +2216,22 @@ fn suggested_export_path(
 /// Left/ itself. Falls back to the left video's own folder when that
 /// convention doesn't apply (e.g. two loose files with no Left/Right
 /// structure).
+/// The Export dialog's minimap placement controls, clamped to the ranges
+/// `MinimapPlacement::validate` accepts (the sliders already stay inside them).
+fn export_minimap_placement(app: &RecoApp) -> reco_minimap::reco::MinimapPlacement {
+    use reco_minimap::reco::{Corner, MinimapPlacement};
+    let index = app.get_export_minimap_corner().clamp(0, 3) as usize;
+    let clamp = |v: f32, r: std::ops::RangeInclusive<f32>| v.clamp(*r.start(), *r.end());
+    MinimapPlacement {
+        corner: Corner::ALL[index],
+        width_fraction: clamp(app.get_export_minimap_size(), MinimapPlacement::WIDTH_RANGE),
+        margin_fraction: clamp(
+            app.get_export_minimap_margin(),
+            MinimapPlacement::MARGIN_RANGE,
+        ),
+    }
+}
+
 fn suggested_calibration_path(left_path: Option<&std::path::Path>) -> Option<PathBuf> {
     let left = left_path?;
     let left_dir = left.parent()?;
@@ -3714,6 +3730,19 @@ fn main() -> anyhow::Result<()> {
         app.set_export_pause_overlay_enabled(s.user_settings.pause_overlay_enabled);
         app.set_export_pause_overlay_fade_secs(s.user_settings.pause_overlay_fade_secs);
         app.set_export_pause_overlay_hold_secs(s.user_settings.pause_overlay_hold_secs);
+
+        // Pitch minimap checkbox + placement: app-level too (see
+        // `GuiSettings::minimap_enabled`).
+        app.set_export_minimap_enabled(s.user_settings.minimap_enabled);
+        let corner = reco_minimap::reco::Corner::from_name(&s.user_settings.minimap_corner)
+            .unwrap_or(reco_minimap::reco::Corner::BottomRight);
+        let corner_index = reco_minimap::reco::Corner::ALL
+            .iter()
+            .position(|c| *c == corner)
+            .unwrap_or(3);
+        app.set_export_minimap_corner(corner_index as i32);
+        app.set_export_minimap_size(s.user_settings.minimap_width);
+        app.set_export_minimap_margin(s.user_settings.minimap_margin);
     }
 
     // App-level SCOREBOARD card settings, same "restore before any
@@ -5443,6 +5472,23 @@ fn main() -> anyhow::Result<()> {
             app.get_export_pause_overlay_enabled(),
             app.get_export_pause_overlay_fade_secs(),
             app.get_export_pause_overlay_hold_secs(),
+        );
+    });
+
+    // The pitch minimap checkbox or its placement changed - persist
+    // app-level, like the PAUZE settings above.
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_minimap(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let placement = export_minimap_placement(&app);
+        state_ref.borrow_mut().user_settings.set_minimap(
+            app.get_export_minimap_enabled(),
+            placement.corner.name(),
+            placement.width_fraction,
+            placement.margin_fraction,
         );
     });
 
@@ -7883,7 +7929,7 @@ fn main() -> anyhow::Result<()> {
         };
         let minimap_setup = if app.get_export_minimap_enabled() {
             match crate::export::load_minimap_setup(s.calibration_path.as_deref(), &autocam) {
-                Ok(setup) => Some(setup),
+                Ok(setup) => Some((setup, export_minimap_placement(&app))),
                 Err(msg) => {
                     log::warn!("Export not started: {msg}");
                     app.set_export_error_text(msg.into());

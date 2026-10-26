@@ -14,6 +14,7 @@
 
 pub mod ball;
 pub mod board;
+pub mod colors;
 pub mod detect;
 pub mod geom;
 pub mod identity;

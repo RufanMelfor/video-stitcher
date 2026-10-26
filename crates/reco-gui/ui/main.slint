@@ -1305,6 +1305,14 @@ export component RecoApp inherits Window {
     // Draw the top-down pitch minimap (reco-minimap) in the export. Needs
     // AI tracking and a minimap.json next to the calibration file.
     in-out property <bool> export-minimap-enabled: false;
+    // Minimap placement: corner index (0 top left, 1 top right,
+    // 2 bottom left, 3 bottom right), width as a share of the video width,
+    // and the gap to the frame edges as a share of the video height.
+    in-out property <int> export-minimap-corner: 3;
+    in-out property <float> export-minimap-size: 0.25;
+    in-out property <float> export-minimap-margin: 0.02;
+    // Fires on every minimap checkbox / placement edit so Rust can persist them.
+    callback changed-minimap();
 
     // Fires once per AI Tracking / panner slider edit above, so Rust can
     // persist the new value as the app-level last-used default (see
@@ -6163,6 +6171,42 @@ export component RecoApp inherits Window {
                         CheckBox {
                             text: "Pitch minimap (needs AI Tracking + minimap.json)";
                             checked <=> root.export-minimap-enabled;
+                            toggled => { root.changed-minimap(); }
+                        }
+                    }
+                    if root.export-minimap-enabled: VerticalLayout {
+                        spacing: 6px;
+                        Tip {
+                            tip: "Which corner of the video the pitch minimap is drawn in.";
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Text { text: "Corner"; color: #888; font-size: 11px; vertical-alignment: center; }
+                                ComboBox {
+                                    model: ["Top left", "Top right", "Bottom left", "Bottom right"];
+                                    current-index <=> root.export-minimap-corner;
+                                    selected(value) => { root.changed-minimap(); }
+                                }
+                            }
+                        }
+                        LabeledSlider {
+                            label: "Minimap size (share of video width)";
+                            tip: "How wide the minimap is, as a share of the video width. 0.25 is a quarter of the width.";
+                            minimum: 0.05;
+                            maximum: 0.6;
+                            value <=> root.export-minimap-size;
+                            decimals: 2;
+                            step: 0.01;
+                            changed(v) => { root.changed-minimap(); }
+                        }
+                        LabeledSlider {
+                            label: "Gap to the edge (share of video height)";
+                            tip: "Space between the minimap and the edges of the video, as a share of the video height. 0 puts it right against the corner.";
+                            minimum: 0.0;
+                            maximum: 0.2;
+                            value <=> root.export-minimap-margin;
+                            decimals: 2;
+                            step: 0.01;
+                            changed(v) => { root.changed-minimap(); }
                         }
                     }
 

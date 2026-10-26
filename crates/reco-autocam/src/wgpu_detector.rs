@@ -4,6 +4,10 @@
 //! DirectML EP) and handles `DetectorFrame::WgpuNv12` by running
 //! the `WgpuPreprocessor` compute shader before delegating to the
 //! inner detector with `DetectorFrame::PreprocessedChw`.
+//!
+//! It also fills [`Detection::color`] with each box's torso colour, read
+//! from the same RGB tensor the model saw (see [`sample_torso_colors`]),
+//! so consumers can tell teams apart without a frame readback of their own.
 
 use reco_core::detect::detector::{
     DetectSplit, Detection, DetectorError, DetectorFrame, PendingDetection, UnifiedDetector,
@@ -113,14 +117,17 @@ impl UnifiedDetector for WgpuPreprocessingDetector {
                 let (device, queue) = (self.device.clone(), self.queue.clone());
                 let preprocessor = self.preprocessor_for(width, height);
                 let tensor = preprocessor.preprocess(&device, &queue, y_view, uv_view, rotation);
+                let input_size = preprocessor.input_size();
                 let inner_frame = DetectorFrame::PreprocessedChw {
                     data: &tensor,
-                    input_w: preprocessor.input_size().width,
-                    input_h: preprocessor.input_size().height,
+                    input_w: input_size.width,
+                    input_h: input_size.height,
                     src_width: width,
                     src_height: height,
                 };
-                self.inner.detect(camera, &inner_frame)
+                let mut dets = self.inner.detect(camera, &inner_frame)?;
+                sample_torso_colors(&mut dets, &tensor, input_size, width, height);
+                Ok(dets)
             }
             // Pass through other frame types to the inner detector
             other => self.inner.detect(camera, other),
@@ -154,27 +161,163 @@ impl UnifiedDetector for WgpuPreprocessingDetector {
                 let (width, height, rotation) = (*width, *height, *rotation);
                 let (device, queue) = (self.device.clone(), self.queue.clone());
                 let preprocessor = self.preprocessor_for(width, height);
-                let tensor = preprocessor.preprocess(&device, &queue, y_view, uv_view, rotation);
+                let tensor = std::sync::Arc::new(
+                    preprocessor.preprocess(&device, &queue, y_view, uv_view, rotation),
+                );
+                let input_size = preprocessor.input_size();
+                let pixels = std::sync::Arc::clone(&tensor);
                 Ok(DetectSplit::Pending {
                     job: PendingDetection {
                         camera,
                         tensor,
-                        input_w: preprocessor.input_size().width,
-                        input_h: preprocessor.input_size().height,
+                        input_w: input_size.width,
+                        input_h: input_size.height,
                         src_width: width,
                         src_height: height,
                     },
-                    // Nothing left for this wrapper to do once the
-                    // deferred inference call returns - the inner
-                    // detector's own postprocessing (coordinate
+                    // The inner detector's own postprocessing (coordinate
                     // un-letterboxing, normalization) already happens
-                    // inside that deferred call.
-                    finish: Box::new(|dets| dets),
+                    // inside the deferred call; this only adds the torso
+                    // colours, from the same shared tensor.
+                    finish: Box::new(move |mut dets| {
+                        sample_torso_colors(&mut dets, &pixels, input_size, width, height);
+                        dets
+                    }),
                 })
             }
             // Frame kinds this wrapper doesn't add async support for -
             // fall back to the synchronous path unchanged.
             other => Ok(DetectSplit::Done(self.inner.detect(camera, other)?)),
         }
+    }
+}
+
+/// Torso band sampled for the shirt colour: this fraction range of the box
+/// height, from the top (shoulders to belly; skips head and legs).
+const TORSO_BAND: (f32, f32) = (0.18, 0.50);
+/// Half-width of the sampled band as a fraction of the box width (skips
+/// arms and the background beside the body).
+const TORSO_HALF_WIDTH: f32 = 0.22;
+/// Samples per band axis; the median of up to `N x N` pixels is robust
+/// against a number, skin or grass in the band.
+const TORSO_SAMPLES_PER_AXIS: usize = 10;
+
+/// Fill each detection's [`Detection::color`] with the per-channel median
+/// of its torso band, read from the preprocessed CHW tensor (RGB in
+/// `0..=1`, the source frame letterboxed into `input`). Detections are
+/// normalized to the `src_w x src_h` frame, the same space the tensor was
+/// letterboxed from. A band that falls outside the tensor leaves `color`
+/// as `None`.
+fn sample_torso_colors(
+    dets: &mut [Detection],
+    tensor: &[f32],
+    input: reco_detect::InputSize,
+    src_w: u32,
+    src_h: u32,
+) {
+    let (iw, ih) = (input.width as usize, input.height as usize);
+    let plane = iw * ih;
+    if plane == 0 || tensor.len() < 3 * plane || src_w == 0 || src_h == 0 {
+        return;
+    }
+    let lb = input.letterbox(src_w, src_h);
+    let to_x = |nx: f32| nx * src_w as f32 * lb.scale + lb.pad_x;
+    let to_y = |ny: f32| ny * src_h as f32 * lb.scale + lb.pad_y;
+    let mut channels: [Vec<u8>; 3] = Default::default();
+    for d in dets.iter_mut() {
+        let top = d.center_y - d.height / 2.0;
+        let x0 = to_x(d.center_x - d.width * TORSO_HALF_WIDTH).max(0.0);
+        let x1 = to_x(d.center_x + d.width * TORSO_HALF_WIDTH).min((iw - 1) as f32);
+        let y0 = to_y(top + d.height * TORSO_BAND.0).max(0.0);
+        let y1 = to_y(top + d.height * TORSO_BAND.1).min((ih - 1) as f32);
+        if !(x1 >= x0 && y1 >= y0) {
+            continue;
+        }
+        let (x0, x1, y0, y1) = (x0 as usize, x1 as usize, y0 as usize, y1 as usize);
+        let step_x = ((x1 - x0) / TORSO_SAMPLES_PER_AXIS).max(1);
+        let step_y = ((y1 - y0) / TORSO_SAMPLES_PER_AXIS).max(1);
+        for c in channels.iter_mut() {
+            c.clear();
+        }
+        for y in (y0..=y1).step_by(step_y) {
+            for x in (x0..=x1).step_by(step_x) {
+                let i = y * iw + x;
+                for (c, ch) in channels.iter_mut().enumerate() {
+                    ch.push((tensor[c * plane + i].clamp(0.0, 1.0) * 255.0).round() as u8);
+                }
+            }
+        }
+        let median = |v: &mut Vec<u8>| {
+            v.sort_unstable();
+            v[v.len() / 2]
+        };
+        d.color = Some([
+            median(&mut channels[0]),
+            median(&mut channels[1]),
+            median(&mut channels[2]),
+        ]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn player(cx: f32, cy: f32, w: f32, h: f32) -> Detection {
+        Detection {
+            camera: CameraId::Left,
+            class_id: 0,
+            confidence: 0.9,
+            center_x: cx,
+            center_y: cy,
+            width: w,
+            height: h,
+            color: None,
+        }
+    }
+
+    /// A 40x30 input showing an 80x60 source frame (letterbox scale 0.5,
+    /// no padding): grass everywhere, a red shirt under a skin-coloured
+    /// head.
+    #[test]
+    fn torso_colour_is_the_shirt_not_head_or_grass() {
+        let input = reco_detect::InputSize::new(40, 30);
+        let (iw, ih) = (40usize, 30usize);
+        let plane = iw * ih;
+        let mut t = vec![0.0f32; 3 * plane];
+        let mut put = |x: usize, y: usize, rgb: [f32; 3]| {
+            for (c, v) in rgb.iter().enumerate() {
+                t[c * plane + y * iw + x] = *v;
+            }
+        };
+        for y in 0..ih {
+            for x in 0..iw {
+                put(x, y, [0.1, 0.5, 0.1]);
+            }
+        }
+        // input pixels = source / 2
+        for y in 10..16 {
+            for x in 15..25 {
+                put(x, y, [0.9, 0.1, 0.1]);
+            }
+        }
+        for y in 7..10 {
+            for x in 18..22 {
+                put(x, y, [0.9, 0.7, 0.6]);
+            }
+        }
+        // player box in source pixels: x 30..50, y 14..54 (head at the top)
+        let mut dets = vec![player(40.0 / 80.0, 34.0 / 60.0, 20.0 / 80.0, 40.0 / 60.0)];
+        sample_torso_colors(&mut dets, &t, input, 80, 60);
+        let c = dets[0].color.expect("band inside the tensor");
+        assert!(c[0] > 200 && c[1] < 60 && c[2] < 60, "{c:?}");
+    }
+
+    #[test]
+    fn short_tensor_samples_nothing() {
+        let input = reco_detect::InputSize::new(40, 30);
+        let mut dets = vec![player(0.5, 0.5, 0.1, 0.2)];
+        sample_torso_colors(&mut dets, &[0.0; 10], input, 80, 60);
+        assert!(dets[0].color.is_none());
     }
 }

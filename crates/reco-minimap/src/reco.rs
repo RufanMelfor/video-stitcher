@@ -24,11 +24,13 @@
 //!
 //! # Teams
 //!
-//! reco's detections carry no pixel colour, so players are not split
-//! into teams: every player shares one tracker group of
-//! `2 * players_per_team` slots and is drawn in one colour. Referees
-//! (when the model has a `referee` class) and the ball are separate.
-//! See `FRICTION.md`.
+//! Detections carry a torso colour sample ([`MappedDetection::color`],
+//! filled by the wgpu detector wrapper). With [`TeamSetup::Auto`] the
+//! first batches are held back while their colours are split into two
+//! teams (2-means in Lab), then replayed; each player is then assigned to
+//! the nearer shirt colour and drawn in it. Referees (when the model has a
+//! `referee` class) and the ball are separate. Without colour samples
+//! (other detector backends) every player is drawn in one colour.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -58,12 +60,37 @@ const MIN_DEPRESSION_RAD: f32 = 0.005;
 /// mis-clicked or mislabelled field point.
 const RMS_WARN_M: f32 = 2.0;
 
-/// Shirt colour every player is given (see the module doc's "Teams");
-/// any colour works as long as it is far from [`AWAY_PLACEHOLDER_RGB`].
-const PLAYER_RGB: [u8; 3] = [255, 255, 255];
-/// The unused second team colour, as far from [`PLAYER_RGB`] as possible
-/// so the team classifier never hesitates.
+/// Shirt colour every player is given without a team split; any colour
+/// works as long as it is far from [`AWAY_PLACEHOLDER_RGB`].
+const PLAYER_RGB: [u8; 3] = [245, 245, 245];
+/// The unused second team colour without a team split, as far from
+/// [`PLAYER_RGB`] as possible so the team classifier never hesitates.
 const AWAY_PLACEHOLDER_RGB: [u8; 3] = [0, 0, 0];
+
+/// Opacity of the minimap's field background (lines, players and ball are
+/// always opaque).
+pub const BACKGROUND_OPACITY: f32 = 0.75;
+
+/// Team learning ([`TeamSetup::Auto`]): only confident player boxes whose
+/// foot is on the field give colour samples (no bench, no spectators).
+const LEARN_MIN_CONFIDENCE: f32 = 0.35;
+/// Samples and detection batches needed before the colours are split.
+const LEARN_MIN_SAMPLES: usize = 150;
+const LEARN_MIN_BATCHES: usize = 10;
+/// Give up learning after this many batches (too few samples: e.g. a
+/// detector backend that does not sample colours).
+const LEARN_MAX_BATCHES: usize = 150;
+/// Two shirt colours closer than this (Lab distance) are not two teams.
+const MIN_TEAM_SEPARATION: f32 = 20.0;
+/// A colour about equally far from both shirts (Lab distance difference
+/// below this) is not assigned to a team; such a box can still continue an
+/// existing track but cannot start one.
+const TEAM_MARGIN: f32 = 6.0;
+/// A colour farther than this (Lab distance) from both shirts is neither
+/// team's: passed on unchanged, so the core treats the box as a referee
+/// (a coach or referee in plain clothes the model calls `person`). Same
+/// value as the core's `TeamClassifier::max_dist`.
+const TEAM_OUTLIER_DIST: f32 = 45.0;
 
 /// Errors from loading or applying a minimap setup.
 #[derive(Debug, thiserror::Error)]
@@ -141,23 +168,74 @@ pub enum Corner {
     BottomRight,
 }
 
-/// Where and how large the minimap appears in the output video.
+impl Corner {
+    /// Every corner, in the order a picker lists them.
+    pub const ALL: [Corner; 4] = [
+        Corner::TopLeft,
+        Corner::TopRight,
+        Corner::BottomLeft,
+        Corner::BottomRight,
+    ];
+
+    /// Stable name (`top_left` ...), as used in CLI flags and settings.
+    pub fn name(self) -> &'static str {
+        match self {
+            Corner::TopLeft => "top_left",
+            Corner::TopRight => "top_right",
+            Corner::BottomLeft => "bottom_left",
+            Corner::BottomRight => "bottom_right",
+        }
+    }
+
+    /// Inverse of [`Self::name`].
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.name() == name)
+    }
+}
+
+/// Where and how large the minimap appears in the output video - an
+/// export setting, independent of the match's `minimap.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct SetupPlacement {
+pub struct MinimapPlacement {
     /// Screen corner.
     pub corner: Corner,
-    /// Minimap width as a fraction of the output width, `(0, 1]`.
+    /// Minimap width as a fraction of the output width, `[0.05, 0.6]`.
     pub width_fraction: f32,
-    /// Gap to the frame edges as a fraction of the output height, `[0, 0.25]`.
+    /// Gap to the frame edges as a fraction of the output height, `[0, 0.2]`.
     pub margin_fraction: f32,
-    /// Opacity of the minimap's field background, `[0, 1]` (lines,
-    /// players and ball are always opaque).
-    pub background_opacity: f32,
+}
+
+impl MinimapPlacement {
+    /// Accepted [`Self::width_fraction`] range.
+    pub const WIDTH_RANGE: std::ops::RangeInclusive<f32> = 0.05..=0.6;
+    /// Accepted [`Self::margin_fraction`] range.
+    pub const MARGIN_RANGE: std::ops::RangeInclusive<f32> = 0.0..=0.2;
+
+    /// Check ranges.
+    pub fn validate(&self) -> Result<(), MinimapError> {
+        if !Self::WIDTH_RANGE.contains(&self.width_fraction) {
+            return Err(MinimapError::Invalid(format!(
+                "minimap width {} is outside {:?} of the output width",
+                self.width_fraction,
+                Self::WIDTH_RANGE
+            )));
+        }
+        if !Self::MARGIN_RANGE.contains(&self.margin_fraction) {
+            return Err(MinimapError::Invalid(format!(
+                "minimap margin {} is outside {:?} of the output height",
+                self.margin_fraction,
+                Self::MARGIN_RANGE
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// The `minimap.json` setup file: field size, the projection's field
-/// points, and placement. Every field is required - there are no hidden
-/// defaults.
+/// points and how teams are told apart - everything that belongs to the
+/// match and the camera position. Where the minimap is drawn is an export
+/// setting ([`MinimapPlacement`]). Every field is required - there are no
+/// hidden defaults.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MinimapSetup {
     /// Format version, must be [`SETUP_VERSION`].
@@ -172,8 +250,25 @@ pub struct MinimapSetup {
     pub referees: usize,
     /// Known field points, at least 4, not all on one line.
     pub points: Vec<FieldPoint>,
-    /// Placement in the output video.
-    pub placement: SetupPlacement,
+    /// How players are split into teams.
+    pub teams: TeamSetup,
+}
+
+/// How players are split into teams (`"teams"` in `minimap.json`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "lowercase")]
+pub enum TeamSetup {
+    /// Learn the two shirt colours from the first seconds of the export.
+    Auto,
+    /// Fixed shirt colours as `#rrggbb`.
+    Colors {
+        /// One team's shirt colour.
+        home: String,
+        /// The other team's shirt colour.
+        away: String,
+    },
+    /// No team split: every player in one colour.
+    Off,
 }
 
 impl MinimapSetup {
@@ -240,24 +335,12 @@ impl MinimapSetup {
                 ));
             }
         }
-        let pl = &self.placement;
-        if !(pl.width_fraction > 0.0 && pl.width_fraction <= 1.0) {
-            return bad(format!(
-                "placement.width_fraction {} is outside (0, 1]",
-                pl.width_fraction
-            ));
-        }
-        if !(0.0..=0.25).contains(&pl.margin_fraction) {
-            return bad(format!(
-                "placement.margin_fraction {} is outside 0..0.25",
-                pl.margin_fraction
-            ));
-        }
-        if !(0.0..=1.0).contains(&pl.background_opacity) {
-            return bad(format!(
-                "placement.background_opacity {} is outside 0..1",
-                pl.background_opacity
-            ));
+        if let TeamSetup::Colors { home, away } = &self.teams {
+            for (name, hex) in [("home", home), ("away", away)] {
+                if crate::colors::parse_hex(hex).is_none() {
+                    return bad(format!("teams.{name} \"{hex}\" is not a #rrggbb colour"));
+                }
+            }
         }
         Ok(())
     }
@@ -474,9 +557,28 @@ fn side_by_side_x(camera: CameraId, x: f32) -> f32 {
     }
 }
 
+/// Team split state of a [`MinimapEngine`].
+enum Teams {
+    /// One colour for every player.
+    Single,
+    /// Collecting shirt colours; the batches are replayed once decided.
+    Learning {
+        samples: Vec<[u8; 3]>,
+        held: Vec<(u64, Vec<MappedDetection>)>,
+    },
+    /// Two shirt colours.
+    Split { home: [u8; 3], away: [u8; 3] },
+}
+
 /// Tracking + rendering state shared by [`MinimapSink`] and [`MinimapOverlay`].
 pub struct MinimapEngine {
-    minimap: Minimap,
+    setup: MinimapSetup,
+    /// Built once the team colours are known (immediately unless
+    /// [`TeamSetup::Auto`]); holds the projector from then on.
+    minimap: Option<Minimap>,
+    /// The projector until `minimap` takes it over.
+    projector: Option<RecoProjector>,
+    teams: Teams,
     renderer: Renderer,
     classes: ClassMap,
     /// Source frame rate; `None` until [`MinimapHandle::set_fps`].
@@ -498,40 +600,38 @@ impl MinimapEngine {
     /// the session's source is open; detections before that are skipped.
     pub fn new(
         setup: &MinimapSetup,
+        placement: MinimapPlacement,
         calibration: &Calibration,
         classes: ClassMap,
         output_size: (u32, u32),
     ) -> Result<Self, MinimapError> {
         setup.validate()?;
+        placement.validate()?;
         if output_size.0 == 0 || output_size.1 == 0 {
             return Err(MinimapError::Invalid("output size must be non-zero".into()));
         }
         let projector = RecoProjector::new(calibration, setup)?;
         log::info!(
-            "Minimap: {}x{} m field, {} field points, fit RMS {:.2} m, classes {:?}",
+            "Minimap: {}x{} m field, {} field points, fit RMS {:.2} m, classes {:?}, teams {:?}",
             setup.field_length_m,
             setup.field_width_m,
             setup.points.len(),
             projector.rms_error_m(),
-            classes
+            classes,
+            setup.teams
         );
-        let profile = setup.sport_profile();
-        let mut cfg = Config::for_sport(&profile, PLAYER_RGB, AWAY_PLACEHOLDER_RGB);
-        // One shared group for both teams (see the module doc's "Teams").
-        cfg.tracker.max_per_team = 2 * setup.players_per_team;
-        cfg.keepers_enabled = false;
-        cfg.referee_from_color = false;
 
-        let target_w = (output_size.0 as f32 * setup.placement.width_fraction).round();
+        let profile = setup.sport_profile();
+        let target_w = (output_size.0 as f32 * placement.width_fraction).round();
         let mut theme = Theme {
             px_per_m: 1.0,
             floor: [24, 92, 48],
             lines: [235, 240, 235],
-            home: [245, 245, 245],
-            away: [245, 245, 245],
+            home: PLAYER_RGB,
+            away: PLAYER_RGB,
             referee: [250, 205, 0],
             ball: [255, 120, 0],
-            background_alpha: (setup.placement.background_opacity * 255.0).round() as u8,
+            background_alpha: (BACKGROUND_OPACITY * 255.0).round() as u8,
             min_alpha: 0.5,
             // Upstream sizes target a full-window basketball court; a
             // quarter-width football overlay needs bigger markers.
@@ -545,23 +645,43 @@ impl MinimapEngine {
         theme.px_per_m = (target_w / unit_w.max(1.0)).max(0.5);
         let renderer = Renderer::with_profile(theme, profile);
         let (w, h) = renderer.size();
-        let placement = corner_placement(
+        let overlay_placement = corner_placement(
             (w as u32, h as u32),
             output_size,
-            setup.placement.corner,
-            setup.placement.margin_fraction,
+            placement.corner,
+            placement.margin_fraction,
         );
 
         let mut engine = Self {
-            minimap: Minimap::new(cfg, Box::new(projector)),
+            setup: setup.clone(),
+            minimap: None,
+            projector: Some(projector),
+            teams: Teams::Single,
             renderer,
             classes,
             fps: None,
             fps_missing_logged: false,
-            placement,
+            placement: overlay_placement,
             last_batch: Vec::new(),
             pending: None,
         };
+        match &setup.teams {
+            TeamSetup::Off => engine.start_tracking(Teams::Single),
+            TeamSetup::Colors { home, away } => {
+                // validate() checked both parse.
+                let parse = |h: &str| crate::colors::parse_hex(h).unwrap_or(PLAYER_RGB);
+                engine.start_tracking(Teams::Split {
+                    home: parse(home),
+                    away: parse(away),
+                });
+            }
+            TeamSetup::Auto => {
+                engine.teams = Teams::Learning {
+                    samples: Vec::new(),
+                    held: Vec::new(),
+                }
+            }
+        }
         // Show the empty field from the first frame on, not only once the
         // first detections arrive.
         let empty = FrameState {
@@ -577,6 +697,42 @@ impl MinimapEngine {
         };
         engine.pending = Some(engine.render(&empty));
         Ok(engine)
+    }
+
+    /// Build the tracker for `teams` (`Single` or `Split`).
+    fn start_tracking(&mut self, teams: Teams) {
+        let Some(projector) = self.projector.take() else {
+            return;
+        };
+        let profile = self.setup.sport_profile();
+        let mut cfg = match teams {
+            Teams::Split { home, away } => {
+                log::info!(
+                    "Minimap: team colours {} and {}",
+                    crate::colors::hex(home),
+                    crate::colors::hex(away)
+                );
+                self.renderer.theme.home = display_color(home);
+                self.renderer.theme.away = display_color(away);
+                let mut cfg = Config::for_sport(&profile, home, away);
+                // A box whose colour is neither shirt (see `to_dets`)
+                // becomes a referee.
+                cfg.referee_from_color = true;
+                cfg
+            }
+            _ => {
+                let mut cfg = Config::for_sport(&profile, PLAYER_RGB, AWAY_PLACEHOLDER_RGB);
+                // Both teams share one group of slots.
+                cfg.tracker.max_per_team = 2 * self.setup.players_per_team;
+                cfg.referee_from_color = false;
+                cfg
+            }
+        };
+        // No goalkeeper kits are known; a keeper in a third colour is
+        // treated like any colour that is neither shirt (see `to_dets`).
+        cfg.keepers_enabled = false;
+        self.minimap = Some(Minimap::new(cfg, Box::new(projector)));
+        self.teams = teams;
     }
 
     fn set_fps(&mut self, fps: f64) -> Result<(), MinimapError> {
@@ -596,18 +752,109 @@ impl MinimapEngine {
     /// between detection runs) and empty batches are skipped: the tracker
     /// then keeps its last state instead of seeing everyone stand still.
     pub fn on_detections(&mut self, frame_index: u64, detections: &[MappedDetection]) {
-        let Some(fps) = self.fps else {
+        if self.fps.is_none() {
             if !self.fps_missing_logged {
                 log::warn!("Minimap: frame rate not set yet, detections skipped");
                 self.fps_missing_logged = true;
             }
             return;
-        };
+        }
         if detections.is_empty() || same_batch(&self.last_batch, detections) {
             return;
         }
         self.last_batch = detections.to_vec();
-        let dets: Vec<Det> = detections
+        if matches!(self.teams, Teams::Learning { .. }) {
+            self.learn(frame_index, detections);
+            return;
+        }
+        self.track(frame_index, detections);
+    }
+
+    /// Collect shirt colours from one batch; once enough are in, split
+    /// them into two teams and replay the held batches.
+    fn learn(&mut self, frame_index: u64, detections: &[MappedDetection]) {
+        let field = crate::geom::Field::new(self.setup.field_length_m, self.setup.field_width_m);
+        let player = self.classes.player;
+        let Teams::Learning { samples, held } = &mut self.teams else {
+            return;
+        };
+        if let Some(projector) = &self.projector {
+            for d in detections {
+                let Some(color) = d.color else { continue };
+                if d.class_id != player || d.confidence < LEARN_MIN_CONFIDENCE {
+                    continue;
+                }
+                let foot = (d.camera_center.0, d.camera_center.1 + d.camera_size.1 / 2.0);
+                if projector
+                    .camera_to_field(d.camera, foot.0, foot.1)
+                    .is_some_and(|p| field.contains(p, 0.0))
+                {
+                    samples.push(color);
+                }
+            }
+        }
+        held.push((frame_index, detections.to_vec()));
+        let enough = samples.len() >= LEARN_MIN_SAMPLES && held.len() >= LEARN_MIN_BATCHES;
+        if !enough && held.len() < LEARN_MAX_BATCHES {
+            return;
+        }
+        let split = if enough {
+            crate::colors::pick_teams(samples)
+        } else {
+            None
+        };
+        let teams = match split {
+            Some((a, b, dist)) if dist >= MIN_TEAM_SEPARATION => Teams::Split {
+                home: a.rgb,
+                away: b.rgb,
+            },
+            Some((_, _, dist)) => {
+                log::warn!(
+                    "Minimap: shirt colours too similar to tell teams apart \
+                     (Lab distance {dist:.0}), drawing all players in one colour"
+                );
+                Teams::Single
+            }
+            None => {
+                log::warn!(
+                    "Minimap: only {} shirt colour samples in {} detection batches \
+                     (does this detector backend sample colours?), drawing all players \
+                     in one colour",
+                    samples.len(),
+                    held.len()
+                );
+                Teams::Single
+            }
+        };
+        let held = std::mem::take(held);
+        self.start_tracking(teams);
+        for (index, batch) in &held {
+            self.track(*index, batch);
+        }
+    }
+
+    fn track(&mut self, frame_index: u64, detections: &[MappedDetection]) {
+        let (Some(fps), Some(_)) = (self.fps, self.minimap.as_ref()) else {
+            return;
+        };
+        let dets = self.to_dets(detections);
+        let t = frame_index as f64 / fps;
+        let state = self
+            .minimap
+            .as_mut()
+            .expect("checked above")
+            .process(t, &dets);
+        self.pending = Some(self.render(&state));
+    }
+
+    /// Convert to the core's detections. A player whose colour is clearly
+    /// nearer one shirt gets that shirt's exact colour, so the core's
+    /// classifier never hesitates over a shaded shirt; a colour about
+    /// equally far from both gets none (it can only continue a track); a
+    /// colour far from both is passed on as is, which the core treats as
+    /// a referee.
+    fn to_dets(&self, detections: &[MappedDetection]) -> Vec<Det> {
+        detections
             .iter()
             .filter_map(|d| {
                 let class = self.classes.class_of(d.class_id)?;
@@ -620,14 +867,28 @@ impl MinimapEngine {
                     d.camera_size.1,
                 );
                 if class == Class::Player {
-                    det.color = Some(PLAYER_RGB);
+                    det.color = match self.teams {
+                        Teams::Split { home, away } => d.color.and_then(|c| {
+                            let (dh, da) = (
+                                crate::colors::lab_dist(c, home),
+                                crate::colors::lab_dist(c, away),
+                            );
+                            if dh.min(da) > TEAM_OUTLIER_DIST {
+                                Some(c)
+                            } else if (dh - da).abs() < TEAM_MARGIN {
+                                None
+                            } else if dh < da {
+                                Some(home)
+                            } else {
+                                Some(away)
+                            }
+                        }),
+                        _ => Some(PLAYER_RGB),
+                    };
                 }
                 Some(det)
             })
-            .collect();
-        let t = frame_index as f64 / fps;
-        let state = self.minimap.process(t, &dets);
-        self.pending = Some(self.render(&state));
+            .collect()
     }
 
     fn render(&self, state: &FrameState) -> OverlayFrame {
@@ -645,6 +906,40 @@ impl MinimapEngine {
     pub fn take_frame(&mut self) -> Option<OverlayFrame> {
         self.pending.take()
     }
+}
+
+/// A measured shirt colour made readable on the minimap: shirts are
+/// measured in shade or backlight, so they come out darker and greyer
+/// than they look; lift brightness and saturation, keep the hue.
+fn display_color(rgb: [u8; 3]) -> [u8; 3] {
+    let [r, g, b] = rgb.map(|v| v as f32 / 255.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let v = max;
+    let s = if max > 0.0 { (max - min) / max } else { 0.0 };
+    let h = if max == min {
+        0.0
+    } else if max == r {
+        ((g - b) / (max - min)).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / (max - min) + 2.0
+    } else {
+        (r - g) / (max - min) + 4.0
+    };
+    let s = (s * 1.6).min(1.0);
+    let v = v.max(0.85);
+    let c = v * s;
+    let x = c * (1.0 - (h.rem_euclid(2.0) - 1.0).abs());
+    let (r1, g1, b1) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    [r1, g1, b1].map(|u| ((u + m) * 255.0).round().clamp(0.0, 255.0) as u8)
 }
 
 fn same_batch(a: &[MappedDetection], b: &[MappedDetection]) -> bool {
@@ -816,12 +1111,7 @@ mod tests {
                 };
                 4
             ],
-            placement: SetupPlacement {
-                corner: Corner::BottomRight,
-                width_fraction: 0.25,
-                margin_fraction: 0.02,
-                background_opacity: 0.8,
-            },
+            teams: TeamSetup::Auto,
         }
     }
 
@@ -841,14 +1131,76 @@ mod tests {
         s.version = 2;
         assert!(s.validate().is_err(), "unknown version");
         let mut s = setup();
-        s.placement.width_fraction = 0.0;
-        assert!(s.validate().is_err(), "zero width");
+        s.teams = TeamSetup::Colors {
+            home: "#ff8000".into(),
+            away: "blue".into(),
+        };
+        assert!(s.validate().is_err(), "colour that is not #rrggbb");
     }
 
     #[test]
     fn setup_requires_every_field() {
         let json = r#"{"version":1,"field_length_m":64,"field_width_m":42.5,"points":[]}"#;
         assert!(serde_json::from_str::<MinimapSetup>(json).is_err());
+    }
+
+    #[test]
+    fn display_color_keeps_hue_and_lifts_dark_shirts() {
+        let orange = display_color([168, 77, 64]);
+        assert!(orange[0] > 200 && orange[0] > orange[1] && orange[1] > orange[2]);
+        let navy = display_color([40, 50, 90]);
+        assert!(navy[2] > 200 && navy[2] > navy[0], "{navy:?}");
+        let grey = display_color([87, 81, 79]);
+        assert!(grey.iter().all(|&v| v > 180), "{grey:?}");
+    }
+
+    #[test]
+    fn team_modes_parse() {
+        let base = r#""version":1,"field_length_m":64,"field_width_m":42.5,"players_per_team":8,"referees":1,"points":[]"#;
+        let parse = |teams: &str| {
+            serde_json::from_str::<MinimapSetup>(&format!("{{{base},\"teams\":{teams}}}"))
+                .map(|s| s.teams)
+        };
+        assert_eq!(parse(r#"{"mode":"auto"}"#).unwrap(), TeamSetup::Auto);
+        assert_eq!(parse(r#"{"mode":"off"}"#).unwrap(), TeamSetup::Off);
+        assert_eq!(
+            parse(r##"{"mode":"colors","home":"#ff8000","away":"#2040c0"}"##).unwrap(),
+            TeamSetup::Colors {
+                home: "#ff8000".into(),
+                away: "#2040c0".into()
+            }
+        );
+        assert!(parse(r#"{"mode":"colors"}"#).is_err(), "colours missing");
+    }
+
+    #[test]
+    fn placement_validation_and_corner_names() {
+        let ok = MinimapPlacement {
+            corner: Corner::BottomRight,
+            width_fraction: 0.25,
+            margin_fraction: 0.02,
+        };
+        assert!(ok.validate().is_ok());
+        assert!(
+            MinimapPlacement {
+                width_fraction: 0.9,
+                ..ok
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            MinimapPlacement {
+                margin_fraction: -0.1,
+                ..ok
+            }
+            .validate()
+            .is_err()
+        );
+        for c in Corner::ALL {
+            assert_eq!(Corner::from_name(c.name()), Some(c));
+        }
+        assert_eq!(Corner::from_name("middle"), None);
     }
 
     #[test]
@@ -874,6 +1226,7 @@ mod tests {
             camera_center: (0.2, 0.3),
             camera_size: (0.01, 0.03),
             position: None,
+            color: None,
         };
         let mut e = d;
         assert!(same_batch(&[d], &[e]));

@@ -133,6 +133,7 @@ mod tests {
             center_y: cy,
             width: 0.02,
             height: 0.02,
+            color: None,
         }
     }
 
