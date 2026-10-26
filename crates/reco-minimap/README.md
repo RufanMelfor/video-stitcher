@@ -61,6 +61,13 @@ Every field is required.
   - `{ "mode": "colors", "home": "#f06020", "away": "#2040c0" }` uses fixed
     colours. The dots are then drawn in exactly these colours.
   - `{ "mode": "off" }` draws every player in one colour.
+- `referee_color` / `ball_color` (optional, `#rrggbb`) set the referee and
+  ball dot colours. Without them, the defaults are `#facd00` (yellow) and
+  `#ff7800` (orange).
+- `show_referees` (optional, default `true`): `false` hides the referee
+  dots. That covers the model's `referee` class and anyone whose colour is
+  neither team's, such as a coach. They are still tracked, so they never
+  take a player's place.
 
 To check a setup without exporting, run:
 

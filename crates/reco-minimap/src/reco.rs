@@ -49,6 +49,11 @@ use crate::render::{Renderer, Theme};
 use crate::sport::SportProfile;
 use crate::{Config, FrameState, Minimap};
 
+/// Referee dot colour when `minimap.json` sets no `referee_color`.
+pub const DEFAULT_REFEREE_COLOR: &str = "#facd00";
+/// Ball dot colour when `minimap.json` sets no `ball_color`.
+pub const DEFAULT_BALL_COLOR: &str = "#ff7800";
+
 /// Current [`MinimapSetup::version`].
 pub const SETUP_VERSION: u32 = 1;
 
@@ -252,6 +257,16 @@ pub struct MinimapSetup {
     pub points: Vec<FieldPoint>,
     /// How players are split into teams.
     pub teams: TeamSetup,
+    /// Referee dot colour as `#rrggbb`; [`DEFAULT_REFEREE_COLOR`] when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referee_color: Option<String>,
+    /// Ball dot colour as `#rrggbb`; [`DEFAULT_BALL_COLOR`] when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ball_color: Option<String>,
+    /// Draw referees (the model's `referee` class, and boxes whose colour
+    /// is neither team's, e.g. a coach). `true` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_referees: Option<bool>,
 }
 
 /// How players are split into teams (`"teams"` in `minimap.json`).
@@ -333,6 +348,16 @@ impl MinimapSetup {
                     "point {i}: field position ({}, {}) is not on the {}x{} m field",
                     p.field_x, p.field_y, self.field_length_m, self.field_width_m
                 ));
+            }
+        }
+        for (name, hex) in [
+            ("referee_color", &self.referee_color),
+            ("ball_color", &self.ball_color),
+        ] {
+            if let Some(hex) = hex
+                && crate::colors::parse_hex(hex).is_none()
+            {
+                return bad(format!("{name} \"{hex}\" is not a #rrggbb colour"));
             }
         }
         if let TeamSetup::Colors { home, away } = &self.teams {
@@ -629,8 +654,8 @@ impl MinimapEngine {
             lines: [235, 240, 235],
             home: PLAYER_RGB,
             away: PLAYER_RGB,
-            referee: [250, 205, 0],
-            ball: [255, 120, 0],
+            referee: marker_color(setup.referee_color.as_deref(), DEFAULT_REFEREE_COLOR),
+            ball: marker_color(setup.ball_color.as_deref(), DEFAULT_BALL_COLOR),
             background_alpha: (BACKGROUND_OPACITY * 255.0).round() as u8,
             min_alpha: 0.5,
             // Upstream sizes target a full-window basketball court; a
@@ -892,7 +917,16 @@ impl MinimapEngine {
     }
 
     fn render(&self, state: &FrameState) -> OverlayFrame {
-        let canvas = self.renderer.render(state);
+        // Referees stay tracked (so they never take a player's slot); hiding
+        // them is drawing-only.
+        let canvas = if self.setup.show_referees == Some(false) {
+            self.renderer.render(&FrameState {
+                referees: Vec::new(),
+                ..state.clone()
+            })
+        } else {
+            self.renderer.render(state)
+        };
         let (w, h) = (canvas.w as u32, canvas.h as u32);
         OverlayFrame {
             width: w,
@@ -906,6 +940,14 @@ impl MinimapEngine {
     pub fn take_frame(&mut self) -> Option<OverlayFrame> {
         self.pending.take()
     }
+}
+
+/// A configured `#rrggbb` marker colour, or `default` (validated setups
+/// only reach here, so a parse failure means `default` itself).
+fn marker_color(hex: Option<&str>, default: &str) -> [u8; 3] {
+    crate::colors::parse_hex(hex.unwrap_or(default))
+        .or_else(|| crate::colors::parse_hex(default))
+        .unwrap_or([255, 255, 255])
 }
 
 /// A measured shirt colour made readable on the minimap: shirts are
@@ -1112,6 +1154,9 @@ mod tests {
                 4
             ],
             teams: TeamSetup::Auto,
+            referee_color: None,
+            ball_color: None,
+            show_referees: None,
         }
     }
 
@@ -1136,6 +1181,18 @@ mod tests {
             away: "blue".into(),
         };
         assert!(s.validate().is_err(), "colour that is not #rrggbb");
+        let mut s = setup();
+        s.ball_color = Some("#12345".into());
+        assert!(s.validate().is_err(), "short ball colour");
+        let mut s = setup();
+        s.referee_color = Some("#000000".into());
+        s.ball_color = Some("#ffffff".into());
+        assert!(s.validate().is_ok());
+        assert_eq!(marker_color(None, DEFAULT_BALL_COLOR), [255, 120, 0]);
+        assert_eq!(
+            marker_color(Some("#000000"), DEFAULT_REFEREE_COLOR),
+            [0, 0, 0]
+        );
     }
 
     #[test]
