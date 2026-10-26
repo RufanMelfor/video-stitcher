@@ -7881,6 +7881,18 @@ fn main() -> anyhow::Result<()> {
             lookahead_reactivity: reco_autocam::panners::FieldPannerConfig::default()
                 .lookahead_reactivity,
         };
+        let minimap_setup = if app.get_export_minimap_enabled() {
+            match crate::export::load_minimap_setup(s.calibration_path.as_deref(), &autocam) {
+                Ok(setup) => Some(setup),
+                Err(msg) => {
+                    log::warn!("Export not started: {msg}");
+                    app.set_export_error_text(msg.into());
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let replay_enabled = app.get_export_replay_enabled();
         let events_enabled = app.get_export_events_enabled();
         let events_path = if events_enabled {
@@ -7980,6 +7992,7 @@ fn main() -> anyhow::Result<()> {
                 cut_ranges,
                 pause_overlay,
                 autocam,
+                minimap_setup,
                 scoreboard_package,
                 scoreboard_state,
                 scoreboard_replay,

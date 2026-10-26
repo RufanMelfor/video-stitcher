@@ -436,6 +436,14 @@ enum Commands {
         #[arg(long)]
         events: Option<String>,
 
+        /// Draw a top-down pitch minimap (players, referees, ball) in a
+        /// corner of the output, from a minimap setup JSON (field size,
+        /// known field points, placement - see crates/reco-minimap/README.md).
+        /// Requires AI tracking (--model, tracking field or ball). Off
+        /// unless given.
+        #[arg(long, value_name = "MINIMAP_JSON")]
+        minimap: Option<String>,
+
         /// Precomputed trajectory CSV (frame,yaw,pitch,fov). Overrides
         /// AI tracking with poses read from the file.
         #[arg(long)]
@@ -1277,6 +1285,7 @@ fn main() -> anyhow::Result<()> {
             allow_no_tracking,
             no_zero_copy,
             events,
+            minimap,
             trajectory,
             panner_config,
             panner_preset,
@@ -1335,6 +1344,7 @@ fn main() -> anyhow::Result<()> {
                 allow_no_tracking,
                 no_zero_copy,
                 events_path: events.as_deref(),
+                minimap_path: minimap.as_deref(),
                 trajectory_path: trajectory.as_deref(),
                 panner_config_path: panner_config.as_deref(),
                 panner_preset: panner_preset.as_deref(),

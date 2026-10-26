@@ -1302,6 +1302,9 @@ export component RecoApp inherits Window {
     in-out property <float> export-cluster-alpha: 0.012;
     in-out property <bool> export-replay-enabled: false;
     in-out property <bool> export-events-enabled: false;
+    // Draw the top-down pitch minimap (reco-minimap) in the export. Needs
+    // AI tracking and a minimap.json next to the calibration file.
+    in-out property <bool> export-minimap-enabled: false;
 
     // Fires once per AI Tracking / panner slider edit above, so Rust can
     // persist the new value as the app-level last-used default (see
@@ -6152,6 +6155,14 @@ export component RecoApp inherits Window {
                         CheckBox {
                             text: "Save AI debug events (.jsonl for visualize_detections.py)";
                             checked <=> root.export-events-enabled;
+                        }
+                    }
+
+                    Tip {
+                        tip: "Draws a top-down pitch map with players, referee and ball in the bottom corner of the export. Needs AI Tracking (below) and a minimap.json file next to the calibration file, which sets the field size and where the field corners are in the camera images.";
+                        CheckBox {
+                            text: "Pitch minimap (needs AI Tracking + minimap.json)";
+                            checked <=> root.export-minimap-enabled;
                         }
                     }
 

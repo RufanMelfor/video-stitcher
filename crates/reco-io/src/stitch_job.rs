@@ -117,6 +117,10 @@ pub struct StitchJob {
     /// filter decision, and pan decision for offline analysis.
     events_path: Option<std::path::PathBuf>,
 
+    /// Extra in-process pipeline-event consumer (e.g. the minimap),
+    /// teed with the `events_path` JSONL writer when both are set.
+    event_sink: Option<Box<dyn reco_core::detect::pipeline_event::PipelineEventSink>>,
+
     /// AI/panner settings snapshot, written as the first line of the
     /// events JSONL (only meaningful together with `events_path`; only
     /// set this when AI tracking is actually enabled - see
@@ -364,6 +368,7 @@ impl StitchJob {
             lookahead_secs: 0.0,
             lookahead_reduced_bit_depth: false,
             events_path: None,
+            event_sink: None,
             ai_run_config: None,
             ai_run_model_path: None,
             metadata_comment: None,
@@ -737,6 +742,19 @@ impl StitchJob {
         self
     }
 
+    /// Attach an in-process pipeline-event consumer (e.g.
+    /// `reco_minimap::reco::MinimapSink`). A session has a single sink
+    /// slot, so with [`Self::events`] also set both receive every event
+    /// (JSONL writer first). The sink runs on the session thread: keep
+    /// its `emit` cheap. A second call replaces the first sink.
+    pub fn event_sink(
+        mut self,
+        sink: Box<dyn reco_core::detect::pipeline_event::PipelineEventSink>,
+    ) -> Self {
+        self.event_sink = Some(sink);
+        self
+    }
+
     /// AI/panner settings (plus which model produced this run) to write
     /// as the events JSONL's first line (a
     /// [`PipelineEvent::RunConfig`](reco_core::detect::pipeline_event::PipelineEvent::RunConfig)),
@@ -1012,21 +1030,34 @@ impl StitchJob {
         // any) is emitted directly here, before the sink is handed to
         // the session, so it's always the first line - the render loop
         // (and its frame_start events) hasn't started yet at this point.
+        // An extra in-process sink (`Self::event_sink`) shares the
+        // session's single slot through a `TeeSink`.
+        use reco_core::detect::pipeline_event::PipelineEventSink;
+        let mut jsonl: Option<Box<dyn PipelineEventSink>> = None;
         if let Some(ref events_path) = self.events_path {
             match crate::jsonl_sink::JsonlSink::create(events_path) {
                 Ok(mut sink) => {
                     log::info!("Pipeline events -> {}", events_path.display());
                     if let Some(config) = self.ai_run_config.take() {
-                        use reco_core::detect::pipeline_event::{PipelineEvent, PipelineEventSink};
+                        use reco_core::detect::pipeline_event::PipelineEvent;
                         let model_path = self.ai_run_model_path.take().unwrap_or_default();
                         sink.emit(PipelineEvent::RunConfig { model_path, config });
                     }
-                    session.set_event_sink(Box::new(sink));
+                    jsonl = Some(Box::new(sink));
                 }
                 Err(e) => {
                     log::warn!("Failed to open events file {}: {e}", events_path.display());
                 }
             }
+        }
+        let sink = match (jsonl, self.event_sink.take()) {
+            (Some(first), Some(second)) => Some(Box::new(
+                reco_core::detect::pipeline_event::TeeSink::new(first, second),
+            ) as Box<dyn PipelineEventSink>),
+            (first, second) => first.or(second),
+        };
+        if let Some(sink) = sink {
+            session.set_event_sink(sink);
         }
 
         // All inputs must share one frame rate: the session clock, trim
@@ -1788,6 +1819,15 @@ impl StitchJob {
             out,
             "Pipeline events JSONL: {}",
             describe_path_opt(&self.events_path)
+        );
+        let _ = writeln!(
+            out,
+            "In-process event sink: {}",
+            if self.event_sink.is_some() {
+                "attached"
+            } else {
+                "none"
+            }
         );
         let _ = writeln!(
             out,

@@ -21,7 +21,7 @@ pub use matrices::{
     FAR_PLANE, NEAR_PLANE, ScreenProjection, project_world_to_screen, unproject_screen_to_world,
     view_matrix,
 };
-pub use rig_correction::{resolve_render_pose, world_to_render_pose};
+pub use rig_correction::{resolve_render_pose, rig_frame, world_to_render_pose};
 pub use types::{CameraId, ViewportPosition};
 pub use virtual_camera::VirtualCamera;
 

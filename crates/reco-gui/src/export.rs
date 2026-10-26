@@ -64,6 +64,45 @@ pub enum ExportOutcome {
     Failed(reco_io::stitch_job::StitchError),
 }
 
+/// File name of the minimap setup, looked up next to the calibration file.
+pub const MINIMAP_SETUP_FILE: &str = "minimap.json";
+
+/// Load the pitch-minimap setup for an export, or explain why it can't
+/// run. Called on the UI thread before the export starts, so a missing or
+/// broken `minimap.json` stops the export with a message instead of
+/// silently exporting without the minimap.
+pub fn load_minimap_setup(
+    calibration_path: Option<&std::path::Path>,
+    autocam: &AutocamUiConfig,
+) -> Result<reco_minimap::reco::MinimapSetup, String> {
+    let ai_ready = cfg!(feature = "autocam")
+        && autocam.enabled
+        && !autocam.model_path.is_empty()
+        && autocam.tracking_mode != "sweep";
+    if !ai_ready {
+        return Err(
+            "Pitch minimap needs AI Tracking (Field or Ball mode, with a model) - turn it on \
+             or switch the minimap off."
+                .into(),
+        );
+    }
+    let Some(dir) = calibration_path.and_then(|p| p.parent()) else {
+        return Err(
+            "Pitch minimap: the calibration has not been saved to a file yet, so there is \
+             no folder to look for minimap.json in."
+                .into(),
+        );
+    };
+    let path = dir.join(MINIMAP_SETUP_FILE);
+    if !path.is_file() {
+        return Err(format!(
+            "Pitch minimap: no {MINIMAP_SETUP_FILE} found next to the calibration ({}).",
+            path.display()
+        ));
+    }
+    reco_minimap::reco::MinimapSetup::from_file(&path).map_err(|e| format!("Pitch minimap: {e}"))
+}
+
 /// Autocam + panner settings captured from the GUI export panel.
 ///
 /// Slint properties can only be read on the UI thread, so the caller
@@ -216,6 +255,38 @@ impl reco_core::telemetry::TelemetrySink for ExportTelemetrySink {
     }
 }
 
+/// The minimap's session halves for one export (see
+/// `reco_minimap::reco::attach`). Errors are user-facing messages.
+#[cfg(feature = "autocam")]
+fn build_minimap(
+    setup: &reco_minimap::reco::MinimapSetup,
+    cal: &Calibration,
+    model_path: &str,
+    output_size: (u32, u32),
+) -> Result<
+    (
+        reco_minimap::reco::MinimapSink,
+        reco_minimap::reco::MinimapOverlay,
+        reco_minimap::reco::MinimapHandle,
+        reco_core::render::overlay::OverlayPlacement,
+    ),
+    String,
+> {
+    let names = reco_autocam::read_model_class_names(std::path::Path::new(model_path));
+    let classes = reco_minimap::reco::ClassMap::from_names(&names).ok_or_else(|| {
+        format!(
+            "Pitch minimap: the AI model names no person/player class (labels: {names:?}), \
+             so there is nothing to draw"
+        )
+    })?;
+    let engine = reco_minimap::reco::MinimapEngine::new(setup, cal, classes, output_size)
+        .map_err(|e| format!("Pitch minimap: {e}"))?;
+    let placement = engine.placement();
+    let (sink, overlay, handle) = reco_minimap::reco::attach(engine);
+    log::info!("Export: pitch minimap on");
+    Ok((sink, overlay, handle, placement))
+}
+
 /// Run a StitchJob on the worker thread.
 #[allow(clippy::too_many_arguments)]
 pub fn run_export(
@@ -242,6 +313,8 @@ pub fn run_export(
     // `StitchJob::pause_overlay`'s doc comment.
     pause_overlay: Option<(f32, f32)>,
     autocam: AutocamUiConfig,
+    // Pitch minimap, from `load_minimap_setup`; `None` = off.
+    minimap_setup: Option<reco_minimap::reco::MinimapSetup>,
     scoreboard_package: Option<reco_scoreboard::ScoreboardPackage>,
     scoreboard_state: Option<serde_json::Value>,
     scoreboard_replay: Option<ScoreboardReplay>,
@@ -275,6 +348,22 @@ pub fn run_export(
     // panner is attached).
     #[cfg(feature = "autocam")]
     let autocam_pitch_limits = cal.autocam_pitch_limits;
+
+    // Pitch minimap: built here, before `cal` moves into the job, and
+    // attached together with AI tracking below.
+    #[cfg(feature = "autocam")]
+    let minimap = match minimap_setup
+        .as_ref()
+        .map(|setup| build_minimap(setup, &cal, &autocam.model_path, (width, height)))
+        .transpose()
+    {
+        Ok(m) => m,
+        Err(msg) => {
+            return ExportOutcome::Failed(reco_io::stitch_job::StitchError::Other(msg));
+        }
+    };
+    #[cfg(not(feature = "autocam"))]
+    let _ = &minimap_setup;
 
     let post_status = |text: String| {
         let weak = app_weak.clone();
@@ -771,9 +860,23 @@ pub fn run_export(
         let ac = autocam.clone();
         let status_weak = app_weak.clone();
         let pitch_limits = autocam_pitch_limits;
+        let minimap_handle = match minimap {
+            Some((sink, overlay, handle, placement)) => {
+                job = job
+                    .event_sink(Box::new(sink))
+                    .overlay_layer(Box::new(overlay), placement);
+                Some(handle)
+            }
+            None => None,
+        };
         job = job.on_session(move |session, source| {
             session.set_autocam_pitch_limits(pitch_limits);
             let info = source.info();
+            if let Some(ref handle) = minimap_handle
+                && let Err(e) = handle.set_fps(info.fps)
+            {
+                log::warn!("Minimap: {e} - it will stay empty");
+            }
             let mode = match ac.tracking_mode.as_str() {
                 "ball" => reco_autocam::TrackingMode::Ball,
                 "sweep" => reco_autocam::TrackingMode::Sweep,

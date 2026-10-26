@@ -40,6 +40,7 @@ automation = []
 base64 = "0.22"
 reco-core = { path = "../reco-core" }
 reco-scoreboard = { path = "../reco-scoreboard" }
+reco-minimap = { path = "../reco-minimap" }
 reco-control = { path = "../reco-control" }
 reco-io = { path = "../reco-io", features = ["ffmpeg", "config", "stacked-output"] }
 serde = { version = "1", features = ["derive"] }

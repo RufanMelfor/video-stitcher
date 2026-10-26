@@ -5688,6 +5688,7 @@ dependencies = [
  "reco-control",
  "reco-core",
  "reco-io",
+ "reco-minimap",
  "serde_json",
  "tracing",
  "tracing-chrome",
@@ -5777,6 +5778,7 @@ dependencies = [
  "reco-core",
  "reco-detect",
  "reco-io",
+ "reco-minimap",
  "reco-scoreboard",
  "rfd",
  "serde",
@@ -5809,6 +5811,17 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "reco-minimap"
+version = "0.5.4"
+dependencies = [
+ "log",
+ "reco-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

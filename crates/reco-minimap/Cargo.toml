@@ -1,0 +1,16 @@
+[package]
+publish = false
+name = "reco-minimap"
+version = "0.5.4"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Top-down pitch minimap (players, referees, ball) from reco detections: field projection, plausible tracking, RGBA overlay"
+
+[dependencies]
+reco-core = { path = "../reco-core" }
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"

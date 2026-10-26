@@ -104,6 +104,8 @@ pub struct StitchArgs<'a> {
     pub no_zero_copy: bool,
     /// Path for pipeline event JSONL output.
     pub events_path: Option<&'a str>,
+    /// Minimap setup JSON; draws the pitch minimap overlay when set.
+    pub minimap_path: Option<&'a str>,
     /// Precomputed trajectory CSV (overrides AI panner).
     pub trajectory_path: Option<&'a str>,
     /// FieldPanner tuning JSON (field mode); only present keys override.
@@ -243,6 +245,15 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         }
     })
     .to_string();
+
+    // Built before `cal` moves into the job; attached to it below.
+    #[cfg(feature = "autocam")]
+    let minimap = build_minimap(&args, &cal)?;
+    #[cfg(not(feature = "autocam"))]
+    anyhow::ensure!(
+        args.minimap_path.is_none(),
+        "--minimap requires AI tracking, which this build does not include (feature `autocam`)"
+    );
 
     let mut job = reco_io::StitchJob::with_calibration(
         to_input(args.left),
@@ -468,6 +479,15 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         let confidence_threshold = args.confidence_threshold;
         let async_detect = args.async_detect;
         let lookahead_secs = args.lookahead;
+        let minimap_handle = match minimap {
+            Some((sink, overlay, handle, placement)) => {
+                job = job
+                    .event_sink(Box::new(sink))
+                    .overlay_layer(Box::new(overlay), placement);
+                Some(handle)
+            }
+            None => None,
+        };
         let tracking_failed = Arc::clone(&tracking_failed);
         // Resolve FieldPanner tuning up front so a bad preset/file fails
         // before rendering. Preset is the base; --panner-config overlays.
@@ -605,6 +625,11 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         job = job.on_session(move |session, source| {
             session.set_autocam_pitch_limits(autocam_pitch_limits);
             let info = source.info();
+            if let Some(ref handle) = minimap_handle
+                && let Err(e) = handle.set_fps(info.fps)
+            {
+                log::warn!("Minimap: {e} - it will stay empty");
+            }
             let mode = match mode_str.as_str() {
                 "sweep" => reco_autocam::TrackingMode::Sweep,
                 "ball" => reco_autocam::TrackingMode::Ball,
@@ -755,6 +780,46 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
 /// below) means "off", matching the GUI slider and the saved calibration.
 /// Passed through as-is, `0.0` would be a real ceiling at the horizon and
 /// reject nearly every ball/player.
+/// The minimap's session halves, built from `--minimap` (`None` when the
+/// flag is absent). Fails when the setup is invalid or AI tracking - the
+/// minimap's only input - is not requested.
+#[cfg(feature = "autocam")]
+fn build_minimap(
+    args: &StitchArgs<'_>,
+    cal: &reco_core::calibration::Calibration,
+) -> anyhow::Result<
+    Option<(
+        reco_minimap::reco::MinimapSink,
+        reco_minimap::reco::MinimapOverlay,
+        reco_minimap::reco::MinimapHandle,
+        reco_core::render::overlay::OverlayPlacement,
+    )>,
+> {
+    let Some(path) = args.minimap_path else {
+        return Ok(None);
+    };
+    let model_path = match args.model_path {
+        Some(m) if args.trajectory_path.is_none() && args.tracking_mode != "sweep" => m,
+        _ => anyhow::bail!(
+            "--minimap needs AI detections: pass --model with --tracking field or ball \
+             (not --trajectory or sweep)"
+        ),
+    };
+    let setup = reco_minimap::reco::MinimapSetup::from_file(Path::new(path))?;
+    let names = reco_autocam::read_model_class_names(Path::new(model_path));
+    let classes = reco_minimap::reco::ClassMap::from_names(&names).ok_or_else(|| {
+        anyhow::anyhow!(
+            "--minimap: model {model_path} names no person/player class (labels: {names:?})"
+        )
+    })?;
+    let engine =
+        reco_minimap::reco::MinimapEngine::new(&setup, cal, classes, (args.width, args.height))?;
+    let placement = engine.placement();
+    let (sink, overlay, handle) = reco_minimap::reco::attach(engine);
+    println!("Minimap: on ({path})");
+    Ok(Some((sink, overlay, handle, placement)))
+}
+
 fn pitch_ceiling(v: Option<f32>) -> Option<f32> {
     v.filter(|p| *p > 0.0)
 }

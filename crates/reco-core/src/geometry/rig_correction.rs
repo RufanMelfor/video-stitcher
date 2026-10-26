@@ -26,7 +26,12 @@ use super::virtual_camera::VirtualCamera;
 /// forward `f0` (base forward after tilt; roll rotates *around* it, so roll
 /// leaves it unchanged). Must mirror `view_matrix`'s construction exactly -
 /// the round-trip test in this module is the guard.
-pub(crate) fn rig_frame(
+///
+/// Public because `u` is the true (level) up direction in the panorama's
+/// native coordinates: a consumer that intersects detection rays with the
+/// ground (e.g. `reco-minimap`) needs it, since panorama pitch is measured
+/// in the tilted rig frame.
+pub fn rig_frame(
     cam: &VirtualCamera,
     rig_tilt: f32,
     rig_roll: f32,

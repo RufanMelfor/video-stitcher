@@ -341,13 +341,7 @@ pub fn setup_autocam(
     let is_onnx = model_path.ends_with(".onnx");
     #[cfg(feature = "ort")]
     let class_names = if is_onnx {
-        match reco_detect::create_ort_session(Path::new(model_path), Vec::new()) {
-            Ok((_, _, names)) => names,
-            Err(e) => {
-                log::warn!("Could not read model labels: {e}, using COCO defaults");
-                Vec::new()
-            }
-        }
+        onnx_class_names(Path::new(model_path))
     } else {
         Vec::new() // Labels from sidecar file or defaults
     };
@@ -785,6 +779,47 @@ pub fn setup_autocam(
     }
 
     Ok(detection_active)
+}
+
+/// The model's class labels (index = class id), read the same way
+/// [`setup_autocam`] reads them: from the ONNX metadata for `.onnx`
+/// files, from the `<name>.labels` sidecar otherwise (`.engine`, NCNN).
+/// Empty when neither is available - callers must then not assume any
+/// class layout.
+///
+/// For consumers that interpret raw class ids next to an autocam session
+/// (e.g. `reco-minimap`), since the session does not expose the labels
+/// its detector resolved.
+pub fn read_model_class_names(model_path: &Path) -> Vec<String> {
+    let is_onnx = model_path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("onnx"));
+    if !is_onnx {
+        return reco_detect::read_labels_file(model_path.with_extension("labels"));
+    }
+    #[cfg(feature = "ort")]
+    {
+        onnx_class_names(model_path)
+    }
+    #[cfg(not(feature = "ort"))]
+    {
+        log::warn!(
+            "Cannot read class names from {} without the `ort` feature",
+            model_path.display()
+        );
+        Vec::new()
+    }
+}
+
+#[cfg(feature = "ort")]
+fn onnx_class_names(model_path: &Path) -> Vec<String> {
+    match reco_detect::create_ort_session(model_path, Vec::new()) {
+        Ok((_, _, names)) => names,
+        Err(e) => {
+            log::warn!("Could not read model labels: {e}, using COCO defaults");
+            Vec::new()
+        }
+    }
 }
 
 /// Resolve a class label to its ID from the model's label list, by name
