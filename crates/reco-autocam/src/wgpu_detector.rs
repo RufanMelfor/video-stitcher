@@ -126,7 +126,7 @@ impl UnifiedDetector for WgpuPreprocessingDetector {
                     src_height: height,
                 };
                 let mut dets = self.inner.detect(camera, &inner_frame)?;
-                sample_torso_colors(&mut dets, &tensor, input_size, width, height);
+                sample_torso_colors(&mut dets, camera, &tensor, input_size, width, height);
                 Ok(dets)
             }
             // Pass through other frame types to the inner detector
@@ -180,7 +180,7 @@ impl UnifiedDetector for WgpuPreprocessingDetector {
                     // inside the deferred call; this only adds the torso
                     // colours, from the same shared tensor.
                     finish: Box::new(move |mut dets| {
-                        sample_torso_colors(&mut dets, &pixels, input_size, width, height);
+                        sample_torso_colors(&mut dets, camera, &pixels, input_size, width, height);
                         dets
                     }),
                 })
@@ -207,9 +207,11 @@ const TORSO_SAMPLES_PER_AXIS: usize = 10;
 /// `0..=1`, the source frame letterboxed into `input`). Detections are
 /// normalized to the `src_w x src_h` frame, the same space the tensor was
 /// letterboxed from. A band that falls outside the tensor leaves `color`
-/// as `None`.
+/// as `None`. Only detections of `camera` are touched: in async detection the
+/// merged detections of both cameras pass through every camera's finisher.
 fn sample_torso_colors(
     dets: &mut [Detection],
+    camera: CameraId,
     tensor: &[f32],
     input: reco_detect::InputSize,
     src_w: u32,
@@ -224,7 +226,7 @@ fn sample_torso_colors(
     let to_x = |nx: f32| nx * src_w as f32 * lb.scale + lb.pad_x;
     let to_y = |ny: f32| ny * src_h as f32 * lb.scale + lb.pad_y;
     let mut channels: [Vec<u8>; 3] = Default::default();
-    for d in dets.iter_mut() {
+    for d in dets.iter_mut().filter(|d| d.camera == camera) {
         let top = d.center_y - d.height / 2.0;
         let x0 = to_x(d.center_x - d.width * TORSO_HALF_WIDTH).max(0.0);
         let x1 = to_x(d.center_x + d.width * TORSO_HALF_WIDTH).min((iw - 1) as f32);
@@ -308,7 +310,7 @@ mod tests {
         }
         // player box in source pixels: x 30..50, y 14..54 (head at the top)
         let mut dets = vec![player(40.0 / 80.0, 34.0 / 60.0, 20.0 / 80.0, 40.0 / 60.0)];
-        sample_torso_colors(&mut dets, &t, input, 80, 60);
+        sample_torso_colors(&mut dets, CameraId::Left, &t, input, 80, 60);
         let c = dets[0].color.expect("band inside the tensor");
         assert!(c[0] > 200 && c[1] < 60 && c[2] < 60, "{c:?}");
     }
@@ -317,7 +319,19 @@ mod tests {
     fn short_tensor_samples_nothing() {
         let input = reco_detect::InputSize::new(40, 30);
         let mut dets = vec![player(0.5, 0.5, 0.1, 0.2)];
-        sample_torso_colors(&mut dets, &[0.0; 10], input, 80, 60);
+        sample_torso_colors(&mut dets, CameraId::Left, &[0.0; 10], input, 80, 60);
         assert!(dets[0].color.is_none());
+    }
+
+    #[test]
+    fn other_cameras_detections_are_left_alone() {
+        let input = reco_detect::InputSize::new(40, 30);
+        let t = vec![0.5f32; 3 * 40 * 30];
+        let mut right = player(0.5, 0.5, 0.2, 0.4);
+        right.camera = CameraId::Right;
+        let mut dets = vec![player(0.5, 0.5, 0.2, 0.4), right];
+        sample_torso_colors(&mut dets, CameraId::Left, &t, input, 80, 60);
+        assert!(dets[0].color.is_some());
+        assert!(dets[1].color.is_none());
     }
 }

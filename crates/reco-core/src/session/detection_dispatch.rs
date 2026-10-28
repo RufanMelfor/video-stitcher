@@ -382,7 +382,15 @@ impl StitchSession {
                 Ok(DetectSplit::Done(dets)) => done_dets.extend(dets),
                 Ok(DetectSplit::Pending { job, finish }) => {
                     pending_jobs.push(job);
-                    finish_fn = Some(finish);
+                    // Compose, don't overwrite: each camera's `finish` runs
+                    // on the merged detections of the whole frame, so the
+                    // last camera's must not replace the first one's. Each
+                    // `finish` only touches its own camera's detections
+                    // (`Detection::camera`).
+                    finish_fn = Some(match finish_fn.take() {
+                        Some(prior) => Box::new(move |dets| finish(prior(dets))),
+                        None => finish,
+                    });
                 }
                 Err(DetectorError::UnsupportedFrameKind) => log::debug!(
                     "StitchSession detector '{}' does not support this frame residency ({camera:?})",
