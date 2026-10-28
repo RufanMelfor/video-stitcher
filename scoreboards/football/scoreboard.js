@@ -164,6 +164,33 @@
         }
     }
 
+    // Shrinks a team name until it fits its slot instead of eliding it
+    // straight away - how wide a name renders depends on the user's
+    // chosen font (custom.fontFamily), so no fixed font-size fits every
+    // club. Starts from the stylesheet's size each time, so a shorter
+    // name grows back. Below the floor the CSS ellipsis takes over.
+    const NAME_MIN_FONT_PX = 26;
+    function fitText(el) {
+        el.style.removeProperty("font-size");
+        let size = parseFloat(getComputedStyle(el).fontSize);
+        while (el.scrollWidth > el.clientWidth && size > NAME_MIN_FONT_PX) {
+            size -= 1;
+            el.style.fontSize = `${size}px`;
+        }
+    }
+
+    function fitNames() {
+        fitText(elements.homeName);
+        fitText(elements.awayName);
+    }
+
+    // A web font finishing loading after the update changes text width;
+    // re-fit then and ask the host for a fresh frame.
+    document.fonts?.ready.then(() => {
+        fitNames();
+        window.__recoMarkDirty?.();
+    });
+
     Reco.onUpdate((state) => {
         debugState = ensureStateShape(structuredClone(state));
         text(elements.homeName, state.home?.shortName || state.home?.name, "HOME");
@@ -195,6 +222,8 @@
         setCustomVar(elements.board, "--banner-color", state.custom?.bannerColor);
         setLogo(elements.homeLogo, state.home?.logo);
         setLogo(elements.awayLogo, state.away?.logo);
+        // After setLogo: a hidden logo widens the name slot (style.css).
+        fitNames();
         syncEditorFields();
     });
 
