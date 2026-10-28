@@ -29,7 +29,7 @@ body {
     --away-color: #cf2027;
     --away-secondary: #ffffff;
     /* Badge layout: the crests are the largest element and overhang the
-       top edge of the bar. The Logo size slider (custom.logoSize, 20-80,
+       bar top and bottom. The Logo size slider (custom.logoSize, 20-80,
        historically an inline icon size with a 34px default) now scales
        the crest relative to that 34px baseline - 34 renders the 168px
        design size - clamped so neither end breaks the layout. A literal
@@ -87,16 +87,18 @@ body {
 .team-away:has(.team-logo[hidden]) { padding-right: 40px; }
 .team-away::before { border-radius: inherit; background: linear-gradient(270deg, var(--away-color), transparent 95%); }
 
-/* Crest is anchored to the bar's bottom edge and grows upward, so a
-   larger Logo size never pushes the bar itself taller. */
+/* Crest is centered on the bar's horizontal midline, overhanging top
+   and bottom equally, so a larger Logo size never pushes the bar
+   itself taller. */
 .team-logo {
     position: absolute;
-    bottom: -6px;
+    top: 50%;
     left: -4px;
+    transform: translateY(-50%);
     width: var(--crest-size);
     height: var(--crest-size);
     object-fit: contain;
-    object-position: bottom center;
+    object-position: center;
     filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.6));
 }
 .team-away .team-logo { left: auto; right: -4px; }
