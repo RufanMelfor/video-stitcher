@@ -28,80 +28,86 @@ body {
     --home-secondary: #ffffff;
     --away-color: #cf2027;
     --away-secondary: #ffffff;
+    /* Badge layout: the crests are the largest element and overhang the
+       top edge of the bar. The Logo size slider (custom.logoSize, 20-80,
+       historically an inline icon size with a 34px default) now scales
+       the crest relative to that 34px baseline - 34 renders the 168px
+       design size - clamped so neither end breaks the layout. A literal
+       px value would cap the crest at 80px, which is what made logos
+       illegible at the ~0.5x on-screen render scale. */
+    --crest-size: clamp(110px, calc(var(--logo-size, 34px) * 168 / 34), 200px);
+    --bar-height: 120px;
+    position: relative;
     display: grid;
-    grid-template-columns: 330px 116px 270px 116px 330px;
-    min-height: 146px;
+    grid-template-columns: 540px 130px 240px 130px 540px;
+    height: var(--bar-height);
     color: #fff;
     /* --scoreboard-font/--banner-color: set from state.custom.fontFamily/
        bannerColor by scoreboard.js, which removeProperty()s them instead
        of setting an empty value when unset - var()'s fallback here only
        kicks in for a genuinely *unset* property, not an empty one. */
     font-family: var(--scoreboard-font, inherit);
-    background: var(--banner-color, linear-gradient(180deg, rgba(17, 22, 31, 0.94), rgba(5, 8, 14, 0.92)));
-    border: 1px solid rgba(255, 255, 255, 0.26);
-    border-radius: 18px;
+    background: var(--banner-color, linear-gradient(180deg, rgba(21, 27, 39, 0.95), rgba(7, 10, 16, 0.93)));
+    border: 2px solid rgba(255, 255, 255, 0.18);
+    border-radius: calc(var(--bar-height) / 2);
     box-shadow: 0 12px 36px rgba(0, 0, 0, 0.55), inset 0 1px rgba(255, 255, 255, 0.12);
-    overflow: hidden;
-}
-
-/* Logo sits inline next to the team name (see .team-identity below)
-   instead of floating in the top corner - an earlier absolutely
-   positioned version overlapped the HOME/AWAY label and team name. */
-.team-identity {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-.team-away .team-identity { flex-direction: row-reverse; }
-
-.team-logo {
-    flex-shrink: 0;
-    width: var(--logo-size, 34px);
-    height: var(--logo-size, 34px);
-    object-fit: contain;
-    filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.6));
+    /* No overflow: hidden - the crests and the competition tab sit
+       partly outside the bar on purpose. */
 }
 
 .team {
     position: relative;
     isolation: isolate;
     display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 6px;
-    padding: 20px 28px;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    /* Room for the overhanging crest; collapses when no logo is set. */
+    padding: 0 20px 0 calc(var(--crest-size) + 6px);
 }
+.team-home:has(.team-logo[hidden]) { padding-left: 40px; }
 
 .team::before {
     content: "";
     position: absolute;
     inset: 0;
-    opacity: 0.76;
+    opacity: 0.85;
     z-index: -1;
 }
 
-.team-home { color: var(--home-secondary); text-align: left; }
-.team-home::before { background: linear-gradient(100deg, var(--home-color), transparent 92%); }
-.team-away { color: var(--away-secondary); text-align: right; align-items: flex-end; }
-.team-away::before { background: linear-gradient(260deg, var(--away-color), transparent 92%); }
+.team-home { color: var(--home-secondary); border-radius: calc(var(--bar-height) / 2) 0 0 calc(var(--bar-height) / 2); }
+.team-home::before { border-radius: inherit; background: linear-gradient(90deg, var(--home-color), transparent 95%); }
+.team-away {
+    flex-direction: row-reverse;
+    color: var(--away-secondary);
+    text-align: right;
+    padding: 0 calc(var(--crest-size) + 6px) 0 20px;
+    border-radius: 0 calc(var(--bar-height) / 2) calc(var(--bar-height) / 2) 0;
+}
+.team-away:has(.team-logo[hidden]) { padding-right: 40px; }
+.team-away::before { border-radius: inherit; background: linear-gradient(270deg, var(--away-color), transparent 95%); }
 
-/* 18px used to be the design size here, matching a real broadcast
-   caption's proportions - but at a typical on-screen banner size
-   (~0.5x render scale, see contain_fit_render_scale) that's under
-   10 physical pixels tall, illegible with any renderer (confirmed via
-   a real exported frame, not just a rendering-mechanism bug - see
-   SESSION_HANDOFF's 2026-08-25 entry). Bumped to stay readable; still
-   clearly smaller than .team-name so it reads as a caption, not a
-   second name. */
-.team-label { font-size: 26px; letter-spacing: 0.16em; opacity: 0.72; }
+/* Crest is anchored to the bar's bottom edge and grows upward, so a
+   larger Logo size never pushes the bar itself taller. */
+.team-logo {
+    position: absolute;
+    bottom: -6px;
+    left: -4px;
+    width: var(--crest-size);
+    height: var(--crest-size);
+    object-fit: contain;
+    object-position: bottom center;
+    filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.6));
+}
+.team-away .team-logo { left: auto; right: -4px; }
+
 /* min-width: 0 lets a flex item shrink below its content size at all -
-   without it, overflow/text-overflow can't kick in inside .team-identity
-   and a long name (or a large logo, see the Logo size slider) would push
-   the card wider instead of eliding. */
-.team-name { min-width: 0; font-size: 38px; line-height: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 2px 6px #000; }
-.score { display: grid; place-items: center; font-size: 72px; font-variant-numeric: tabular-nums; text-shadow: 0 3px 8px #000; }
+   without it, overflow/text-overflow can't kick in and a long name
+   would push the bar wider instead of eliding. */
+.team-name { min-width: 0; font-size: 38px; line-height: 1; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 2px 6px #000; }
+.score { display: grid; place-items: center; font-size: 80px; font-weight: 800; font-variant-numeric: tabular-nums; text-shadow: 0 3px 8px #000; }
 
-.cards { display: flex; gap: 6px; }
+.cards { display: flex; flex-shrink: 0; gap: 6px; }
 .team-away .cards { flex-direction: row-reverse; }
 .card-badge {
     display: inline-flex;
@@ -111,7 +117,8 @@ body {
     height: 32px;
     padding: 0 6px;
     border-radius: 4px;
-    /* Same too-small-at-typical-render-scale fix as .team-label above. */
+    /* 20px, not smaller: at the typical ~0.5x on-screen render scale
+       anything below this is under 10 physical pixels and illegible. */
     font-size: 20px;
     font-variant-numeric: tabular-nums;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
@@ -131,19 +138,41 @@ body {
 .card-red { background: #d0342c; color: #fff; }
 
 .game-center {
-    display: grid;
-    place-content: center;
-    grid-template-columns: 1fr 1fr;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
     text-align: center;
-    background: rgba(0, 0, 0, 0.28);
 }
 
-/* .competition/.added-time/.period bumped alongside .team-label above -
-   same too-small-to-render-legibly-at-any-scale issue, same fix. */
-.competition { grid-column: 1 / -1; margin-bottom: 4px; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 22px; font-weight: 700; letter-spacing: 0.09em; opacity: 0.72; }
-.clock { grid-column: 1 / -1; font-size: 54px; line-height: 1.05; font-variant-numeric: tabular-nums; letter-spacing: 0.04em; }
-.added-time { grid-column: 1 / -1; margin-top: -6px; font-size: 26px; font-variant-numeric: tabular-nums; color: #ffd45a; }
-.period { grid-column: 1 / -1; margin-top: 10px; font-size: 28px; letter-spacing: 0.06em; }
+/* Sits as a tab on top of the bar so it never squeezes the clock out
+   of the 120px bar height. */
+.competition {
+    position: absolute;
+    bottom: calc(100% + 2px);
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: 320px;
+    padding: 4px 16px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    background: rgba(7, 10, 16, 0.9);
+    border: 2px solid rgba(255, 255, 255, 0.18);
+    border-bottom: 0;
+    border-radius: 10px 10px 0 0;
+}
+.competition[hidden] { display: none; }
+.clock-row { display: flex; align-items: baseline; gap: 8px; }
+.clock { font-size: 54px; line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: 0.04em; }
+.added-time { font-size: 28px; font-variant-numeric: tabular-nums; color: #ffd45a; }
+.added-time[hidden] { display: none; }
+.period { margin-top: 6px; font-size: 26px; letter-spacing: 0.06em; opacity: 0.85; }
 
 .debug-controls {
     position: absolute;
