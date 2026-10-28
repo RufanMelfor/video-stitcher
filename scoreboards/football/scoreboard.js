@@ -164,16 +164,26 @@
         }
     }
 
-    // Shrinks a team name until it fits its slot instead of eliding it
-    // straight away - how wide a name renders depends on the user's
-    // chosen font (custom.fontFamily), so no fixed font-size fits every
-    // club. Starts from the stylesheet's size each time, so a shorter
-    // name grows back. Below the floor the CSS ellipsis takes over.
+    // Shrinks a team name only when it doesn't fit its two-line slot
+    // (style.css wraps long names onto a second line first). How wide a
+    // name renders depends on the user's chosen font (custom.fontFamily),
+    // so no fixed font-size fits every club - a single long word can
+    // still overflow. Starts from the stylesheet's size each time, so a
+    // shorter name grows back; below the floor the line clamp cuts off.
     const NAME_MIN_FONT_PX = 26;
+    const NAME_MAX_LINES = 2;
+    // Counts lines from scrollHeight rather than comparing it with
+    // clientHeight: glyph ascenders make scrollHeight a few px taller
+    // than the box even for a name that fits on one line.
+    function overflows(el) {
+        const lineHeight = parseFloat(getComputedStyle(el).lineHeight);
+        const lines = Math.round(el.scrollHeight / lineHeight);
+        return el.scrollWidth > el.clientWidth || lines > NAME_MAX_LINES;
+    }
     function fitText(el) {
         el.style.removeProperty("font-size");
         let size = parseFloat(getComputedStyle(el).fontSize);
-        while (el.scrollWidth > el.clientWidth && size > NAME_MIN_FONT_PX) {
+        while (overflows(el) && size > NAME_MIN_FONT_PX) {
             size -= 1;
             el.style.fontSize = `${size}px`;
         }

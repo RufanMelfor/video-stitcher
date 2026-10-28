@@ -39,7 +39,7 @@ body {
     --bar-height: 120px;
     position: relative;
     display: grid;
-    grid-template-columns: 540px 130px 240px 130px 540px;
+    grid-template-columns: 400px 130px 240px 130px 400px;
     height: var(--bar-height);
     color: #fff;
     /* --scoreboard-font/--banner-color: set from state.custom.fontFamily/
@@ -101,10 +101,22 @@ body {
 }
 .team-away .team-logo { left: auto; right: -4px; }
 
-/* min-width: 0 lets a flex item shrink below its content size at all -
-   without it, overflow/text-overflow can't kick in and a long name
-   would push the bar wider instead of eliding. */
-.team-name { min-width: 0; font-size: 38px; line-height: 1; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 2px 6px #000; }
+/* A long name wraps onto a second line instead of widening the bar;
+   scoreboard.js (fitText) shrinks the font only if two lines still
+   don't fit. min-width: 0 lets the flex item shrink below its content
+   size at all - without it the name would push the bar wider. */
+.team-name {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    min-width: 0;
+    overflow: hidden;
+    font-size: 36px;
+    line-height: 1.05;
+    text-transform: uppercase;
+    text-wrap: balance;
+    text-shadow: 0 2px 6px #000;
+}
 .score { display: grid; place-items: center; font-size: 80px; font-weight: 800; font-variant-numeric: tabular-nums; text-shadow: 0 3px 8px #000; }
 
 .cards { display: flex; flex-shrink: 0; gap: 6px; }
