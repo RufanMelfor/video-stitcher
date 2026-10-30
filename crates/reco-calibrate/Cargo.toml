@@ -36,6 +36,10 @@ reco-io = { path = "../reco-io", optional = true }
 profiling = ["dep:tracing", "reco-core/profiling"]
 io = ["dep:reco-io"]
 
+[[example]]
+name = "compare_setups"
+required-features = ["io"]
+
 [dev-dependencies]
 approx = "0.5"
 pollster = "0.4"
