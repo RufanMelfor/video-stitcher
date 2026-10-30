@@ -30,11 +30,21 @@
 //! looks at the far field across the seam and adds its own ZNCC term to
 //! the objective (`--far-weight`, default 1 = same as one third).
 //!
+//! Parallax means no setup lines up the whole overlap at every depth;
+//! what the viewer sees is the alignment where the export cuts.
+//! `--seam-strip PX` scores only within PX view pixels of that cut
+//! (`--seam-offset`, the value used for export; the CLI default 0 when
+//! omitted). Composites outline the scored region in red. `--gradient`
+//! scores ZNCC on the vertical luma gradient, so horizontal edges (the
+//! rails, boards and lines a vertical step breaks) dominate the score
+//! instead of tree texture.
+//!
 //! Usage:
 //!   cargo run --release -p reco-calibrate --example seam_alignment -- \
 //!     <left.mp4> <right.mp4> <output_dir> --frames N1,N2,... \
 //!     [--holdout M1,M2,...] [--refine] [--fov-degrees F] \
 //!     [--far-pitch P] [--far-fov F] [--far-weight W] \
+//!     [--seam-offset S] [--seam-strip PX] [--gradient] \
 //!     [--eval-width W] [--eval-height H] <setup.json>...
 //!
 //! Frame numbers are left-camera frames; the right camera uses each
@@ -79,6 +89,31 @@ struct EvalContext {
     far_fov: f32,
     /// Weight of the far-field view's ZNCC next to the three thirds.
     far_weight: f32,
+    /// Seam position the export cuts at (`Topology::seam_offset`).
+    seam_offset: f32,
+    /// Score only within this many view pixels of the seam; 0 = the
+    /// whole overlap.
+    seam_strip: f32,
+    /// Score ZNCC on the vertical luma gradient instead of luma.
+    gradient: bool,
+}
+
+/// Luma, or its vertical central difference when `ctx.gradient`: a
+/// vertical misalignment shows only at horizontal edges (rails, boards,
+/// lines), which the gradient isolates from flat areas and tree texture.
+fn zncc_input(ctx: &EvalContext, rgba: &[u8]) -> Vec<f32> {
+    let (w, h) = (ctx.width as usize, ctx.height as usize);
+    let luma = photometric::to_luma(rgba, ctx.width, ctx.height);
+    if !ctx.gradient {
+        return luma;
+    }
+    let mut g = vec![0.0f32; w * h];
+    for y in 1..h - 1 {
+        for x in 0..w {
+            g[y * w + x] = luma[(y + 1) * w + x] - luma[(y - 1) * w + x];
+        }
+    }
+    g
 }
 
 /// Alignment quality of one setup over a set of frames.
@@ -181,10 +216,12 @@ fn evaluate(
 
     for (fi, (l, r)) in pairs.iter().enumerate() {
         let (left_rgba, right_rgba) = render_pair(ctx, cal, &scene, ctx.fov_degrees, 0.0, l, r);
-        let mask =
+        let mut mask =
             photometric::overlap_mask_from_alpha(&left_rgba, &right_rgba, w, h, ALPHA_THRESHOLD);
+        restrict_to_seam(ctx, &scene, ctx.fov_degrees, 0.0, &mut mask);
         let left_luma = photometric::to_luma(&left_rgba, w, h);
         let right_luma = photometric::to_luma(&right_rgba, w, h);
+        let (left_z, right_z) = (zncc_input(ctx, &left_rgba), zncc_input(ctx, &right_rgba));
 
         let Some((min_row, max_row)) = overlap_rows(&mask) else {
             score
@@ -234,7 +271,7 @@ fn evaluate(
                     .collect(),
             };
             let report =
-                photometric::windowed_zncc(&left_luma, &right_luma, &sub, ZNCC_PATCH, MIN_VARIANCE);
+                photometric::windowed_zncc(&left_z, &right_z, &sub, ZNCC_PATCH, MIN_VARIANCE);
             if report.valid_patches > 0 {
                 sum.0 += report.mean;
                 sum.1 += 1;
@@ -244,16 +281,17 @@ fn evaluate(
         if fi == 0
             && let Some(path) = composite_path
         {
-            save_composite(&left_rgba, &right_rgba, w, h, path);
+            save_composite(&left_rgba, &right_rgba, &mask, path);
         }
 
         if ctx.far_fov > 0.0 {
             let (fl, fr) = render_pair(ctx, cal, &scene, ctx.far_fov, ctx.far_pitch, l, r);
-            let fmask = photometric::overlap_mask_from_alpha(&fl, &fr, w, h, ALPHA_THRESHOLD);
+            let mut fmask = photometric::overlap_mask_from_alpha(&fl, &fr, w, h, ALPHA_THRESHOLD);
+            restrict_to_seam(ctx, &scene, ctx.far_fov, ctx.far_pitch, &mut fmask);
             let fl_luma = photometric::to_luma(&fl, w, h);
             let fr_luma = photometric::to_luma(&fr, w, h);
-            let report =
-                photometric::windowed_zncc(&fl_luma, &fr_luma, &fmask, ZNCC_PATCH, MIN_VARIANCE);
+            let (fl_z, fr_z) = (zncc_input(ctx, &fl), zncc_input(ctx, &fr));
+            let report = photometric::windowed_zncc(&fl_z, &fr_z, &fmask, ZNCC_PATCH, MIN_VARIANCE);
             if report.valid_patches > 0 {
                 far_sum.0 += report.mean;
                 far_sum.1 += 1;
@@ -275,7 +313,7 @@ fn evaluate(
             if fi == 0
                 && let Some(path) = composite_path
             {
-                save_composite(&fl, &fr, w, h, &path.replace(".png", "_far.png"));
+                save_composite(&fl, &fr, &fmask, &path.replace(".png", "_far.png"));
             }
         }
     }
@@ -435,6 +473,8 @@ fn main() {
         eprintln!(
             "Usage: {} <left.mp4> <right.mp4> <output_dir> --frames N1,N2,... \
              [--holdout M1,M2,...] [--refine] [--fov-degrees F] \
+             [--far-pitch P] [--far-fov F] [--far-weight W] \
+             [--seam-offset S] [--seam-strip PX] [--gradient] \
              [--eval-width W] [--eval-height H] <setup.json>...",
             args[0]
         );
@@ -452,6 +492,9 @@ fn main() {
     let mut far_pitch: f32 = 0.46;
     let mut far_fov: f32 = 25.0;
     let mut far_weight: f32 = 1.0;
+    let mut seam_offset: f32 = 0.0;
+    let mut seam_strip: f32 = 0.0;
+    let mut gradient = false;
     let mut setup_paths: Vec<&String> = Vec::new();
     let mut i = 0;
     while i < rest.len() {
@@ -467,6 +510,10 @@ fn main() {
             }
             "--refine" => {
                 refine = true;
+                i += 1;
+            }
+            "--gradient" => {
+                gradient = true;
                 i += 1;
             }
             "--fov-degrees" => {
@@ -487,6 +534,14 @@ fn main() {
             }
             "--far-weight" => {
                 far_weight = value().parse().expect("--far-weight: number");
+                i += 2;
+            }
+            "--seam-offset" => {
+                seam_offset = value().parse().expect("--seam-offset: number");
+                i += 2;
+            }
+            "--seam-strip" => {
+                seam_strip = value().parse().expect("--seam-strip: pixels (0 = off)");
                 i += 2;
             }
             "--eval-height" => {
@@ -543,12 +598,18 @@ fn main() {
         far_pitch,
         far_fov,
         far_weight,
+        seam_offset,
+        seam_strip,
+        gradient,
     };
 
     println!(
         "Frames {frames:?} (holdout {holdout:?}), view {width}x{height} at {fov_degrees} deg, \
          far zoom {far_fov} deg pitched {far_pitch:.2} rad (weight {far_weight})"
     );
+    if seam_strip > 0.0 {
+        println!("Scoring only within {seam_strip} px of the seam at seam_offset {seam_offset}");
+    }
     println!("dy = vertical disparity in view pixels (0 = lines continue across the seam)");
     println!("zncc = overlap similarity (1.0 = identical; doubled content lowers it)");
 
@@ -619,8 +680,42 @@ fn overlap_rows(mask: &OverlapMask) -> Option<(u32, u32)> {
     Some((first, last))
 }
 
-/// Left first, right alpha-blended over it (production draw order).
-fn save_composite(left: &[u8], right: &[u8], width: u32, height: u32, path: &str) {
+/// Keep only the overlap pixels within `ctx.seam_strip` view pixels of
+/// the seam (the right plane's `uv.x = seam_offset` line, where the
+/// export cuts with the default blend direction). No-op when the strip
+/// is 0; empties the mask when the seam is not in view.
+fn restrict_to_seam(
+    ctx: &EvalContext,
+    scene: &SceneGeometry,
+    fov: f32,
+    pitch: f32,
+    mask: &mut OverlapMask,
+) {
+    if ctx.seam_strip <= 0.0 {
+        return;
+    }
+    let ends = [-0.5, 1.5].map(|v| {
+        ctx.right_renderer
+            .plane_point_to_pixel(scene, true, fov, pitch, [ctx.seam_offset, v])
+    });
+    let [Some(a), Some(b)] = ends else {
+        mask.mask.fill(false);
+        return;
+    };
+    let slope = (b[0] - a[0]) / (b[1] - a[1]);
+    let width = mask.width as usize;
+    for (y, row) in mask.mask.chunks_exact_mut(width).enumerate() {
+        let seam_x = a[0] + (y as f32 + 0.5 - a[1]) * slope;
+        for (x, m) in row.iter_mut().enumerate() {
+            *m &= (x as f32 + 0.5 - seam_x).abs() <= ctx.seam_strip;
+        }
+    }
+}
+
+/// Left first, right alpha-blended over it (production draw order), with
+/// the scored region's outline (`mask` edges) drawn in red.
+fn save_composite(left: &[u8], right: &[u8], mask: &OverlapMask, path: &str) {
+    let (width, height) = (mask.width, mask.height);
     let mut out = vec![0u8; (width * height * 4) as usize];
     for (o, (l, r)) in out
         .chunks_exact_mut(4)
@@ -631,6 +726,14 @@ fn save_composite(left: &[u8], right: &[u8], width: u32, height: u32, path: &str
             o[c] = (r[c] as f32 * ra + l[c] as f32 * (1.0 - ra)).round() as u8;
         }
         o[3] = 255;
+    }
+    let w = width as usize;
+    for (p, &m) in mask.mask.iter().enumerate() {
+        let x = p % w;
+        let edge = m && (x == 0 || x == w - 1 || !mask.mask[p - 1] || !mask.mask[p + 1]);
+        if edge {
+            out[p * 4..p * 4 + 3].copy_from_slice(&[255, 0, 0]);
+        }
     }
     image::RgbaImage::from_raw(width, height, out)
         .expect("rgba buffer size mismatch")

@@ -31,7 +31,7 @@ use crate::geometry::{VirtualCamera, opengl_to_wgpu_matrix};
 use crate::gpu::GpuContext;
 
 use bytemuck::{Pod, Zeroable};
-use nalgebra::{Isometry3, Perspective3, Point3, Rotation3, Unit};
+use nalgebra::{Isometry3, Matrix4, Perspective3, Point3, Rotation3, Unit, Vector4};
 use wgpu::util::DeviceExt;
 
 const NEAR_PLANE: f32 = 0.01;
@@ -403,6 +403,73 @@ impl SingleCameraRenderer {
         )
     }
 
+    /// Model-view-projection of one camera plane for a render at
+    /// `fov_degrees` / `view_pitch` (see [`Self::render_and_readback_pitched`]).
+    fn mvp(
+        &self,
+        scene: &SceneGeometry,
+        is_right: bool,
+        fov_degrees: f32,
+        view_pitch: f32,
+    ) -> Matrix4<f32> {
+        let aspect = self.eval_width as f32 / self.eval_height as f32;
+        let projection = opengl_to_wgpu_matrix()
+            * Perspective3::new(aspect, fov_degrees.to_radians(), NEAR_PLANE, FAR_PLANE)
+                .to_homogeneous();
+
+        // Straight-ahead view: the yaw=pitch=rig_tilt=rig_roll=0 special
+        // case of `renderer::view_matrix` (private to that module, not
+        // reachable here). With all four at zero, `view_matrix` reduces
+        // exactly to `look_at_rh(eye, eye + base_forward, world_up)`.
+        let cam = VirtualCamera::new(&scene.camera_position);
+        let eye = Point3::from(cam.eye);
+        let up = VirtualCamera::world_up();
+        // Positive pitch turns the forward axis up, about the camera's own
+        // right axis (forward x up).
+        let right = Unit::new_normalize(cam.base_forward.cross(&up));
+        let forward = Rotation3::from_axis_angle(&right, view_pitch) * cam.base_forward;
+        let target = Point3::from(eye.coords + forward);
+        let view = Isometry3::look_at_rh(&eye, &target, &up).to_homogeneous();
+
+        let model = if is_right {
+            scene.model_matrix_right()
+        } else {
+            scene.model_matrix_left()
+        };
+        projection * view * model
+    }
+
+    /// Pixel position (x right, y down, in the `eval_width` x
+    /// `eval_height` readback) of a point on one camera plane, for a
+    /// render with the same `fov_degrees` / `view_pitch`. `plane_uv` is in
+    /// `fisheye.wgsl`'s extended plane UV space (the one its seam test
+    /// compares `seam_offset` against: the right plane's seam-adjacent
+    /// edge is `x = 0.0`, the left plane's `x = 1.0`; `y` runs top to
+    /// bottom). `None` when the point is behind the view.
+    pub fn plane_point_to_pixel(
+        &self,
+        scene: &SceneGeometry,
+        is_right: bool,
+        fov_degrees: f32,
+        view_pitch: f32,
+        plane_uv: [f32; 2],
+    ) -> Option<[f32; 2]> {
+        // Extended UV -> vertex UV (fs_main: uv = in.uv * 2 - 0.5) ->
+        // quad position (see `quad_vertices`).
+        let vx = (plane_uv[0] + 0.5) / 2.0;
+        let vy = (plane_uv[1] + 0.5) / 2.0;
+        let local = Vector4::new(vx - 0.5, (0.5 - vy) / scene.plane_aspect, 0.0, 1.0);
+        let clip = self.mvp(scene, is_right, fov_degrees, view_pitch) * local;
+        if clip.w <= 0.0 {
+            return None;
+        }
+        let (nx, ny) = (clip.x / clip.w, clip.y / clip.w);
+        Some([
+            (nx + 1.0) * 0.5 * self.eval_width as f32,
+            (1.0 - ny) * 0.5 * self.eval_height as f32,
+        ])
+    }
+
     /// [`Self::render_and_readback`], but with the view pitched up
     /// (positive `view_pitch`, radians) or down from straight at the seam -
     /// e.g. to look at the far field across the seam with a narrow
@@ -446,31 +513,7 @@ impl SingleCameraRenderer {
             self.input_height / 2,
         );
 
-        let aspect = self.eval_width as f32 / self.eval_height as f32;
-        let projection = opengl_to_wgpu_matrix()
-            * Perspective3::new(aspect, fov_degrees.to_radians(), NEAR_PLANE, FAR_PLANE)
-                .to_homogeneous();
-
-        // Straight-ahead view: the yaw=pitch=rig_tilt=rig_roll=0 special
-        // case of `renderer::view_matrix` (private to that module, not
-        // reachable here). With all four at zero, `view_matrix` reduces
-        // exactly to `look_at_rh(eye, eye + base_forward, world_up)`.
-        let cam = VirtualCamera::new(&scene.camera_position);
-        let eye = Point3::from(cam.eye);
-        let up = VirtualCamera::world_up();
-        // Positive pitch turns the forward axis up, about the camera's own
-        // right axis (forward x up).
-        let right = Unit::new_normalize(cam.base_forward.cross(&up));
-        let forward = Rotation3::from_axis_angle(&right, view_pitch) * cam.base_forward;
-        let target = Point3::from(eye.coords + forward);
-        let view = Isometry3::look_at_rh(&eye, &target, &up).to_homogeneous();
-
-        let model = if is_right {
-            scene.model_matrix_right()
-        } else {
-            scene.model_matrix_left()
-        };
-        let mvp = projection * view * model;
+        let mvp = self.mvp(scene, is_right, fov_degrees, view_pitch);
 
         // blend_width = 0.0: never soften the alpha coverage signal (see
         // module doc). flip_180/is_full_range = false: this harness's
