@@ -433,6 +433,9 @@ pub enum CalibrationStep {
     FeatureMatching,
     /// Optimizing camera parameters.
     Optimizing,
+    /// Fine-tuning the alignment on rendered pixels at the seam
+    /// (`seam_refine`).
+    RefiningAlignment,
 }
 
 impl std::fmt::Display for CalibrationStep {
@@ -445,6 +448,7 @@ impl std::fmt::Display for CalibrationStep {
             Self::Undistorting => write!(f, "Undistorting"),
             Self::FeatureMatching => write!(f, "FeatureMatching"),
             Self::Optimizing => write!(f, "Optimizing"),
+            Self::RefiningAlignment => write!(f, "RefiningAlignment"),
         }
     }
 }

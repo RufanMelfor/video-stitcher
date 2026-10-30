@@ -134,6 +134,21 @@ struct CalibrationOutput {
     imu_diagnostics: Option<reco_calibrate::telemetry::ImuDiagnostics>,
 }
 
+/// Result of a "Refine Alignment" run (`seam_refine`, seam stage only).
+struct RefineOutput {
+    /// The refined setup; only its searched topology fields are applied.
+    calibration: Calibration,
+    /// Seam score (`SeamScore::objective`) before and after.
+    before: f32,
+    after: f32,
+}
+
+/// Frames "Refine Alignment" scores: the anchor plus this many more...
+const REFINE_FRAME_COUNT: u64 = reco_calibrate::seam_refine::REFINE_FRAMES as u64;
+/// ...this many seconds apart (players move between them, so the score
+/// does not hinge on one moment).
+const REFINE_FRAME_SPACING_SECS: f64 = 5.0;
+
 /// Result sent from the calibration background thread. The error is
 /// the typed [`reco_calibrate::video::CalibrateVideosError`] now that
 /// it is `Clone + Send + Sync` (plan step 7), so the UI thread can
@@ -341,6 +356,8 @@ struct AppState {
     recording_frames: u64,
     /// Receives calibration results from the background thread.
     cal_rx: Option<std::sync::mpsc::Receiver<CalibrationResult>>,
+    /// Receives "Refine Alignment" results from its background thread.
+    refine_rx: Option<std::sync::mpsc::Receiver<Result<RefineOutput, String>>>,
     /// Receives the result of a standalone sync-offset detection job (see
     /// `on_compute_sync_offset`), separate from full auto-calibrate.
     sync_offset_job:
@@ -713,6 +730,7 @@ impl AppState {
             recording_path: None,
             recording_frames: 0,
             cal_rx: None,
+            refine_rx: None,
             sync_offset_job: None,
             pending_sync_offset_autosave: false,
             audio_envelope_left: Vec::new(),
@@ -5762,6 +5780,7 @@ fn main() -> anyhow::Result<()> {
             force_x_rx,
             force_z_rz,
             full_res_features,
+            refine_alignment,
         ) = app_weak
             .upgrade()
             .map(|a| {
@@ -5776,6 +5795,7 @@ fn main() -> anyhow::Result<()> {
                     a.get_force_x_rx(),
                     a.get_force_z_rz(),
                     a.get_cal_full_res_features(),
+                    a.get_cal_refine_alignment(),
                 )
             })
             .unwrap_or((
@@ -5789,6 +5809,7 @@ fn main() -> anyhow::Result<()> {
                 false,
                 false,
                 false,
+                true,
             ));
 
         // The anchor is a manually typed frame number when set (an exact,
@@ -5941,7 +5962,7 @@ fn main() -> anyhow::Result<()> {
                  sample_window={sample_window:.0}s, skip=[{skip_start:.1}s, -{skip_end:.1}s], \
                  imu_seeds={use_imu_seeds}, force_x_rx={force_x_rx}, force_z_rz={force_z_rz}, \
                  akaze={akaze_threshold}, detect_y=[{detect_y_min:.2}, {detect_y_max:.2}], \
-                 full_res_features={full_res_features}"
+                 full_res_features={full_res_features}, refine_alignment={refine_alignment}"
             );
             let mut config = reco_calibrate::CalibrationConfig {
                 num_frames: cal_frames,
@@ -5975,6 +5996,8 @@ fn main() -> anyhow::Result<()> {
                     config: Some(config),
                     left_params: existing_left_params,
                     right_params: existing_right_params,
+                    seam_refine: refine_alignment
+                        .then(reco_calibrate::seam_refine::SeamRefineOptions::default),
                     ..Default::default()
                 },
                 &mut |progress| {
@@ -6033,6 +6056,62 @@ fn main() -> anyhow::Result<()> {
             .borrow()
             .calibration_interrupted
             .store(true, Ordering::Relaxed);
+    });
+
+    // "Refine Alignment": fine-tune the current setup on rendered pixels
+    // at the seam where it sits now (`seam_refine`, seam stage only). For
+    // after the user has placed the seam, which Auto Calibrate cannot know
+    // beforehand. Shares the calibration progress popup and its Cancel.
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_refine_alignment(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let (left, right, cal, fps, current_frame, interrupted) = {
+            let s = state_ref.borrow();
+            let (Some(l), Some(r), Some(cal)) = (&s.left_path, &s.right_path, &s.calibration)
+            else {
+                return;
+            };
+            s.calibration_interrupted.store(false, Ordering::Relaxed);
+            (
+                l.clone(),
+                r.clone(),
+                cal.clone(),
+                s.playback.fps(),
+                s.playback.frame_index(),
+                Arc::clone(&s.calibration_interrupted),
+            )
+        };
+        // Same anchor rule as Auto Calibrate: the typed frame, else the
+        // current playback position.
+        let anchor = app
+            .get_cal_anchor_frame_text()
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(current_frame);
+        app.set_calibrating(true);
+        app.set_calibration_step("RefiningAlignment".into());
+        app.set_calibration_detail("Decoding frames".into());
+        app.set_calibration_progress(0.0);
+        app.set_calibration_log(slint::ModelRc::new(slint::VecModel::from(Vec::<
+            slint::SharedString,
+        >::new())));
+        app.set_status_text("Refining alignment...".into());
+        log::info!(
+            "Refine Alignment: anchor frame {anchor}, seam_offset {:.4}",
+            cal.topology.seam_offset
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        state_ref.borrow_mut().refine_rx = Some(rx);
+        let weak = app.as_weak();
+        std::thread::spawn(move || {
+            let result =
+                run_refine_alignment(&left, &right, &cal, fps, anchor, &weak, &interrupted);
+            tx.send(result).ok();
+        });
     });
 
     // Live AKAZE detection preview: fires on every AKAZE tuning-slider
@@ -8510,6 +8589,15 @@ fn main() -> anyhow::Result<()> {
                 return;
             }
 
+            // Poll for "Refine Alignment" results.
+            if let Some(rx) = &s.refine_rx
+                && let Ok(result) = rx.try_recv()
+            {
+                s.refine_rx = None;
+                handle_refine_result(result, &mut s, &app_weak);
+                return;
+            }
+
             // Poll for standalone sync-offset detection results.
             if let Some(rx) = &s.sync_offset_job
                 && let Ok(result) = rx.try_recv()
@@ -9622,6 +9710,174 @@ fn classify_init_error(err: &str) -> (String, String) {
 }
 
 /// Handle a calibration result from the background thread.
+/// Background part of "Refine Alignment": decode the anchor frame and
+/// [`REFINE_FRAME_COUNT`] - 1 more [`REFINE_FRAME_SPACING_SECS`] apart
+/// (from the first segment, like Auto Calibrate), then run the seam stage
+/// of `seam_refine` at the setup's current `seam_offset`.
+fn run_refine_alignment(
+    left: &std::path::Path,
+    right: &std::path::Path,
+    cal: &Calibration,
+    fps: f64,
+    anchor: u64,
+    weak: &slint::Weak<RecoApp>,
+    interrupted: &AtomicBool,
+) -> Result<RefineOutput, String> {
+    use reco_calibrate::seam_refine::{self, SeamRefineError, SeamRefineOptions};
+    use reco_io::ffmpeg::calibration_io;
+
+    let progress = |detail: String, fraction: f32| {
+        let weak = weak.clone();
+        slint::invoke_from_event_loop(move || {
+            if let Some(app) = weak.upgrade() {
+                app.set_calibration_detail(detail.into());
+                app.set_calibration_progress(fraction);
+            }
+        })
+        .ok();
+    };
+
+    let probe = calibration_io::probe_video(left).map_err(|e| format!("probe: {e}"))?;
+    let last = probe.total_frames.saturating_sub(1);
+    let step = (fps.max(1.0) * REFINE_FRAME_SPACING_SECS).round() as u64;
+    let span = step * (REFINE_FRAME_COUNT - 1);
+    if anchor > last {
+        log::warn!(
+            "Refine Alignment: anchor frame {anchor} is past the first segment ({last}); \
+             only the first segment is sampled"
+        );
+    }
+    // Keep every frame inside the file: near the end, shift the window back.
+    let start = anchor.min(last.saturating_sub(span));
+    let mut frames: Vec<u64> = (0..REFINE_FRAME_COUNT)
+        .map(|i| (start + i * step).min(last))
+        .collect();
+    frames.dedup();
+    let right_frames: Vec<u64> = frames
+        .iter()
+        .map(|f| (*f as i64 + cal.sync_offset).max(0) as u64)
+        .collect();
+    log::info!("Refine Alignment: frames {frames:?} (right {right_frames:?})");
+
+    let l = calibration_io::extract_frames(left, &frames).map_err(|e| format!("decode: {e}"))?;
+    let r =
+        calibration_io::extract_frames(right, &right_frames).map_err(|e| format!("decode: {e}"))?;
+    let pairs: Vec<_> = l.into_iter().zip(r).collect();
+    if interrupted.load(Ordering::Relaxed) {
+        return Err("cancelled".into());
+    }
+    let gpu = reco_core::gpu::GpuContext::new_blocking().map_err(|e| format!("GPU: {e}"))?;
+
+    let opts = SeamRefineOptions::default();
+    // Nelder-Mead scores roughly 1.3 setups per iteration on average.
+    let expected = (opts.max_iters as f32 * 1.3).max(1.0);
+    let outcome = seam_refine::refine_alignment(
+        &gpu,
+        cal,
+        &pairs,
+        cal.topology.seam_offset,
+        true,
+        opts,
+        &mut |_, _, evals| {
+            progress(
+                format!("Refining alignment ({evals} setups scored)"),
+                (evals as f32 / expected).min(1.0),
+            )
+        },
+        interrupted,
+    )
+    .map_err(|e| match e {
+        SeamRefineError::Cancelled => "cancelled".to_string(),
+        e => e.to_string(),
+    })?;
+    log::info!(
+        "Refine Alignment: seam score {:.4} -> {:.4} (thirds {:?} -> {:?}, far zoom {:?} -> {:?})",
+        outcome.before.objective,
+        outcome.after.objective,
+        outcome.before.zncc,
+        outcome.after.zncc,
+        outcome.before.far_zoom,
+        outcome.after.far_zoom
+    );
+    Ok(RefineOutput {
+        calibration: outcome.calibration,
+        before: outcome.before.objective,
+        after: outcome.after.objective,
+    })
+}
+
+/// Apply a "Refine Alignment" result: copy only the searched topology
+/// fields onto the current setup (anything else the user changed while it
+/// ran stays), update their sliders, and mark the setup unsaved.
+fn handle_refine_result(
+    result: Result<RefineOutput, String>,
+    state: &mut AppState,
+    app_weak: &slint::Weak<RecoApp>,
+) {
+    let Some(app) = app_weak.upgrade() else {
+        return;
+    };
+    app.set_calibrating(false);
+    let out = match result {
+        Ok(out) => out,
+        Err(e) if e == "cancelled" => {
+            log::info!("Refine Alignment cancelled");
+            app.set_status_text("Refine Alignment cancelled".into());
+            return;
+        }
+        Err(e) => {
+            log::error!("Refine Alignment failed: {e}");
+            app.set_status_text("Refine Alignment failed".into());
+            state
+                .toasts
+                .push(Severity::Error, "Refine Alignment failed", e.clone());
+            crate::toast::sync_to_ui(&state.toasts, &app);
+            return;
+        }
+    };
+    let Some(mut layout) = state.calibration.as_ref().map(|c| c.topology.clone()) else {
+        return;
+    };
+    let t = &out.calibration.topology;
+    layout.x_ty = t.x_ty;
+    layout.x_rz = t.x_rz;
+    layout.z_rx = t.z_rx;
+    layout.x_rx = t.x_rx;
+    layout.z_rz = t.z_rz;
+    layout.ground_tilt_x = t.ground_tilt_x;
+    layout.ground_tilt_z = t.ground_tilt_z;
+    layout.top_tilt_x = t.top_tilt_x;
+    layout.top_tilt_z = t.top_tilt_z;
+    state.apply_layout(layout.clone());
+    app.set_cal_x_ty(layout.x_ty as f32);
+    app.set_cal_x_rz(layout.x_rz as f32);
+    app.set_cal_z_rx(layout.z_rx as f32);
+    app.set_cal_x_rx(layout.x_rx as f32);
+    app.set_cal_z_rz(layout.z_rz as f32);
+    app.set_cal_ground_tilt_x(layout.ground_tilt_x as f32);
+    app.set_cal_ground_tilt_z(layout.ground_tilt_z as f32);
+    app.set_cal_top_tilt_x(layout.top_tilt_x as f32);
+    app.set_cal_top_tilt_z(layout.top_tilt_z as f32);
+    if out.after > out.before {
+        app.set_cal_dirty(true);
+        app.set_status_text(
+            format!(
+                "Alignment refined (seam score {:.3} -> {:.3}) - save the setup to keep it",
+                out.before, out.after
+            )
+            .into(),
+        );
+    } else {
+        app.set_status_text(
+            format!(
+                "Alignment already at its best for this seam position (score {:.3})",
+                out.before
+            )
+            .into(),
+        );
+    }
+}
+
 fn handle_calibration_result(
     result: CalibrationResult,
     state: &mut AppState,

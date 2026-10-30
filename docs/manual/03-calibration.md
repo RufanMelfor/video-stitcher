@@ -32,6 +32,12 @@ What the program does:
    fisheye distortion can be corrected.
 3. **Finds matching points** in both pictures (AKAZE feature matching) and
    solves for the alignment that makes them coincide.
+4. **Refines the alignment on the pixels** along the seam: it compares what
+   both cameras show there (lines, fences, advertising boards, players) and
+   fine-tunes the alignment until they line up. Matching points are found
+   mostly in the background, so this step is what removes steps in pitch lines
+   and doubled players close to the cameras. It adds about two minutes and can
+   be switched off under *Advanced* (*Refine alignment on pixels*).
 
 When it finishes, a short line under the buttons tells you whether both cameras
 carried usable motion-sensor data, or whether the program had to rely on audio
@@ -66,7 +72,18 @@ where the two pictures meet. This is an aid only: it never appears in an export.
 
 <!-- screenshot: Overlap view in Difference mode, aligned and misaligned -->
 
-## Step 3: Fine-tune by hand
+## Step 3: Place the seam, then Refine Alignment
+
+Because of parallax, no alignment fits every distance everywhere in the
+overlap: the alignment is fine-tuned for where the seam is. Auto Calibrate tunes
+it for the default seam position. When you move the seam (**Seam position**,
+or drag the red seam line), click **Refine Alignment** under *Setup*
+afterwards. It fine-tunes the alignment for the new seam position, using the
+anchor frame (or the current frame) and three more frames 5 seconds apart, so
+pick a moment with players near the seam. It takes about two minutes and can be
+cancelled. Click **Save Setup** to keep the result.
+
+## Step 4: Fine-tune by hand
 
 Everything below is optional. Change one slider at a time and look at Overlap
 view after each change. The sliders under **Calibration** are grouped per camera.
@@ -92,7 +109,7 @@ The reset buttons next to the sliders return a value to its default.
 Every one of these settings is explained in the
 [settings reference](settings-reference.md).
 
-## Step 4: Check the sync
+## Step 5: Check the sync
 
 If the two videos are not exactly in step, players and the ball will look
 doubled near the seam while things move. Two tools help:
@@ -128,6 +145,8 @@ a better moment:
 - **Detect Y min / Detect Y max:** the part of the picture, top to bottom, where
   features are searched.
 - **Full-resolution features:** more precise on 4K footage, but slower.
+- **Refine alignment on pixels:** the last Auto Calibrate step (see *Step 1*).
+  On by default.
 - **Force extra skew fit:** solves the skew of one camera even when no motion
   data suggests it.
 

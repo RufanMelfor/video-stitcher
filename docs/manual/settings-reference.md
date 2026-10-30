@@ -170,6 +170,12 @@ so their defaults only apply until you pick one.
 | Detect Y max | 0.5 to 1.0 | 0.95 | Bottom edge of the vertical region used for feature detection (fraction of frame height). Updates the preview live. |
 | Full-resolution features (slower) |  | off | Detect features at full video resolution instead of downscaling to 1920px wide. More precise on 4K+ footage, but slower. |
 
+### Pixel Refine
+
+| Setting | Range | Default | What it does |
+|---|---|---|---|
+| Refine alignment on pixels |  | on | After the feature-point fit, fine-tune the alignment by comparing what both cameras actually show along the seam (lines, fences, boards, players). Fixes steps in lines and doubled players near the camera. Adds about two minutes. |
+
 ### Skew Fit
 
 | Setting | Range | Default | What it does |

@@ -1120,6 +1120,20 @@ enum Commands {
         #[arg(long, default_value_t = 0.08)]
         seam_sigma_y: f64,
 
+        /// After the feature-point fit, fine-tune the alignment by
+        /// comparing what both cameras render along the seam (lines,
+        /// fences, boards, players) on up to 4 of the calibration frames.
+        /// Fixes steps in lines and doubled players near the camera; adds
+        /// about two minutes. Same as the GUI's "Refine alignment on pixels".
+        #[arg(long)]
+        refine_alignment: bool,
+
+        /// Seam position to refine the alignment for (plane-local UV, same
+        /// as `reco stitch --seam-offset`); also saved in the setup. Only
+        /// used with --refine-alignment.
+        #[arg(long, default_value_t = 0.0, requires = "refine_alignment")]
+        seam_offset: f32,
+
         /// Directory to write debug data (keypoints, matches as JSON + images).
         #[arg(long)]
         debug_dir: Option<String>,
@@ -1671,6 +1685,8 @@ fn main() -> anyhow::Result<()> {
             trim,
             seam_sigma,
             seam_sigma_y,
+            refine_alignment,
+            seam_offset,
             debug_dir,
             output,
         } => calibrate::run_calibrate(
@@ -1697,6 +1713,7 @@ fn main() -> anyhow::Result<()> {
             trim,
             seam_sigma,
             seam_sigma_y,
+            refine_alignment.then_some(seam_offset),
             debug_dir.as_deref(),
             &output,
         ),

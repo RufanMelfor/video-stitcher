@@ -1466,6 +1466,10 @@ export component RecoApp inherits Window {
     // Enabling this detects at full source resolution instead - slower,
     // but can improve precision on 4K+ footage.
     in-out property <bool> cal-full-res-features: false;
+    // Final Auto Calibrate stage: fine-tune the alignment on rendered
+    // pixels at the seam (reco_calibrate::seam_refine). On by default:
+    // the feature-point result alone leaves visible steps near the camera.
+    in-out property <bool> cal-refine-alignment: true;
     in-out property <int> calibration-frames: 4;
     in-out property <float> cal-akaze-threshold: 0.0001;
     in-out property <float> cal-detect-y-min: 0.05;
@@ -1582,6 +1586,8 @@ export component RecoApp inherits Window {
     callback pick-calibration();
     callback pick-match-folder();
     callback auto-calibrate();
+    // Re-run the pixel alignment refine for the current seam position.
+    callback refine-alignment();
     // Fired whenever an AKAZE tuning slider/checkbox changes, so Rust can
     // re-run detection on the current frame and show the result live
     // without a full Auto-Calibrate run.
@@ -2170,6 +2176,15 @@ export component RecoApp inherits Window {
                             FlatButton {
                                 text: "Load…";
                                 clicked => { root.pick-calibration(); }
+                            }
+                        }
+
+                        if root.has-both-videos && root.files-loaded: Tip {
+                            tip: "Fine-tunes the camera alignment for where the seam is now, by comparing what both cameras show along the seam (lines, fences, boards). Use it after moving the seam. Scores the anchor frame (or the current frame) plus three more 5 s apart - pick a moment with players near the seam. Takes about two minutes.";
+                            FlatButton {
+                                text: root.calibrating ? "Working..." : "Refine Alignment";
+                                enabled: !root.calibrating;
+                                clicked => { root.refine-alignment(); }
                             }
                         }
 
@@ -4477,6 +4492,19 @@ export component RecoApp inherits Window {
                                     CheckBox {
                                         text: "Full-resolution features (slower)";
                                         checked <=> root.cal-full-res-features;
+                                        enabled: !root.calibrating;
+                                    }
+                                }
+                            }
+
+                            CalGroupBox {
+                                title: "PIXEL REFINE";
+
+                                Tip {
+                                    tip: "After the feature-point fit, fine-tune the alignment by comparing what both cameras actually show along the seam (lines, fences, boards, players). Fixes steps in lines and doubled players near the camera. Adds about two minutes.";
+                                    CheckBox {
+                                        text: "Refine alignment on pixels";
+                                        checked <=> root.cal-refine-alignment;
                                         enabled: !root.calibrating;
                                     }
                                 }

@@ -38,6 +38,7 @@ pub fn run_calibrate(
     trim: f64,
     seam_sigma: f64,
     seam_sigma_y: f64,
+    refine_seam_offset: Option<f32>,
     debug_dir: Option<&str>,
     output: &str,
 ) -> anyhow::Result<()> {
@@ -175,9 +176,40 @@ pub fn run_calibrate(
 
     // Step 5: Calibrate
     eprintln!("Calibrating with {} frame pairs...", frame_pairs.len());
-    let result = pipeline
+    let mut result = pipeline
         .calibrate(&gpu, &frame_pairs)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Step 6 (optional): pixel refine at the seam
+    if let Some(seam_offset) = refine_seam_offset {
+        use reco_calibrate::seam_refine;
+        let pairs = seam_refine::spread_evenly(&frame_pairs, seam_refine::REFINE_FRAMES);
+        eprintln!(
+            "Refining alignment at seam_offset {seam_offset} on {} frame pairs...",
+            pairs.len()
+        );
+        let started = std::time::Instant::now();
+        let mut cal = result.calibration.clone();
+        cal.topology.seam_offset = seam_offset;
+        let outcome = seam_refine::refine_alignment(
+            &gpu,
+            &cal,
+            &pairs,
+            seam_offset,
+            false,
+            seam_refine::SeamRefineOptions::default(),
+            &mut |_, _, _| {},
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        eprintln!(
+            "  seam score {:.4} -> {:.4} in {:.0} s",
+            outcome.before.objective,
+            outcome.after.objective,
+            started.elapsed().as_secs_f32()
+        );
+        result.calibration = outcome.calibration;
+    }
 
     // Write output
     let json = serde_json::to_string_pretty(&result.calibration)?;

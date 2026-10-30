@@ -32,6 +32,7 @@ use reco_io::ffmpeg::calibration_io::{self, CalibrationIoError};
 
 use crate::error::CalibrateError;
 use crate::pipeline::{CalibrationPipeline, VideoInfo};
+use crate::seam_refine::{self, SeamRefineError, SeamRefineOptions};
 use crate::types::{CalibrationConfig, CalibrationProgress, CalibrationResult, CalibrationStep};
 
 /// Options for [`calibrate_videos`].
@@ -60,6 +61,11 @@ pub struct CalibrateVideosOptions {
     pub right_params: Option<Lens>,
     /// Manual sync offset in frames. Auto-detects via IMU/audio if `None`.
     pub sync_offset: Option<i64>,
+    /// Final photometric seam refinement (both stages, seam at the
+    /// result's `seam_offset`) on up to [`seam_refine::REFINE_FRAMES`] of
+    /// the calibration frames. `None` = off: the AKAZE result is returned
+    /// as is.
+    pub seam_refine: Option<SeamRefineOptions>,
 }
 
 /// Errors from [`calibrate_videos`]. `Clone + Send + Sync` so a
@@ -350,10 +356,76 @@ pub fn calibrate_videos(
     let gpu = GpuContext::new_blocking()?;
     log::info!("GPU: {}", gpu.gpu_name());
 
-    let result = pipeline.calibrate_reporting(
+    let mut result = pipeline.calibrate_reporting(
         &gpu,
         &frame_pairs,
         Some(&mut |done, total, preview| emit_frame_progress(on_progress, done, total, preview)),
     )?;
+
+    if let Some(opts) = options.seam_refine {
+        check_interrupted(interrupted)?;
+        let pairs = seam_refine::spread_evenly(&frame_pairs, seam_refine::REFINE_FRAMES);
+        result.calibration = refine_seam(
+            &gpu,
+            &result.calibration,
+            &pairs,
+            opts,
+            on_progress,
+            interrupted,
+        )?;
+    }
     Ok(result)
+}
+
+/// Run both seam-refine stages, reporting progress. Cancellation
+/// propagates; any other failure keeps `cal` (logged), since the AKAZE
+/// result is still a usable setup.
+fn refine_seam(
+    gpu: &GpuContext,
+    cal: &reco_core::calibration::Calibration,
+    pairs: &[(reco_core::source::YuvFrame, reco_core::source::YuvFrame)],
+    opts: SeamRefineOptions,
+    on_progress: &mut dyn FnMut(&CalibrationProgress),
+    interrupted: &AtomicBool,
+) -> Result<reco_core::calibration::Calibration, CalibrateVideosError> {
+    // Nelder-Mead scores roughly 1.3 setups per iteration on average.
+    let expected = (opts.max_iters as f32 * 1.3).max(1.0);
+    let seam_offset = cal.topology.seam_offset;
+    let outcome = seam_refine::refine_alignment(
+        gpu,
+        cal,
+        pairs,
+        seam_offset,
+        false,
+        opts,
+        &mut |stage, stages, evals| {
+            let within = (evals as f32 / expected).min(1.0);
+            on_progress(&CalibrationProgress {
+                step: CalibrationStep::RefiningAlignment,
+                detail: format!("Refining alignment, stage {}/{stages}", stage + 1),
+                fraction: Some((stage as f32 + within) / stages as f32),
+                preview: None,
+            });
+        },
+        interrupted,
+    );
+    match outcome {
+        Ok(o) => {
+            log::info!(
+                "seam refine: objective {:.4} -> {:.4} (thirds {:?} -> {:?}, far zoom {:?} -> {:?})",
+                o.before.objective,
+                o.after.objective,
+                o.before.zncc,
+                o.after.zncc,
+                o.before.far_zoom,
+                o.after.far_zoom
+            );
+            Ok(o.calibration)
+        }
+        Err(SeamRefineError::Cancelled) => Err(CalibrateVideosError::Cancelled),
+        Err(e) => {
+            log::warn!("seam refine failed ({e}); keeping the feature-point result");
+            Ok(cal.clone())
+        }
+    }
 }

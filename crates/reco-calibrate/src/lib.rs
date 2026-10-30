@@ -80,6 +80,7 @@ pub mod preview;
 mod ransac;
 pub mod row_profile;
 pub mod sampling;
+pub mod seam_refine;
 pub mod telemetry;
 pub mod traits;
 pub mod types;

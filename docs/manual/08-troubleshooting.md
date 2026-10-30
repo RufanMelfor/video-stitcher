@@ -17,7 +17,7 @@ where to look. If nothing here helps, see *Getting help* at the end.
 | What you see | Look at |
 |---|---|
 | A visible line or step where the cameras meet | [Chapter 3](03-calibration.md): check with Overlap view, fine-tune Roll, Skew and Seam position. |
-| Things look doubled near the seam while they move | The cameras are out of sync. Check the *Audio Sync Waveform* and *Detect Sync Offset* ([chapter 3](03-calibration.md#step-4-check-the-sync)). |
+| Things look doubled near the seam while they move | The cameras are out of sync. Check the *Audio Sync Waveform* and *Detect Sync Offset* ([chapter 3](03-calibration.md#step-5-check-the-sync)). |
 | One half is brighter or has other colours | [Chapter 4](04-colour-and-sharpness.md): Auto color match, then Gamma. If it changes during the match, try *Auto gamma*. |
 | A black gap or wedge in the picture | You may have pushed **Intersect** too far; move the seam with *Seam position* instead. For the AI camera, set the **AI pitch limits** so it does not aim into the wedge ([chapter 3](03-calibration.md#detection-zones-field-area-goals-and-ai-limits)). |
 | Lines at the edge of the panorama lean | **Rig tilt** and **Rig roll** in *Rig alignment*. |
