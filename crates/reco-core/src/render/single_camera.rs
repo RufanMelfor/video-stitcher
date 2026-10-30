@@ -31,7 +31,7 @@ use crate::geometry::{VirtualCamera, opengl_to_wgpu_matrix};
 use crate::gpu::GpuContext;
 
 use bytemuck::{Pod, Zeroable};
-use nalgebra::{Isometry3, Perspective3, Point3};
+use nalgebra::{Isometry3, Perspective3, Point3, Rotation3, Unit};
 use wgpu::util::DeviceExt;
 
 const NEAR_PLANE: f32 = 0.01;
@@ -388,6 +388,42 @@ impl SingleCameraRenderer {
         ground_tilt: GroundTilt,
         top_tilt: TopTilt,
     ) -> Vec<u8> {
+        self.render_and_readback_pitched(
+            gpu,
+            scene,
+            camera_params,
+            is_right,
+            fov_degrees,
+            0.0,
+            y,
+            u,
+            v,
+            ground_tilt,
+            top_tilt,
+        )
+    }
+
+    /// [`Self::render_and_readback`], but with the view pitched up
+    /// (positive `view_pitch`, radians) or down from straight at the seam -
+    /// e.g. to look at the far field across the seam with a narrow
+    /// `fov_degrees` for more pixels on distant content. Pitch is a pure
+    /// view rotation: it changes where this render looks, not the scene
+    /// geometry being validated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_and_readback_pitched(
+        &self,
+        gpu: &GpuContext,
+        scene: &SceneGeometry,
+        camera_params: &Lens,
+        is_right: bool,
+        fov_degrees: f32,
+        view_pitch: f32,
+        y: &[u8],
+        u: &[u8],
+        v: &[u8],
+        ground_tilt: GroundTilt,
+        top_tilt: TopTilt,
+    ) -> Vec<u8> {
         upload_plane(
             &gpu.queue,
             &self.y_texture,
@@ -421,8 +457,12 @@ impl SingleCameraRenderer {
         // exactly to `look_at_rh(eye, eye + base_forward, world_up)`.
         let cam = VirtualCamera::new(&scene.camera_position);
         let eye = Point3::from(cam.eye);
-        let target = Point3::from(eye.coords + cam.base_forward);
         let up = VirtualCamera::world_up();
+        // Positive pitch turns the forward axis up, about the camera's own
+        // right axis (forward x up).
+        let right = Unit::new_normalize(cam.base_forward.cross(&up));
+        let forward = Rotation3::from_axis_angle(&right, view_pitch) * cam.base_forward;
+        let target = Point3::from(eye.coords + forward);
         let view = Isometry3::look_at_rh(&eye, &target, &up).to_homogeneous();
 
         let model = if is_right {

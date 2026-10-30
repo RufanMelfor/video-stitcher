@@ -13,20 +13,28 @@
 //! - scores ZNCC (1.0 = identical) in the far / mid / near thirds of the
 //!   overlap - doubled players and lines lower it.
 //!
-//! All setups are rendered with the FIRST setup's framing (tilt, roll),
-//! so only the alignment differs between them, not where the view looks.
+//! The view always looks straight at the seam (`SingleCameraRenderer`
+//! ignores the setup's framing tilt/roll), so every setup is judged from
+//! the same viewpoint.
 //!
 //! `--refine` (experiment): starting from the LAST setup, Nelder-Mead
-//! searches `x_ty`, `x_rz`, `z_rx`, `x_rx`, `z_rz`, `ground_tilt_x/z` to
-//! maximize the mean ZNCC over the three thirds on `--frames`, keeping
+//! searches `x_ty`, `x_rz`, `z_rx`, `x_rx`, `z_rz`, `ground_tilt_x/z` and
+//! `top_tilt_x/z` to maximize the objective on `--frames`, keeping
 //! `intersect` and `axis_offset` fixed. The result is scored again on
 //! `--holdout` frames (never used in the search) and written to
 //! `<output_dir>/refined_setup.json`.
+//!
+//! The background beyond the pitch is only a thin strip in the wide view,
+//! so a second, zoomed view (`--far-pitch` rad above the seam centre,
+//! `--far-fov` vertical deg; 0 = off)
+//! looks at the far field across the seam and adds its own ZNCC term to
+//! the objective (`--far-weight`, default 1 = same as one third).
 //!
 //! Usage:
 //!   cargo run --release -p reco-calibrate --example seam_alignment -- \
 //!     <left.mp4> <right.mp4> <output_dir> --frames N1,N2,... \
 //!     [--holdout M1,M2,...] [--refine] [--fov-degrees F] \
+//!     [--far-pitch P] [--far-fov F] [--far-weight W] \
 //!     [--eval-width W] [--eval-height H] <setup.json>...
 //!
 //! Frame numbers are left-camera frames; the right camera uses each
@@ -65,6 +73,12 @@ struct EvalContext {
     height: u32,
     aspect: f32,
     fov_degrees: f32,
+    /// Zoomed far-field view: pitch above straight-at-the-seam (rad) and
+    /// vertical FOV (deg); FOV 0 = off.
+    far_pitch: f32,
+    far_fov: f32,
+    /// Weight of the far-field view's ZNCC next to the three thirds.
+    far_weight: f32,
 }
 
 /// Alignment quality of one setup over a set of frames.
@@ -76,13 +90,25 @@ struct Score {
     dy: [Vec<f32>; 3],
     /// Per-frame "row:dy" listing, for the report.
     band_lines: Vec<String>,
+    /// Mean ZNCC in the zoomed far-field view (`None` when off).
+    far_zoom: Option<f32>,
+    /// |dy| per measured band in the zoomed far-field view.
+    far_dy: Vec<f32>,
+    /// Weight of `far_zoom` in [`Self::objective`].
+    far_weight: f32,
 }
 
 impl Score {
     /// Single number to maximize: every third counts equally, so the
-    /// large, easy far field cannot hide a misaligned near field.
+    /// large, easy far field cannot hide a misaligned near field; the
+    /// zoomed far-field view adds its own weighted term, since in the
+    /// wide view the background beyond the pitch is only a thin strip.
     fn objective(&self) -> f32 {
-        self.zncc.iter().sum::<f32>() / 3.0
+        let thirds = self.zncc.iter().sum::<f32>();
+        match self.far_zoom {
+            Some(z) => (thirds + self.far_weight * z) / (3.0 + self.far_weight),
+            None => thirds / 3.0,
+        }
     }
 
     fn print(&self, label: &str) {
@@ -101,7 +127,17 @@ impl Score {
                 self.zncc[ti]
             );
         }
-        println!("   mean zncc {:.4}", self.objective());
+        if let Some(z) = self.far_zoom {
+            let mut dy = self.far_dy.clone();
+            dy.sort_by(f32::total_cmp);
+            let median = dy.get(dy.len() / 2).copied().unwrap_or(f32::NAN);
+            let max = dy.last().copied().unwrap_or(f32::NAN);
+            println!(
+                "   far zoom: |dy| median {median:5.2} px  max {max:5.2} px  [{} bands]   zncc {z:.4}",
+                dy.len()
+            );
+        }
+        println!("   objective {:.4}", self.objective());
     }
 }
 
@@ -141,34 +177,10 @@ fn evaluate(
     let (w, h) = (ctx.width, ctx.height);
     let mut score = Score::default();
     let mut zncc_sums = [(0.0f32, 0usize); 3];
+    let mut far_sum = (0.0f32, 0usize);
 
     for (fi, (l, r)) in pairs.iter().enumerate() {
-        let (lg, lt) = tilts(cal, false);
-        let (rg, rt) = tilts(cal, true);
-        let left_rgba = ctx.left_renderer.render_and_readback(
-            &ctx.gpu,
-            &scene,
-            &cal.lenses[0],
-            false,
-            ctx.fov_degrees,
-            &l.y,
-            &l.u,
-            &l.v,
-            lg,
-            lt,
-        );
-        let right_rgba = ctx.right_renderer.render_and_readback(
-            &ctx.gpu,
-            &scene,
-            &cal.lenses[1],
-            true,
-            ctx.fov_degrees,
-            &r.y,
-            &r.u,
-            &r.v,
-            rg,
-            rt,
-        );
+        let (left_rgba, right_rgba) = render_pair(ctx, cal, &scene, ctx.fov_degrees, 0.0, l, r);
         let mask =
             photometric::overlap_mask_from_alpha(&left_rgba, &right_rgba, w, h, ALPHA_THRESHOLD);
         let left_luma = photometric::to_luma(&left_rgba, w, h);
@@ -234,11 +246,93 @@ fn evaluate(
         {
             save_composite(&left_rgba, &right_rgba, w, h, path);
         }
+
+        if ctx.far_fov > 0.0 {
+            let (fl, fr) = render_pair(ctx, cal, &scene, ctx.far_fov, ctx.far_pitch, l, r);
+            let fmask = photometric::overlap_mask_from_alpha(&fl, &fr, w, h, ALPHA_THRESHOLD);
+            let fl_luma = photometric::to_luma(&fl, w, h);
+            let fr_luma = photometric::to_luma(&fr, w, h);
+            let report =
+                photometric::windowed_zncc(&fl_luma, &fr_luma, &fmask, ZNCC_PATCH, MIN_VARIANCE);
+            if report.valid_patches > 0 {
+                far_sum.0 += report.mean;
+                far_sum.1 += 1;
+            }
+            if measure_dy {
+                let bands = row_profile::measure_row_bands(
+                    &fl_luma,
+                    &fr_luma,
+                    &fmask,
+                    BAND_HEIGHT,
+                    MAX_DY,
+                    MIN_VARIANCE,
+                    MIN_CONFIDENCE,
+                );
+                score
+                    .far_dy
+                    .extend(bands.iter().flatten().map(|b| b.dy.abs()));
+            }
+            if fi == 0
+                && let Some(path) = composite_path
+            {
+                save_composite(&fl, &fr, w, h, &path.replace(".png", "_far.png"));
+            }
+        }
     }
     for (ti, (sum, n)) in zncc_sums.iter().enumerate() {
         score.zncc[ti] = if *n > 0 { sum / *n as f32 } else { -1.0 };
     }
+    if ctx.far_fov > 0.0 {
+        score.far_zoom = Some(if far_sum.1 > 0 {
+            far_sum.0 / far_sum.1 as f32
+        } else {
+            -1.0
+        });
+    }
+    score.far_weight = ctx.far_weight;
     score
+}
+
+/// Render both cameras of one frame pair into `scene` at `fov` (vertical,
+/// degrees), looking `pitch` radians above straight at the seam.
+fn render_pair(
+    ctx: &EvalContext,
+    cal: &Calibration,
+    scene: &SceneGeometry,
+    fov: f32,
+    pitch: f32,
+    l: &YuvFrame,
+    r: &YuvFrame,
+) -> (Vec<u8>, Vec<u8>) {
+    let (lg, lt) = tilts(cal, false);
+    let (rg, rt) = tilts(cal, true);
+    let left = ctx.left_renderer.render_and_readback_pitched(
+        &ctx.gpu,
+        scene,
+        &cal.lenses[0],
+        false,
+        fov,
+        pitch,
+        &l.y,
+        &l.u,
+        &l.v,
+        lg,
+        lt,
+    );
+    let right = ctx.right_renderer.render_and_readback_pitched(
+        &ctx.gpu,
+        scene,
+        &cal.lenses[1],
+        true,
+        fov,
+        pitch,
+        &r.y,
+        &r.u,
+        &r.v,
+        rg,
+        rt,
+    );
+    (left, right)
 }
 
 /// Decode left frames and the matching right frames (`sync_offset`).
@@ -260,7 +354,7 @@ fn load_pairs(
 }
 
 /// Parameters `--refine` searches, in this order.
-const REFINE_PARAMS: [&str; 7] = [
+const REFINE_PARAMS: [&str; 9] = [
     "x_ty",
     "x_rz",
     "z_rx",
@@ -268,9 +362,11 @@ const REFINE_PARAMS: [&str; 7] = [
     "z_rz",
     "ground_tilt_x",
     "ground_tilt_z",
+    "top_tilt_x",
+    "top_tilt_z",
 ];
 /// Initial simplex step per parameter (same order).
-const REFINE_STEPS: [f64; 7] = [0.002, 0.004, 0.008, 0.008, 0.004, 0.01, 0.01];
+const REFINE_STEPS: [f64; 9] = [0.002, 0.004, 0.008, 0.008, 0.004, 0.01, 0.01, 0.005, 0.005];
 
 fn get_params(cal: &Calibration) -> Vec<f64> {
     let t = &cal.topology;
@@ -282,6 +378,8 @@ fn get_params(cal: &Calibration) -> Vec<f64> {
         t.z_rz,
         t.ground_tilt_x,
         t.ground_tilt_z,
+        t.top_tilt_x,
+        t.top_tilt_z,
     ]
 }
 
@@ -295,6 +393,8 @@ fn with_params(base: &Calibration, p: &[f64]) -> Calibration {
     t.z_rz = p[4];
     t.ground_tilt_x = p[5];
     t.ground_tilt_z = p[6];
+    t.top_tilt_x = p[7];
+    t.top_tilt_z = p[8];
     cal
 }
 
@@ -349,6 +449,9 @@ fn main() {
     let mut fov_degrees: f32 = 100.0;
     let mut width: u32 = 1920;
     let mut height: u32 = 1080;
+    let mut far_pitch: f32 = 0.46;
+    let mut far_fov: f32 = 25.0;
+    let mut far_weight: f32 = 1.0;
     let mut setup_paths: Vec<&String> = Vec::new();
     let mut i = 0;
     while i < rest.len() {
@@ -374,6 +477,18 @@ fn main() {
                 width = value().parse().expect("--eval-width: integer");
                 i += 2;
             }
+            "--far-pitch" => {
+                far_pitch = value().parse().expect("--far-pitch: number (rad)");
+                i += 2;
+            }
+            "--far-fov" => {
+                far_fov = value().parse().expect("--far-fov: number (0 = off)");
+                i += 2;
+            }
+            "--far-weight" => {
+                far_weight = value().parse().expect("--far-weight: number");
+                i += 2;
+            }
             "--eval-height" => {
                 height = value().parse().expect("--eval-height: integer");
                 i += 2;
@@ -391,7 +506,7 @@ fn main() {
     );
     std::fs::create_dir_all(output_dir).expect("cannot create output_dir");
 
-    let mut setups: Vec<(String, Calibration)> = setup_paths
+    let setups: Vec<(String, Calibration)> = setup_paths
         .iter()
         .map(|p| {
             let cal = Calibration::from_file(Path::new(p))
@@ -403,11 +518,6 @@ fn main() {
             (name, cal)
         })
         .collect();
-    let (view_tilt, view_roll) = (setups[0].1.framing.tilt, setups[0].1.framing.roll);
-    for (_, cal) in &mut setups {
-        cal.framing.tilt = view_tilt;
-        cal.framing.roll = view_roll;
-    }
     let sync_offset = setups[0].1.sync_offset;
     if setups.iter().any(|(_, c)| c.sync_offset != sync_offset) {
         eprintln!("note: setups differ in sync_offset; using the first setup's ({sync_offset})");
@@ -430,11 +540,14 @@ fn main() {
         height,
         aspect,
         fov_degrees,
+        far_pitch,
+        far_fov,
+        far_weight,
     };
 
     println!(
         "Frames {frames:?} (holdout {holdout:?}), view {width}x{height} at {fov_degrees} deg, \
-         framing tilt {view_tilt:.3} roll {view_roll:.3} for all setups"
+         far zoom {far_fov} deg pitched {far_pitch:.2} rad (weight {far_weight})"
     );
     println!("dy = vertical disparity in view pixels (0 = lines continue across the seam)");
     println!("zncc = overlap similarity (1.0 = identical; doubled content lowers it)");
