@@ -103,7 +103,7 @@ In the *Scoreboard* section (left panel, under *Rig alignment*):
 4. **Drag the scoreboard on the preview** to move it. You can also set logos and
    the font in the editor.
 
-Scoreboard settings are stored in the calibration file. Scoreboard packages live
+Scoreboard settings are stored in the setup file. Scoreboard packages live
 in the `scoreboards` folder next to the program or in your `panopitch` data
 folder; see [scoreboards/README.md](../../scoreboards/README.md) if you want to
 make your own.

@@ -10,7 +10,7 @@ where to look. If nothing here helps, see *Getting help* at the end.
 | A message that `avformat-61.dll` (or another FFmpeg `.dll`) **was not found** | The FFmpeg DLLs must sit **next to** `reco-gui.exe`, also when you run a build you made yourself. | Copy all FFmpeg DLLs from the FFmpeg `bin` folder (or from a release package) into the same folder as `reco-gui.exe`. |
 | A video will not load | Unsupported type, or the folder layout is wrong. | Use `mp4`, `mov`, `avi` or `mkv`. For a match folder you need `Left` and `Right` subfolders with the videos in them ([chapter 2](02-cameras-and-footage.md)). The message says which folder is missing or empty. |
 | The two videos are refused | The cameras recorded at different frame rates. | Record both cameras at the same frame rate. A difference of up to half a frame per second (such as 29.97 and 30) is accepted. |
-| *"calibration is no longer supported"*, or an error when loading a calibration | The file was made by another version of the program or by the original Reco. | Run **Auto Calibrate** again. Calibration files are not guaranteed to work between this program and upstream Reco. |
+| *"calibration is no longer supported"*, or an error when loading a setup | The file was made by another version of the program or by the original Reco. | Run **Auto Calibrate** again. Setup files are not guaranteed to work between this program and upstream Reco. |
 
 ## The picture does not look right
 

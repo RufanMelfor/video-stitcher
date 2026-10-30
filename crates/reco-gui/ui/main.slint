@@ -1024,7 +1024,7 @@ export component RecoApp inherits Window {
     // metadata actually offered for sync/orientation. See the Tip next
     // to where this is displayed for the full explanation.
     in-out property <string> imu-status-text: "";
-    in-out property <string> status-text: "Load left + right videos and calibration JSON to begin";
+    in-out property <string> status-text: "Load left + right videos and setup JSON to begin";
     in-out property <float> progress: 0.0;
     in-out property <int> current-frame: 0;
     property <bool> frame-input-editing: false;
@@ -2099,7 +2099,7 @@ export component RecoApp inherits Window {
                         spacing: 8px;
                         alignment: start;
 
-                        // Fills Left, Right and Calibration below in one
+                        // Fills Left, Right and Setup below in one
                         // shot from a `<match>/Left/`, `<match>/Right/`
                         // folder - see `on_pick_match_folder` in main.rs.
                         FlatButton {
@@ -2155,7 +2155,7 @@ export component RecoApp inherits Window {
 
                         if root.has-both-videos || root.calibration-path != "": Rectangle { height: 1px; background: root.border-subtle; }
 
-                        if root.has-both-videos || root.calibration-path != "": Text { text: "Calibration"; color: #aaa; font-size: 12px; font-weight: 600; }
+                        if root.has-both-videos || root.calibration-path != "": Text { text: "Setup"; color: #aaa; font-size: 12px; font-weight: 600; }
 
                         if root.has-both-videos: HorizontalLayout {
                             spacing: 4px;
@@ -2365,7 +2365,7 @@ export component RecoApp inherits Window {
                             }
 
                             if root.cal-dirty || root.lens-dirty: FlatButton {
-                                text: "Save Calibration";
+                                text: "Save Setup";
                                 primary: true;
                                 clicked => { root.save-calibration(); }
                             }
@@ -2466,7 +2466,7 @@ export component RecoApp inherits Window {
 
 
                                 if !root.zone-edit-mode && !root.has-roi: Text {
-                                    text: "Or paste ROI JSON above (from another calibration, or scripted).";
+                                    text: "Or paste ROI JSON above (from another setup, or scripted).";
                                     color: root.text-dim;
                                     font-size: 10px;
                                     wrap: word-wrap;
@@ -2858,7 +2858,7 @@ export component RecoApp inherits Window {
                         horizontal-alignment: center;
                     }
                     Text {
-                        text: "1. Open Files panel and add left + right videos\n2. Auto Calibrate or load a calibration JSON\n3. Preview, adjust, then Export";
+                        text: "1. Open Files panel and add left + right videos\n2. Auto Calibrate or load a setup JSON\n3. Preview, adjust, then Export";
                         color: #444;
                         font-size: 13px;
                         horizontal-alignment: center;
@@ -4098,8 +4098,8 @@ export component RecoApp inherits Window {
                             }
                         }
 
-                        // Saving lives in one place: the "Save Calibration"
-                        // button in the Files-panel Calibration card (enabled on
+                        // Saving lives in one place: the "Save Setup"
+                        // button in the Files-panel Setup card (enabled on
                         // cal/lens dirty, saves the whole calibration incl. lens
                         // + blend). This section keeps only the contextual
                         // layout Reset so there is no duplicate save button.
@@ -4286,7 +4286,7 @@ export component RecoApp inherits Window {
                             title: "VIVID COLOR GRADE";
 
                             Tip {
-                                tip: "Universal color grade applied to the whole composited output - perks up grey/dull footage. Sets brightness/saturation/gamma to a tuned preset; use the sliders below to fine-tune further, or leave this off and drive the sliders directly. 1.0/1.0/1.0 is identity - off by default, no GPU cost. Updates live and is saved in the calibration.";
+                                tip: "Universal color grade applied to the whole composited output - perks up grey/dull footage. Sets brightness/saturation/gamma to a tuned preset; use the sliders below to fine-tune further, or leave this off and drive the sliders directly. 1.0/1.0/1.0 is identity - off by default, no GPU cost. Updates live and is saved in the setup.";
                                 CheckBox {
                                     text: "Vivid";
                                     checked <=> root.vivid-enabled;
@@ -4341,7 +4341,7 @@ export component RecoApp inherits Window {
 
                             LabeledSlider {
                                 label: "Sharpening";
-                                tip: "Unsharp-mask sharpening applied to the final output, compensating for detail loss when the AI panner zooms into a crop of the panorama. 0.0 (default) disables it - no GPU cost. Above ~1.5 starts showing visible haloing around high-contrast edges. GPU-only. Updates live and is saved in the calibration.";
+                                tip: "Unsharp-mask sharpening applied to the final output, compensating for detail loss when the AI panner zooms into a crop of the panorama. 0.0 (default) disables it - no GPU cost. Above ~1.5 starts showing visible haloing around high-contrast edges. GPU-only. Updates live and is saved in the setup.";
                                 minimum: 0.0;
                                 maximum: 2.0;
                                 value <=> root.sharpen-amount;
@@ -5189,7 +5189,7 @@ export component RecoApp inherits Window {
         }
 
         // ── Recent files dialog (modal) ──
-        // Three columns (Left / Right / Calibration). Each entry is a
+        // Three columns (Left / Right / Setup). Each entry is a
         // clickable row; click loads that path into the corresponding
         // file slot. Rendered as a sibling of the main layout so it
         // overlays everything.
@@ -5328,7 +5328,7 @@ export component RecoApp inherits Window {
                                 padding: 10px;
                                 spacing: 4px;
                                 Text {
-                                    text: "Calibrations";
+                                    text: "Setups";
                                     color: #aaa;
                                     font-size: 12px;
                                     font-weight: 600;
@@ -5587,7 +5587,7 @@ export component RecoApp inherits Window {
                     }
 
                     Tip {
-                        tip: "Seam blend width used to prefill new calibrations - matches the Stitching panel's Seam blend slider.";
+                        tip: "Seam blend width used to prefill new setups - matches the Stitching panel's Seam blend slider.";
                         Text {
                             text: "Default seam blend (" + round(root.prefs-default-blend-width * 100) / 100 + ")";
                             color: #ccc;
@@ -5618,8 +5618,8 @@ export component RecoApp inherits Window {
                     }
 
                     Tip {
-                        tip: "Calibration file used as a fallback whenever no calibration is otherwise loaded for a session. Saving over this file while it's your active calibration will ask for confirmation first, since future sessions with nothing else picked fall back to it.";
-                        Text { text: "Default calibration"; color: #ccc; font-size: 12px; }
+                        tip: "Setup file used as a fallback whenever no setup is otherwise loaded for a session. Saving over this file while it's your active setup will ask for confirmation first, since future sessions with nothing else picked fall back to it.";
+                        Text { text: "Default setup"; color: #ccc; font-size: 12px; }
                     }
                     HorizontalLayout {
                         spacing: 6px;
@@ -6167,7 +6167,7 @@ export component RecoApp inherits Window {
                     }
 
                     Tip {
-                        tip: "Draws a top-down pitch map with players, referee and ball in the bottom corner of the export. Needs AI Tracking (below) and a minimap.json file next to the calibration file, which sets the field size and where the field corners are in the camera images.";
+                        tip: "Draws a top-down pitch map with players, referee and ball in the bottom corner of the export. Needs AI Tracking (below) and a minimap.json file next to the setup file, which sets the field size and where the field corners are in the camera images.";
                         CheckBox {
                             text: "Pitch minimap (needs AI Tracking + minimap.json)";
                             checked <=> root.export-minimap-enabled;
@@ -7151,7 +7151,7 @@ export component RecoApp inherits Window {
                     Text { text: "No field ROI set"; color: root.text-heading; font-size: 18px; font-weight: 600; }
 
                     Text {
-                        text: "This calibration has no field ROI. AI framing and tracking use it to stay on the pitch, so without one the export may frame poorly. Continue anyway?";
+                        text: "This setup has no field ROI. AI framing and tracking use it to stay on the pitch, so without one the export may frame poorly. Continue anyway?";
                         color: root.text-muted;
                         font-size: 12px;
                         wrap: word-wrap;
@@ -7199,10 +7199,10 @@ export component RecoApp inherits Window {
                     padding: 24px;
                     spacing: 14px;
 
-                    Text { text: "Overwrite default calibration?"; color: root.text-heading; font-size: 18px; font-weight: 600; }
+                    Text { text: "Overwrite default setup?"; color: root.text-heading; font-size: 18px; font-weight: 600; }
 
                     Text {
-                        text: "This is your configured Default Calibration - the fallback used whenever no calibration is otherwise loaded. Saving now will overwrite it with the current session's changes.";
+                        text: "This is your configured Default Setup - the fallback used whenever no setup is otherwise loaded. Saving now will overwrite it with the current session's changes.";
                         color: root.text-muted;
                         font-size: 12px;
                         wrap: word-wrap;
@@ -7248,7 +7248,7 @@ export component RecoApp inherits Window {
                     Text { text: "Detect sync offset for this match?"; color: root.text-heading; font-size: 18px; font-weight: 600; }
 
                     Text {
-                        text: "This calibration was just seeded from your Default Calibration. Camera start times differ recording to recording, so its sync offset probably doesn't apply here - detect and save the correct one now?";
+                        text: "This setup was just seeded from your Default Setup. Camera start times differ recording to recording, so its sync offset probably doesn't apply here - detect and save the correct one now?";
                         color: root.text-muted;
                         font-size: 12px;
                         wrap: word-wrap;

@@ -40,7 +40,7 @@ also offered upstream as pull requests; everything is Windows-tested only.
   *overlap fit* mode that uses both cameras' views of the same rays (sky
   included). *(PR)*
 - **Vivid color grade** and **GPU sharpening** in the Color Mapping panel,
-  stored in the calibration.
+  stored in the setup.
 - Manual **ground / top-plane tilt** correction with adjustable band width,
   split per-camera **Roll and Skew** sliders, **manual seam positioning** with
   a draggable seam line. *(PR)*
@@ -58,7 +58,7 @@ also offered upstream as pull requests; everything is Windows-tested only.
 - Ball tracker fixes and tunables: hold and coast time, implausible-jump
   rejection, player-anchor gate with near/far radius, ball reach, ball margin,
   `fov_alpha` / `cluster_alpha`, AI pitch safety lines, visible per-mode
-  detection confidence. Settings are saved in the calibration and as app
+  detection confidence. Settings are saved in the setup and as app
   defaults. See `docs/ai-panner-tuning.md`.
 - In-app **field ROI editor** (replaces the browser tool). *(PR)*
 - `reco ai-debug-raw`: side-by-side raw-camera export with detection boxes, and
@@ -68,7 +68,7 @@ also offered upstream as pull requests; everything is Windows-tested only.
 - **Cut ranges** (skip stoppages) with a timeline UI, audio that follows the
   cuts, and a "PAUZE" dip-to-black overlay at each cut.
 - **Goal highlight reel** export.
-- **Match Folder picker** (auto-fills left / right / calibration, suggests the
+- **Match Folder picker** (auto-fills left / right / setup, suggests the
   output path), **sync-offset detection** and an **audio waveform** panel. *(PR)*
 - Export quality presets with bitrate shown and a per-export `.log` sidecar.
 - Export settings embedded as container metadata, and an 8-bit lookahead
@@ -82,7 +82,7 @@ also offered upstream as pull requests; everything is Windows-tested only.
 **GUI**
 - Slint renderer switched from femtovg to **Skia** (fixes wobbly text) *(PR)*,
   flat restyle with grouped cards *(PR)*, click-to-open help badges *(PR)*, update-available
-  toolbar button *(PR)*, app icon, and a calibration file that also restores
+  toolbar button *(PR)*, app icon, and a setup file that also restores
   the export and AI settings.
 
 **Training tooling (`scripts/`, `docs/YOLO26_Training.md`)**

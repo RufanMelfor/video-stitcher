@@ -96,7 +96,7 @@ pub fn load_minimap_setup(
     let path = dir.join(MINIMAP_SETUP_FILE);
     if !path.is_file() {
         return Err(format!(
-            "Pitch minimap: no {MINIMAP_SETUP_FILE} found next to the calibration ({}).",
+            "Pitch minimap: no {MINIMAP_SETUP_FILE} found next to the setup ({}).",
             path.display()
         ));
     }

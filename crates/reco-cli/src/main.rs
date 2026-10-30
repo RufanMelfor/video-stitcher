@@ -156,7 +156,7 @@ enum Commands {
         /// Path to the right camera video file.
         right: String,
 
-        /// Path to the calibration JSON file.
+        /// Path to the setup JSON file.
         #[arg(short, long)]
         calibration: String,
 
@@ -238,7 +238,7 @@ enum Commands {
         quality: String,
 
         /// Seam blend width (0.0–1.0). 0 = hard edge. Overrides the
-        /// calibration's saved value; when omitted, the calibration decides.
+        /// setup's saved value; when omitted, the setup decides.
         #[arg(long, value_parser = parse_blend)]
         blend: Option<f32>,
 
@@ -278,10 +278,10 @@ enum Commands {
 
         /// Manual nudge of the seam position, in plane-local UV units
         /// (same space as `--blend`). `0.0` (default) = seam sits exactly
-        /// where the calibration's geometry puts it. Positive/negative
+        /// where the setup's geometry puts it. Positive/negative
         /// shrinks/grows the fading camera's own visible extent - see
         /// `MatchCalibration::seam_offset`'s doc. Not read from the
-        /// calibration file automatically; pass the value you saved from
+        /// setup file automatically; pass the value you saved from
         /// the GUI explicitly, same as `--blend`.
         #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
         seam_offset: f32,
@@ -295,7 +295,7 @@ enum Commands {
         /// Manual gamma for the left camera, applied *before* the
         /// automatic color match measures anything. Above 1.0 lifts the
         /// mid-tones, below 1.0 lowers them; 1.0 is identity. Unset
-        /// leaves whatever the calibration holds. See
+        /// leaves whatever the setup holds. See
         /// `reco_core::calibration::Topology::color_gamma_left`.
         #[arg(long)]
         color_gamma_left: Option<f32>,
@@ -614,8 +614,8 @@ enum Commands {
         /// Path to the right camera video file.
         right: String,
 
-        /// Path to the calibration JSON file. Only used to resolve the
-        /// field ROI overlay (if the calibration has one) - no geometry
+        /// Path to the setup JSON file. Only used to resolve the
+        /// field ROI overlay (if the setup has one) - no geometry
         /// from it otherwise affects this output.
         #[arg(short, long)]
         calibration: String,
@@ -675,7 +675,7 @@ enum Commands {
         #[arg(long = "detection-interval", default_value_t = 1)]
         detection_interval: u32,
 
-        /// Draw the calibration's field ROI polygon outline (yellow),
+        /// Draw the setup's field ROI polygon outline (yellow),
         /// when present. A ball the model found but that a real export
         /// would silently drop (outside an ROI that's too tight) is
         /// exactly what shows up as a box outside this outline.
@@ -707,7 +707,7 @@ enum Commands {
         /// Path to the right camera video file.
         right: String,
 
-        /// Path to the calibration JSON file.
+        /// Path to the setup JSON file.
         #[arg(short, long)]
         calibration: String,
 
@@ -725,8 +725,8 @@ enum Commands {
         #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
         sync_offset: i64,
 
-        /// Seam blend width (0.0 = hard cut). Overrides the calibration's
-        /// saved value; when omitted, the calibration decides.
+        /// Seam blend width (0.0 = hard cut). Overrides the setup's
+        /// saved value; when omitted, the setup decides.
         #[arg(long, value_parser = parse_blend)]
         blend: Option<f32>,
 
@@ -747,7 +747,7 @@ enum Commands {
         #[arg(long)]
         right_device: String,
 
-        /// Path to the calibration JSON file.
+        /// Path to the setup JSON file.
         #[arg(short, long)]
         calibration: String,
 
@@ -787,8 +787,8 @@ enum Commands {
         #[arg(long, default_value = "fast")]
         quality: String,
 
-        /// Seam blend width (0.0-1.0). Overrides the calibration's saved
-        /// value; when omitted, the calibration decides.
+        /// Seam blend width (0.0-1.0). Overrides the setup's saved
+        /// value; when omitted, the setup decides.
         #[arg(long, value_parser = parse_blend)]
         blend: Option<f32>,
 
@@ -922,7 +922,7 @@ enum Commands {
         #[arg(long, default_value_t = 1)]
         right_camera: u32,
 
-        /// Path to the calibration JSON file.
+        /// Path to the setup JSON file.
         #[arg(short, long)]
         calibration: String,
 
@@ -962,8 +962,8 @@ enum Commands {
         #[arg(long, default_value = "fast")]
         quality: String,
 
-        /// Seam blend width (0.0-1.0). Overrides the calibration's saved
-        /// value; when omitted, the calibration decides.
+        /// Seam blend width (0.0-1.0). Overrides the setup's saved
+        /// value; when omitted, the setup decides.
         #[arg(long, value_parser = parse_blend)]
         blend: Option<f32>,
 
@@ -1124,7 +1124,7 @@ enum Commands {
         #[arg(long)]
         debug_dir: Option<String>,
 
-        /// Output calibration JSON file path.
+        /// Output setup JSON file path.
         #[arg(short, long, default_value = "match.json")]
         output: String,
     },

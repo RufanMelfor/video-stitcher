@@ -17,7 +17,7 @@ like.
 
 ## What you need
 
-1. **A calibration** with a **field ROI** set (see
+1. **A setup** with a **field ROI** set (see
    [chapter 3](03-calibration.md#detection-zones-field-area-goals-and-ai-limits)).
    Without one the program warns you before exporting, because the AI then has
    no idea which people are on your pitch.
@@ -115,7 +115,7 @@ following the wrong ball.
 - AI tracking shows up in the exported file. To get a feeling for it before you
   export, the *zoom range* picture in the AI Tracking section draws boxes for
   the widest and tightest framing the camera will use, on the current frame.
-- Settings you choose are remembered, and are saved in the calibration so that
+- Settings you choose are remembered, and are saved in the setup so that
   the same rig starts with the same AI settings.
 
 Continue with [chapter 6: cuts, scoreboard and Match Logger](06-cuts-scoreboard-match-logger.md).

@@ -605,7 +605,7 @@ fn build_bug_report(state: &AppState, app_weak: &slint::Weak<RecoApp>) -> String
     // Redact file paths
     if let Some(cal) = &state.calibration_path {
         let name = cal.file_name().unwrap_or_default().to_string_lossy();
-        report.push_str(&format!("\n## Files\n- Calibration: {name}\n"));
+        report.push_str(&format!("\n## Files\n- Setup: {name}\n"));
     }
 
     report.push_str(
@@ -1051,7 +1051,7 @@ impl AppState {
     /// Write the current (edited) calibration back to disk.
     fn save_calibration(&self) -> Result<(), String> {
         let (Some(cal), Some(path)) = (&self.calibration, &self.calibration_path) else {
-            return Err("No calibration or path to save".into());
+            return Err("No setup or path to save".into());
         };
         // `self.calibration` is the always-synced source of truth: every
         // mutation path (layout/framing sliders, lens sliders and pickers,
@@ -1099,8 +1099,8 @@ impl AppState {
             };
 
         // Load calibration.
-        let cal = Calibration::from_file(&cal_path)
-            .map_err(|e| format!("Calibration load error: {e}"))?;
+        let cal =
+            Calibration::from_file(&cal_path).map_err(|e| format!("Setup load error: {e}"))?;
 
         // Open video source.
         let sync_offset = cal.sync_offset;
@@ -2247,7 +2247,7 @@ fn suggested_calibration_path(left_path: Option<&std::path::Path>) -> Option<Pat
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "reco".into());
-    Some(base_dir.join(format!("{stem}_calibration.json")))
+    Some(base_dir.join(format!("{stem}_setup.json")))
 }
 
 /// Build the `InputPath` for a camera slot from freshly picked file(s),
@@ -4015,7 +4015,7 @@ fn main() -> anyhow::Result<()> {
                 s.unload_pipeline();
                 if let Some(app) = app_weak.upgrade() {
                     app.set_files_loaded(false);
-                    app.set_status_text("File changed - re-calibrate or load calibration".into());
+                    app.set_status_text("File changed - re-calibrate or load a setup".into());
                 }
             }
             if let Some(app) = app_weak.upgrade() {
@@ -4074,7 +4074,7 @@ fn main() -> anyhow::Result<()> {
                 s.unload_pipeline();
                 if let Some(app) = app_weak.upgrade() {
                     app.set_files_loaded(false);
-                    app.set_status_text("File changed - re-calibrate or load calibration".into());
+                    app.set_status_text("File changed - re-calibrate or load a setup".into());
                 }
             }
             if let Some(app) = app_weak.upgrade() {
@@ -4105,7 +4105,7 @@ fn main() -> anyhow::Result<()> {
     let state_ref = Rc::clone(&state);
     app.on_pick_calibration(move || {
         let dialog = rfd::FileDialog::new()
-            .set_title("Select calibration JSON")
+            .set_title("Select setup JSON")
             .add_filter("JSON", &["json", "JSON"]);
         if let Some(path) = dialog.pick_file() {
             let mut s = state_ref.borrow_mut();
@@ -4114,7 +4114,7 @@ fn main() -> anyhow::Result<()> {
                 s.unload_pipeline();
                 if let Some(app) = app_weak.upgrade() {
                     app.set_files_loaded(false);
-                    app.set_status_text("Calibration changed — reloading".into());
+                    app.set_status_text("Setup changed — reloading".into());
                 }
             }
             if let Some(app) = app_weak.upgrade() {
@@ -4173,9 +4173,7 @@ fn main() -> anyhow::Result<()> {
             s.unload_pipeline();
             if let Some(app) = app_weak.upgrade() {
                 app.set_files_loaded(false);
-                app.set_status_text(
-                    "Match folder changed - re-calibrate or load calibration".into(),
-                );
+                app.set_status_text("Match folder changed - re-calibrate or load a setup".into());
             }
         }
 
@@ -4218,7 +4216,7 @@ fn main() -> anyhow::Result<()> {
         let mut freshly_created = false;
         if cal_path.exists() {
             log::info!(
-                "Match folder: reusing existing calibration {}",
+                "Match folder: reusing existing setup {}",
                 cal_path.display()
             );
             s.calibration_path = Some(cal_path.clone());
@@ -4227,7 +4225,7 @@ fn main() -> anyhow::Result<()> {
             match std::fs::copy(&default_cal, &cal_path) {
                 Ok(_) => {
                     log::info!(
-                        "Match folder: seeded calibration from Default Calibration at {}",
+                        "Match folder: seeded setup from Default Setup at {}",
                         cal_path.display()
                     );
                     s.calibration_path = Some(cal_path.clone());
@@ -4235,12 +4233,12 @@ fn main() -> anyhow::Result<()> {
                     freshly_created = true;
                 }
                 Err(e) => {
-                    log::warn!("Failed to copy Default Calibration into match folder: {e}");
+                    log::warn!("Failed to copy Default Setup into match folder: {e}");
                     s.calibration_path = None;
                     if let Some(app) = app_weak.upgrade() {
                         s.toasts.push(
                             Severity::Error,
-                            "Default Calibration",
+                            "Default Setup",
                             format!("Could not copy into match folder: {e}"),
                         );
                         crate::toast::sync_to_ui(&s.toasts, &app);
@@ -4344,7 +4342,7 @@ fn main() -> anyhow::Result<()> {
             s.unload_pipeline();
             if let Some(app) = app_weak.upgrade() {
                 app.set_files_loaded(false);
-                app.set_status_text("File changed — re-calibrate or load calibration".into());
+                app.set_status_text("File changed — re-calibrate or load a setup".into());
             }
         }
         if let Some(app) = app_weak.upgrade() {
@@ -4369,7 +4367,7 @@ fn main() -> anyhow::Result<()> {
             s.unload_pipeline();
             if let Some(app) = app_weak.upgrade() {
                 app.set_files_loaded(false);
-                app.set_status_text("File changed — re-calibrate or load calibration".into());
+                app.set_status_text("File changed — re-calibrate or load a setup".into());
             }
         }
         if let Some(app) = app_weak.upgrade() {
@@ -4394,7 +4392,7 @@ fn main() -> anyhow::Result<()> {
             s.unload_pipeline();
             if let Some(app) = app_weak.upgrade() {
                 app.set_files_loaded(false);
-                app.set_status_text("Calibration changed — reloading".into());
+                app.set_status_text("Setup changed — reloading".into());
             }
         }
         if let Some(app) = app_weak.upgrade() {
@@ -4437,7 +4435,7 @@ fn main() -> anyhow::Result<()> {
         if let Some(app) = app_weak.upgrade() {
             app.set_left_path("".into());
             app.set_files_loaded(false);
-            app.set_status_text("Left video cleared. Calibration preserved.".into());
+            app.set_status_text("Left video cleared. Setup preserved.".into());
             sync_segments(&s, &app);
         }
     });
@@ -4455,7 +4453,7 @@ fn main() -> anyhow::Result<()> {
         if let Some(app) = app_weak.upgrade() {
             app.set_right_path("".into());
             app.set_files_loaded(false);
-            app.set_status_text("Right video cleared. Calibration preserved.".into());
+            app.set_status_text("Right video cleared. Setup preserved.".into());
             sync_segments(&s, &app);
         }
     });
@@ -4472,7 +4470,7 @@ fn main() -> anyhow::Result<()> {
         if let Some(app) = app_weak.upgrade() {
             app.set_calibration_path("".into());
             app.set_files_loaded(false);
-            app.set_status_text("Calibration cleared".into());
+            app.set_status_text("Setup cleared".into());
         }
     });
 
@@ -4693,7 +4691,7 @@ fn main() -> anyhow::Result<()> {
             s.toasts.push(
                 crate::toast::Severity::Info,
                 "ROI applied",
-                format!("{point_count} points saved to calibration."),
+                format!("{point_count} points saved to setup."),
             );
             crate::toast::sync_to_ui(&s.toasts, &app);
         }
@@ -5236,8 +5234,8 @@ fn main() -> anyhow::Result<()> {
     let app_weak = app.as_weak();
     app.on_pick_prefs_default_calibration(move || {
         let dialog = rfd::FileDialog::new()
-            .set_title("Select default calibration")
-            .add_filter("Calibration JSON", &["json"]);
+            .set_title("Select default setup")
+            .add_filter("Setup JSON", &["json"]);
         if let Some(path) = dialog.pick_file()
             && let Some(app) = app_weak.upgrade()
         {
@@ -7040,13 +7038,13 @@ fn main() -> anyhow::Result<()> {
             Ok(()) => {
                 let mut s = state_ref.borrow_mut();
                 if let Some(app) = app_weak.upgrade() {
-                    app.set_status_text("Calibration saved".into());
+                    app.set_status_text("Setup saved".into());
                     // Clear BOTH dirty flags: the Save button is shown on
                     // `cal-dirty || lens-dirty`, so leaving lens-dirty set
                     // kept the button visible after a successful save.
                     app.set_cal_dirty(false);
                     app.set_lens_dirty(false);
-                    s.toasts.push(Severity::Info, "Calibration saved", "");
+                    s.toasts.push(Severity::Info, "Setup saved", "");
                     crate::toast::sync_to_ui(&s.toasts, &app);
                 }
             }
@@ -8533,7 +8531,7 @@ fn main() -> anyhow::Result<()> {
                                 match s.save_calibration() {
                                     Ok(()) => {
                                         app.set_cal_dirty(false);
-                                        status.push_str(" - saved to calibration");
+                                        status.push_str(" - saved to setup");
                                     }
                                     Err(e) => {
                                         log::error!(
@@ -8677,7 +8675,7 @@ fn main() -> anyhow::Result<()> {
                                     format!("{e}"),
                                 ),
                                 reco_io::stitch_job::StitchError::Calibration(e) => (
-                                    "Calibration error",
+                                    "Setup error",
                                     e.clone(),
                                 ),
                                 reco_io::stitch_job::StitchError::Session(
@@ -9297,7 +9295,7 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                             Severity::Warn,
                             "AI model not found",
                             format!(
-                                "The calibration was saved with {missing}, which does not exist on this PC - keeping your current model."
+                                "The setup was saved with {missing}, which does not exist on this PC - keeping your current model."
                             ),
                         );
                         crate::toast::sync_to_ui(&s.toasts, &app);
@@ -9572,7 +9570,7 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
             let missing: Vec<&str> = [
                 s_ref.left_path.is_none().then_some("left video"),
                 s_ref.right_path.is_none().then_some("right video"),
-                s_ref.calibration_path.is_none().then_some("calibration"),
+                s_ref.calibration_path.is_none().then_some("setup"),
             ]
             .into_iter()
             .flatten()
@@ -10197,7 +10195,7 @@ mod suggested_calibration_path_tests {
         assert_eq!(
             suggested_calibration_path(Some(left)),
             Some(PathBuf::from(
-                "D:/Matches/TeamA - TeamB 2026-08-22/DJI_0001_calibration.json"
+                "D:/Matches/TeamA - TeamB 2026-08-22/DJI_0001_setup.json"
             ))
         );
     }
@@ -10208,7 +10206,7 @@ mod suggested_calibration_path_tests {
         assert_eq!(
             suggested_calibration_path(Some(left)),
             Some(PathBuf::from(
-                "D:/Matches/TeamA - TeamB/DJI_0001_calibration.json"
+                "D:/Matches/TeamA - TeamB/DJI_0001_setup.json"
             ))
         );
     }
@@ -10218,7 +10216,7 @@ mod suggested_calibration_path_tests {
         let left = Path::new("D:/Recordings/DJI_0001.mp4");
         assert_eq!(
             suggested_calibration_path(Some(left)),
-            Some(PathBuf::from("D:/Recordings/DJI_0001_calibration.json"))
+            Some(PathBuf::from("D:/Recordings/DJI_0001_setup.json"))
         );
     }
 

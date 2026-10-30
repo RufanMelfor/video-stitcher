@@ -68,27 +68,27 @@ Copy them from your FFmpeg `bin` folder.
 This program is a fork of Reco Video Stitcher. It keeps its settings and caches
 in its own `panopitch` folders and only checks this project's releases for
 updates. Do not install a build from the original project over it, and do not
-expect calibration files to move between the two. When you first start RECO
+expect setup files to move between the two. When you first start RECO
 Panopitch it copies your existing Reco settings into its own folder; the
 originals stay untouched.
 
 ## First start
 
 1. Start `reco-gui.exe`. You see the welcome text with three steps: add the left
-   and right videos, calibrate (or load a calibration), then preview, adjust and
+   and right videos, calibrate (or load a setup), then preview, adjust and
    export.
 2. Open **Preferences** (the gear button in the top bar). It is worth setting
    these once:
    - **AI model**: the default model file, so you do not have to browse for it
      for every export.
    - **Default codec** and **Default quality** for exports.
-   - **Default calibration**: see [chapter 3](03-calibration.md#re-using-a-calibration).
+   - **Default setup**: see [chapter 3](03-calibration.md#re-using-a-setup).
 3. Dark or light theme is also set there.
 
 ## The program at a glance
 
 - **Left panel (Files):** choose the match folder or the left and right videos,
-  load or create the calibration.
+  load or create the setup.
 - **Centre:** the stitched preview, with a timeline and playback controls
   underneath.
 - **Right panel:** the settings, in collapsible sections (Lens, Calibration,

@@ -27,7 +27,7 @@ Click **Start Export**. The top bar shows the progress and a **Cancel** button.
 When it is done, **Show in folder** opens the file's location. The preview is
 paused while exporting.
 
-If the calibration has no field ROI and AI tracking is on, you are asked to
+If the setup has no field ROI and AI tracking is on, you are asked to
 confirm first: *Export Anyway* continues, or you can set the field area first
 (see [chapter 3](03-calibration.md#detection-zones-field-area-goals-and-ai-limits)).
 
@@ -38,7 +38,7 @@ confirm first: *Export Anyway* continues, or you can set the field area first
 - Use **High** for the file you keep or upload.
 
 Better quality means a larger file and a slower export. Your preferred defaults
-can be set in *Preferences*, and they are also saved in the calibration.
+can be set in *Preferences*, and they are also saved in the setup.
 
 ## Speed and video memory
 
@@ -89,7 +89,7 @@ reco stitch left.mp4 right.mp4 -c match.json -o out.mp4 --model yolo.onnx --trac
 ```
 
 `reco stitch --help` lists all options, such as `--lookahead`,
-`--cut-range` and `--async-detect`. A calibration made in the GUI can be used
+`--cut-range` and `--async-detect`. A setup made in the GUI can be used
 directly with `-c`.
 
 Continue with [chapter 8: when something goes wrong](08-troubleshooting.md).

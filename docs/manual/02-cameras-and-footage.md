@@ -9,7 +9,7 @@ What the software needs from your recording:
 
 - **Two cameras, mounted rigidly.** Their views must overlap in the middle, and
   they must not move relative to each other during the match or between matches.
-  The calibration describes exactly how the two cameras sit; if you bump the rig
+  The setup describes exactly how the two cameras sit; if you bump the rig
   or mount the cameras again, calibrate again.
 - **The same settings on both cameras:** the same resolution, frame rate and
   video codec. If the frame rates differ the program stops with an error.
@@ -52,10 +52,12 @@ Rules the program follows:
   not matter).
 - Recognised video types are `mp4`, `mov`, `avi` and `mkv`.
 - Several files in one folder are treated as one recording, in file-name order.
-- The calibration file for the match is stored **in the match folder itself**,
-  named after the folder with `_calibration` added, for example
-  `2026-10-04 Home - Away_calibration.json`. Characters Windows does not allow in
-  file names are replaced by a dash.
+- The setup file for the match is stored **in the match folder itself**. The
+  program uses any `.json` in that folder with `setup` in its name. If there is
+  none, it is created named after the folder with `_setup` added, for example
+  `2026-10-04 Home - Away_setup.json`. Characters Windows does not allow in file
+  names are replaced by a dash. Older `..._calibration.json` files are still
+  found.
 - If you logged the match with the Match Logger (see
   [chapter 6](06-cuts-scoreboard-match-logger.md)), put its export file (a
   `.json`) directly in the match folder. The program finds it by its content, so
@@ -68,10 +70,10 @@ Rules the program follows:
 
 1. In the left panel click **Select Match Folder...** and choose the match
    folder.
-2. The program fills in the left video, the right video and the calibration in
+2. The program fills in the left video, the right video and the setup in
    one go:
-   - If the folder already has a calibration, it is loaded.
-   - If not, and you have set a **Default calibration** in Preferences, that file
+   - If the folder already has a setup, it is loaded.
+   - If not, and you have set a **Default setup** in Preferences, that file
      is copied into the match folder as the starting point. You are then asked
      whether to **detect the sync offset** for this match, because camera start
      times differ from recording to recording ("Detect & Save").
@@ -83,13 +85,13 @@ Rules the program follows:
 ### By hand
 
 Use the **+** buttons next to *Left* and *Right* to add the videos, and **Load...**
-next to *Calibration* to open an existing calibration file. **Clear** removes a
-video; the small **x** next to the calibration path unloads it. **Recent...**
+next to *Setup* to open an existing setup file. **Clear** removes a
+video; the small **x** next to the setup path unloads it. **Recent...**
 lists matches you worked on before.
 
 ## The preview and the timeline
 
-Once both videos and a calibration are loaded the stitched picture appears.
+Once both videos and a setup are loaded the stitched picture appears.
 Use the timeline and play controls under the preview to move around, play and
 change the playback speed (click the speed box to type an exact value). You can
 look around and zoom in the preview; the **Reset** button in the preview

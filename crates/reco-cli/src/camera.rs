@@ -127,7 +127,7 @@ pub fn run_camera(
     let mut cal = reco_core::calibration::Calibration::from_file(Path::new(calibration))?;
     if let Some(b) = blend {
         eprintln!(
-            "Seam blend: --blend {b} overrides the calibration's {}",
+            "Seam blend: --blend {b} overrides the setup's {}",
             cal.topology.blend_width
         );
         cal.topology.blend_width = b;

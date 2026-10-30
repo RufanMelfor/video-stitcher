@@ -4,8 +4,9 @@
 //! per match (usually named after the two teams and a date), containing
 //! `Left/` and `Right/` subfolders with that camera's recording(s). This
 //! module locates those subfolders and their video files, and derives
-//! where the per-match calibration file should live, so `main.rs` can
-//! fill in the left video, right video, and calibration pickers from a
+//! where the per-match setup file lives (an existing `*setup*.json`, or a
+//! new `<folder>_setup.json`), so `main.rs` can
+//! fill in the left video, right video, and setup pickers from a
 //! single folder pick instead of three separate file dialogs.
 
 use std::path::{Path, PathBuf};
@@ -62,7 +63,8 @@ pub fn scan_match_folder(base: &Path) -> Result<MatchFolderScan, MatchFolderErro
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let calibration_path = base.join(sanitize_calibration_filename(&folder_name));
+    let calibration_path =
+        find_setup_file(base).unwrap_or_else(|| base.join(sanitize_setup_filename(&folder_name)));
     Ok(MatchFolderScan {
         left_videos,
         right_videos,
@@ -113,21 +115,50 @@ fn collect_video_files(dir: &Path) -> Vec<PathBuf> {
     videos
 }
 
-/// Derive the per-match calibration filename from the match folder's
-/// name, e.g. "TeamA - TeamB 2026-08-22" becomes
-/// "TeamA - TeamB 2026-08-22_calibration.json". Characters invalid in
-/// Windows/macOS/Linux filenames are replaced with "-" so the copy step
-/// never fails on the folder name alone.
-fn sanitize_calibration_filename(folder_name: &str) -> String {
+/// Find an existing setup file directly inside `base`: a `.json` whose
+/// name contains "setup" (case-insensitive). Falls back to a `.json`
+/// containing "calibration", the name older versions wrote, so match
+/// folders created before the rename keep loading. Candidates are sorted
+/// so the pick is deterministic when several match.
+fn find_setup_file(base: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(base).ok()?;
+    let mut jsons: Vec<(PathBuf, String)> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        })
+        .filter_map(|p| {
+            let name = p.file_name()?.to_str()?.to_ascii_lowercase();
+            Some((p, name))
+        })
+        .collect();
+    jsons.sort();
+    ["setup", "calibration"].iter().find_map(|needle| {
+        jsons
+            .iter()
+            .find(|(_, name)| name.contains(needle))
+            .map(|(p, _)| p.clone())
+    })
+}
+
+/// Derive the per-match setup filename from the match folder's name, e.g.
+/// "TeamA - TeamB 2026-08-22" becomes "TeamA - TeamB 2026-08-22_setup.json".
+/// Characters invalid in Windows/macOS/Linux filenames are replaced with
+/// "-" so the copy step never fails on the folder name alone.
+fn sanitize_setup_filename(folder_name: &str) -> String {
     let cleaned: String = folder_name
         .chars()
         .map(|c| if is_invalid_filename_char(c) { '-' } else { c })
         .collect();
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
-        "match_calibration.json".to_string()
+        "match_setup.json".to_string()
     } else {
-        format!("{trimmed}_calibration.json")
+        format!("{trimmed}_setup.json")
     }
 }
 
@@ -200,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn calibration_filename_derived_from_folder_name() {
+    fn setup_filename_derived_from_folder_name() {
         let dir = make_match_dir(&["Left", "Right"]);
         std::fs::write(dir.path().join("Left/clip1.mp4"), b"").unwrap();
         std::fs::write(dir.path().join("Right/clip1.mp4"), b"").unwrap();
@@ -214,20 +245,61 @@ mod tests {
             .into_owned();
         assert_eq!(
             scan.calibration_path,
-            dir.path().join(format!("{folder_name}_calibration.json"))
+            dir.path().join(format!("{folder_name}_setup.json"))
         );
+    }
+
+    #[test]
+    fn existing_setup_file_is_found_by_name() {
+        let dir = make_match_dir(&["Left", "Right"]);
+        std::fs::write(dir.path().join("Left/clip1.mp4"), b"").unwrap();
+        std::fs::write(dir.path().join("Right/clip1.mp4"), b"").unwrap();
+        std::fs::write(dir.path().join("minimap.json"), b"{}").unwrap();
+        std::fs::write(dir.path().join("DJI_0040_D_L01_Setup.json"), b"{}").unwrap();
+
+        let scan = scan_match_folder(dir.path()).unwrap();
+        assert_eq!(
+            scan.calibration_path,
+            dir.path().join("DJI_0040_D_L01_Setup.json")
+        );
+    }
+
+    #[test]
+    fn legacy_calibration_file_is_still_found() {
+        let dir = make_match_dir(&["Left", "Right"]);
+        std::fs::write(dir.path().join("Left/clip1.mp4"), b"").unwrap();
+        std::fs::write(dir.path().join("Right/clip1.mp4"), b"").unwrap();
+        std::fs::write(dir.path().join("Match_calibration.json"), b"{}").unwrap();
+
+        let scan = scan_match_folder(dir.path()).unwrap();
+        assert_eq!(
+            scan.calibration_path,
+            dir.path().join("Match_calibration.json")
+        );
+    }
+
+    #[test]
+    fn setup_file_preferred_over_legacy_calibration() {
+        let dir = make_match_dir(&["Left", "Right"]);
+        std::fs::write(dir.path().join("Left/clip1.mp4"), b"").unwrap();
+        std::fs::write(dir.path().join("Right/clip1.mp4"), b"").unwrap();
+        std::fs::write(dir.path().join("a_calibration.json"), b"{}").unwrap();
+        std::fs::write(dir.path().join("z_setup.json"), b"{}").unwrap();
+
+        let scan = scan_match_folder(dir.path()).unwrap();
+        assert_eq!(scan.calibration_path, dir.path().join("z_setup.json"));
     }
 
     #[test]
     fn sanitizes_invalid_filename_characters() {
         assert_eq!(
-            sanitize_calibration_filename("Team A : Team B"),
-            "Team A - Team B_calibration.json"
+            sanitize_setup_filename("Team A : Team B"),
+            "Team A - Team B_setup.json"
         );
     }
 
     #[test]
     fn empty_folder_name_falls_back() {
-        assert_eq!(sanitize_calibration_filename(""), "match_calibration.json");
+        assert_eq!(sanitize_setup_filename(""), "match_setup.json");
     }
 }

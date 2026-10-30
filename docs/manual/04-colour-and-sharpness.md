@@ -88,7 +88,7 @@ try it when the classic method leaves a visible difference in the sky.
 A single switch that perks up grey, dull footage. Switching it on sets
 brightness, saturation and gamma to a tuned preset; the three sliders below it
 let you fine-tune (1.0 means *no change*, range 0.5 to 1.5). You can also leave
-the switch off and set the sliders directly. It is stored in the calibration and
+the switch off and set the sliders directly. It is stored in the setup and
 costs no GPU time when off.
 
 ## Sharpening

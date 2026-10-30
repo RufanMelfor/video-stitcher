@@ -97,7 +97,7 @@ pub fn run_preview(
     // mutate the document directly - no shadow copy).
     if let Some(b) = blend_width {
         eprintln!(
-            "Seam blend: --blend {b} overrides the calibration's {}",
+            "Seam blend: --blend {b} overrides the setup's {}",
             cal.topology.blend_width
         );
         cal.topology.blend_width = b;
@@ -527,7 +527,7 @@ impl ApplicationHandler for App {
         println!("          Arrows/drag = pan, +/-/scroll = zoom");
         println!("          1/2 = intersect, 3/4 = axis offset, 5/6 = vertical align");
         println!("          7/8 = focal length, 9/0 = k1 distortion (barrel/pincushion)");
-        println!("          B = cycle blend width, C = toggle clamping, S = save calibration");
+        println!("          B = cycle blend width, C = toggle clamping, S = save setup");
 
         self.surface = Some(surface);
         self.renderer = Some(renderer);
@@ -749,8 +749,8 @@ impl ApplicationHandler for App {
                             // Save calibration
                             let path = std::path::Path::new("calibration_adjusted.json");
                             match self.cal.to_file(path) {
-                                Ok(()) => println!("Calibration saved to {}", path.display()),
-                                Err(e) => eprintln!("Failed to save calibration: {e}"),
+                                Ok(()) => println!("Setup saved to {}", path.display()),
+                                Err(e) => eprintln!("Failed to save setup: {e}"),
                             }
                         }
                         PhysicalKey::Code(KeyCode::KeyR) => {

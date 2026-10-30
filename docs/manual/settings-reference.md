@@ -6,8 +6,8 @@
 
 Every setting below is shown in the app with a **?** badge that displays the
 same text. Defaults are the values the app starts with before any saved
-calibration or preference overrides them. A blank default means the value is
-filled in by the app (for example from the loaded calibration). Picking a
+setup or preference overrides them. A blank default means the value is
+filled in by the app (for example from the loaded setup). Picking a
 **Style preset** in the AI Tracking section overwrites the framing sliders,
 so their defaults only apply until you pick one.
 
@@ -140,7 +140,7 @@ so their defaults only apply until you pick one.
 
 | Setting | Range | Default | What it does |
 |---|---|---|---|
-| Vivid |  | off | Universal color grade applied to the whole composited output - perks up grey/dull footage. Sets brightness/saturation/gamma to a tuned preset; use the sliders below to fine-tune further, or leave this off and drive the sliders directly. 1.0/1.0/1.0 is identity - off by default, no GPU cost. Updates live and is saved in the calibration. |
+| Vivid |  | off | Universal color grade applied to the whole composited output - perks up grey/dull footage. Sets brightness/saturation/gamma to a tuned preset; use the sliders below to fine-tune further, or leave this off and drive the sliders directly. 1.0/1.0/1.0 is identity - off by default, no GPU cost. Updates live and is saved in the setup. |
 | Brightness | 0.5 to 1.5 | 1.0 | Color grade brightness multiplier. 1.0 is identity - above brightens, below darkens. Updates live. |
 | Saturation | 0.5 to 1.5 | 1.0 | Color grade saturation multiplier. 1.0 is identity - above makes colors more vivid, below desaturates toward greyscale. Updates live. |
 | Gamma | 0.5 to 1.5 | 1.0 | Color grade gamma. 1.0 is identity - above lifts mid-tones, below lowers them. Updates live. |
@@ -149,7 +149,7 @@ so their defaults only apply until you pick one.
 
 | Setting | Range | Default | What it does |
 |---|---|---|---|
-| Sharpening | 0.0 to 2.0 | 0.0 | Unsharp-mask sharpening applied to the final output, compensating for detail loss when the AI panner zooms into a crop of the panorama. 0.0 (default) disables it - no GPU cost. Above ~1.5 starts showing visible haloing around high-contrast edges. GPU-only. Updates live and is saved in the calibration. |
+| Sharpening | 0.0 to 2.0 | 0.0 | Unsharp-mask sharpening applied to the final output, compensating for detail loss when the AI panner zooms into a crop of the panorama. 0.0 (default) disables it - no GPU cost. Above ~1.5 starts showing visible haloing around high-contrast edges. GPU-only. Updates live and is saved in the setup. |
 | Radius |  |  | Blur sample radius in pixels. Larger sharpens coarser detail (useful when heavily zoomed in); smaller targets fine detail. |
 
 ## Advanced
@@ -190,7 +190,7 @@ so their defaults only apply until you pick one.
 | Default codec |  |  | Codec used to prefill the Export dialog. Can still be changed per export. |
 | Default quality |  |  | Quality preset used to prefill the Export dialog. Can still be changed per export. |
 | AI model (ONNX) |  |  | Default YOLO model path, used to prefill the Export dialog's AI Tracking section so you don't have to browse for it every time. |
-| Default calibration |  |  | Calibration file used as a fallback whenever no calibration is otherwise loaded for a session. Saving over this file while it's your active calibration will ask for confirmation first, since future sessions with nothing else picked fall back to it. |
+| Default setup |  |  | Setup file used as a fallback whenever no setup is otherwise loaded for a session. Saving over this file while it's your active setup will ask for confirmation first, since future sessions with nothing else picked fall back to it. |
 
 ### Recording defaults
 

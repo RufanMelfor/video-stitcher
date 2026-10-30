@@ -4,7 +4,7 @@ Calibration tells the program exactly how your two cameras sit relative to each
 other, so their pictures join into one without a visible seam. You usually do it
 once per rig setup and then reuse it.
 
-A calibration is stored in a small file (`.json`). It holds the alignment, the
+The result is stored in a small setup file (`.json`). It holds the alignment, the
 lens data, the colour settings you chose and, if you set them, your AI defaults,
 export defaults and scoreboard settings.
 
@@ -13,14 +13,14 @@ export defaults and scoreboard settings.
 1. Load the two videos (or a match folder, see [chapter 2](02-cameras-and-footage.md)).
 2. Click **Auto Calibrate** and wait.
 3. Look at the result with **Overlap view**. If it is good, click **Save
-   Calibration** and you are done.
+   Setup** and you are done.
 4. If something is slightly off, fine-tune with the sliders described below, and
    save again.
 
 ## Step 1: Auto Calibrate
 
-In the left panel, under *Calibration*, click **Auto Calibrate**. After a
-calibration exists the same button reads **Re-calibrate**. While it runs the
+In the left panel, under *Setup*, click **Auto Calibrate**. After a
+setup exists the same button reads **Re-calibrate**. While it runs the
 button shows *Calibrating...* and the Debug log shows progress.
 
 What the program does:
@@ -108,8 +108,8 @@ doubled near the seam while things move. Two tools help:
 
 ## Saving
 
-When you change a calibration value a **Save Calibration** button appears. Save
-when you are happy. Everything on the calibration (alignment, lens, colour
+When you change a calibration value a **Save Setup** button appears. Save
+when you are happy. Everything in the setup (alignment, lens, colour
 settings, AI defaults, export defaults, scoreboard settings) is stored in the one
 file and restored when you load it again.
 
@@ -145,12 +145,12 @@ and normally do not need touching.
 
 These settings tell the AI where the pitch is, so people and balls outside it are
 ignored. They are in *Rig alignment > Detection zones* and are part of the
-calibration.
+setup.
 
 - **Field ROI** (the playing area): click **Edit ROI / GOAL...** to open the lens
   preview. Click to add points, drag a point to move it, right-click a point to
   delete it. Use **Left** and **Right** to edit the other camera. **Paste ROI**
-  accepts a field area copied from another calibration. **If you export with AI
+  accepts a field area copied from another setup. **If you export with AI
   tracking and no field ROI, the program warns you**, because without it the
   camera may frame badly.
 - **Goal geometry:** the same editor, in goal mode. A goal needs at least 4
@@ -162,22 +162,22 @@ calibration.
 
 <!-- screenshot: the lens preview with the ROI polygon -->
 
-## Re-using a calibration
+## Re-using a setup
 
-A calibration stays valid as long as the two cameras do not move relative to each
+A setup stays valid as long as the two cameras do not move relative to each
 other and you keep the same lenses and settings. So you can reuse it for every
 match you record with the same rig. Two things differ per recording and are
 handled for you:
 
 - **The sync offset** (the cameras never start at exactly the same moment). When
-  you start a match from a *Default calibration* the program offers to detect it
+  you start a match from a *Default setup* the program offers to detect it
   for you: **Detect & Save**.
 - **Colour** depends on the light of that day, so check
   [chapter 4](04-colour-and-sharpness.md) for each match.
 
-To set it up, calibrate a good match, save the calibration, and in *Preferences*
-choose it as your **Default calibration**. For a new match folder without a
-calibration the program then copies it in as the starting point. Because other
+To set it up, calibrate a good match, save the setup, and in *Preferences*
+choose it as your **Default setup**. For a new match folder without a
+setup the program then copies it in as the starting point. Because other
 sessions fall back to the default, saving over it asks for confirmation first.
 
 If you bump the rig, change the mounting or switch lenses, calibrate again.
