@@ -90,6 +90,7 @@ pub mod calibration;
 /// See [`core::StitchCore`] for details. Engine orchestration is
 /// wgpu-free; only its GPU streaming surface is gated on `gpu`.
 pub mod core;
+pub mod coverage;
 pub mod detect;
 pub mod encoder;
 pub mod geometry;
