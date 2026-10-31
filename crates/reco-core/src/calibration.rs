@@ -956,6 +956,12 @@ pub struct ScoreboardSettings {
     /// could shift if packages are added/removed between sessions.
     #[serde(default)]
     pub package_id: String,
+    /// Folder the package was opened from (the GUI's scoreboard "Open..."),
+    /// so a setup comes back with its own design even when it is not an
+    /// installed package. `None` = an installed package, found by
+    /// `package_id`.
+    #[serde(default)]
+    pub package_dir: Option<PathBuf>,
     /// Absolute path to the last-loaded Match Logger export, if any.
     #[serde(default)]
     pub match_logger_path: Option<PathBuf>,
@@ -1838,6 +1844,7 @@ mod tests {
         cal.scoreboard = Some(ScoreboardSettings {
             enabled: true,
             package_id: "football".into(),
+            package_dir: None,
             match_logger_path: Some(PathBuf::from("D:/matches/HomeClub_vs_AwayClub_DEMO.json")),
             sync_event_ts_ms: Some(1_784_620_775_000),
             sync_video_seconds: 3.2,

@@ -1361,6 +1361,8 @@ export component RecoApp inherits Window {
     // Generic manifest-discovered HTML scoreboard overlay.
     in-out property <bool> scoreboard-enabled: false;
     in-out property <[string]> available-scoreboards: [];
+    // Pick a scoreboard package folder from disk and add it to the list.
+    callback open-scoreboard-package();
     in-out property <int> scoreboard-current-index: 0;
     in-out property <string> scoreboard-error-text: "";
     in-out property <bool> scoreboard-editor-available: false;
@@ -2534,10 +2536,21 @@ export component RecoApp inherits Window {
                                     }
                                 }
 
-                                if root.scoreboard-enabled: ComboBox {
-                                    model: root.available-scoreboards;
-                                    current-index <=> root.scoreboard-current-index;
-                                    selected(value) => { root.changed-scoreboard(); }
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    if root.scoreboard-enabled: ComboBox {
+                                        horizontal-stretch: 1;
+                                        model: root.available-scoreboards;
+                                        current-index <=> root.scoreboard-current-index;
+                                        selected(value) => { root.changed-scoreboard(); }
+                                    }
+                                    Tip {
+                                        tip: "Open a scoreboard design from a folder (the one holding its manifest.json). It is added to the list, selected, remembered for next time and saved in the setup. A design with the same id as a built-in one replaces it.";
+                                        FlatButton {
+                                            text: "Open design…";
+                                            clicked => { root.open-scoreboard-package(); }
+                                        }
+                                    }
                                 }
 
                                 // Match Logger import replaces the live-manual
