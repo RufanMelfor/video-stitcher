@@ -1305,6 +1305,9 @@ export component RecoApp inherits Window {
     // Draw the top-down pitch minimap (reco-minimap) in the export. Needs
     // AI tracking and a minimap.json next to the calibration file.
     in-out property <bool> export-minimap-enabled: false;
+    // True only in builds with the `minimap` cargo feature; hides the
+    // minimap controls otherwise.
+    in property <bool> minimap-built: false;
     // Minimap placement: corner index (0 top left, 1 top right,
     // 2 bottom left, 3 bottom right), width as a share of the video width,
     // and the gap to the frame edges as a share of the video height.
@@ -6241,7 +6244,7 @@ export component RecoApp inherits Window {
                         }
                     }
 
-                    Tip {
+                    if root.minimap-built: Tip {
                         tip: "Draws a top-down pitch map with players, referee and ball in the bottom corner of the export. Needs AI Tracking (below) and a minimap.json file next to the setup file, which sets the field size and where the field corners are in the camera images.";
                         CheckBox {
                             text: "Pitch minimap (needs AI Tracking + minimap.json)";
@@ -6249,7 +6252,7 @@ export component RecoApp inherits Window {
                             toggled => { root.changed-minimap(); }
                         }
                     }
-                    if root.export-minimap-enabled: VerticalLayout {
+                    if root.minimap-built && root.export-minimap-enabled: VerticalLayout {
                         spacing: 6px;
                         Tip {
                             tip: "Which corner of the video the pitch minimap is drawn in.";

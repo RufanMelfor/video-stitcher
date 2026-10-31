@@ -491,6 +491,7 @@ impl GuiSettings {
 
     /// Persist the pitch minimap checkbox and placement (see
     /// `Self::minimap_enabled`'s doc comment).
+    #[cfg(feature = "minimap")]
     pub fn set_minimap(&mut self, enabled: bool, corner: &str, width: f32, margin: f32) {
         self.minimap_enabled = enabled;
         self.minimap_corner = corner.to_string();

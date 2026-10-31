@@ -2254,6 +2254,7 @@ fn suggested_export_path(
 /// structure).
 /// The Export dialog's minimap placement controls, clamped to the ranges
 /// `MinimapPlacement::validate` accepts (the sliders already stay inside them).
+#[cfg(feature = "minimap")]
 fn export_minimap_placement(app: &RecoApp) -> reco_minimap::reco::MinimapPlacement {
     use reco_minimap::reco::{Corner, MinimapPlacement};
     let index = app.get_export_minimap_corner().clamp(0, 3) as usize;
@@ -3837,17 +3838,21 @@ fn main() -> anyhow::Result<()> {
         app.set_export_pause_overlay_hold_secs(s.user_settings.pause_overlay_hold_secs);
 
         // Pitch minimap checkbox + placement: app-level too (see
-        // `GuiSettings::minimap_enabled`).
-        app.set_export_minimap_enabled(s.user_settings.minimap_enabled);
-        let corner = reco_minimap::reco::Corner::from_name(&s.user_settings.minimap_corner)
-            .unwrap_or(reco_minimap::reco::Corner::BottomRight);
-        let corner_index = reco_minimap::reco::Corner::ALL
-            .iter()
-            .position(|c| *c == corner)
-            .unwrap_or(3);
-        app.set_export_minimap_corner(corner_index as i32);
-        app.set_export_minimap_size(s.user_settings.minimap_width);
-        app.set_export_minimap_margin(s.user_settings.minimap_margin);
+        // `GuiSettings::minimap_enabled`). Hidden without the `minimap` feature.
+        app.set_minimap_built(cfg!(feature = "minimap"));
+        #[cfg(feature = "minimap")]
+        {
+            app.set_export_minimap_enabled(s.user_settings.minimap_enabled);
+            let corner = reco_minimap::reco::Corner::from_name(&s.user_settings.minimap_corner)
+                .unwrap_or(reco_minimap::reco::Corner::BottomRight);
+            let corner_index = reco_minimap::reco::Corner::ALL
+                .iter()
+                .position(|c| *c == corner)
+                .unwrap_or(3);
+            app.set_export_minimap_corner(corner_index as i32);
+            app.set_export_minimap_size(s.user_settings.minimap_width);
+            app.set_export_minimap_margin(s.user_settings.minimap_margin);
+        }
     }
 
     // App-level SCOREBOARD card settings, same "restore before any
@@ -5629,8 +5634,11 @@ fn main() -> anyhow::Result<()> {
 
     // The pitch minimap checkbox or its placement changed - persist
     // app-level, like the PAUZE settings above.
+    #[cfg(feature = "minimap")]
     let app_weak = app.as_weak();
+    #[cfg(feature = "minimap")]
     let state_ref = Rc::clone(&state);
+    #[cfg(feature = "minimap")]
     app.on_changed_minimap(move || {
         let Some(app) = app_weak.upgrade() else {
             return;
@@ -8220,6 +8228,7 @@ fn main() -> anyhow::Result<()> {
             lookahead_reactivity: reco_autocam::panners::FieldPannerConfig::default()
                 .lookahead_reactivity,
         };
+        #[cfg(feature = "minimap")]
         let minimap_setup = if app.get_export_minimap_enabled() {
             match crate::export::load_minimap_setup(s.calibration_path.as_deref(), &autocam) {
                 Ok(setup) => Some((setup, export_minimap_placement(&app))),
@@ -8232,6 +8241,8 @@ fn main() -> anyhow::Result<()> {
         } else {
             None
         };
+        #[cfg(not(feature = "minimap"))]
+        let minimap_setup: Option<crate::export::MinimapRequest> = None;
         let replay_enabled = app.get_export_replay_enabled();
         let events_enabled = app.get_export_events_enabled();
         let events_path = if events_enabled {

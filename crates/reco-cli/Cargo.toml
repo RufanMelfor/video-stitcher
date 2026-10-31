@@ -25,7 +25,10 @@ required-features = ["autocam"]
 # `--no-default-features --features autocam,tensorrt-native,...`
 # so the prebuilt ort-sys (glibc-sensitive) isn't pulled.
 default = ["autocam", "ort"]
-autocam = ["dep:reco-autocam", "dep:reco-minimap"]
+autocam = ["dep:reco-autocam"]
+# `reco stitch --minimap` (reco-minimap). Off by default: not part of the
+# normal build for now.
+minimap = ["autocam", "dep:reco-minimap"]
 ort = ["autocam", "reco-autocam/ort"]
 replay = ["reco-io/stacked-output"]
 cuda = ["autocam", "reco-autocam/cuda"]

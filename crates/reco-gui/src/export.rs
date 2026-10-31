@@ -64,13 +64,25 @@ pub enum ExportOutcome {
     Failed(reco_io::stitch_job::StitchError),
 }
 
+/// The pitch minimap's setup and placement for one export.
+#[cfg(feature = "minimap")]
+pub type MinimapRequest = (
+    reco_minimap::reco::MinimapSetup,
+    reco_minimap::reco::MinimapPlacement,
+);
+/// Without the `minimap` feature there is no minimap to request.
+#[cfg(not(feature = "minimap"))]
+pub enum MinimapRequest {}
+
 /// File name of the minimap setup, looked up next to the calibration file.
+#[cfg(feature = "minimap")]
 pub const MINIMAP_SETUP_FILE: &str = "minimap.json";
 
 /// Load the pitch-minimap setup for an export, or explain why it can't
 /// run. Called on the UI thread before the export starts, so a missing or
 /// broken `minimap.json` stops the export with a message instead of
 /// silently exporting without the minimap.
+#[cfg(feature = "minimap")]
 pub fn load_minimap_setup(
     calibration_path: Option<&std::path::Path>,
     autocam: &AutocamUiConfig,
@@ -257,7 +269,7 @@ impl reco_core::telemetry::TelemetrySink for ExportTelemetrySink {
 
 /// The minimap's session halves for one export (see
 /// `reco_minimap::reco::attach`). Errors are user-facing messages.
-#[cfg(feature = "autocam")]
+#[cfg(all(feature = "autocam", feature = "minimap"))]
 fn build_minimap(
     setup: &reco_minimap::reco::MinimapSetup,
     placement: reco_minimap::reco::MinimapPlacement,
@@ -316,11 +328,8 @@ pub fn run_export(
     pause_overlay: Option<(f32, f32)>,
     autocam: AutocamUiConfig,
     // Pitch minimap (setup from `load_minimap_setup`, placement from the
-    // Export dialog); `None` = off.
-    minimap_setup: Option<(
-        reco_minimap::reco::MinimapSetup,
-        reco_minimap::reco::MinimapPlacement,
-    )>,
+    // Export dialog); `None` = off. Always `None` without the `minimap` feature.
+    minimap_setup: Option<MinimapRequest>,
     scoreboard_package: Option<reco_scoreboard::ScoreboardPackage>,
     scoreboard_state: Option<serde_json::Value>,
     scoreboard_replay: Option<ScoreboardReplay>,
@@ -357,7 +366,7 @@ pub fn run_export(
 
     // Pitch minimap: built here, before `cal` moves into the job, and
     // attached together with AI tracking below.
-    #[cfg(feature = "autocam")]
+    #[cfg(all(feature = "autocam", feature = "minimap"))]
     let minimap = match minimap_setup
         .as_ref()
         .map(|(setup, placement)| {
@@ -376,7 +385,7 @@ pub fn run_export(
             return ExportOutcome::Failed(reco_io::stitch_job::StitchError::Other(msg));
         }
     };
-    #[cfg(not(feature = "autocam"))]
+    #[cfg(not(all(feature = "autocam", feature = "minimap")))]
     let _ = &minimap_setup;
 
     let post_status = |text: String| {
@@ -874,6 +883,7 @@ pub fn run_export(
         let ac = autocam.clone();
         let status_weak = app_weak.clone();
         let pitch_limits = autocam_pitch_limits;
+        #[cfg(feature = "minimap")]
         let minimap_handle = match minimap {
             Some((sink, overlay, handle, placement)) => {
                 job = job
@@ -886,6 +896,7 @@ pub fn run_export(
         job = job.on_session(move |session, source| {
             session.set_autocam_pitch_limits(pitch_limits);
             let info = source.info();
+            #[cfg(feature = "minimap")]
             if let Some(ref handle) = minimap_handle
                 && let Err(e) = handle.set_fps(info.fps)
             {
