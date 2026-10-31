@@ -18,6 +18,9 @@ path = "src/main.rs"
 # explicit backend (tensorrt-native, ncnn).
 default = ["autocam", "ort"]
 autocam = ["dep:reco-autocam"]
+# Pitch minimap overlay in the Export dialog (reco-minimap). Off by default:
+# not part of the normal build for now.
+minimap = ["autocam", "dep:reco-minimap"]
 ort = ["autocam", "reco-autocam/ort"]
 tensorrt = ["autocam", "reco-autocam/tensorrt"]
 tensorrt-native = ["autocam", "reco-autocam/tensorrt-native"]
@@ -40,7 +43,7 @@ automation = []
 base64 = "0.22"
 reco-core = { path = "../reco-core" }
 reco-scoreboard = { path = "../reco-scoreboard" }
-reco-minimap = { path = "../reco-minimap" }
+reco-minimap = { path = "../reco-minimap", optional = true }
 reco-control = { path = "../reco-control" }
 reco-io = { path = "../reco-io", features = ["ffmpeg", "config", "stacked-output"] }
 serde = { version = "1", features = ["derive"] }

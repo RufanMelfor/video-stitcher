@@ -662,7 +662,24 @@ struct RecordingFrame {
 
 impl AppState {
     fn new() -> Self {
-        let discovery = reco_scoreboard::discover_installed();
+        let mut discovery = reco_scoreboard::discover_installed();
+        // User-opened packages (scoreboard "Open..."), oldest first so the
+        // most recently opened wins an id clash.
+        for dir in crate::settings::GuiSettings::load()
+            .opened_scoreboard_dirs
+            .iter()
+            .rev()
+        {
+            match reco_scoreboard::ScoreboardPackage::load(dir) {
+                Ok(package) => {
+                    insert_scoreboard_package(&mut discovery.packages, package);
+                }
+                Err(error) => log::warn!(
+                    "Skipping opened scoreboard package {}: {error}",
+                    dir.display()
+                ),
+            }
+        }
         for issue in &discovery.issues {
             match issue.severity {
                 // A later search root re-finding a package an earlier one
@@ -2237,6 +2254,7 @@ fn suggested_export_path(
 /// structure).
 /// The Export dialog's minimap placement controls, clamped to the ranges
 /// `MinimapPlacement::validate` accepts (the sliders already stay inside them).
+#[cfg(feature = "minimap")]
 fn export_minimap_placement(app: &RecoApp) -> reco_minimap::reco::MinimapPlacement {
     use reco_minimap::reco::{Corner, MinimapPlacement};
     let index = app.get_export_minimap_corner().clamp(0, 3) as usize;
@@ -3363,6 +3381,38 @@ fn flag_scoreboard_dirty(app_weak: &slint::Weak<RecoApp>, state: &Rc<RefCell<App
     });
 }
 
+/// Add `package` to the scoreboard list: replaces a package with the same
+/// id (an opened copy wins over the installed one), else appends.
+/// Returns its index.
+fn insert_scoreboard_package(
+    packages: &mut Vec<reco_scoreboard::ScoreboardPackage>,
+    package: reco_scoreboard::ScoreboardPackage,
+) -> usize {
+    match packages
+        .iter()
+        .position(|p| p.manifest.id == package.manifest.id)
+    {
+        Some(index) => {
+            packages[index] = package;
+            index
+        }
+        None => {
+            packages.push(package);
+            packages.len() - 1
+        }
+    }
+}
+
+/// Push the scoreboard package names to the design selector.
+fn sync_scoreboard_list(app: &RecoApp, s: &AppState) {
+    let names = s
+        .scoreboard_packages
+        .iter()
+        .map(|package| package.manifest.name.clone().into())
+        .collect::<Vec<slint::SharedString>>();
+    app.set_available_scoreboards(slint::ModelRc::new(slint::VecModel::from(names)));
+}
+
 /// Snapshot the current scoreboard state into a persistable
 /// `ScoreboardSettings` - the scoreboard equivalent of
 /// `snapshot_autocam_defaults`, see `do_save_calibration`. Unlike
@@ -3372,14 +3422,21 @@ fn snapshot_scoreboard_settings(
     app: &RecoApp,
     s: &AppState,
 ) -> reco_core::calibration::ScoreboardSettings {
-    let package_id = s
+    let package = s
         .scoreboard_packages
-        .get(app.get_scoreboard_current_index().max(0) as usize)
+        .get(app.get_scoreboard_current_index().max(0) as usize);
+    let package_id = package
         .map(|package| package.manifest.id.clone())
         .unwrap_or_default();
+    // Only opened packages carry their folder; installed ones are found
+    // by id (their install path differs per machine).
+    let package_dir = package
+        .map(|package| package.directory.clone())
+        .filter(|dir| s.user_settings.opened_scoreboard_dirs.contains(dir));
     reco_core::calibration::ScoreboardSettings {
         enabled: app.get_scoreboard_enabled(),
         package_id,
+        package_dir,
         match_logger_path: s.scoreboard_import_path.clone(),
         sync_event_ts_ms: s.scoreboard_sync_anchor.map(|anchor| anchor.event_ts_ms),
         sync_video_seconds: s
@@ -3505,10 +3562,40 @@ fn apply_scoreboard_settings(
 ) {
     let mut s = state_ref.borrow_mut();
 
-    let package_index = s
-        .scoreboard_packages
-        .iter()
-        .position(|package| package.manifest.id == settings.package_id);
+    // A setup that used an opened package brings it back, even on a
+    // machine (or after a restart) where it is not in the list yet.
+    if let Some(dir) = settings.package_dir.as_ref()
+        && !s.scoreboard_packages.iter().any(|p| &p.directory == dir)
+    {
+        match reco_scoreboard::ScoreboardPackage::load(dir) {
+            Ok(package) => {
+                insert_scoreboard_package(&mut s.scoreboard_packages, package);
+                sync_scoreboard_list(app, &s);
+            }
+            Err(error) => {
+                log::warn!(
+                    "Cannot load the setup's scoreboard {}: {error}",
+                    dir.display()
+                );
+                app.set_scoreboard_error_text(
+                    format!("Scoreboard design not found: {}", dir.display()).into(),
+                );
+            }
+        }
+    }
+    let package_index = settings
+        .package_dir
+        .as_ref()
+        .and_then(|dir| {
+            s.scoreboard_packages
+                .iter()
+                .position(|p| &p.directory == dir)
+        })
+        .or_else(|| {
+            s.scoreboard_packages
+                .iter()
+                .position(|package| package.manifest.id == settings.package_id)
+        });
     if let Some(index) = package_index {
         app.set_scoreboard_current_index(index as i32);
     }
@@ -3751,17 +3838,21 @@ fn main() -> anyhow::Result<()> {
         app.set_export_pause_overlay_hold_secs(s.user_settings.pause_overlay_hold_secs);
 
         // Pitch minimap checkbox + placement: app-level too (see
-        // `GuiSettings::minimap_enabled`).
-        app.set_export_minimap_enabled(s.user_settings.minimap_enabled);
-        let corner = reco_minimap::reco::Corner::from_name(&s.user_settings.minimap_corner)
-            .unwrap_or(reco_minimap::reco::Corner::BottomRight);
-        let corner_index = reco_minimap::reco::Corner::ALL
-            .iter()
-            .position(|c| *c == corner)
-            .unwrap_or(3);
-        app.set_export_minimap_corner(corner_index as i32);
-        app.set_export_minimap_size(s.user_settings.minimap_width);
-        app.set_export_minimap_margin(s.user_settings.minimap_margin);
+        // `GuiSettings::minimap_enabled`). Hidden without the `minimap` feature.
+        app.set_minimap_built(cfg!(feature = "minimap"));
+        #[cfg(feature = "minimap")]
+        {
+            app.set_export_minimap_enabled(s.user_settings.minimap_enabled);
+            let corner = reco_minimap::reco::Corner::from_name(&s.user_settings.minimap_corner)
+                .unwrap_or(reco_minimap::reco::Corner::BottomRight);
+            let corner_index = reco_minimap::reco::Corner::ALL
+                .iter()
+                .position(|c| *c == corner)
+                .unwrap_or(3);
+            app.set_export_minimap_corner(corner_index as i32);
+            app.set_export_minimap_size(s.user_settings.minimap_width);
+            app.set_export_minimap_margin(s.user_settings.minimap_margin);
+        }
     }
 
     // App-level SCOREBOARD card settings, same "restore before any
@@ -3895,12 +3986,7 @@ fn main() -> anyhow::Result<()> {
     // The selector is manifest-driven; no sport name is compiled into Rust.
     {
         let s = state.borrow();
-        let names = s
-            .scoreboard_packages
-            .iter()
-            .map(|package| package.manifest.name.clone().into())
-            .collect::<Vec<slint::SharedString>>();
-        app.set_available_scoreboards(slint::ModelRc::new(slint::VecModel::from(names)));
+        sync_scoreboard_list(&app, &s);
         app.set_scoreboard_error_text(s.scoreboard_error.clone().into());
     }
 
@@ -5279,6 +5365,60 @@ fn main() -> anyhow::Result<()> {
         s.user_settings.save();
     });
 
+    // Scoreboard "Open...": pick a package folder (with manifest.json),
+    // add it to the design list, select and enable it.
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_open_scoreboard_package(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let Some(dir) = rfd::FileDialog::new()
+            .set_title("Open a scoreboard design (folder with manifest.json)")
+            .pick_folder()
+        else {
+            return;
+        };
+        let package = match reco_scoreboard::ScoreboardPackage::load(&dir) {
+            Ok(package) => package,
+            Err(error) => {
+                log::warn!("Cannot open scoreboard package {}: {error}", dir.display());
+                let mut s = state_ref.borrow_mut();
+                s.toasts.push(
+                    Severity::Warn,
+                    "Not a scoreboard design",
+                    format!(
+                        "{}: {error}. Pick the folder that holds the design's manifest.json \
+                         (the folder name must match its \"id\").",
+                        dir.display()
+                    ),
+                );
+                crate::toast::sync_to_ui(&s.toasts, &app);
+                return;
+            }
+        };
+        log::info!(
+            "Opened scoreboard package '{}' ({}) from {}",
+            package.manifest.name,
+            package.manifest.id,
+            package.directory.display()
+        );
+        let name = package.manifest.name.clone();
+        {
+            let mut s = state_ref.borrow_mut();
+            let package_dir = package.directory.clone();
+            let index = insert_scoreboard_package(&mut s.scoreboard_packages, package);
+            s.user_settings.push_opened_scoreboard_dir(package_dir);
+            sync_scoreboard_list(&app, &s);
+            app.set_scoreboard_current_index(index as i32);
+            app.set_scoreboard_enabled(true);
+        }
+        // Same path as picking a design from the list.
+        app.invoke_changed_scoreboard();
+        app.set_cal_dirty(true);
+        app.set_status_text(format!("Scoreboard design '{name}' opened").into());
+    });
+
     let app_weak = app.as_weak();
     let state_ref = Rc::clone(&state);
     app.on_changed_scoreboard(move || {
@@ -5494,8 +5634,11 @@ fn main() -> anyhow::Result<()> {
 
     // The pitch minimap checkbox or its placement changed - persist
     // app-level, like the PAUZE settings above.
+    #[cfg(feature = "minimap")]
     let app_weak = app.as_weak();
+    #[cfg(feature = "minimap")]
     let state_ref = Rc::clone(&state);
+    #[cfg(feature = "minimap")]
     app.on_changed_minimap(move || {
         let Some(app) = app_weak.upgrade() else {
             return;
@@ -8085,6 +8228,7 @@ fn main() -> anyhow::Result<()> {
             lookahead_reactivity: reco_autocam::panners::FieldPannerConfig::default()
                 .lookahead_reactivity,
         };
+        #[cfg(feature = "minimap")]
         let minimap_setup = if app.get_export_minimap_enabled() {
             match crate::export::load_minimap_setup(s.calibration_path.as_deref(), &autocam) {
                 Ok(setup) => Some((setup, export_minimap_placement(&app))),
@@ -8097,6 +8241,8 @@ fn main() -> anyhow::Result<()> {
         } else {
             None
         };
+        #[cfg(not(feature = "minimap"))]
+        let minimap_setup: Option<crate::export::MinimapRequest> = None;
         let replay_enabled = app.get_export_replay_enabled();
         let events_enabled = app.get_export_events_enabled();
         let events_path = if events_enabled {
@@ -9485,19 +9631,21 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 // function (VRAM checks etc. below) working unchanged.
                 if let Some(mut sb) = s.calibration.as_ref().and_then(|c| c.scoreboard.clone()) {
                     // The calibration's own copy of the "preference"-style
-                    // fields (placement, banner color, font, logo size,
-                    // auto-cut) is whatever was true when THIS calibration
-                    // was last saved - it goes stale the moment the user
-                    // tweaks those app-wide from a different match, and
-                    // applying it here would silently undo the app-level
+                    // fields (banner color, font, logo size, auto-cut) is
+                    // whatever was true when THIS calibration was last
+                    // saved - it goes stale the moment the user tweaks
+                    // those app-wide from a different match, and applying
+                    // it here would silently undo the app-level
                     // persistence added for exactly this reason (see
-                    // `persist_scoreboard_settings`). Match-specific bits
-                    // (Match Logger export, sync anchor, team logos,
-                    // package/enabled) still come from the calibration.
-                    // The app-level settings win for the rest whenever
-                    // they exist.
+                    // `persist_scoreboard_settings`); the app-level
+                    // settings win for those whenever they exist.
+                    // Match- and rig-specific bits come from the
+                    // calibration: Match Logger export, sync anchor, team
+                    // logos, package/enabled, and the placement - where
+                    // the scoreboard sits depends on this rig's framing
+                    // (what part of the frame is pitch), so the setup's
+                    // own position is the one the user expects back.
                     if let Some(app_sb) = s.user_settings.scoreboard_settings.clone() {
-                        sb.placement = app_sb.placement;
                         sb.banner_color_name = app_sb.banner_color_name;
                         sb.font_family = app_sb.font_family;
                         sb.logo_size_px = app_sb.logo_size_px;

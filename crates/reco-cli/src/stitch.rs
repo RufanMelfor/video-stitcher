@@ -253,12 +253,12 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
     .to_string();
 
     // Built before `cal` moves into the job; attached to it below.
-    #[cfg(feature = "autocam")]
+    #[cfg(feature = "minimap")]
     let minimap = build_minimap(&args, &cal)?;
-    #[cfg(not(feature = "autocam"))]
+    #[cfg(not(feature = "minimap"))]
     anyhow::ensure!(
         args.minimap_path.is_none(),
-        "--minimap requires AI tracking, which this build does not include (feature `autocam`)"
+        "--minimap is not part of this build (cargo feature `minimap`)"
     );
 
     let mut job = reco_io::StitchJob::with_calibration(
@@ -485,6 +485,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         let confidence_threshold = args.confidence_threshold;
         let async_detect = args.async_detect;
         let lookahead_secs = args.lookahead;
+        #[cfg(feature = "minimap")]
         let minimap_handle = match minimap {
             Some((sink, overlay, handle, placement)) => {
                 job = job
@@ -631,6 +632,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         job = job.on_session(move |session, source| {
             session.set_autocam_pitch_limits(autocam_pitch_limits);
             let info = source.info();
+            #[cfg(feature = "minimap")]
             if let Some(ref handle) = minimap_handle
                 && let Err(e) = handle.set_fps(info.fps)
             {
@@ -789,7 +791,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
 /// The minimap's session halves, built from `--minimap` (`None` when the
 /// flag is absent). Fails when the setup is invalid or AI tracking - the
 /// minimap's only input - is not requested.
-#[cfg(feature = "autocam")]
+#[cfg(feature = "minimap")]
 fn build_minimap(
     args: &StitchArgs<'_>,
     cal: &reco_core::calibration::Calibration,

@@ -200,6 +200,12 @@ pub struct GuiSettings {
     /// (`AppState::ai_debug_cut_ranges`), never persisted.
     #[serde(default)]
     pub ai_debug_settings: Option<AiDebugSettings>,
+    /// Scoreboard package folders opened with the scoreboard "Open..."
+    /// button, most recent first; loaded next to the installed packages
+    /// at startup (an opened package replaces an installed one with the
+    /// same id).
+    #[serde(default)]
+    pub opened_scoreboard_dirs: Vec<PathBuf>,
 }
 
 /// Persisted AI Debug tab settings - see `GuiSettings::ai_debug_settings`.
@@ -308,6 +314,7 @@ impl Default for GuiSettings {
             minimap_width: default_minimap_width(),
             minimap_margin: default_minimap_margin(),
             ai_debug_settings: None,
+            opened_scoreboard_dirs: Vec::new(),
         }
     }
 }
@@ -328,7 +335,15 @@ impl GuiSettings {
     /// Persist settings atomically. Errors are logged and swallowed -
     /// a failure to save preferences should never block user work
     /// (worst case: the user has to re-pick defaults next session).
+    ///
+    /// A no-op in unit tests: the `set_*` helpers below save, and tests
+    /// exercising them must never overwrite the user's real
+    /// `%APPDATA%\reco\config\gui.json` (they did, and every `cargo test`
+    /// reset e.g. the scoreboard position to the test fixture's).
     pub fn save(&self) {
+        if cfg!(test) {
+            return;
+        }
         if let Err(e) = reco_io::settings::save(NAMESPACE, self) {
             log::warn!("failed to save GUI settings: {e}");
         }
@@ -450,6 +465,14 @@ impl GuiSettings {
         self.save();
     }
 
+    /// Remember a scoreboard package folder opened by the user (moved to
+    /// the front if already known).
+    pub fn push_opened_scoreboard_dir(&mut self, dir: PathBuf) {
+        self.opened_scoreboard_dirs.retain(|d| d != &dir);
+        self.opened_scoreboard_dirs.insert(0, dir);
+        self.save();
+    }
+
     /// Persist the SCOREBOARD card's settings (see
     /// `Self::scoreboard_settings`'s doc comment).
     pub fn set_scoreboard_settings(&mut self, settings: ScoreboardSettings) {
@@ -468,6 +491,7 @@ impl GuiSettings {
 
     /// Persist the pitch minimap checkbox and placement (see
     /// `Self::minimap_enabled`'s doc comment).
+    #[cfg(feature = "minimap")]
     pub fn set_minimap(&mut self, enabled: bool, corner: &str, width: f32, margin: f32) {
         self.minimap_enabled = enabled;
         self.minimap_corner = corner.to_string();
@@ -624,6 +648,18 @@ mod tests {
     }
 
     #[test]
+    fn opened_scoreboard_dirs_dedupe_most_recent_first() {
+        let mut s = GuiSettings::default();
+        s.push_opened_scoreboard_dir(PathBuf::from("a"));
+        s.push_opened_scoreboard_dir(PathBuf::from("b"));
+        s.push_opened_scoreboard_dir(PathBuf::from("a"));
+        assert_eq!(
+            s.opened_scoreboard_dirs,
+            vec![PathBuf::from("a"), PathBuf::from("b")]
+        );
+    }
+
+    #[test]
     fn scoreboard_settings_absent_until_set() {
         let s = GuiSettings::default();
         assert!(s.scoreboard_settings.is_none());
@@ -635,6 +671,7 @@ mod tests {
         let sb = ScoreboardSettings {
             enabled: true,
             package_id: "football".into(),
+            package_dir: None,
             match_logger_path: None,
             sync_event_ts_ms: None,
             sync_video_seconds: 0.0,
