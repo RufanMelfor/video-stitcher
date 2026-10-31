@@ -17,6 +17,7 @@
 
 mod detect_preview;
 mod export;
+mod info_report;
 mod match_folder;
 mod playback;
 mod preview;
@@ -6056,6 +6057,81 @@ fn main() -> anyhow::Result<()> {
             .borrow()
             .calibration_interrupted
             .store(true, Ordering::Relaxed);
+    });
+
+    // "Info": probe every segment of both cameras (headers only, fast) and
+    // show the footage / lens / rig-coverage report.
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_show_info(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let s = state_ref.borrow();
+        let camera = |input: Option<&reco_io::stitch_job::InputPath>, profile: String| {
+            info_report::CameraInfo {
+                segments: input
+                    .map(reco_io::stitch_job::InputPath::all_paths)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|p| {
+                        let probe = reco_io::ffmpeg::media_info::probe_media_info(&p)
+                            .map_err(|e| e.to_string());
+                        (p, probe)
+                    })
+                    .collect(),
+                lens_profile: profile,
+            }
+        };
+        let profile = |source: slint::SharedString,
+                       camera: slint::SharedString,
+                       lens: slint::SharedString| {
+            [source, camera, lens]
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && s != "Unknown" && s != "Not detected")
+                .collect::<Vec<_>>()
+                .join(" - ")
+        };
+        let imu = app.get_imu_status_text();
+        let report = info_report::build_report(&info_report::ReportInput {
+            left: camera(
+                s.left_input.as_ref(),
+                profile(
+                    app.get_lens_left_source(),
+                    app.get_lens_left_camera(),
+                    app.get_lens_left_lens(),
+                ),
+            ),
+            right: camera(
+                s.right_input.as_ref(),
+                profile(
+                    app.get_lens_right_source(),
+                    app.get_lens_right_camera(),
+                    app.get_lens_right_lens(),
+                ),
+            ),
+            calibration: s.calibration.as_ref(),
+            setup_path: s.calibration_path.as_deref(),
+            imu_status: imu.as_str(),
+        });
+        app.set_info_report(report.into());
+        app.set_info_dialog_open(true);
+    });
+
+    let app_weak = app.as_weak();
+    app.on_copy_info(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        let text = app.get_info_report().to_string();
+        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+            Ok(()) => app.set_status_text("Info copied to the clipboard".into()),
+            Err(e) => {
+                log::warn!("Copy info to clipboard failed: {e}");
+                app.set_status_text("Could not copy to the clipboard".into());
+            }
+        }
     });
 
     // "Refine Alignment": fine-tune the current setup on rendered pixels

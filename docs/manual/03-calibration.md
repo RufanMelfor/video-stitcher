@@ -130,6 +130,27 @@ when you are happy. Everything in the setup (alignment, lens, colour
 settings, AI defaults, export defaults, scoreboard settings) is stored in the one
 file and restored when you load it again.
 
+## Info
+
+The **Info** button next to *Refine Alignment* opens a report about the
+footage and the rig:
+
+- per camera: the files and segments, duration and size, video codec,
+  resolution, frame rate, bit depth and bitrate, the audio track, the recording
+  time and the camera that wrote the file;
+- the lens profile and the lens's field of view (horizontal, vertical and
+  diagonal, in degrees);
+- with a setup loaded: the sync offset, the angle between the two cameras, the
+  **overlap in degrees** (the part of the scene both cameras see, at the
+  horizon), the total panorama width and where the seam lies within the
+  overlap.
+
+The angles come from the stitch model, which treats both cameras as if they sat
+in one point. The real cameras are a few centimetres apart, so take the angles
+as a close guide (for example to compare two ways of mounting the cameras), not
+as an exact measurement. **Copy to clipboard** copies the whole report, for
+example to share it on the forum.
+
 ## Choosing the moment
 
 Calibration uses frames spread over the video. If the automatic result is poor,

@@ -1588,6 +1588,12 @@ export component RecoApp inherits Window {
     callback auto-calibrate();
     // Re-run the pixel alignment refine for the current seam position.
     callback refine-alignment();
+    // "Info" dialog: footage, lens and rig-coverage report (Rust builds the
+    // text into info-report), and copying it to the clipboard.
+    in-out property <bool> info-dialog-open: false;
+    in-out property <string> info-report: "";
+    callback show-info();
+    callback copy-info();
     // Fired whenever an AKAZE tuning slider/checkbox changes, so Rust can
     // re-run detection on the current frame and show the result live
     // without a full Auto-Calibrate run.
@@ -2179,12 +2185,23 @@ export component RecoApp inherits Window {
                             }
                         }
 
-                        if root.has-both-videos && root.files-loaded: Tip {
-                            tip: "Fine-tunes the camera alignment for where the seam is now, by comparing what both cameras show along the seam (lines, fences, boards). Use it after moving the seam. Scores the anchor frame (or the current frame) plus three more 5 s apart - pick a moment with players near the seam. Takes about two minutes.";
-                            FlatButton {
-                                text: root.calibrating ? "Working..." : "Refine Alignment";
-                                enabled: !root.calibrating;
-                                clicked => { root.refine-alignment(); }
+                        if root.has-both-videos: HorizontalLayout {
+                            spacing: 4px;
+                            if root.files-loaded: Tip {
+                                horizontal-stretch: 1;
+                                tip: "Fine-tunes the camera alignment for where the seam is now, by comparing what both cameras show along the seam (lines, fences, boards). Use it after moving the seam. Scores the anchor frame (or the current frame) plus three more 5 s apart - pick a moment with players near the seam. Takes about two minutes.";
+                                FlatButton {
+                                    text: root.calibrating ? "Working..." : "Refine Alignment";
+                                    enabled: !root.calibrating;
+                                    clicked => { root.refine-alignment(); }
+                                }
+                            }
+                            Tip {
+                                tip: "Details of both videos (codec, resolution, bit depth, bitrate, audio, recording time), the lenses' field of view and, with a setup, how many degrees the cameras overlap. Can be copied to the clipboard.";
+                                FlatButton {
+                                    text: "Info";
+                                    clicked => { root.show-info(); }
+                                }
                             }
                         }
 
@@ -7155,6 +7172,48 @@ export component RecoApp inherits Window {
                 }  // close ScrollView
             }
         }
+        // ── Info report (modal) ──
+        if root.info-dialog-open: Rectangle {
+            background: root.bg-scrim;
+            TouchArea { clicked => { root.info-dialog-open = false; } }
+
+            Rectangle {
+                width: min(parent.width - 60px, 760px);
+                height: min(parent.height - 60px, 640px);
+                background: root.bg-surface;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: root.border-mid;
+                TouchArea {}
+
+                VerticalLayout {
+                    padding: 24px;
+                    spacing: 14px;
+
+                    Text { text: "Info"; color: root.text-heading; font-size: 18px; font-weight: 600; }
+
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            Text {
+                                text: root.info-report;
+                                color: root.text-muted;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: end;
+                        FlatButton { text: "Copy to clipboard"; clicked => { root.copy-info(); } }
+                        FlatButton { text: "Close"; primary: true; clicked => { root.info-dialog-open = false; } }
+                    }
+                }
+            }
+        }
+
         // ── No-ROI export confirmation (modal) ──
         //
         // Rendered after the Export dialog so it stacks on top when both
