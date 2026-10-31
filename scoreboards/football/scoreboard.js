@@ -164,6 +164,43 @@
         }
     }
 
+    // Shrinks a team name only when it doesn't fit its two-line slot
+    // (style.css wraps long names onto a second line first). How wide a
+    // name renders depends on the user's chosen font (custom.fontFamily),
+    // so no fixed font-size fits every club - a single long word can
+    // still overflow. Starts from the stylesheet's size each time, so a
+    // shorter name grows back; below the floor the line clamp cuts off.
+    const NAME_MIN_FONT_PX = 26;
+    const NAME_MAX_LINES = 2;
+    // Counts lines from scrollHeight rather than comparing it with
+    // clientHeight: glyph ascenders make scrollHeight a few px taller
+    // than the box even for a name that fits on one line.
+    function overflows(el) {
+        const lineHeight = parseFloat(getComputedStyle(el).lineHeight);
+        const lines = Math.round(el.scrollHeight / lineHeight);
+        return el.scrollWidth > el.clientWidth || lines > NAME_MAX_LINES;
+    }
+    function fitText(el) {
+        el.style.removeProperty("font-size");
+        let size = parseFloat(getComputedStyle(el).fontSize);
+        while (overflows(el) && size > NAME_MIN_FONT_PX) {
+            size -= 1;
+            el.style.fontSize = `${size}px`;
+        }
+    }
+
+    function fitNames() {
+        fitText(elements.homeName);
+        fitText(elements.awayName);
+    }
+
+    // A web font finishing loading after the update changes text width;
+    // re-fit then and ask the host for a fresh frame.
+    document.fonts?.ready.then(() => {
+        fitNames();
+        window.__recoMarkDirty?.();
+    });
+
     Reco.onUpdate((state) => {
         debugState = ensureStateShape(structuredClone(state));
         text(elements.homeName, state.home?.shortName || state.home?.name, "HOME");
@@ -195,6 +232,8 @@
         setCustomVar(elements.board, "--banner-color", state.custom?.bannerColor);
         setLogo(elements.homeLogo, state.home?.logo);
         setLogo(elements.awayLogo, state.away?.logo);
+        // After setLogo: a hidden logo widens the name slot (style.css).
+        fitNames();
         syncEditorFields();
     });
 
