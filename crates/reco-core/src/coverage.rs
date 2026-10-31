@@ -1,23 +1,37 @@
-//! Angular coverage of a setup: each lens's field of view, and how many
-//! degrees of the scene both cameras see.
+//! Angular coverage of a setup: each lens's field of view, the physical
+//! angle between the two cameras, and how many degrees of the scene both
+//! cameras see.
 //!
 //! Pure math on a [`Calibration`] - no GPU, no I/O.
 //!
 //! - [`lens_fov`]: horizontal / vertical / diagonal field of view of one
 //!   lens from its KB4 intrinsics (the physical lens, independent of the
 //!   rig).
-//! - [`horizon_coverage`]: sweeps viewing directions along the horizon
-//!   from the stitch's virtual eye and tests, per direction, whether it
-//!   lands inside each camera's real image - the same plane intersection
-//!   and KB4 mapping `fisheye.wgsl` uses. The angle where both cameras
-//!   have image is the overlap.
+//! - [`horizon_coverage`]: the rig along the horizon, in real camera
+//!   angles.
 //!
-//! The stitch models both cameras as seen from one virtual eye, while the
-//! real cameras sit a few centimetres apart, so the rig angles are a
-//! close guide (for comparing mounts, or "is there enough overlap"), not a
-//! survey-grade measurement. The horizon row is outside the
-//! `ground_tilt` / `top_tilt` bands, so those corrections do not change
-//! the result.
+//! # Why not angles in the stitch model
+//!
+//! The stitch places the two undistorted images on planes that are always
+//! 90 deg apart (the L-shape) and views them from one virtual eye; a real
+//! rig angle other than 90 deg is absorbed by the eye position and
+//! `intersect`. Angles measured from that eye are therefore model angles,
+//! not the rig's (on a rig measured at 84.0 deg in CAD the eye sees ~80).
+//!
+//! Instead, [`horizon_coverage`] sweeps directions from the eye only to
+//! find which pixels the calibration declares to be the *same* scene point
+//! in both cameras (the same plane intersection and KB4 bounds test
+//! `fisheye.wgsl` uses). Each camera's plane UV is its pinhole-normalized
+//! image, so `atan((u - cx) / fx)` is the true horizontal angle of that
+//! point off that camera's own optical axis. Differences of those angles
+//! are physical: the camera angle is `angle_in_left - angle_in_right` for
+//! a shared point, the overlap is the span of shared points in one
+//! camera's angles. On the 84.0 deg rig this gives 84.4-84.5 deg for three
+//! independent setups.
+//!
+//! It assumes the cameras share one projection centre (true to a few cm
+//! on a two-camera rig; scene points are metres away) and uses the
+//! horizon row, which lies outside the `ground_tilt` / `top_tilt` bands.
 
 use nalgebra::{Matrix4, Vector3, Vector4};
 
@@ -26,8 +40,9 @@ use crate::geometry::VirtualCamera;
 use crate::lens::kb4;
 use crate::render::scene::SceneGeometry;
 
-/// Angular step of the [`horizon_coverage`] sweep, in degrees.
-pub const SWEEP_STEP_DEG: f64 = 0.05;
+/// Angular step of the [`horizon_coverage`] sweep, in degrees (of the
+/// virtual eye; only sets the sampling density).
+pub const SWEEP_STEP_DEG: f64 = 0.02;
 /// Half-range of the sweep either side of the view centre, in degrees.
 const SWEEP_HALF_RANGE_DEG: f64 = 160.0;
 const NEWTON_MAX_ITERS: usize = 50;
@@ -88,29 +103,29 @@ fn theta_from_theta_d(theta_d: f64, d: &[f64; 4]) -> Option<f64> {
     None
 }
 
-/// Horizontal angles (degrees) along the horizon as seen from the stitch's
-/// virtual eye. 0 = straight at the seam corner, positive = to the
-/// viewer's right.
+/// The rig along the horizon, in physical degrees (see the module doc).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HorizonCoverage {
-    /// Left camera's image: `[from, to]`. `None` if it covers nothing.
-    pub left_deg: Option<[f64; 2]>,
-    /// Right camera's image: `[from, to]`. `None` if it covers nothing.
-    pub right_deg: Option<[f64; 2]>,
-    /// Angle where both cameras have image.
+    /// Angle between the two cameras' optical axes (median over the
+    /// overlap). `None` without overlap.
+    pub camera_angle_deg: Option<f64>,
+    /// Horizontal angle the left camera contributes along the horizon.
+    pub left_span_deg: f64,
+    /// Horizontal angle the right camera contributes along the horizon.
+    pub right_span_deg: f64,
+    /// Angle seen by both cameras.
     pub overlap_deg: f64,
-    /// Angle where at least one camera has image (panorama width).
+    /// Total horizontal angle of the panorama (`left + right - overlap`).
     pub panorama_deg: f64,
-    /// Angle between the two cameras' optical axes.
-    pub axis_angle_deg: Option<f64>,
-    /// Where the export cuts (`Topology::seam_offset` on the right
-    /// plane, default blend direction). `None` if outside the sweep.
-    pub seam_deg: Option<f64>,
+    /// Where the export cuts (`Topology::seam_offset` on the right plane,
+    /// default blend direction) as `[degrees from the overlap's left edge,
+    /// degrees from its right edge]`. `None` when the seam is not inside
+    /// the overlap.
+    pub seam_in_overlap_deg: Option<[f64; 2]>,
 }
 
 /// One camera plane: world -> plane-local transform plus the lens.
 struct Plane<'a> {
-    model: Matrix4<f64>,
     inverse: Matrix4<f64>,
     aspect: f64,
     lens: &'a Lens,
@@ -154,25 +169,38 @@ impl Plane<'_> {
         (0.0..=1.0).contains(&du) && (0.0..=1.0).contains(&dv)
     }
 
-    /// World position of extended plane UV `(u, v)`.
-    fn world_at(&self, u: f64, v: f64) -> Vector3<f64> {
-        let vx = (u + 0.5) / 2.0;
-        let vy = (v + 0.5) / 2.0;
-        let p = self.model * Vector4::new(vx - 0.5, (0.5 - vy) / self.aspect, 0.0, 1.0);
-        Vector3::new(p.x, p.y, p.z)
+    /// Horizontal angle (degrees, positive = right) of extended plane UV
+    /// column `u` off this camera's own optical axis: plane UV is the
+    /// pinhole-normalized image, so this is `atan(x)`.
+    fn camera_angle(&self, u: f64) -> f64 {
+        let l = self.lens;
+        let (fx, cx) = (l.fx / l.width as f64, l.cx / l.width as f64);
+        ((u - cx) / fx).atan().to_degrees()
     }
 }
 
-/// Sweep the horizon (see the module doc). Left = `lenses[0]`, right =
-/// `lenses[1]`; a setup with fewer than two lenses covers nothing.
+/// Running `[min, max]`.
+fn extend(range: &mut Option<[f64; 2]>, a: f64) {
+    let r = range.get_or_insert([a, a]);
+    r[0] = r[0].min(a);
+    r[1] = r[1].max(a);
+}
+
+fn span(range: Option<[f64; 2]>) -> f64 {
+    range.map(|[a, b]| b - a).unwrap_or(0.0)
+}
+
+/// Measure the rig along the horizon (see the module doc). Left =
+/// `lenses[0]`, right = `lenses[1]`; a setup with fewer than two lenses,
+/// or degenerate planes, covers nothing.
 pub fn horizon_coverage(cal: &Calibration) -> HorizonCoverage {
     let empty = HorizonCoverage {
-        left_deg: None,
-        right_deg: None,
+        camera_angle_deg: None,
+        left_span_deg: 0.0,
+        right_span_deg: 0.0,
         overlap_deg: 0.0,
         panorama_deg: 0.0,
-        axis_angle_deg: None,
-        seam_deg: None,
+        seam_in_overlap_deg: None,
     };
     let (Some(left_lens), Some(right_lens)) = (cal.lenses.first(), cal.lenses.get(1)) else {
         return empty;
@@ -180,9 +208,7 @@ pub fn horizon_coverage(cal: &Calibration) -> HorizonCoverage {
     let aspect = left_lens.width as f32 / left_lens.height.max(1) as f32;
     let scene = SceneGeometry::new(&cal.topology, &cal.framing, aspect);
     let plane = |model: Matrix4<f32>, lens| {
-        let model = model.cast::<f64>();
-        model.try_inverse().map(|inverse| Plane {
-            model,
+        model.cast::<f64>().try_inverse().map(|inverse| Plane {
             inverse,
             aspect: scene.plane_aspect as f64,
             lens,
@@ -199,63 +225,65 @@ pub fn horizon_coverage(cal: &Calibration) -> HorizonCoverage {
     let eye = cam.eye.cast::<f64>();
     let up = VirtualCamera::world_up().cast::<f64>();
     let forward = cam.base_forward.cast::<f64>();
-    // Horizontal, viewer's right (independent of base_right's handedness).
     let right_axis = forward.cross(&up).normalize();
-    let angle_of = |p: Vector3<f64>| {
-        let d = p - eye;
-        d.dot(&right_axis).atan2(d.dot(&forward)).to_degrees()
-    };
 
     let steps = (2.0 * SWEEP_HALF_RANGE_DEG / SWEEP_STEP_DEG).round() as usize;
-    let mut left_range: Option<[f64; 2]> = None;
-    let mut right_range: Option<[f64; 2]> = None;
-    let (mut both, mut any) = (0usize, 0usize);
+    // Ranges in each camera's own angles.
+    let (mut left_range, mut right_range, mut overlap_range) = (None, None, None);
+    let mut angle_diffs: Vec<f64> = Vec::new();
     let seam_u = cal.topology.seam_offset as f64;
+    // (left-camera angle at the seam, |u - seam_u|) of the closest sample.
     let mut seam: Option<(f64, f64)> = None;
-    let extend = |range: &mut Option<[f64; 2]>, a: f64| {
-        let r = range.get_or_insert([a, a]);
-        r[0] = r[0].min(a);
-        r[1] = r[1].max(a);
-    };
     for i in 0..=steps {
-        let a = -SWEEP_HALF_RANGE_DEG + i as f64 * SWEEP_STEP_DEG;
-        let (s, c) = a.to_radians().sin_cos();
-        let dir = forward * c + right_axis * s;
-        let in_left = left
+        let a = (-SWEEP_HALF_RANGE_DEG + i as f64 * SWEEP_STEP_DEG).to_radians();
+        let dir = forward * a.cos() + right_axis * a.sin();
+        let lh = left
             .hit_uv(&eye, &dir)
-            .is_some_and(|(u, v)| left.samples_image(u, v));
-        let right_hit = right.hit_uv(&eye, &dir);
-        let in_right = right_hit.is_some_and(|(u, v)| right.samples_image(u, v));
-        if let Some((u, _)) = right_hit {
-            let miss = (u - seam_u).abs();
+            .filter(|&(u, v)| left.samples_image(u, v));
+        let rh = right
+            .hit_uv(&eye, &dir)
+            .filter(|&(u, v)| right.samples_image(u, v));
+        if let Some((u, _)) = lh {
+            extend(&mut left_range, left.camera_angle(u));
+        }
+        if let Some((u, _)) = rh {
+            extend(&mut right_range, right.camera_angle(u));
+        }
+        if let (Some((ul, _)), Some((ur, _))) = (lh, rh) {
+            // The same scene direction, as each camera sees it.
+            let al = left.camera_angle(ul);
+            angle_diffs.push(al - right.camera_angle(ur));
+            extend(&mut overlap_range, al);
+            let miss = (ur - seam_u).abs();
             if seam.is_none_or(|(_, best)| miss < best) {
-                seam = Some((a, miss));
+                seam = Some((al, miss));
             }
         }
-        if in_left {
-            extend(&mut left_range, a);
-        }
-        if in_right {
-            extend(&mut right_range, a);
-        }
-        both += usize::from(in_left && in_right);
-        any += usize::from(in_left || in_right);
     }
 
-    // Optical axis: the principal point on each plane.
-    let axis = |p: &Plane| {
-        let (w, h) = (p.lens.width as f64, p.lens.height as f64);
-        angle_of(p.world_at(p.lens.cx / w, p.lens.cy / h))
-    };
+    let (left_span, right_span, overlap) =
+        (span(left_range), span(right_range), span(overlap_range));
     HorizonCoverage {
-        left_deg: left_range,
-        right_deg: right_range,
-        overlap_deg: both as f64 * SWEEP_STEP_DEG,
-        panorama_deg: any as f64 * SWEEP_STEP_DEG,
-        axis_angle_deg: Some((axis(&right) - axis(&left)).abs()),
-        // Only a true crossing counts, not the nearest edge of the quad.
-        seam_deg: seam.filter(|(_, miss)| *miss < 0.01).map(|(a, _)| a),
+        camera_angle_deg: median(&mut angle_diffs),
+        left_span_deg: left_span,
+        right_span_deg: right_span,
+        overlap_deg: overlap,
+        panorama_deg: left_span + right_span - overlap,
+        // Only a true crossing inside the overlap counts, not its nearest
+        // edge. The overlap's left edge is where the right camera starts.
+        seam_in_overlap_deg: match (seam, overlap_range) {
+            (Some((al, miss)), Some([lo, hi])) if miss < 0.01 => Some([al - lo, hi - al]),
+            _ => None,
+        },
     }
+}
+
+fn median(v: &mut [f64]) -> Option<f64> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(f64::total_cmp);
+    Some(v[v.len() / 2])
 }
 
 #[cfg(test)]
@@ -334,31 +362,35 @@ mod tests {
 
     #[test]
     fn horizon_coverage_is_consistent() {
-        let cov = horizon_coverage(&test_calibration([0.0; 4]));
-        let l = cov.left_deg.expect("left covers");
-        let r = cov.right_deg.expect("right covers");
-        // Left camera on the viewer's left.
-        assert!(l[0] + l[1] < r[0] + r[1], "left {l:?} right {r:?}");
+        let cal = test_calibration([0.0; 4]);
+        let cov = horizon_coverage(&cal);
+        let hfov = lens_fov(&cal.lenses[0]).expect("fov").horizontal_deg;
+        // Each camera contributes at most its lens's horizontal FOV.
+        for s in [cov.left_span_deg, cov.right_span_deg] {
+            assert!(s > 0.0 && s <= hfov + 0.1, "span {s} vs lens {hfov}");
+        }
         assert!(cov.overlap_deg > 0.0);
-        assert!(cov.overlap_deg < (l[1] - l[0]).min(r[1] - r[0]));
-        // Union = both spans minus the shared part (to sweep resolution).
-        let union = (l[1] - l[0]) + (r[1] - r[0]) - cov.overlap_deg;
-        assert!((cov.panorama_deg - union).abs() < 4.0 * SWEEP_STEP_DEG);
-        let axis = cov.axis_angle_deg.expect("axes");
-        assert!(axis > 0.0 && axis < 180.0, "axis angle {axis}");
-        let seam = cov.seam_deg.expect("seam in view");
+        assert!(cov.overlap_deg < cov.left_span_deg.min(cov.right_span_deg));
+        let angle = cov.camera_angle_deg.expect("overlap");
+        assert!(angle > 0.0 && angle < hfov, "camera angle {angle}");
+        // Co-located cameras: overlap = what both lenses see past the angle
+        // between them, when the overlap reaches both image edges.
         assert!(
-            seam >= r[0] - 1.0 && seam <= l[1] + 1.0,
-            "seam {seam} outside overlap"
+            cov.overlap_deg <= cov.left_span_deg / 2.0 + cov.right_span_deg / 2.0 - angle + 1.0,
+            "overlap {} angle {angle}",
+            cov.overlap_deg
         );
+        let [from_left, from_right] = cov.seam_in_overlap_deg.expect("seam inside overlap");
+        assert!((from_left + from_right - cov.overlap_deg).abs() < 1e-9);
+        assert!(from_left >= 0.0 && from_right >= 0.0);
     }
 
     #[test]
-    fn moving_the_seam_moves_its_angle() {
+    fn moving_the_seam_moves_it_within_the_overlap() {
         let mut cal = test_calibration([0.0; 4]);
-        let a = horizon_coverage(&cal).seam_deg.expect("seam");
+        let a = horizon_coverage(&cal).seam_in_overlap_deg.expect("seam")[0];
         cal.topology.seam_offset = 0.1;
-        let b = horizon_coverage(&cal).seam_deg.expect("seam");
+        let b = horizon_coverage(&cal).seam_in_overlap_deg.expect("seam")[0];
         assert!((a - b).abs() > 0.5, "seam {a} -> {b}");
     }
 
@@ -368,6 +400,6 @@ mod tests {
         cal.lenses.truncate(1);
         let cov = horizon_coverage(&cal);
         assert_eq!(cov.overlap_deg, 0.0);
-        assert!(cov.left_deg.is_none());
+        assert!(cov.camera_angle_deg.is_none());
     }
 }

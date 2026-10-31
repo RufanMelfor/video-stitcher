@@ -256,42 +256,39 @@ pub fn build_report(input: &ReportInput<'_>) -> String {
     );
 
     let c = horizon_coverage(cal);
-    if let Some(a) = c.axis_angle_deg {
-        let _ = writeln!(out, "Angle between the cameras: {a:.1} deg");
+    match c.camera_angle_deg {
+        Some(a) => {
+            let _ = writeln!(out, "Angle between the cameras: {a:.1} deg");
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "Angle between the cameras: unknown (the setup has no overlap)"
+            );
+        }
     }
     let _ = writeln!(
         out,
         "Overlap (seen by both cameras): {:.1} deg at the horizon",
         c.overlap_deg
     );
-    let _ = writeln!(out, "Panorama width: {:.1} deg", c.panorama_deg);
-    for (label, range) in [
-        ("Left camera covers", c.left_deg),
-        ("Right camera covers", c.right_deg),
-    ] {
-        if let Some([a, b]) = range {
-            let _ = writeln!(out, "{label}: {a:.1} to {b:.1} deg");
-        }
-    }
+    let _ = writeln!(
+        out,
+        "Panorama width: {:.1} deg (left camera {:.1} + right camera {:.1} - overlap)",
+        c.panorama_deg, c.left_span_deg, c.right_span_deg
+    );
     let seam_offset = cal.topology.seam_offset;
-    match (c.seam_deg, c.left_deg, c.right_deg) {
-        (Some(s), Some(l), Some(r)) if c.overlap_deg > 0.0 => {
-            // Overlap runs from where the right camera starts to where
-            // the left camera ends.
+    match c.seam_in_overlap_deg {
+        Some([from_left, from_right]) => {
             let _ = writeln!(
                 out,
-                "Seam: at {s:.1} deg (seam position {seam_offset:.3}), {:.1} deg from the overlap's left edge, {:.1} deg from its right edge",
-                s - r[0],
-                l[1] - s
+                "Seam (position {seam_offset:.3}): {from_left:.1} deg from the overlap's left edge, {from_right:.1} deg from its right edge"
             );
         }
-        (Some(s), _, _) => {
-            let _ = writeln!(out, "Seam: at {s:.1} deg (seam position {seam_offset:.3})");
-        }
-        _ => {
+        None => {
             let _ = writeln!(
                 out,
-                "Seam: outside the view (seam position {seam_offset:.3})"
+                "Seam (position {seam_offset:.3}): not inside the overlap"
             );
         }
     }
@@ -300,7 +297,7 @@ pub fn build_report(input: &ReportInput<'_>) -> String {
     }
     let _ = writeln!(
         out,
-        "Angles: 0 = straight at the seam corner, negative = left. They come from the stitch model, which sees both cameras from one point while the real cameras sit a few cm apart: a close guide, not a survey measurement."
+        "Angles are measured at the horizon from the setup and the lens profiles, treating both cameras as one viewpoint; accurate to about half a degree on a typical rig."
     );
     out
 }

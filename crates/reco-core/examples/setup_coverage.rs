@@ -35,16 +35,14 @@ fn main() {
         }
         let c = horizon_coverage(&cal);
         println!(
-            "   horizon: left {:?}  right {:?}",
-            c.left_deg.map(|r| r.map(|a| (a * 10.0).round() / 10.0)),
-            c.right_deg.map(|r| r.map(|a| (a * 10.0).round() / 10.0))
-        );
-        println!(
-            "   overlap {:.1} deg, panorama {:.1} deg, axis angle {:?}, seam at {:?} deg",
+            "   camera angle {:?} deg, spans L {:.1} / R {:.1}, overlap {:.1}, panorama {:.1}, seam in overlap {:?}",
+            c.camera_angle_deg.map(|a| (a * 100.0).round() / 100.0),
+            c.left_span_deg,
+            c.right_span_deg,
             c.overlap_deg,
             c.panorama_deg,
-            c.axis_angle_deg.map(|a| (a * 10.0).round() / 10.0),
-            c.seam_deg.map(|a| (a * 10.0).round() / 10.0)
+            c.seam_in_overlap_deg
+                .map(|s| s.map(|a| (a * 10.0).round() / 10.0))
         );
     }
 }

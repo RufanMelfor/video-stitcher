@@ -145,11 +145,12 @@ footage and the rig:
   horizon), the total panorama width and where the seam lies within the
   overlap.
 
-The angles come from the stitch model, which treats both cameras as if they sat
-in one point. The real cameras are a few centimetres apart, so take the angles
-as a close guide (for example to compare two ways of mounting the cameras), not
-as an exact measurement. **Copy to clipboard** copies the whole report, for
-example to share it on the forum.
+The rig angles are real camera angles: they are worked out from the points the
+setup says both cameras see and the lens profiles. On a rig whose cameras are
+84.0 degrees apart in the CAD drawing, the report shows 84.4 to 84.5 degrees, so
+expect them to be accurate to about half a degree. A setup with a poor alignment
+gives poorer angles. **Copy to clipboard** copies the whole report, for example
+to share it on the forum.
 
 ## Choosing the moment
 
