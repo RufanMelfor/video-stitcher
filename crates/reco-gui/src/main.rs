@@ -5782,6 +5782,7 @@ fn main() -> anyhow::Result<()> {
             force_z_rz,
             full_res_features,
             refine_alignment,
+            level_from_image,
         ) = app_weak
             .upgrade()
             .map(|a| {
@@ -5797,6 +5798,7 @@ fn main() -> anyhow::Result<()> {
                     a.get_force_z_rz(),
                     a.get_cal_full_res_features(),
                     a.get_cal_refine_alignment(),
+                    a.get_cal_level_from_image(),
                 )
             })
             .unwrap_or((
@@ -5810,6 +5812,7 @@ fn main() -> anyhow::Result<()> {
                 false,
                 false,
                 false,
+                true,
                 true,
             ));
 
@@ -5963,7 +5966,8 @@ fn main() -> anyhow::Result<()> {
                  sample_window={sample_window:.0}s, skip=[{skip_start:.1}s, -{skip_end:.1}s], \
                  imu_seeds={use_imu_seeds}, force_x_rx={force_x_rx}, force_z_rz={force_z_rz}, \
                  akaze={akaze_threshold}, detect_y=[{detect_y_min:.2}, {detect_y_max:.2}], \
-                 full_res_features={full_res_features}, refine_alignment={refine_alignment}"
+                 full_res_features={full_res_features}, refine_alignment={refine_alignment}, \
+                 level_from_image={level_from_image}"
             );
             let mut config = reco_calibrate::CalibrationConfig {
                 num_frames: cal_frames,
@@ -5999,6 +6003,7 @@ fn main() -> anyhow::Result<()> {
                     right_params: existing_right_params,
                     seam_refine: refine_alignment
                         .then(reco_calibrate::seam_refine::SeamRefineOptions::default),
+                    level_from_image,
                     ..Default::default()
                 },
                 &mut |progress| {

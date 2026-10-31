@@ -176,6 +176,12 @@ so their defaults only apply until you pick one.
 |---|---|---|---|
 | Refine alignment on pixels |  | on | After the feature-point fit, fine-tune the alignment by comparing what both cameras actually show along the seam (lines, fences, boards, players). Fixes steps in lines and doubled players near the camera. Adds about two minutes. |
 
+### Rig Level
+
+| Setting | Range | Default | What it does |
+|---|---|---|---|
+| Level the rig from vertical structures |  | on | Set Rig tilt and Rig roll from vertical structures in the footage (light masts, goal posts, fence posts, buildings, standing players) instead of the cameras' motion sensors. Needs some vertical structures in view; if there are too few, tilt and roll stay as they were. |
+
 ### Skew Fit
 
 | Setting | Range | Default | What it does |

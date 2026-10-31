@@ -1470,6 +1470,10 @@ export component RecoApp inherits Window {
     // pixels at the seam (reco_calibrate::seam_refine). On by default:
     // the feature-point result alone leaves visible steps near the camera.
     in-out property <bool> cal-refine-alignment: true;
+    // Auto Calibrate sets Rig tilt / roll from vertical structures in the
+    // footage (reco_calibrate::rig_level) instead of the cameras' motion
+    // sensors, whose orientation data is not reliable on all cameras.
+    in-out property <bool> cal-level-from-image: true;
     in-out property <int> calibration-frames: 4;
     in-out property <float> cal-akaze-threshold: 0.0001;
     in-out property <float> cal-detect-y-min: 0.05;
@@ -4522,6 +4526,19 @@ export component RecoApp inherits Window {
                                     CheckBox {
                                         text: "Refine alignment on pixels";
                                         checked <=> root.cal-refine-alignment;
+                                        enabled: !root.calibrating;
+                                    }
+                                }
+                            }
+
+                            CalGroupBox {
+                                title: "RIG LEVEL";
+
+                                Tip {
+                                    tip: "Set Rig tilt and Rig roll from vertical structures in the footage (light masts, goal posts, fence posts, buildings, standing players) instead of the cameras' motion sensors. Needs some vertical structures in view; if there are too few, tilt and roll stay as they were.";
+                                    CheckBox {
+                                        text: "Level the rig from vertical structures";
+                                        checked <=> root.cal-level-from-image;
                                         enabled: !root.calibrating;
                                     }
                                 }

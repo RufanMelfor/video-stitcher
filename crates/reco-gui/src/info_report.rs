@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use reco_core::calibration::Calibration;
-use reco_core::coverage::{horizon_coverage, lens_fov};
+use reco_core::coverage::{horizon_coverage, lens_fov, physical_rig_level};
 use reco_io::ffmpeg::media_info::MediaInfo;
 
 /// One camera's footage and lens label.
@@ -289,6 +289,27 @@ pub fn build_report(input: &ReportInput<'_>) -> String {
             let _ = writeln!(
                 out,
                 "Seam (position {seam_offset:.3}): not inside the overlap"
+            );
+        }
+    }
+    let framing = &cal.framing;
+    match physical_rig_level(cal) {
+        Some(level) => {
+            let _ = writeln!(
+                out,
+                "Rig lean: tilt {:.1} deg (negative = pointing down), roll {:.1} deg (from the setup's Rig tilt {:.1} / Rig roll {:.1} deg)",
+                level.tilt_deg,
+                level.roll_deg,
+                framing.tilt.to_degrees(),
+                framing.roll.to_degrees()
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "Rig tilt / roll in the setup: {:.1} / {:.1} deg",
+                framing.tilt.to_degrees(),
+                framing.roll.to_degrees()
             );
         }
     }

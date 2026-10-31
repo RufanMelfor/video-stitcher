@@ -38,6 +38,13 @@ What the program does:
    mostly in the background, so this step is what removes steps in pitch lines
    and doubled players close to the cameras. It adds about two minutes and can
    be switched off under *Advanced* (*Refine alignment on pixels*).
+5. **Levels the rig**: sets *Rig tilt* and *Rig roll* from vertical structures
+   in the picture (light masts, goal posts, fence posts, buildings, standing
+   players), which in reality all stand straight up. This replaces the
+   cameras' motion-sensor orientation, which is not reliable on every camera.
+   If too few vertical structures are in view, tilt and roll stay as they were.
+   Can be switched off under *Advanced* (*Level the rig from vertical
+   structures*).
 
 When it finishes, a short line under the buttons tells you whether both cameras
 carried usable motion-sensor data, or whether the program had to rely on audio
@@ -143,7 +150,9 @@ footage and the rig:
 - with a setup loaded: the sync offset, the angle between the two cameras, the
   **overlap in degrees** (the part of the scene both cameras see, at the
   horizon), the total panorama width and where the seam lies within the
-  overlap.
+  overlap;
+- the rig's physical lean: how far it points down (tilt) and leans sideways
+  (roll), worked out from the setup's *Rig tilt* and *Rig roll*.
 
 The rig angles are real camera angles: they are worked out from the points the
 setup says both cameras see and the lens profiles. On a rig whose cameras are
@@ -167,8 +176,10 @@ a better moment:
 - **Detect Y min / Detect Y max:** the part of the picture, top to bottom, where
   features are searched.
 - **Full-resolution features:** more precise on 4K footage, but slower.
-- **Refine alignment on pixels:** the last Auto Calibrate step (see *Step 1*).
+- **Refine alignment on pixels:** Auto Calibrate step 4 (see *Step 1*).
   On by default.
+- **Level the rig from vertical structures:** Auto Calibrate step 5 (see
+  *Step 1*). On by default.
 - **Force extra skew fit:** solves the skew of one camera even when no motion
   data suggests it.
 

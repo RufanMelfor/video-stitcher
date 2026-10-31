@@ -1134,6 +1134,13 @@ enum Commands {
         #[arg(long, default_value_t = 0.0, requires = "refine_alignment")]
         seam_offset: f32,
 
+        /// Set the rig tilt / roll in the setup from vertical structures
+        /// in the calibration frames (light masts, goal posts, buildings,
+        /// standing players) instead of the cameras' motion sensors. Same
+        /// as the GUI's "Level the rig from vertical structures".
+        #[arg(long)]
+        level_from_image: bool,
+
         /// Directory to write debug data (keypoints, matches as JSON + images).
         #[arg(long)]
         debug_dir: Option<String>,
@@ -1687,6 +1694,7 @@ fn main() -> anyhow::Result<()> {
             seam_sigma_y,
             refine_alignment,
             seam_offset,
+            level_from_image,
             debug_dir,
             output,
         } => calibrate::run_calibrate(
@@ -1714,6 +1722,7 @@ fn main() -> anyhow::Result<()> {
             seam_sigma,
             seam_sigma_y,
             refine_alignment.then_some(seam_offset),
+            level_from_image,
             debug_dir.as_deref(),
             &output,
         ),

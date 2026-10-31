@@ -78,6 +78,7 @@ pub mod photometric;
 pub mod pipeline;
 pub mod preview;
 mod ransac;
+pub mod rig_level;
 pub mod row_profile;
 pub mod sampling;
 pub mod seam_refine;

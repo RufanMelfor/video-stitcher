@@ -436,6 +436,8 @@ pub enum CalibrationStep {
     /// Fine-tuning the alignment on rendered pixels at the seam
     /// (`seam_refine`).
     RefiningAlignment,
+    /// Measuring rig tilt / roll from vertical structures (`rig_level`).
+    LevelingRig,
 }
 
 impl std::fmt::Display for CalibrationStep {
@@ -449,6 +451,7 @@ impl std::fmt::Display for CalibrationStep {
             Self::FeatureMatching => write!(f, "FeatureMatching"),
             Self::Optimizing => write!(f, "Optimizing"),
             Self::RefiningAlignment => write!(f, "RefiningAlignment"),
+            Self::LevelingRig => write!(f, "LevelingRig"),
         }
     }
 }

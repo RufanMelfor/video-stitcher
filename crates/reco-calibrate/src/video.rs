@@ -66,6 +66,11 @@ pub struct CalibrateVideosOptions {
     /// the calibration frames. `None` = off: the AKAZE result is returned
     /// as is.
     pub seam_refine: Option<SeamRefineOptions>,
+    /// Set `Framing::tilt` / `roll` from vertical structures in the
+    /// calibration frames ([`crate::rig_level`]) instead of the camera's
+    /// IMU orientation. When the measurement fails (too few vertical
+    /// edges) the framing stays as calibrated and a warning is logged.
+    pub level_from_image: bool,
 }
 
 /// Errors from [`calibrate_videos`]. `Clone + Send + Sync` so a
@@ -373,6 +378,34 @@ pub fn calibrate_videos(
             on_progress,
             interrupted,
         )?;
+    }
+
+    if options.level_from_image {
+        check_interrupted(interrupted)?;
+        emit_progress(
+            on_progress,
+            CalibrationStep::LevelingRig,
+            "Measuring rig tilt and roll from vertical structures",
+        );
+        match crate::rig_level::estimate_framing(&result.calibration, &frame_pairs) {
+            Some(level) => {
+                log::info!(
+                    "rig level: framing tilt {:.2} deg, roll {:.2} deg (was {:.2} / {:.2}); physical {:?}",
+                    level.framing_tilt.to_degrees(),
+                    level.framing_roll.to_degrees(),
+                    result.calibration.framing.tilt.to_degrees(),
+                    result.calibration.framing.roll.to_degrees(),
+                    level.physical
+                );
+                result.calibration.framing.tilt = level.framing_tilt;
+                result.calibration.framing.roll = level.framing_roll;
+            }
+            None => log::warn!(
+                "rig level: not measurable from these frames; framing stays tilt {:.2} / roll {:.2} deg",
+                result.calibration.framing.tilt.to_degrees(),
+                result.calibration.framing.roll.to_degrees()
+            ),
+        }
     }
     Ok(result)
 }

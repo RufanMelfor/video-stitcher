@@ -39,6 +39,7 @@ pub fn run_calibrate(
     seam_sigma: f64,
     seam_sigma_y: f64,
     refine_seam_offset: Option<f32>,
+    level_from_image: bool,
     debug_dir: Option<&str>,
     output: &str,
 ) -> anyhow::Result<()> {
@@ -209,6 +210,23 @@ pub fn run_calibrate(
             started.elapsed().as_secs_f32()
         );
         result.calibration = outcome.calibration;
+    }
+
+    // Step 7 (optional): rig level from vertical structures
+    if level_from_image {
+        match reco_calibrate::rig_level::estimate_framing(&result.calibration, &frame_pairs) {
+            Some(level) => {
+                eprintln!(
+                    "Rig level from the image: tilt {:.2} deg, roll {:.2} deg (physical {:?})",
+                    level.framing_tilt.to_degrees(),
+                    level.framing_roll.to_degrees(),
+                    level.physical
+                );
+                result.calibration.framing.tilt = level.framing_tilt;
+                result.calibration.framing.roll = level.framing_roll;
+            }
+            None => eprintln!("Rig level: too few vertical structures, framing unchanged"),
+        }
     }
 
     // Write output
