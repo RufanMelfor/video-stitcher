@@ -8,6 +8,7 @@ pub mod calibration_io;
 pub mod decoder;
 pub mod encoder;
 mod hw_upload;
+pub mod media_info;
 
 use std::sync::Once;
 
