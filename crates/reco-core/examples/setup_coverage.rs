@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use reco_core::calibration::Calibration;
-use reco_core::coverage::{horizon_coverage, lens_fov};
+use reco_core::coverage::{horizon_coverage, lens_fov, physical_rig_level};
 
 fn main() {
     let paths: Vec<String> = std::env::args().skip(1).collect();
@@ -43,6 +43,12 @@ fn main() {
             c.panorama_deg,
             c.seam_in_overlap_deg
                 .map(|s| s.map(|a| (a * 10.0).round() / 10.0))
+        );
+        println!(
+            "   framing tilt {:.2} roll {:.2} deg -> physical rig {:?}",
+            cal.framing.tilt.to_degrees(),
+            cal.framing.roll.to_degrees(),
+            physical_rig_level(&cal)
         );
     }
 }

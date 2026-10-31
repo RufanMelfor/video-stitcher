@@ -32,11 +32,22 @@
 //! It assumes the cameras share one projection centre (true to a few cm
 //! on a two-camera rig; scene points are metres away) and uses the
 //! horizon row, which lies outside the `ground_tilt` / `top_tilt` bands.
+//!
+//! # Rig level
+//!
+//! The camera angle says nothing about how the rig leans: tilting the whole
+//! rig turns both cameras equally. The lean comes from the scene - each
+//! camera's direction of true "up" (e.g. from vertical structures, see
+//! `reco_calibrate::rig_level`). [`framing_from_camera_up`] turns those
+//! into the setup's `Framing::tilt` / `roll` (the stitch model's rig
+//! correction, see `geometry::rig_frame`); [`physical_rig_level`] turns a
+//! setup's framing back into the physical rig tilt / roll, with the rig's
+//! forward direction halfway between the two cameras.
 
-use nalgebra::{Matrix4, Vector3, Vector4};
+use nalgebra::{Matrix3, Matrix4, Vector3, Vector4};
 
 use crate::calibration::{Calibration, Lens};
-use crate::geometry::VirtualCamera;
+use crate::geometry::{VirtualCamera, rig_frame};
 use crate::lens::kb4;
 use crate::render::scene::SceneGeometry;
 
@@ -278,6 +289,97 @@ pub fn horizon_coverage(cal: &Calibration) -> HorizonCoverage {
     }
 }
 
+/// Camera axes of one plane in the stitch model's world: columns are the
+/// camera's x (image right), y (image down) and z (viewing direction).
+/// The plane is the camera's image plane seen from the eye side: local +x
+/// = image right, +y = image up, +z towards the eye.
+fn model_camera_axes(model: &Matrix4<f32>) -> Matrix3<f64> {
+    let r: Matrix3<f64> = model.fixed_view::<3, 3>(0, 0).into_owned().cast::<f64>();
+    let x = (r * Vector3::x()).normalize();
+    let y = (r * -Vector3::y()).normalize();
+    let z = (r * -Vector3::z()).normalize();
+    Matrix3::from_columns(&[x, y, z])
+}
+
+fn model_axes(cal: &Calibration) -> Option<(Matrix3<f64>, Matrix3<f64>, SceneGeometry)> {
+    let lens = cal.lenses.first()?;
+    let aspect = lens.width as f32 / lens.height.max(1) as f32;
+    let scene = SceneGeometry::new(&cal.topology, &cal.framing, aspect);
+    Some((
+        model_camera_axes(&scene.model_matrix_left()),
+        model_camera_axes(&scene.model_matrix_right()),
+        scene,
+    ))
+}
+
+/// `Framing::tilt` / `roll` (radians) that make the stitch's level
+/// reference match the measured true-up directions of the two cameras
+/// (unit vectors in each camera's own frame: x = image right, y = image
+/// down, z = viewing direction). The two are averaged in the model's
+/// world. `None` for a setup without lenses or a degenerate up.
+pub fn framing_from_camera_up(
+    cal: &Calibration,
+    up_left: Vector3<f64>,
+    up_right: Vector3<f64>,
+) -> Option<(f64, f64)> {
+    let (left, right, scene) = model_axes(cal)?;
+    let u = (left * up_left.normalize() + right * up_right.normalize()).try_normalize(1e-9)?;
+    let cam = VirtualCamera::new(&scene.camera_position);
+    let fwd = cam.base_forward.cast::<f64>();
+    let axis = cam.base_right.cast::<f64>().normalize();
+    // rig_frame: tilt turns forward and up about base_right; roll then
+    // turns up about the tilted forward f0, so the result stays
+    // perpendicular to f0. f0(t) = fwd cos t + (axis x fwd) sin t
+    // (fwd is horizontal, perpendicular to axis); solve u . f0 = 0.
+    let side = axis.cross(&fwd);
+    let tilt = (-(u.dot(&fwd))).atan2(u.dot(&side));
+    let (up_t, f0) = rig_frame(&cam, tilt as f32, 0.0);
+    let (up_t, f0) = (up_t.cast::<f64>(), f0.cast::<f64>());
+    // u = R(f0, -roll) * up_t.
+    let roll = -(up_t.cross(&u).dot(&f0)).atan2(up_t.dot(&u));
+    Some((tilt, roll))
+}
+
+/// Physical lean of the rig, in degrees.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RigLevel {
+    /// Forward lean: negative = pointing down (towards the pitch).
+    pub tilt_deg: f64,
+    /// Sideways lean: positive = the rig's top leans to the viewer's right.
+    pub roll_deg: f64,
+}
+
+/// The physical rig tilt / roll that a setup's `Framing::tilt` / `roll`
+/// stand for: the framing's level-up direction, expressed in each camera's
+/// frame through the stitch model, then in the physical rig frame (the
+/// cameras yawed by +- half of [`HorizonCoverage::camera_angle_deg`]
+/// either side of the rig's forward direction), averaged over both
+/// cameras. `None` without a camera angle (no overlap).
+pub fn physical_rig_level(cal: &Calibration) -> Option<RigLevel> {
+    let half = horizon_coverage(cal).camera_angle_deg?.to_radians() / 2.0;
+    let (left, right, scene) = model_axes(cal)?;
+    let cam = VirtualCamera::new(&scene.camera_position);
+    let (u, _) = rig_frame(&cam, cal.framing.tilt as f32, cal.framing.roll as f32);
+    let u = u.cast::<f64>();
+    // Camera axes in the physical rig frame (x right, y down, z forward).
+    let rig_axes = |yaw: f64| {
+        let (s, c) = yaw.sin_cos();
+        Matrix3::from_columns(&[
+            Vector3::new(c, 0.0, -s),
+            Vector3::y(),
+            Vector3::new(s, 0.0, c),
+        ])
+    };
+    let u_rig = (rig_axes(-half) * (left.transpose() * u)
+        + rig_axes(half) * (right.transpose() * u))
+        .try_normalize(1e-9)?;
+    Some(RigLevel {
+        // Pointing down by t puts up at -sin t along the viewing axis.
+        tilt_deg: u_rig.z.asin().to_degrees(),
+        roll_deg: u_rig.x.atan2(-u_rig.y).to_degrees(),
+    })
+}
+
 fn median(v: &mut [f64]) -> Option<f64> {
     if v.is_empty() {
         return None;
@@ -392,6 +494,54 @@ mod tests {
         cal.topology.seam_offset = 0.1;
         let b = horizon_coverage(&cal).seam_in_overlap_deg.expect("seam")[0];
         assert!((a - b).abs() > 0.5, "seam {a} -> {b}");
+    }
+
+    #[test]
+    fn model_camera_axes_look_from_the_eye_at_the_plane() {
+        let cal = test_calibration([0.0; 4]);
+        let (left, right, scene) = model_axes(&cal).expect("axes");
+        let eye = VirtualCamera::new(&scene.camera_position).eye.cast::<f64>();
+        for (axes, model) in [
+            (left, scene.model_matrix_left()),
+            (right, scene.model_matrix_right()),
+        ] {
+            let centre = (model.cast::<f64>() * Vector4::new(0.0, 0.0, 0.0, 1.0)).xyz();
+            assert!(
+                axes.column(2).dot(&(centre - eye)) > 0.0,
+                "camera looks away from its plane"
+            );
+            // Right-handed: x cross y = z.
+            let z = axes.column(0).cross(&axes.column(1));
+            assert!((z - axes.column(2)).norm() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn framing_round_trips_through_camera_up() {
+        let mut cal = test_calibration([0.0; 4]);
+        for (tilt, roll) in [(0.0, 0.0), (0.37, -0.02), (-0.2, 0.1)] {
+            cal.framing.tilt = tilt;
+            cal.framing.roll = roll;
+            let (left, right, scene) = model_axes(&cal).expect("axes");
+            let cam = VirtualCamera::new(&scene.camera_position);
+            let u = rig_frame(&cam, tilt as f32, roll as f32).0.cast::<f64>();
+            let (t, r) = framing_from_camera_up(&cal, left.transpose() * u, right.transpose() * u)
+                .expect("framing");
+            assert!(
+                (t - tilt).abs() < 1e-5 && (r - roll).abs() < 1e-5,
+                "{tilt},{roll} -> {t},{r}"
+            );
+        }
+    }
+
+    #[test]
+    fn level_framing_is_a_level_rig() {
+        let cal = test_calibration([0.0; 4]);
+        let level = physical_rig_level(&cal).expect("level");
+        assert!(
+            level.tilt_deg.abs() < 1e-6 && level.roll_deg.abs() < 1e-6,
+            "{level:?}"
+        );
     }
 
     #[test]
