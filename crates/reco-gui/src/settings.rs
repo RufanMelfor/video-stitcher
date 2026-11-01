@@ -691,6 +691,7 @@ mod tests {
             match_end_trail_secs: 10.0,
             highlight_lead_secs: 18.0,
             highlight_trail_secs: 8.0,
+            highlight_fade_secs: 0.5,
         };
         s.set_scoreboard_settings(sb);
         let json = serde_json::to_string(&s).unwrap();

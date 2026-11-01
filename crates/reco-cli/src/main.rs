@@ -225,6 +225,12 @@ enum Commands {
         #[arg(long, default_value_t = 4.0)]
         pause_overlay_hold: f32,
 
+        /// Caption on the --pause-overlay black card. An empty string
+        /// makes it a plain dip to black, e.g. between the clips of a
+        /// --keep-range highlights reel (use --pause-overlay-hold 0).
+        #[arg(long, default_value = "PAUZE")]
+        pause_overlay_caption: String,
+
         /// Force a specific encoder (e.g., h264_nvenc, hevc_nvenc, libx264). Auto-detects by default.
         #[arg(long)]
         encoder: Option<String>,
@@ -1291,6 +1297,7 @@ fn main() -> anyhow::Result<()> {
             pause_overlay,
             pause_overlay_fade,
             pause_overlay_hold,
+            pause_overlay_caption,
             encoder,
             codec,
             quality,
@@ -1363,6 +1370,7 @@ fn main() -> anyhow::Result<()> {
                 cut_ranges: cut_range,
                 keep_ranges: keep_range,
                 pause_overlay: pause_overlay.then_some((pause_overlay_fade, pause_overlay_hold)),
+                pause_overlay_caption: &pause_overlay_caption,
                 encoder_name: encoder,
                 codec: &codec,
                 quality: &quality,

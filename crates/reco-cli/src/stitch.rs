@@ -65,6 +65,9 @@ pub struct StitchArgs<'a> {
     /// `--pause-overlay`/`--pause-overlay-fade`/`--pause-overlay-hold`'s
     /// help text.
     pub pause_overlay: Option<(f32, f32)>,
+    /// Caption on the pause overlay card (`--pause-overlay-caption`);
+    /// empty = plain dip to black.
+    pub pause_overlay_caption: &'a str,
     pub encoder_name: Option<String>,
     pub codec: &'a str,
     pub quality: &'a str,
@@ -343,7 +346,9 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         job = job.start_time(first.0).end_time(last.1).cut_ranges(gaps);
     }
     if let Some((fade_secs, hold_secs)) = args.pause_overlay {
-        job = job.pause_overlay(fade_secs, hold_secs);
+        job = job
+            .pause_overlay(fade_secs, hold_secs)
+            .pause_overlay_caption(args.pause_overlay_caption);
     }
     if args.sync_offset != 0 {
         job = job.sync_offset(args.sync_offset);

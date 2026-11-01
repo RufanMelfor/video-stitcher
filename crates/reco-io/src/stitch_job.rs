@@ -60,6 +60,9 @@ pub struct StitchJob {
     /// `(fade_secs, hold_secs)` for the "PAUZE" dip-to-black transition
     /// at every cut-range boundary. See [`Self::pause_overlay`].
     pause_overlay: Option<(f32, f32)>,
+    /// Caption shown on the pause overlay's black card. See
+    /// [`Self::pause_overlay_caption`].
+    pause_overlay_caption: String,
     /// Externally-registered overlay layers (e.g. reco-gui's
     /// scoreboard) to composite together with each other and with
     /// `pause_overlay`, if any. See [`Self::overlay_layer`].
@@ -349,6 +352,7 @@ impl StitchJob {
             max_frames: None,
             cut_ranges: Vec::new(),
             pause_overlay: None,
+            pause_overlay_caption: "PAUZE".to_string(),
             overlay_layers: Vec::new(),
             sync_offset: None,
             blend_width: None,
@@ -546,6 +550,15 @@ impl StitchJob {
     /// called in.
     pub fn pause_overlay(mut self, fade_secs: f32, hold_secs: f32) -> Self {
         self.pause_overlay = Some((fade_secs, hold_secs));
+        self
+    }
+
+    /// Caption drawn on [`Self::pause_overlay`]'s black card, `"PAUZE"`
+    /// by default. An empty caption makes it a plain dip to black - e.g.
+    /// between the clips of a highlights reel, where the cut is not a
+    /// break in play.
+    pub fn pause_overlay_caption(mut self, caption: impl Into<String>) -> Self {
+        self.pause_overlay_caption = caption.into();
         self
     }
 
@@ -1321,7 +1334,9 @@ impl StitchJob {
         )> = Vec::new();
         if let Some((fade_secs, hold_secs)) = self.pause_overlay {
             let overlay_cfg = reco_core::render::pause_overlay::PauseOverlayConfig::new(
-                fade_secs, hold_secs, "PAUZE",
+                fade_secs,
+                hold_secs,
+                self.pause_overlay_caption.clone(),
             )
             .map_err(|e| StitchError::Other(format!("pause_overlay: {e}")))?;
             let schedule = crate::cut_range::extend_for_pause_overlay(
@@ -1775,7 +1790,13 @@ impl StitchJob {
             out,
             "Pause overlay: {}",
             match self.pause_overlay {
-                Some((fade, hold)) => format!("PAUZE card, fade {fade}s, hold {hold}s"),
+                Some((fade, hold)) if self.pause_overlay_caption.is_empty() => {
+                    format!("dip to black (no caption), fade {fade}s, hold {hold}s")
+                }
+                Some((fade, hold)) => format!(
+                    "{} card, fade {fade}s, hold {hold}s",
+                    self.pause_overlay_caption
+                ),
                 None => "disabled".to_string(),
             }
         );

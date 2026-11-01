@@ -138,4 +138,10 @@ logged moment. The lead is longer than the trail on purpose: a goal is logged
 *after* the ball goes in, so the build-up lies before the logged moment and only
 the celebration comes after it.
 
+**Fade to black between clips** (starts at 0.5 s) replaces the hard cut between
+two goal clips with a short dip to black: the picture fades out at the end of one
+clip and back in at the start of the next. It adds no screen time and shows no
+caption; the PAUZE settings are not used for a highlights export. Set it to 0 for
+a hard cut.
+
 Continue with [chapter 7: exporting](07-exporting.md).
