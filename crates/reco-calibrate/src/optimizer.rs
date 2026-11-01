@@ -434,7 +434,7 @@ impl Optimizer for NelderMeadOptimizer {
             blend_width: reco_core::calibration::DEFAULT_BLEND_WIDTH,
             blend_flip_direction: false,
             seam_offset: 0.0,
-            multiband_blend_enabled: false,
+            multiband_blend_enabled: reco_core::calibration::DEFAULT_MULTIBAND_BLEND_ENABLED,
             color_match_enabled: reco_core::calibration::DEFAULT_COLOR_MATCH_ENABLED,
             color_match_band_width: reco_core::calibration::DEFAULT_COLOR_MATCH_BAND_WIDTH,
             color_match_grid_cols: reco_core::calibration::DEFAULT_COLOR_MATCH_GRID_COLS,
@@ -448,7 +448,7 @@ impl Optimizer for NelderMeadOptimizer {
             color_gamma_left: 1.0,
             color_gamma_right: 1.0,
             color_match_auto_gamma: false,
-            color_match_overlap_fit: false,
+            color_match_overlap_fit: reco_core::calibration::DEFAULT_COLOR_MATCH_OVERLAP_FIT,
             // Not fitted by this optimizer - see fit_ground_tilt_manual.rs
             // and FRICTION.md points 18-20 for the separate manual-line
             // workflow that fits these.

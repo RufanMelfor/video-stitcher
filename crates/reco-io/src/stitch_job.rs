@@ -1849,10 +1849,15 @@ impl StitchJob {
     /// Pretty-prints the `autocam` object from [`Self::metadata_comment`]
     /// (the one JSON snapshot both reco-cli and reco-gui already build
     /// with the resolved AI/panner knobs - see their `run_stitch`/
-    /// `run_export`) as `key: value` lines. This is the only place that
-    /// carries those knobs at all: [`Self::ai_run_config`] is only ever
-    /// set when [`Self::events`] is also used, so it can't be relied on
-    /// here.
+    /// `run_export`). This is the only place that carries those knobs at
+    /// all: [`Self::ai_run_config`] is only ever set when [`Self::events`]
+    /// is also used, so it can't be relied on here.
+    ///
+    /// Known knobs are printed with the GUI's Export dialog label, in the
+    /// dialog's order and with its rounding and unit (see
+    /// [`AUTOCAM_LOG_FIELDS`]), followed by the JSON key in brackets so
+    /// the line can still be found in the raw snapshot. Keys not in the
+    /// table follow as plain `key: value` lines.
     fn describe_autocam_snapshot(&self) -> String {
         let Some(raw) = &self.metadata_comment else {
             return "  (no run-settings snapshot was attached to this export)\n".to_string();
@@ -1866,16 +1871,7 @@ impl StitchJob {
         else {
             return "  (no autocam block in the run-settings snapshot)\n".to_string();
         };
-        let mut out = String::new();
-        for (key, val) in autocam {
-            let shown = match val {
-                serde_json::Value::String(s) => s.clone(),
-                serde_json::Value::Null => "not set".to_string(),
-                other => other.to_string(),
-            };
-            out.push_str(&format!("  {key}: {shown}\n"));
-        }
-        out
+        describe_autocam_object(autocam)
     }
 
     /// Result/error footer appended to the export log once [`Self::run`]
@@ -1968,9 +1964,173 @@ impl StitchJob {
     }
 }
 
+/// How one autocam snapshot key is shown in the export log: the GUI's
+/// Export dialog label, decimals and unit suffix (`None` decimals = print
+/// the value as-is: text, booleans, integers).
+struct AutocamLogField {
+    key: &'static str,
+    label: &'static str,
+    decimals: Option<usize>,
+    unit: &'static str,
+}
+
+const fn field(
+    key: &'static str,
+    label: &'static str,
+    decimals: Option<usize>,
+    unit: &'static str,
+) -> AutocamLogField {
+    AutocamLogField {
+        key,
+        label,
+        decimals,
+        unit,
+    }
+}
+
+/// The autocam knobs in the order, and with the labels, rounding and units,
+/// of reco-gui's Export dialog (AI Tracking section, then Advanced panner),
+/// so a log line can be found on screen and the other way round. Keep in
+/// step with `crates/reco-gui/ui/main.slint`.
+const AUTOCAM_LOG_FIELDS: &[AutocamLogField] = &[
+    field("enabled", "AI Tracking: Enable", None, ""),
+    field("model_path", "Model", None, ""),
+    field("tracking_mode", "Tracking mode", None, ""),
+    field("detection_interval", "Detect every N frames", None, ""),
+    field("player_anchor_rad", "Ball anchor range", Some(2), " rad"),
+    field("ball_coast_secs", "Ball coast time", Some(2), " s"),
+    field("ball_hold_secs", "Ball hold time", Some(1), " s"),
+    field("ball_max_speed", "Ball max speed", Some(2), " rad/frame"),
+    field("max_player_pitch", "Player height limit", Some(2), " rad"),
+    field("ball_max_pitch", "Ball height limit", Some(2), " rad"),
+    field("ball_jump_confidence", "Ball jump confidence", Some(2), ""),
+    field(
+        "ball_acquire_max_dist_from_cluster",
+        "Ball acquire range",
+        Some(2),
+        " rad",
+    ),
+    field(
+        "ball_acquire_established_frames",
+        "Ball acquire arm delay",
+        None,
+        " frames",
+    ),
+    field("confidence_threshold", "Detection confidence", Some(2), ""),
+    field("preset", "Style preset", None, ""),
+    field("framing", "Framing", None, ""),
+    field("lock_pitch", "Pitch: Lock (horizontal-only)", None, ""),
+    field("lookahead_secs", "Lookahead (smoothness)", Some(2), " s"),
+    field(
+        "lookahead_reduced_bit_depth",
+        "Reduce lookahead memory (8-bit)",
+        None,
+        "",
+    ),
+    field(
+        "async_detect",
+        "Async AI detection (faster export)",
+        None,
+        "",
+    ),
+    field("cluster_mode", "Cluster mode", None, ""),
+    field("ball_weight", "Ball weight", Some(2), ""),
+    field(
+        "cluster_bandwidth_rad",
+        "Cluster bandwidth",
+        Some(2),
+        " rad",
+    ),
+    field("dead_zone_rad", "Dead-zone", Some(2), " rad"),
+    field("ball_max_dist_from_cluster", "Ball reach", Some(2), " rad"),
+    field("fov_tight", "Field of view: Tight", Some(0), " deg"),
+    field("fov_default", "Field of view: Default", Some(0), " deg"),
+    field("fov_wide", "Field of view: Wide", Some(0), " deg"),
+    field("ball_frame_margin_deg", "Ball margin", Some(1), " deg"),
+    field("fov_alpha", "Smoothing speed: Zoom (FOV)", Some(3), ""),
+    field(
+        "cluster_alpha",
+        "Smoothing speed: Aim (cluster)",
+        Some(3),
+        "",
+    ),
+];
+
+/// One snapshot value as text: strings bare, booleans as on/off, numbers
+/// rounded to `decimals` when given.
+fn format_autocam_value(val: &serde_json::Value, decimals: Option<usize>) -> String {
+    match (val, decimals) {
+        (serde_json::Value::String(s), _) => s.clone(),
+        (serde_json::Value::Null, _) => "not set".to_string(),
+        (serde_json::Value::Bool(b), _) => if *b { "on" } else { "off" }.to_string(),
+        (serde_json::Value::Number(n), Some(d)) => match n.as_f64() {
+            Some(f) => format!("{f:.d$}"),
+            None => n.to_string(),
+        },
+        (other, _) => other.to_string(),
+    }
+}
+
+/// The export-log lines for an autocam snapshot object - see
+/// [`StitchJob::describe_autocam_snapshot`].
+fn describe_autocam_object(autocam: &serde_json::Map<String, serde_json::Value>) -> String {
+    let mut out = String::new();
+    for f in AUTOCAM_LOG_FIELDS {
+        if let Some(val) = autocam.get(f.key) {
+            let shown = format_autocam_value(val, f.decimals);
+            let unit = if matches!(val, serde_json::Value::Number(_)) {
+                f.unit
+            } else {
+                ""
+            };
+            out.push_str(&format!("  {}: {shown}{unit}   [{}]\n", f.label, f.key));
+        }
+    }
+    for (key, val) in autocam {
+        if AUTOCAM_LOG_FIELDS.iter().all(|f| f.key != key) {
+            out.push_str(&format!("  {key}: {}\n", format_autocam_value(val, None)));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autocam_log_uses_gui_labels_order_and_rounding() {
+        let json = serde_json::json!({
+            "fov_alpha": 0.03999999910593033,
+            "player_anchor_rad": 0.5,
+            "ball_max_speed": 0.12999999523162842,
+            "lock_pitch": false,
+            "some_new_knob": 7,
+        });
+        let text = describe_autocam_object(json.as_object().unwrap());
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "  Ball anchor range: 0.50 rad   [player_anchor_rad]",
+                "  Ball max speed: 0.13 rad/frame   [ball_max_speed]",
+                "  Pitch: Lock (horizontal-only): off   [lock_pitch]",
+                "  Smoothing speed: Zoom (FOV): 0.040   [fov_alpha]",
+                "  some_new_knob: 7",
+            ]
+        );
+    }
+
+    #[test]
+    fn autocam_log_fields_are_unique() {
+        for (i, f) in AUTOCAM_LOG_FIELDS.iter().enumerate() {
+            assert!(
+                AUTOCAM_LOG_FIELDS[i + 1..].iter().all(|g| g.key != f.key),
+                "duplicate key {}",
+                f.key
+            );
+        }
+    }
 
     #[test]
     fn all_paths_returns_every_chained_segment() {

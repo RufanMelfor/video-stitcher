@@ -540,6 +540,14 @@ pub const DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET: f32 = 0.04;
 pub const DEFAULT_COLOR_GAMMA: f32 = 1.0;
 /// Off - see [`Topology::color_match_auto_gamma`].
 pub const DEFAULT_COLOR_MATCH_AUTO_GAMMA: bool = false;
+/// On for newly created calibrations - see
+/// [`Topology::color_match_overlap_fit`]. (A saved calibration without the
+/// field still loads as off: it predates the feature.)
+pub const DEFAULT_COLOR_MATCH_OVERLAP_FIT: bool = true;
+/// On for newly created calibrations - see
+/// [`Topology::multiband_blend_enabled`]. (A saved calibration without the
+/// field still loads as off: it predates the feature.)
+pub const DEFAULT_MULTIBAND_BLEND_ENABLED: bool = true;
 
 fn default_color_match_enabled() -> bool {
     DEFAULT_COLOR_MATCH_ENABLED

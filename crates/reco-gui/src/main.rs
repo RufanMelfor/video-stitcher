@@ -1605,7 +1605,7 @@ impl AppState {
         }
     }
 
-    /// Enable/disable the experimental same-direction overlap fit - see
+    /// Enable/disable the same-direction overlap fit - see
     /// `StitchPipeline::set_color_match_overlap_fit`.
     fn set_color_match_overlap_fit(&mut self, enabled: bool) {
         // Mirrored into `self.calibration` for the same reason as
@@ -1819,7 +1819,7 @@ impl AppState {
             DEFAULT_COLOR_MATCH_EMA_ALPHA, DEFAULT_COLOR_MATCH_ENABLED,
             DEFAULT_COLOR_MATCH_GRID_COLS, DEFAULT_COLOR_MATCH_GRID_ROWS,
             DEFAULT_COLOR_MATCH_INTERVAL_FRAMES, DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET,
-            DEFAULT_COLOR_MATCH_MAX_Y_OFFSET,
+            DEFAULT_COLOR_MATCH_MAX_Y_OFFSET, DEFAULT_COLOR_MATCH_OVERLAP_FIT,
         };
         if let Some(bridge) = self.bridge.as_mut() {
             let pipeline = bridge.engine_mut().pipeline_mut();
@@ -1833,7 +1833,7 @@ impl AppState {
             pipeline.set_color_match_max_chroma_offset(DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET);
             pipeline.set_color_gamma(DEFAULT_COLOR_GAMMA, DEFAULT_COLOR_GAMMA);
             pipeline.set_color_match_auto_gamma(DEFAULT_COLOR_MATCH_AUTO_GAMMA);
-            pipeline.set_color_match_overlap_fit(false);
+            pipeline.set_color_match_overlap_fit(DEFAULT_COLOR_MATCH_OVERLAP_FIT);
             // Vivid color grade / sharpening reset to identity/off too -
             // both live in this same Color Mapping panel.
             pipeline.set_color_grade(1.0, 1.0, 1.0);
@@ -1846,7 +1846,7 @@ impl AppState {
             cal.topology.color_gamma_left = DEFAULT_COLOR_GAMMA;
             cal.topology.color_gamma_right = DEFAULT_COLOR_GAMMA;
             cal.topology.color_match_auto_gamma = DEFAULT_COLOR_MATCH_AUTO_GAMMA;
-            cal.topology.color_match_overlap_fit = false;
+            cal.topology.color_match_overlap_fit = DEFAULT_COLOR_MATCH_OVERLAP_FIT;
             cal.topology.color_grade_brightness = 1.0;
             cal.topology.color_grade_saturation = 1.0;
             cal.topology.color_grade_gamma = 1.0;
@@ -7057,6 +7057,7 @@ fn main() -> anyhow::Result<()> {
                 DEFAULT_COLOR_MATCH_ENABLED, DEFAULT_COLOR_MATCH_GRID_COLS,
                 DEFAULT_COLOR_MATCH_GRID_ROWS, DEFAULT_COLOR_MATCH_INTERVAL_FRAMES,
                 DEFAULT_COLOR_MATCH_MAX_CHROMA_OFFSET, DEFAULT_COLOR_MATCH_MAX_Y_OFFSET,
+                DEFAULT_COLOR_MATCH_OVERLAP_FIT,
             };
             app.set_color_match_enabled(DEFAULT_COLOR_MATCH_ENABLED);
             app.set_color_match_band_width(DEFAULT_COLOR_MATCH_BAND_WIDTH);
@@ -7069,7 +7070,7 @@ fn main() -> anyhow::Result<()> {
             app.set_color_gamma_left(DEFAULT_COLOR_GAMMA);
             app.set_color_gamma_right(DEFAULT_COLOR_GAMMA);
             app.set_color_match_auto_gamma(DEFAULT_COLOR_MATCH_AUTO_GAMMA);
-            app.set_color_match_overlap_fit(false);
+            app.set_color_match_overlap_fit(DEFAULT_COLOR_MATCH_OVERLAP_FIT);
             app.set_vivid_enabled(false);
             app.set_color_grade_brightness(1.0);
             app.set_color_grade_saturation(1.0);
