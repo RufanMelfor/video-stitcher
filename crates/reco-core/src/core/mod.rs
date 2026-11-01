@@ -329,7 +329,17 @@ impl StitchCore {
     /// a gap it has no way to know happened. No-op for any slot that
     /// isn't attached, or whose implementation doesn't override
     /// [`Panner::reset`]/[`Tracker::reset`] (both default to no-op).
+    ///
+    /// Also forgets the cached [`Self::last_detections`]: frames between
+    /// detection frames (`detection_interval`) reuse that cache, and
+    /// with async detect the new window's first detections only land
+    /// once its lookahead pre-fill is consumed - so without clearing it,
+    /// the whole pre-fill fed the freshly reset trackers the previous
+    /// clip's ball, which they then coasted/held for seconds (2026-11-01:
+    /// a highlight clip panned back toward the previous clip's goal and
+    /// missed its own).
     pub fn reset_autocam_state(&mut self) {
+        self.last_detections.clear();
         if let Some(panner) = self.panner.as_mut() {
             panner.reset();
         }
@@ -1355,5 +1365,10 @@ mod tests {
         assert_eq!(dets.len(), 2);
         assert_eq!(dets[0].camera, CameraId::Left);
         assert_eq!(dets[1].camera, CameraId::Right);
+
+        // A cut must not let the next clip's in-between frames reuse
+        // this clip's detections.
+        core.reset_autocam_state();
+        assert!(core.last_detections().is_empty());
     }
 }
