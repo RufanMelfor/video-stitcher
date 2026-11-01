@@ -1067,6 +1067,20 @@ pub struct ScoreboardSettings {
     /// celebration, which is all that follows.
     #[serde(default = "default_highlight_trail_secs")]
     pub highlight_trail_secs: f32,
+    /// Seconds of the dip to black between two highlight clips: the
+    /// picture fades out over this long at the end of one clip and back
+    /// in over this long at the start of the next (no caption, no extra
+    /// screen time). `0.0` = a hard cut.
+    #[serde(default = "default_highlight_fade_secs")]
+    pub highlight_fade_secs: f32,
+}
+
+/// Default dip to black between highlight clips - short enough not to
+/// eat into a clip's build-up.
+pub const DEFAULT_HIGHLIGHT_FADE_SECS: f32 = 0.5;
+
+fn default_highlight_fade_secs() -> f32 {
+    DEFAULT_HIGHLIGHT_FADE_SECS
 }
 
 fn default_scoreboard_logo_size_px() -> f32 {
@@ -1932,6 +1946,7 @@ mod tests {
             match_end_trail_secs: 8.0,
             highlight_lead_secs: 15.0,
             highlight_trail_secs: 10.0,
+            highlight_fade_secs: 0.5,
         });
         let json = cal.to_json_pretty();
         let back: Calibration = serde_json::from_str(&json).unwrap();

@@ -322,10 +322,11 @@ pub fn run_export(
     start_secs: f32,
     end_secs: f32,
     cut_ranges: Vec<reco_io::cut_range::CutRange>,
-    // `Some((fade_secs, hold_secs))` shows a "PAUZE" dip-to-black
-    // transition at every cut-range boundary. See
+    // `Some((fade_secs, hold_secs, caption))` shows a dip-to-black
+    // transition at every cut-range boundary - the "PAUZE" card, or a
+    // plain dip with an empty caption (highlights). See
     // `StitchJob::pause_overlay`'s doc comment.
-    pause_overlay: Option<(f32, f32)>,
+    pause_overlay: Option<(f32, f32, String)>,
     autocam: AutocamUiConfig,
     // Pitch minimap (setup from `load_minimap_setup`, placement from the
     // Export dialog); `None` = off. Always `None` without the `minimap` feature.
@@ -426,10 +427,16 @@ pub fn run_export(
         // fall back to the naive span if it can't compute (e.g. an
         // invalid cut range - StitchJob::run will surface that error
         // properly once the export actually starts).
-        let overlay_cfg = pause_overlay.and_then(|(fade_secs, hold_secs)| {
-            reco_core::render::pause_overlay::PauseOverlayConfig::new(fade_secs, hold_secs, "PAUZE")
+        let overlay_cfg = pause_overlay
+            .as_ref()
+            .and_then(|(fade_secs, hold_secs, caption)| {
+                reco_core::render::pause_overlay::PauseOverlayConfig::new(
+                    *fade_secs,
+                    *hold_secs,
+                    caption.clone(),
+                )
                 .ok()
-        });
+            });
         let range_total = reco_io::cut_range::planned_output_frames(
             start_secs as f64,
             (end_secs > 0.0).then_some(end_secs as f64),
@@ -561,9 +568,12 @@ pub fn run_export(
         });
     let mut replay_window_limits =
         reco_io::cut_range::window_limits(&replay_keep_windows, video_fps, None);
-    if let Some((fade_secs, hold_secs)) = pause_overlay
-        && let Ok(overlay_cfg) =
-            reco_core::render::pause_overlay::PauseOverlayConfig::new(fade_secs, hold_secs, "PAUZE")
+    if let Some((fade_secs, hold_secs, caption)) = pause_overlay.as_ref()
+        && let Ok(overlay_cfg) = reco_core::render::pause_overlay::PauseOverlayConfig::new(
+            *fade_secs,
+            *hold_secs,
+            caption.clone(),
+        )
     {
         reco_io::cut_range::extend_for_pause_overlay(
             &replay_keep_windows,
@@ -797,8 +807,10 @@ pub fn run_export(
         );
         job = job.cut_ranges(cut_ranges);
     }
-    if let Some((fade_secs, hold_secs)) = pause_overlay {
-        job = job.pause_overlay(fade_secs, hold_secs);
+    if let Some((fade_secs, hold_secs, caption)) = pause_overlay {
+        job = job
+            .pause_overlay(fade_secs, hold_secs)
+            .pause_overlay_caption(caption);
     }
 
     if replay_enabled {

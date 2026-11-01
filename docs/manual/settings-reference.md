@@ -45,6 +45,7 @@ so their defaults only apply until you pick one.
 | Match trim |  |  | Seconds kept outside the match itself: lead-in before kickoff, and how long the export keeps running past the final whistle. These two move the export start/end time, not a cut range. |
 | Highlights only (goals) |  | off | Export only the goals: one clip per logged goal, spliced together. Sets the export start, end and cut ranges for you, and renames the output so it cannot overwrite the full match. Turning this on turns auto-cut off - it already excludes everything that is not a goal. |
 | Goal clip |  |  | How much of each goal to keep. The lead reaches back further than the trail on purpose: the goal is logged after the ball is in, so the build-up sits before the logged moment while only the celebration follows it. |
+| Fade to black between clips | 0 and up | 0.5 s | Fade to black between two goal clips instead of a hard cut: the picture fades out at the end of one clip and back in at the start of the next, over this many seconds each way. It adds no screen time and shows no caption. 0 = hard cut. |
 
 ## Audio Sync Waveform
 

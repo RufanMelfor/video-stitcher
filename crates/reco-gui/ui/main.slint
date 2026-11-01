@@ -1422,6 +1422,9 @@ export component RecoApp inherits Window {
     in-out property <bool> scoreboard-derive-highlights: false;
     in-out property <float> highlights-lead-secs: 15.0;
     in-out property <float> highlights-trail-secs: 10.0;
+    // Dip to black between highlight clips, seconds each way; 0 = hard
+    // cut. ScoreboardSettings::highlight_fade_secs.
+    in-out property <float> highlights-fade-secs: 0.5;
     in-out property <float> autocut-cut-lead-secs: 2.0;
     in-out property <float> autocut-cut-trail-secs: 2.0;
     in-out property <float> autocut-kickoff-lead-secs: 2.0;
@@ -2743,6 +2746,22 @@ export component RecoApp inherits Window {
                                             escaped => { self.text = root.highlights-trail-secs; }
                                         }
                                         Text { text: "s after"; color: #888; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
+                                    }
+                                    Tip {
+                                        tip: "Fade to black between two goal clips instead of a hard cut: the picture fades out at the end of one clip and back in at the start of the next, over this many seconds each way. It adds no screen time and shows no caption. 0 = hard cut.";
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            NumEdit {
+                                                text: root.highlights-fade-secs;
+                                                width: 44px;
+                                                edited(v) => {
+                                                    root.highlights-fade-secs = Math.max(v.to-float(), 0);
+                                                    root.changed-highlights-margins();
+                                                }
+                                                escaped => { self.text = root.highlights-fade-secs; }
+                                            }
+                                            Text { text: "s fade to black between clips"; color: #888; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
+                                        }
                                     }
                                 }
 

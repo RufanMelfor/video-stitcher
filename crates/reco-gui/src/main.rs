@@ -3479,6 +3479,7 @@ fn snapshot_scoreboard_settings(
         // does not - see `ScoreboardSettings::highlight_lead_secs`.
         highlight_lead_secs: app.get_highlights_lead_secs(),
         highlight_trail_secs: app.get_highlights_trail_secs(),
+        highlight_fade_secs: app.get_highlights_fade_secs(),
     }
 }
 
@@ -3742,6 +3743,7 @@ fn apply_scoreboard_settings(
     app.set_autocut_match_end_trail_secs(settings.match_end_trail_secs);
     app.set_highlights_lead_secs(settings.highlight_lead_secs);
     app.set_highlights_trail_secs(settings.highlight_trail_secs);
+    app.set_highlights_fade_secs(settings.highlight_fade_secs);
 
     app.set_scoreboard_derive_cut_ranges(settings.derive_cut_ranges);
     refresh_derived_cut_ranges(&mut s, app);
@@ -8221,12 +8223,21 @@ fn main() -> anyhow::Result<()> {
             "Export range: start={start_secs:.1}s, end={end_secs:.1}s, {} cut range(s)",
             cut_ranges.len()
         );
-        let pause_overlay = app.get_export_pause_overlay_enabled().then(|| {
-            (
-                app.get_export_pause_overlay_fade_secs(),
-                app.get_export_pause_overlay_hold_secs(),
-            )
-        });
+        // A highlights reel's cuts are not breaks in play: there the
+        // transition is the reel's own plain dip to black (no caption,
+        // no hold), not the PAUZE card.
+        let highlights_fade = app.get_highlights_fade_secs();
+        let pause_overlay = if app.get_scoreboard_derive_highlights() {
+            (highlights_fade > 0.0).then(|| (highlights_fade, 0.0, String::new()))
+        } else {
+            app.get_export_pause_overlay_enabled().then(|| {
+                (
+                    app.get_export_pause_overlay_fade_secs(),
+                    app.get_export_pause_overlay_hold_secs(),
+                    "PAUZE".to_string(),
+                )
+            })
+        };
         let autocam = crate::export::AutocamUiConfig {
             enabled: app.get_export_autocam_enabled(),
             model_path: app.get_export_model_path().to_string(),
