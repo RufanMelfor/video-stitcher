@@ -17,7 +17,7 @@ so their defaults only apply until you pick one.
 |---|---|---|---|
 | Seam blend | 0 to 0.3 | 0.05 | Width of the feathered blend at the seam between the two cameras. |
 | Flip blend direction (left over right) |  | off | Which camera fades in over the other at the seam. Off (default): right fades over a fixed left. On: left fades over a fixed right. Doesn't move the seam itself. |
-| Multi-band blend (experimental) |  | off | Spatial (multi-band) blend: blurs low frequencies over a wide band and keeps high frequencies over a narrow band, instead of a single crossfade. Lets the seam blend read as wider without doubling fine detail (ball, player edges, field lines) - but costs 10 render passes instead of 1. Experimental. |
+| Multi-band blend |  | on (new setups) | Spatial (multi-band) blend: blurs low frequencies over a wide band and keeps high frequencies over a narrow band, instead of a single crossfade. Lets the seam blend read as wider without doubling fine detail (ball, player edges, field lines) - but costs 10 render passes instead of 1. |
 | Show seam line |  | off | Draws a thin red line at the exact geometric seam position, independent of how wide the seam blend is. Purely a visual aid for tuning Seam position and Flip blend direction - doesn't affect the render otherwise. |
 | Overlap view |  |  | Calibration aid, preview only (never in an export). Right over left / Left over right: shows that camera semi-transparently on the other camera's side of the seam - where the calibration is right, lines and goals line up; where it's off, you see them doubled. Difference: shows how much the two cameras differ wherever both see the same spot - near black = aligned, bright edges = misaligned. Both: both ghosts at once across the whole overlap - lines that cross the seam at an angle point to a roll error. Judge on far-away things (far touchline, goals); close to the cameras some doubling is normal (parallax). |
 | Overlap opacity | 0.0 to 1.0 | 0.5 | Ghost: how strongly the other camera shows through. Difference: how much of the difference image replaces the normal picture. |
@@ -107,7 +107,7 @@ so their defaults only apply until you pick one.
 
 | Setting | Range | Default | What it does |
 |---|---|---|---|
-| Overlap fit (sky + grass, experimental) |  | off | Experimental. Measures both cameras at exactly the same spots next to the seam - from the sky down to the near touchline - and fits a brightness + contrast correction per color channel, so sky and grass can both match (the classic auto match compares a different piece of the field per camera and can only shift the average). When on, the band width / grid / max offset settings and Auto gamma below are not used. |
+| Overlap fit (sky + grass) |  | on (new setups) | Measures both cameras at exactly the same spots next to the seam - from the sky down to the near touchline - and fits a brightness + contrast correction per color channel, so sky and grass can both match (the classic auto match compares a different piece of the field per camera and can only shift the average). When on, the band width / grid / max offset settings and Auto gamma below are not used. |
 
 ### Manual Gamma (Before Auto Match)
 

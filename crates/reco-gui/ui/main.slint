@@ -1102,7 +1102,7 @@ export component RecoApp inherits Window {
     // reco-core's Topology::color_match_auto_gamma. Off = the sliders keep
     // their static, manually-tuned meaning exactly as before.
     in-out property <bool> color-match-auto-gamma: false;
-    // reco-core's Topology::color_match_overlap_fit (experimental): measure
+    // reco-core's Topology::color_match_overlap_fit: measure
     // both cameras at the same view directions around the seam (sky
     // included) and fit a per-channel gain + gamma instead of the band-mean
     // offset. Overrides auto gamma while on.
@@ -2307,9 +2307,9 @@ export component RecoApp inherits Window {
                                 }
 
                                 Tip {
-                                    tip: "Spatial (multi-band) blend: blurs low frequencies over a wide band and keeps high frequencies over a narrow band, instead of a single crossfade. Lets the seam blend read as wider without doubling fine detail (ball, player edges, field lines) - but costs 10 render passes instead of 1. Experimental.";
+                                    tip: "Spatial (multi-band) blend: blurs low frequencies over a wide band and keeps high frequencies over a narrow band, instead of a single crossfade. Lets the seam blend read as wider without doubling fine detail (ball, player edges, field lines) - but costs 10 render passes instead of 1.";
                                     CheckBox {
-                                        text: "Multi-band blend (experimental)";
+                                        text: "Multi-band blend";
                                         checked <=> root.multiband-blend-enabled;
                                         toggled => { root.changed-multiband-blend-enabled(self.checked); }
                                     }
@@ -4189,9 +4189,9 @@ export component RecoApp inherits Window {
                         }
 
                         Tip {
-                            tip: "Experimental. Measures both cameras at exactly the same spots next to the seam - from the sky down to the near touchline - and fits a brightness + contrast correction per color channel, so sky and grass can both match (the classic auto match compares a different piece of the field per camera and can only shift the average). When on, the band width / grid / max offset settings and Auto gamma below are not used.";
+                            tip: "Measures both cameras at exactly the same spots next to the seam - from the sky down to the near touchline - and fits a brightness + contrast correction per color channel, so sky and grass can both match (the classic auto match compares a different piece of the field per camera and can only shift the average). When on, the band width / grid / max offset settings and Auto gamma below are not used.";
                             CheckBox {
-                                text: "Overlap fit (sky + grass, experimental)";
+                                text: "Overlap fit (sky + grass)";
                                 checked <=> root.color-match-overlap-fit;
                                 toggled => { root.changed-color-match-overlap-fit(self.checked); }
                             }

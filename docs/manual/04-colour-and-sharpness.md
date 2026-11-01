@@ -73,15 +73,16 @@ overshoot later. While it is on, the gamma sliders still move but your values ar
 overwritten at the next measurement. **Turn Auto gamma off before setting a fixed
 value** that has to stay.
 
-## Overlap fit (experimental)
+## Overlap fit
 
 A different way of matching that measures both cameras at exactly the same spots
 next to the seam, from the sky down to the near touchline, and fits a brightness
 and contrast correction per colour channel. That lets sky and grass both match,
 which the classic method cannot do because it compares a different piece of the
 field for each camera. While it is on, the band width, grid and max offset
-settings and Auto gamma are not used. It is off by default because it is new;
-try it when the classic method leaves a visible difference in the sky.
+settings and Auto gamma are not used. On real match footage it matches sky and
+grass better than the classic method, so it is on for every new setup (a setup
+saved before it existed keeps it off until you switch it on).
 
 ## Vivid colour grade
 

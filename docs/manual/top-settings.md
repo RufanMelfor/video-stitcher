@@ -26,9 +26,9 @@ or a player's legs, can look slightly doubled.
 - **Start with** the default.
 - **Change it** if you see a hard line or colour step at the seam that the colour
   settings (section 2) cannot remove.
-- **Experimental alternative:** *Multi-band blend* blends wide for smooth areas
-  and narrow for fine detail. It looks better but is slower (10 render passes
-  instead of 1).
+- *Multi-band blend* (on for every new setup) blends wide for smooth areas
+  and narrow for fine detail. It looks better than a single crossfade but is
+  slower (10 render passes instead of 1).
 
 <!-- screenshot: Seam section with "Show seam line" switched on -->
 
