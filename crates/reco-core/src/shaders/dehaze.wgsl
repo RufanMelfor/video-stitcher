@@ -14,11 +14,15 @@
 //                     stand above the horizon (a stand, a roof)
 //            guard    leaves pixels as bright as the fog alone (the sky)
 //            then the local brightness the veil removal took away is given
-//            back (ratio in [1, 2]), so the result gains colour and contrast
-//            without getting darker.
+//            back (ratio in [1, 2]) raised to `keep_light`: 1 = the result
+//            gains colour and contrast without getting darker (thick fog),
+//            0 = full veil removal, darker and punchier (thin fog, where
+//            giving brightness back looks milky).
 
 const CELL: i32 = 16;
 const LUMA: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
+// Upper bound on the brightness give-back ratio.
+const MAX_GIVE_BACK: f32 = 2.0;
 
 struct DehazeParams {
     // xyz: true up (level world vertical) in camera space; w: tan(vfov / 2).
@@ -26,7 +30,7 @@ struct DehazeParams {
     // x: aspect (w / h), y: strength, z: cap, w: tan(far angle).
     shape: vec4<f32>,
     // x: guard band (fraction of A's luma), y: airlight EMA alpha,
-    // z: min sin(elevation) for a sky cell, w: max brightness give-back.
+    // z: min sin(elevation) for a sky cell, w: keep_light (0..1).
     tuning: vec4<f32>,
 }
 
@@ -197,8 +201,8 @@ fn apply_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ratio = clamp(
         l_low * (1.0 - v) / max(l_low - a_l * v, 1e-3),
         1.0,
-        params.tuning.w,
+        MAX_GIVE_BACK,
     );
-    out = out * ratio;
+    out = out * pow(ratio, params.tuning.w);
     textureStore(output, p, vec4<f32>(clamp(out, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0));
 }

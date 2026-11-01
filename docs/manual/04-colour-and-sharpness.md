@@ -97,8 +97,19 @@ costs no GPU time when off.
 lays over the far side of the pitch, the stand and the background, so they get
 their colour and contrast back. The effect grows with the distance from the
 camera, worked out from the view geometry: the near field, which has little fog
-in front of it, stays as it is. It also keeps the brightness of what it
-corrects, so a dark building next to the stand does not turn black.
+in front of it, stays as it is.
+
+Removing a veil makes things darker. **Keep brightness** (0 to 1, starts at 0.5)
+sets how much of that brightness is given back:
+
+- **Thick fog**: set it high (around 1.0). A thick veil removed without giving
+  brightness back makes the stand and buildings far too dark.
+- **Thin fog**: set it low (around 0.0). There is little veil to remove, and
+  giving brightness back makes the picture look milky.
+
+There is no automatic switch for when the fog lifts: a test on matches in sunny
+weather showed they cannot be told apart from fog reliably. If the fog clears
+during a match, lower Dehaze or set it to 0.
 
 The colour of the fog is measured from the sky in view and then kept, so the
 camera needs to show some sky once before the effect starts; after that it also

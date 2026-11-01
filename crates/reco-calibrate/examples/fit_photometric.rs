@@ -684,6 +684,7 @@ fn vec5_to_layout(p: &[f64], x_rx: f64, z_rz: f64) -> (Topology, Framing) {
         sharpen_amount: 0.0,
         sharpen_radius: 1.0,
         dehaze_strength: 0.0,
+        dehaze_keep_light: 0.5,
     };
     let framing = Framing {
         axis_offset: p[0],

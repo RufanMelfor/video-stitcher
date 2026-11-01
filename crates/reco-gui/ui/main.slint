@@ -1141,6 +1141,9 @@ export component RecoApp inherits Window {
     // and StitchPipeline::set_dehaze_strength. Calibration-saved. 0.0
     // (default) disables it, no GPU cost. GPU-only.
     in-out property <float> dehaze-strength: 0.0;
+    // Topology::dehaze_keep_light - brightness given back after the veil
+    // is removed (1 = all, 0 = none).
+    in-out property <float> dehaze-keep-light: 0.5;
     in-out property <float> rig-tilt: 0.0; // degrees
     in-out property <float> rig-roll: 0.0; // degrees
     in-out property <int> sync-offset: 0;  // frames
@@ -1931,7 +1934,7 @@ export component RecoApp inherits Window {
     callback changed-pause-overlay();
     callback changed-color-grade-settings();
     callback changed-sharpen-settings();
-    callback changed-dehaze-strength();
+    callback changed-dehaze-settings();
 
     // File management: per-side segment lists and removal.
     in-out property <[string]> left-segments: [];
@@ -4403,7 +4406,16 @@ export component RecoApp inherits Window {
                                 maximum: 0.8;
                                 value <=> root.dehaze-strength;
                                 decimals: 2;
-                                changed(v) => { root.changed-dehaze-strength(); }
+                                changed(v) => { root.changed-dehaze-settings(); }
+                            }
+                            if root.dehaze-strength > 0: LabeledSlider {
+                                label: "Keep brightness";
+                                tip: "How much of the brightness the fog removal takes away is given back. Thick fog: set it high (around 1.0), otherwise the picture gets too dark. Thin fog: set it low (around 0.0), because giving brightness back there makes the picture look milky. 0.5 (default) is in between. Updates live and is saved in the setup.";
+                                minimum: 0.0;
+                                maximum: 1.0;
+                                value <=> root.dehaze-keep-light;
+                                decimals: 2;
+                                changed(v) => { root.changed-dehaze-settings(); }
                             }
                         }
 

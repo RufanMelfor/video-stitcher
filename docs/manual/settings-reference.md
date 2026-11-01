@@ -150,6 +150,7 @@ so their defaults only apply until you pick one.
 | Setting | Range | Default | What it does |
 |---|---|---|---|
 | Dehaze | 0.0 to 0.8 | 0.0 | Removes the grey veil of fog or haze from the far side of the pitch, the stand and the background, bringing back their colour and contrast. The near field is left as it is: the effect grows with distance from the camera. The fog colour is measured from the sky, so it needs some sky in view to start. 0.35-0.5 suits a misty day; higher brings up compression noise in the distance. 0.0 (default) disables it - no GPU cost. GPU-only. Updates live and is saved in the setup. |
+| Keep brightness | 0.0 to 1.0 | 0.5 | Shown when Dehaze is above 0. How much of the brightness the fog removal takes away is given back. Thick fog: set it high (around 1.0), otherwise the picture gets too dark. Thin fog: set it low (around 0.0), because giving brightness back there makes the picture look milky. 0.5 (default) is in between. Updates live and is saved in the setup. |
 
 ### Sharpening
 

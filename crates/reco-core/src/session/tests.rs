@@ -68,6 +68,7 @@ fn test_calibration() -> Calibration {
             sharpen_amount: 0.0,
             sharpen_radius: 1.0,
             dehaze_strength: 0.0,
+            dehaze_keep_light: 0.5,
         },
         Framing {
             axis_offset: 0.25,

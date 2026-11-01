@@ -2751,6 +2751,7 @@ mod tests {
                 sharpen_amount: 0.0,
                 sharpen_radius: 1.0,
                 dehaze_strength: 0.0,
+                dehaze_keep_light: 0.5,
             },
             framing: crate::calibration::Framing {
                 axis_offset: 0.24,
@@ -2893,6 +2894,7 @@ mod tests {
                 sharpen_amount: 0.0,
                 sharpen_radius: 1.0,
                 dehaze_strength: 0.0,
+                dehaze_keep_light: 0.5,
             },
             framing: crate::calibration::Framing {
                 axis_offset: 0.18876110017299652,

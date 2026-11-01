@@ -547,6 +547,12 @@ impl StitchCore {
         self.executor.set_dehaze_strength(strength);
     }
 
+    /// Set how much brightness dehaze gives back (`0..=1`) - see
+    /// [`crate::calibration::Topology::dehaze_keep_light`].
+    pub fn set_dehaze_keep_light(&mut self, keep_light: f32) {
+        self.executor.set_dehaze_keep_light(keep_light);
+    }
+
     /// Set the lens-correction strength on every lens (`0` = pinhole,
     /// `1` = full KB4).
     pub fn set_lens_correction_amount(&mut self, amount: f32) {
