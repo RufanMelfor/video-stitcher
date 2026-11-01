@@ -256,8 +256,9 @@ impl StitchPipeline {
 
         // Same reasoning as `initial_color_grade` above, for dehaze.
         let initial_dehaze = calibration.topology.dehaze_strength;
+        let initial_keep_light = calibration.topology.dehaze_keep_light;
         let dehaze = (!crate::gpu::dehaze::is_identity(initial_dehaze))
-            .then(|| DehazePass::new(&gpu, initial_dehaze));
+            .then(|| DehazePass::new(&gpu, initial_dehaze, initial_keep_light));
 
         Ok(Self {
             gpu,
@@ -846,7 +847,29 @@ impl StitchPipeline {
         if let Some(pass) = self.dehaze.as_mut() {
             pass.set_strength(strength);
         } else if !crate::gpu::dehaze::is_identity(strength) {
-            self.dehaze = Some(DehazePass::new(&self.gpu, strength));
+            self.dehaze = Some(DehazePass::new(
+                &self.gpu,
+                strength,
+                self.calibration.topology.dehaze_keep_light,
+            ));
+        }
+    }
+
+    /// Set how much of the brightness the haze removal takes away is
+    /// given back, clamped to
+    /// [`crate::calibration::DEHAZE_KEEP_LIGHT_RANGE`] - see
+    /// [`crate::calibration::Topology::dehaze_keep_light`]. Mirrors into
+    /// the calibration like [`Self::set_dehaze_strength`].
+    pub fn set_dehaze_keep_light(&mut self, keep_light: f32) {
+        let range = crate::calibration::DEHAZE_KEEP_LIGHT_RANGE;
+        let keep_light = if keep_light.is_finite() {
+            keep_light.clamp(*range.start(), *range.end())
+        } else {
+            crate::calibration::DEFAULT_DEHAZE_KEEP_LIGHT
+        };
+        self.calibration.topology.dehaze_keep_light = keep_light;
+        if let Some(pass) = self.dehaze.as_mut() {
+            pass.set_keep_light(keep_light);
         }
     }
 

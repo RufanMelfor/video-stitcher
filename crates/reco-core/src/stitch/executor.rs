@@ -585,6 +585,16 @@ impl Executor {
         }
     }
 
+    /// Set how much brightness dehaze gives back. A no-op on the CPU
+    /// executor, same as [`Self::set_dehaze_strength`].
+    pub fn set_dehaze_keep_light(&mut self, keep_light: f32) {
+        match self {
+            Executor::Cpu(_) => {}
+            #[cfg(feature = "gpu")]
+            Executor::Gpu(g) => g.pipeline.set_dehaze_keep_light(keep_light),
+        }
+    }
+
     /// Set the lens-correction strength on every lens, clamped to `[0, 1]`.
     pub fn set_lens_correction_amount(&mut self, amount: f32) {
         match self {

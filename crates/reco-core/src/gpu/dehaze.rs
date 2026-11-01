@@ -33,8 +33,6 @@ const AIRLIGHT_EMA_ALPHA: f32 = 0.05;
 /// A cell counts as sky when its centre ray is at least this many degrees
 /// above the horizon.
 const SKY_MIN_ELEVATION_DEG: f32 = 3.0;
-/// Upper bound on the brightness given back after the veil is removed.
-const MAX_BRIGHTNESS_GIVE_BACK: f32 = 2.0;
 
 /// View geometry the dehaze pass needs for one frame: where "up" is in
 /// camera space and the projection's shape.
@@ -76,12 +74,14 @@ pub struct DehazePass {
     sampler: wgpu::Sampler,
     stats: std::sync::Mutex<Option<wgpu::Texture>>,
     strength: f32,
+    keep_light: f32,
 }
 
 impl DehazePass {
-    /// Create the pipelines. `strength` is the initial
-    /// [`crate::calibration::Topology::dehaze_strength`].
-    pub fn new(gpu: &GpuContext, strength: f32) -> Self {
+    /// Create the pipelines. `strength` and `keep_light` are the initial
+    /// [`crate::calibration::Topology::dehaze_strength`] and
+    /// [`crate::calibration::Topology::dehaze_keep_light`].
+    pub fn new(gpu: &GpuContext, strength: f32, keep_light: f32) -> Self {
         let device = &gpu.device;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("dehaze"),
@@ -129,12 +129,19 @@ impl DehazePass {
             sampler,
             stats: std::sync::Mutex::new(None),
             strength,
+            keep_light,
         }
     }
 
     /// Change the strength without rebuilding anything.
     pub fn set_strength(&mut self, strength: f32) {
         self.strength = strength;
+    }
+
+    /// Change how much brightness is given back (`0..=1`) without
+    /// rebuilding anything.
+    pub fn set_keep_light(&mut self, keep_light: f32) {
+        self.keep_light = keep_light;
     }
 
     /// Whether the current strength makes the pass a no-op.
@@ -199,7 +206,7 @@ impl DehazePass {
                 GUARD_BAND,
                 AIRLIGHT_EMA_ALPHA,
                 SKY_MIN_ELEVATION_DEG.to_radians().sin(),
-                MAX_BRIGHTNESS_GIVE_BACK,
+                self.keep_light,
             ],
         };
         gpu.queue

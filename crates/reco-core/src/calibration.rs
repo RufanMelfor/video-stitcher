@@ -478,11 +478,28 @@ pub struct Topology {
     /// [`crate::render::pipeline::StitchPipeline::set_dehaze_strength`].
     #[serde(default)]
     pub dehaze_strength: f32,
+    /// How much of the local brightness the haze removal takes away is
+    /// given back, `0.0` (none: deepest contrast, dark objects get darker)
+    /// to `1.0` (all: brightness kept, only colour and contrast restored).
+    /// Thick fog wants it high (removing a thick veil darkens a lot), thin
+    /// fog low (giving brightness back there looks milky). Only meaningful
+    /// when [`Self::dehaze_strength`] is non-zero.
+    #[serde(default = "default_dehaze_keep_light")]
+    pub dehaze_keep_light: f32,
 }
 
 /// Valid range for [`Topology::dehaze_strength`]. Above ~0.8 the far field
 /// is mostly compression noise brought back up.
 pub const DEHAZE_STRENGTH_RANGE: std::ops::RangeInclusive<f32> = 0.0..=0.8;
+/// Valid range for [`Topology::dehaze_keep_light`].
+pub const DEHAZE_KEEP_LIGHT_RANGE: std::ops::RangeInclusive<f32> = 0.0..=1.0;
+/// Default for [`Topology::dehaze_keep_light`]: halfway, between what
+/// thick and thin fog want.
+pub const DEFAULT_DEHAZE_KEEP_LIGHT: f32 = 0.5;
+
+fn default_dehaze_keep_light() -> f32 {
+    DEFAULT_DEHAZE_KEEP_LIGHT
+}
 
 /// Safe drag range for [`Topology::seam_offset`], in the same plane-local
 /// UV units as `blend_width`. Wide enough to give a visually meaningful
@@ -1517,6 +1534,20 @@ fn validate_topology(t: &Topology) -> Result<(), CalibrationError> {
             max: *DEHAZE_STRENGTH_RANGE.end() as f64,
         });
     }
+    if !t.dehaze_keep_light.is_finite() {
+        return Err(CalibrationError::NonFiniteFloat {
+            field: "topology.dehaze_keep_light".to_owned(),
+            value: format!("{}", t.dehaze_keep_light),
+        });
+    }
+    if !DEHAZE_KEEP_LIGHT_RANGE.contains(&t.dehaze_keep_light) {
+        return Err(CalibrationError::OutOfRange {
+            field: "topology.dehaze_keep_light".to_owned(),
+            value: t.dehaze_keep_light as f64,
+            min: *DEHAZE_KEEP_LIGHT_RANGE.start() as f64,
+            max: *DEHAZE_KEEP_LIGHT_RANGE.end() as f64,
+        });
+    }
 
     Ok(())
 }
@@ -1991,6 +2022,7 @@ mod tests {
                 sharpen_amount: 0.0,
                 sharpen_radius: 1.0,
                 dehaze_strength: 0.0,
+                dehaze_keep_light: 0.5,
             },
             framing: Framing {
                 axis_offset: 0.25,
