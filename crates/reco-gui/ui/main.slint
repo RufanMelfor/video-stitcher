@@ -1137,6 +1137,10 @@ export component RecoApp inherits Window {
     // 0.0 amount (default) disables it, no GPU cost. GPU-only.
     in-out property <float> sharpen-amount: 0.0;
     in-out property <float> sharpen-radius: 1.0;
+    // Fog/haze removal strength - see reco-core's Topology::dehaze_strength
+    // and StitchPipeline::set_dehaze_strength. Calibration-saved. 0.0
+    // (default) disables it, no GPU cost. GPU-only.
+    in-out property <float> dehaze-strength: 0.0;
     in-out property <float> rig-tilt: 0.0; // degrees
     in-out property <float> rig-roll: 0.0; // degrees
     in-out property <int> sync-offset: 0;  // frames
@@ -1927,6 +1931,7 @@ export component RecoApp inherits Window {
     callback changed-pause-overlay();
     callback changed-color-grade-settings();
     callback changed-sharpen-settings();
+    callback changed-dehaze-strength();
 
     // File management: per-side segment lists and removal.
     in-out property <[string]> left-segments: [];
@@ -4385,6 +4390,20 @@ export component RecoApp inherits Window {
                                 value <=> root.color-grade-gamma;
                                 decimals: 2;
                                 changed(v) => { root.changed-color-grade-settings(); }
+                            }
+                        }
+
+                        CalGroupBox {
+                            title: "DEHAZE";
+
+                            LabeledSlider {
+                                label: "Dehaze";
+                                tip: "Removes the grey veil of fog or haze from the far side of the pitch, the stand and the background, bringing back their colour and contrast. The near field is left as it is: the effect grows with distance from the camera. The fog colour is measured from the sky, so it needs some sky in view to start. 0.35-0.5 suits a misty day; higher brings up compression noise in the distance. 0.0 (default) disables it - no GPU cost. GPU-only. Updates live and is saved in the setup.";
+                                minimum: 0.0;
+                                maximum: 0.8;
+                                value <=> root.dehaze-strength;
+                                decimals: 2;
+                                changed(v) => { root.changed-dehaze-strength(); }
                             }
                         }
 

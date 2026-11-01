@@ -16,7 +16,7 @@ preview while you drag a slider.
    use **Gamma left** and **Gamma right**.
 3. **If sky and grass cannot both be made to match**, try **Overlap fit**.
 4. **Only at the end**, if the footage looks dull or soft, use **Vivid** and
-   **Sharpening**.
+   **Sharpening**. On a misty day, use **Dehaze** first.
 
 Always judge the result on the **seam**: it should be hard to say where one
 camera ends and the other begins.
@@ -90,6 +90,22 @@ brightness, saturation and gamma to a tuned preset; the three sliders below it
 let you fine-tune (1.0 means *no change*, range 0.5 to 1.5). You can also leave
 the switch off and set the sliders directly. It is stored in the setup and
 costs no GPU time when off.
+
+## Dehaze
+
+*Dehaze* (0 to 0.8, starts at 0 = off) removes the grey veil that fog or haze
+lays over the far side of the pitch, the stand and the background, so they get
+their colour and contrast back. The effect grows with the distance from the
+camera, worked out from the view geometry: the near field, which has little fog
+in front of it, stays as it is. It also keeps the brightness of what it
+corrects, so a dark building next to the stand does not turn black.
+
+The colour of the fog is measured from the sky in view and then kept, so the
+camera needs to show some sky once before the effect starts; after that it also
+works while the camera looks down at the pitch. 0.35 to 0.5 suits a misty day.
+Higher values bring up compression noise and blocks in the distance: fog really
+removes information, and what is gone cannot be brought back. It is stored in
+the setup and costs no GPU time when off.
 
 ## Sharpening
 

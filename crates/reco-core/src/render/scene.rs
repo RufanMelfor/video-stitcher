@@ -198,6 +198,7 @@ mod tests {
             color_grade_gamma: 1.0,
             sharpen_amount: 0.0,
             sharpen_radius: 1.0,
+            dehaze_strength: 0.0,
         }
     }
 
@@ -257,6 +258,7 @@ mod tests {
             color_grade_gamma: 1.0,
             sharpen_amount: 0.0,
             sharpen_radius: 1.0,
+            dehaze_strength: 0.0,
         };
 
         let geom = SceneGeometry::new(&topology, &framing(0.24), 16.0 / 9.0);

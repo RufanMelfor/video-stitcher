@@ -540,6 +540,13 @@ impl StitchCore {
         self.executor.set_sharpen_params(amount, radius);
     }
 
+    /// Set the fog/haze removal strength applied to the stitched frame
+    /// before color grade. `0.0` disables it - see
+    /// [`crate::calibration::Topology::dehaze_strength`].
+    pub fn set_dehaze_strength(&mut self, strength: f32) {
+        self.executor.set_dehaze_strength(strength);
+    }
+
     /// Set the lens-correction strength on every lens (`0` = pinhole,
     /// `1` = full KB4).
     pub fn set_lens_correction_amount(&mut self, amount: f32) {

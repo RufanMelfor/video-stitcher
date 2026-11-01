@@ -468,7 +468,21 @@ pub struct Topology {
     /// `sharpen_amount` is non-zero. See [`Self::sharpen_amount`].
     #[serde(default = "default_sharpen_radius")]
     pub sharpen_radius: f32,
+
+    /// Fog/haze removal strength, `0.0` (default, off - the GPU passes are
+    /// skipped entirely) to [`DEHAZE_STRENGTH_RANGE`]'s upper bound. The
+    /// fraction of haze removed at the horizon; nearer ground gets less,
+    /// by its distance from the camera (from the view geometry), so the
+    /// near field stays as it was. GPU-only (no effect on the CPU
+    /// executor). See
+    /// [`crate::render::pipeline::StitchPipeline::set_dehaze_strength`].
+    #[serde(default)]
+    pub dehaze_strength: f32,
 }
+
+/// Valid range for [`Topology::dehaze_strength`]. Above ~0.8 the far field
+/// is mostly compression noise brought back up.
+pub const DEHAZE_STRENGTH_RANGE: std::ops::RangeInclusive<f32> = 0.0..=0.8;
 
 /// Safe drag range for [`Topology::seam_offset`], in the same plane-local
 /// UV units as `blend_width`. Wide enough to give a visually meaningful
@@ -1489,6 +1503,21 @@ fn validate_topology(t: &Topology) -> Result<(), CalibrationError> {
         }
     }
 
+    if !t.dehaze_strength.is_finite() {
+        return Err(CalibrationError::NonFiniteFloat {
+            field: "topology.dehaze_strength".to_owned(),
+            value: format!("{}", t.dehaze_strength),
+        });
+    }
+    if !DEHAZE_STRENGTH_RANGE.contains(&t.dehaze_strength) {
+        return Err(CalibrationError::OutOfRange {
+            field: "topology.dehaze_strength".to_owned(),
+            value: t.dehaze_strength as f64,
+            min: *DEHAZE_STRENGTH_RANGE.start() as f64,
+            max: *DEHAZE_STRENGTH_RANGE.end() as f64,
+        });
+    }
+
     Ok(())
 }
 
@@ -1961,6 +1990,7 @@ mod tests {
                 color_grade_gamma: 1.0,
                 sharpen_amount: 0.0,
                 sharpen_radius: 1.0,
+                dehaze_strength: 0.0,
             },
             framing: Framing {
                 axis_offset: 0.25,

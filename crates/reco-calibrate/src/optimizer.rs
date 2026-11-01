@@ -471,6 +471,7 @@ impl Optimizer for NelderMeadOptimizer {
             color_grade_gamma: 1.0,
             sharpen_amount: 0.0,
             sharpen_radius: 1.0,
+            dehaze_strength: 0.0,
         };
         let framing = Framing {
             axis_offset: params.cam_d,

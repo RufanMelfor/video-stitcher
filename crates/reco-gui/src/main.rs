@@ -1793,6 +1793,22 @@ impl AppState {
         }
     }
 
+    /// Fog/haze removal - the Color Mapping panel's "Dehaze" slider (see
+    /// `reco_core::calibration::Topology::dehaze_strength`). Same shape
+    /// as [`Self::set_color_gamma`].
+    fn set_dehaze_strength(&mut self, strength: f32) {
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.topology.dehaze_strength = strength;
+        }
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge
+                .engine_mut()
+                .pipeline_mut()
+                .set_dehaze_strength(strength);
+            self.preview_dirty = true;
+        }
+    }
+
     /// Restore all Auto Color Match tuning knobs to their engineering
     /// defaults - not the values loaded from the current calibration file,
     /// which is what `reset_calibration` does for the layout sliders.
@@ -1821,6 +1837,7 @@ impl AppState {
             // both live in this same Color Mapping panel.
             pipeline.set_color_grade(1.0, 1.0, 1.0);
             pipeline.set_sharpen_params(0.0, 1.0);
+            pipeline.set_dehaze_strength(0.0);
             self.preview_dirty = true;
         }
         if let Some(cal) = self.calibration.as_mut() {
@@ -1833,6 +1850,7 @@ impl AppState {
             cal.topology.color_grade_gamma = 1.0;
             cal.topology.sharpen_amount = 0.0;
             cal.topology.sharpen_radius = 1.0;
+            cal.topology.dehaze_strength = 0.0;
         }
     }
 
@@ -5682,6 +5700,19 @@ fn main() -> anyhow::Result<()> {
         app.set_cal_dirty(true);
     });
 
+    // The Color Mapping panel's Dehaze slider changed.
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_changed_dehaze_strength(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        state_ref
+            .borrow_mut()
+            .set_dehaze_strength(app.get_dehaze_strength());
+        app.set_cal_dirty(true);
+    });
+
     // One of the four auto-cut margin fields was edited. Re-derives in
     // place so the timeline shows the new boundaries immediately - the
     // whole point of the fields is judging the result against the
@@ -7042,6 +7073,7 @@ fn main() -> anyhow::Result<()> {
             app.set_color_grade_gamma(1.0);
             app.set_sharpen_amount(0.0);
             app.set_sharpen_radius(1.0);
+            app.set_dehaze_strength(0.0);
             app.set_cal_dirty(true);
         }
     });
@@ -9584,6 +9616,10 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 let t = &b.engine().calibration().topology;
                 (t.sharpen_amount, t.sharpen_radius)
             });
+            let dehaze_strength = s
+                .bridge
+                .as_ref()
+                .map(|b| b.engine().calibration().topology.dehaze_strength);
             // Lens-correction strength came in via the loaded calibration and
             // the renderer was seeded with it at bridge creation; mirror it
             // into AppState so a later save re-persists the right value.
@@ -9821,6 +9857,9 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 if let Some((amount, radius)) = sharpen_params {
                     app.set_sharpen_amount(amount);
                     app.set_sharpen_radius(radius);
+                }
+                if let Some(strength) = dehaze_strength {
+                    app.set_dehaze_strength(strength);
                 }
                 if let Some(lc) = lens_correction {
                     app.set_lens_correction_amount(lc);
@@ -10264,6 +10303,10 @@ fn handle_calibration_result(
                         let t = &b.engine().calibration().topology;
                         (t.sharpen_amount, t.sharpen_radius)
                     });
+                    let dehaze_strength = state
+                        .bridge
+                        .as_ref()
+                        .map(|b| b.engine().calibration().topology.dehaze_strength);
                     let lens_correction =
                         state.calibration.as_ref().map(|c| c.lenses[0].correction);
                     if let Some(lc) = lens_correction {
@@ -10420,6 +10463,9 @@ fn handle_calibration_result(
                         if let Some((amount, radius)) = sharpen_params {
                             app.set_sharpen_amount(amount);
                             app.set_sharpen_radius(radius);
+                        }
+                        if let Some(strength) = dehaze_strength {
+                            app.set_dehaze_strength(strength);
                         }
                         if let Some(lc) = lens_correction {
                             app.set_lens_correction_amount(lc);
