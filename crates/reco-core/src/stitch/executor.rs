@@ -574,6 +574,17 @@ impl Executor {
         }
     }
 
+    /// Set the fog/haze removal strength. A no-op on the CPU executor -
+    /// it's a headless correctness oracle with no GPU compute pass to run
+    /// the dehaze shader on.
+    pub fn set_dehaze_strength(&mut self, strength: f32) {
+        match self {
+            Executor::Cpu(_) => {}
+            #[cfg(feature = "gpu")]
+            Executor::Gpu(g) => g.pipeline.set_dehaze_strength(strength),
+        }
+    }
+
     /// Set the lens-correction strength on every lens, clamped to `[0, 1]`.
     pub fn set_lens_correction_amount(&mut self, amount: f32) {
         match self {

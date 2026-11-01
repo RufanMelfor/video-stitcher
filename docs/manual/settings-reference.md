@@ -145,6 +145,12 @@ so their defaults only apply until you pick one.
 | Saturation | 0.5 to 1.5 | 1.0 | Color grade saturation multiplier. 1.0 is identity - above makes colors more vivid, below desaturates toward greyscale. Updates live. |
 | Gamma | 0.5 to 1.5 | 1.0 | Color grade gamma. 1.0 is identity - above lifts mid-tones, below lowers them. Updates live. |
 
+### Dehaze
+
+| Setting | Range | Default | What it does |
+|---|---|---|---|
+| Dehaze | 0.0 to 0.8 | 0.0 | Removes the grey veil of fog or haze from the far side of the pitch, the stand and the background, bringing back their colour and contrast. The near field is left as it is: the effect grows with distance from the camera. The fog colour is measured from the sky, so it needs some sky in view to start. 0.35-0.5 suits a misty day; higher brings up compression noise in the distance. 0.0 (default) disables it - no GPU cost. GPU-only. Updates live and is saved in the setup. |
+
 ### Sharpening
 
 | Setting | Range | Default | What it does |

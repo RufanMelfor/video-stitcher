@@ -29,6 +29,7 @@ use super::viewport::{ResolvedViewport, ViewportConfig};
 use crate::calibration::Calibration;
 use crate::geometry::ViewportPosition;
 use crate::gpu::color_grade::{ColorGradeParams, ColorGradePass};
+use crate::gpu::dehaze::{DehazePass, DehazeView};
 use crate::gpu::sharpen::{SharpenParams, SharpenPass};
 use crate::gpu::{GpuContext, GpuError};
 
@@ -149,6 +150,15 @@ pub struct StitchPipeline {
     /// Scratch texture the sharpen compute pass writes into. Same
     /// size/format as `render_target`; rebuilt in [`Self::resize`].
     sharpen_scratch: std::sync::Mutex<Option<wgpu::Texture>>,
+    /// Fog/haze removal, applied to the raw stitched frame right before
+    /// color grade. Lazily created on the first non-zero
+    /// [`Self::set_dehaze_strength`] (or a calibration saved with it on),
+    /// same reasoning as `color_grade`. Keeps the measured fog colour
+    /// across frames.
+    dehaze: Option<DehazePass>,
+    /// Scratch texture the dehaze apply pass writes into. Same
+    /// size/format as `render_target`; rebuilt in [`Self::resize`].
+    dehaze_scratch: std::sync::Mutex<Option<wgpu::Texture>>,
 }
 
 /// Pre-built bind groups for GPU-resident zero-copy sources.
@@ -244,6 +254,11 @@ impl StitchPipeline {
         let sharpen =
             (!initial_sharpen.is_identity()).then(|| SharpenPass::new(&gpu, &initial_sharpen));
 
+        // Same reasoning as `initial_color_grade` above, for dehaze.
+        let initial_dehaze = calibration.topology.dehaze_strength;
+        let dehaze = (!crate::gpu::dehaze::is_identity(initial_dehaze))
+            .then(|| DehazePass::new(&gpu, initial_dehaze));
+
         Ok(Self {
             gpu,
             scene,
@@ -265,6 +280,8 @@ impl StitchPipeline {
             sharpen,
             sharpen_params: initial_sharpen,
             sharpen_scratch: std::sync::Mutex::new(None),
+            dehaze,
+            dehaze_scratch: std::sync::Mutex::new(None),
         })
     }
 
@@ -355,6 +372,8 @@ impl StitchPipeline {
         *self.color_grade_scratch.lock().unwrap() = None;
         // Same reasoning, for the sharpen pass's scratch texture.
         *self.sharpen_scratch.lock().unwrap() = None;
+        // And for dehaze's.
+        *self.dehaze_scratch.lock().unwrap() = None;
         Some((width, height))
     }
 
@@ -459,13 +478,15 @@ impl StitchPipeline {
     fn composite_target_commands(
         &self,
         stitch_commands: wgpu::CommandBuffer,
+        viewport: &ResolvedViewport,
     ) -> wgpu::CommandBuffer {
         let target = self.renderer.render_target();
 
-        // Color grade runs first (on the raw stitched frame, before any
-        // overlay/transition compositing) - a "Vivid" boost is meant for
+        // Dehaze, then color grade, run first (on the raw stitched frame,
+        // before any overlay/transition compositing) - both are meant for
         // the video content, not a scoreboard or PAUZE card drawn on top
         // of it. See `Self::color_grade_target_commands`.
+        let stitch_commands = self.dehaze_target_commands(stitch_commands, target, viewport);
         let stitch_commands = self.color_grade_target_commands(stitch_commands, target);
 
         // Transition first so the content overlay draws on top of it -
@@ -552,6 +573,83 @@ impl StitchPipeline {
         encoder.finish()
     }
 
+    /// The view geometry the dehaze pass needs for a frame rendered at
+    /// `viewport` into a texture of `size`: the level world up in camera
+    /// space (same view matrix the stitch pass uses) and the projection.
+    fn dehaze_view(&self, viewport: &ResolvedViewport, size: wgpu::Extent3d) -> DehazeView {
+        let tilt = self.calibration.framing.tilt as f32;
+        let roll = self.calibration.framing.roll as f32;
+        let view = crate::geometry::view_matrix(
+            &self.scene.camera_position,
+            viewport.position.yaw,
+            viewport.position.pitch,
+            tilt,
+            roll,
+        );
+        let cam = crate::geometry::VirtualCamera::new(&self.scene.camera_position);
+        let (up_world, _) = crate::geometry::rig_frame(&cam, tilt, roll);
+        let up_cam = view.fixed_view::<3, 3>(0, 0) * up_world;
+        DehazeView {
+            up_cam: [up_cam.x, up_cam.y, up_cam.z],
+            fov_v_deg: viewport.config.fov_degrees,
+            aspect: size.width as f32 / size.height.max(1) as f32,
+        }
+    }
+
+    /// Encode the dehaze passes (if enabled) on the raw stitched frame,
+    /// right before color grade, writing the result back into `target`.
+    /// No-op (returns `commands` unchanged) when dehaze is off. Same
+    /// scratch-texture-and-blit-back shape as
+    /// [`Self::color_grade_target_commands`].
+    fn dehaze_target_commands(
+        &self,
+        commands: wgpu::CommandBuffer,
+        target: &wgpu::Texture,
+        viewport: &ResolvedViewport,
+    ) -> wgpu::CommandBuffer {
+        let Some(pass) = self.dehaze.as_ref() else {
+            return commands;
+        };
+        if pass.is_identity() {
+            return commands;
+        }
+
+        self.gpu.queue().submit(std::iter::once(commands));
+
+        let size = target.size();
+        let mut scratch_guard = self.dehaze_scratch.lock().unwrap();
+        let make_scratch = || {
+            self.gpu.device().create_texture(&wgpu::TextureDescriptor {
+                label: Some("dehaze_scratch"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let scratch = scratch_guard.get_or_insert_with(make_scratch);
+        if scratch.size() != size {
+            *scratch = make_scratch();
+        }
+
+        let view = self.dehaze_view(viewport, size);
+        let mut encoder =
+            self.gpu
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("dehaze_pass"),
+                });
+        pass.encode(&self.gpu, &mut encoder, target, scratch, &view);
+        encoder.copy_texture_to_texture(scratch.as_image_copy(), target.as_image_copy(), size);
+        encoder.finish()
+    }
+
     /// Encode the color grade pass (if enabled) on the raw stitched
     /// frame, before overlay/transition compositing, writing the result
     /// back into `target` so every downstream consumer keeps reading a
@@ -623,7 +721,23 @@ impl StitchPipeline {
     /// COPY_SRC | COPY_DST` usage - see `reco_gui::preview`'s caller for
     /// why. Without `target`, color grade/sharpen only ever apply on
     /// export, not to what the Color Mapping panel's sliders show live.
-    fn composite_view_if_enabled(&self, target_view: &wgpu::TextureView, target: &wgpu::Texture) {
+    fn composite_view_if_enabled(
+        &self,
+        target_view: &wgpu::TextureView,
+        target: &wgpu::Texture,
+        viewport: &ResolvedViewport,
+    ) {
+        // Dehaze before the overlays, like the export path, so the fog
+        // colour is measured on the video only.
+        let commands = self
+            .gpu
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("dehaze_noop"),
+            })
+            .finish();
+        let commands = self.dehaze_target_commands(commands, target, viewport);
+        self.gpu.queue().submit(std::iter::once(commands));
         for pass in [self.transition.as_ref(), self.overlay.as_ref()]
             .into_iter()
             .flatten()
@@ -710,6 +824,36 @@ impl StitchPipeline {
         } else if !self.sharpen_params.is_identity() {
             self.sharpen = Some(SharpenPass::new(&self.gpu, &self.sharpen_params));
         }
+    }
+
+    /// Set the fog/haze removal strength, applied to the raw stitched frame
+    /// before color grade. `0.0` disables it entirely (the passes are
+    /// skipped and cost nothing); values are clamped to
+    /// [`crate::calibration::DEHAZE_STRENGTH_RANGE`]. GPU resources are
+    /// created lazily on the first non-zero call.
+    ///
+    /// Also mirrors into `self.calibration.topology.dehaze_strength` (same
+    /// reasoning as [`Self::set_color_grade`]) so it's part of the saved
+    /// calibration document.
+    pub fn set_dehaze_strength(&mut self, strength: f32) {
+        let range = crate::calibration::DEHAZE_STRENGTH_RANGE;
+        let strength = if strength.is_finite() {
+            strength.clamp(*range.start(), *range.end())
+        } else {
+            0.0
+        };
+        self.calibration.topology.dehaze_strength = strength;
+        if let Some(pass) = self.dehaze.as_mut() {
+            pass.set_strength(strength);
+        } else if !crate::gpu::dehaze::is_identity(strength) {
+            self.dehaze = Some(DehazePass::new(&self.gpu, strength));
+        }
+    }
+
+    /// Current fog/haze removal strength, `0.0` if off. Reads the stored
+    /// calibration value - see [`Self::set_dehaze_strength`].
+    pub fn dehaze_strength(&self) -> f32 {
+        self.calibration.topology.dehaze_strength
     }
 
     /// Current sharpen parameters as `(amount, radius)`, `(0.0, 1.0)` if
@@ -1657,7 +1801,7 @@ impl StitchPipeline {
             self.show_seam_line,
             target_view,
         );
-        self.composite_view_if_enabled(target_view, target);
+        self.composite_view_if_enabled(target_view, target, &viewport);
         Ok(())
     }
 
@@ -1701,7 +1845,7 @@ impl StitchPipeline {
             self.show_seam_line,
             target_view,
         );
-        self.composite_view_if_enabled(target_view, target);
+        self.composite_view_if_enabled(target_view, target, &viewport);
         Ok(())
     }
 
@@ -1736,8 +1880,8 @@ impl StitchPipeline {
             },
         };
 
-        Ok(
-            self.composite_target_commands(self.renderer.render_to_target(
+        Ok(self.composite_target_commands(
+            self.renderer.render_to_target(
                 &self.gpu,
                 &self.scene,
                 &self.calibration,
@@ -1746,8 +1890,9 @@ impl StitchPipeline {
                 color_correction,
                 self.calibration.topology.multiband_blend_enabled,
                 self.show_seam_line,
-            )),
-        )
+            ),
+            &viewport,
+        ))
     }
 
     /// Upload NV12 frames and render to the internal target.
@@ -1780,8 +1925,8 @@ impl StitchPipeline {
             },
         };
 
-        Ok(
-            self.composite_target_commands(self.renderer.render_to_target(
+        Ok(self.composite_target_commands(
+            self.renderer.render_to_target(
                 &self.gpu,
                 &self.scene,
                 &self.calibration,
@@ -1790,8 +1935,9 @@ impl StitchPipeline {
                 color_correction,
                 self.calibration.topology.multiband_blend_enabled,
                 self.show_seam_line,
-            )),
-        )
+            ),
+            &viewport,
+        ))
     }
 
     /// Upload packed BGRA/RGBA frames and render to the internal target.
@@ -1827,8 +1973,8 @@ impl StitchPipeline {
             },
         };
 
-        Ok(
-            self.composite_target_commands(self.renderer.render_to_target(
+        Ok(self.composite_target_commands(
+            self.renderer.render_to_target(
                 &self.gpu,
                 &self.scene,
                 &self.calibration,
@@ -1837,8 +1983,9 @@ impl StitchPipeline {
                 self.identity_correction_with_static_gamma(),
                 self.calibration.topology.multiband_blend_enabled,
                 self.show_seam_line,
-            )),
-        )
+            ),
+            &viewport,
+        ))
     }
 
     /// Render from GPU-resident RGBA textures (e.g. Bayer demosaic output).
@@ -1909,16 +2056,19 @@ impl StitchPipeline {
             self.identity_correction_with_static_gamma()
         };
 
-        self.composite_target_commands(self.renderer.render_to_target(
-            &self.gpu,
-            &self.scene,
-            &self.calibration,
+        self.composite_target_commands(
+            self.renderer.render_to_target(
+                &self.gpu,
+                &self.scene,
+                &self.calibration,
+                &viewport,
+                self.calibration.topology.blend_width,
+                correction,
+                self.calibration.topology.multiband_blend_enabled,
+                self.show_seam_line,
+            ),
             &viewport,
-            self.calibration.topology.blend_width,
-            correction,
-            self.calibration.topology.multiband_blend_enabled,
-            self.show_seam_line,
-        ))
+        )
     }
 
     /// Enable 180-degree UV flip for the GPU zero-copy path.
