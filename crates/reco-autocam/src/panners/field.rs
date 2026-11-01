@@ -433,6 +433,12 @@ pub struct FieldPanner {
     /// seen, so the reactive damping profile stays stable through the
     /// drain tail (where the future window shrinks back to empty).
     lookahead_active: bool,
+    /// Set by [`Panner::reset`] (a cut in the timeline): the next frame
+    /// with a target puts the camera and zoom straight on it instead of
+    /// panning there. The picture changes at a cut anyway; a pan across
+    /// the field from where the previous clip ended only delays the new
+    /// one (it cost a goal at the start of a highlight clip).
+    snap_pending: bool,
     last_debug: Option<FieldPannerDebug>,
 }
 
@@ -480,6 +486,10 @@ impl FieldPanner {
             lead_pitch: 0.0,
             frame_index: 0,
             lookahead_active: false,
+            // The first frame of a session already starts from the
+            // default pose and has always eased in from there; only a
+            // mid-run cut snaps.
+            snap_pending: false,
             last_debug: None,
         }
     }
@@ -998,6 +1008,13 @@ impl Panner for FieldPanner {
             && target_yaw.is_finite()
             && target_pitch.is_finite()
         {
+            if self.snap_pending {
+                // First target after a cut: be there, don't pan there.
+                self.yaw = target_yaw;
+                self.pitch = target_pitch;
+                self.velocity_yaw = 0.0;
+                self.velocity_pitch = 0.0;
+            }
             let max_v = self.max_velocity * reactivity;
             let v_alpha = (self.config.velocity_alpha * reactivity).min(1.0);
             let mut err_yaw = target_yaw - self.yaw;
@@ -1032,7 +1049,11 @@ impl Panner for FieldPanner {
             let vel_mag = (self.velocity_yaw.powi(2) + self.velocity_pitch.powi(2)).sqrt();
             let target_fov = self.target_fov(c.spread, c.pitch, vel_mag);
             if target_fov.is_finite() {
-                self.current_fov += self.config.fov_alpha * (target_fov - self.current_fov);
+                if self.snap_pending {
+                    self.current_fov = target_fov;
+                } else {
+                    self.current_fov += self.config.fov_alpha * (target_fov - self.current_fov);
+                }
             } else {
                 log::warn!(
                     "FieldPanner: non-finite FOV target ({target_fov}) from \
@@ -1066,6 +1087,10 @@ impl Panner for FieldPanner {
                     self.config.min_cluster
                 );
             }
+        }
+
+        if self.snap_pending && target.is_some_and(|(y, p)| y.is_finite() && p.is_finite()) {
+            self.snap_pending = false;
         }
 
         if self.frame_index.is_multiple_of(LOG_INTERVAL) {
@@ -1130,15 +1155,17 @@ impl Panner for FieldPanner {
     /// locks onto fresh data immediately instead of smoothing in from
     /// wherever the pre-cut state left off.
     ///
-    /// `yaw`/`pitch`/`current_fov` (the actual output position) are
-    /// deliberately left as-is - there's nothing wrong with the
-    /// camera's last rendered position, only the *rate-of-change*
-    /// state is stale. `ema_initialized = false` is what actually does
-    /// the unsticking: the next `ema_step` snaps straight to the raw
-    /// target instead of blending from `ema_yaw`/`ema_pitch` (see
-    /// `ema_step`'s doc comment). `frame_index` is left alone - it only
-    /// paces periodic debug logging, not panner behavior.
+    /// The camera position and zoom are not panned from the pre-cut
+    /// pose either: `snap_pending` puts them straight on the first
+    /// target after the cut. Panning there from where the previous clip
+    /// ended took up to ~13 s across the field (2026-11-01: a goal 11 s
+    /// into a highlight clip was missed while the camera was still on
+    /// its way). `ema_initialized = false` makes that target the fresh
+    /// raw one (see `ema_step`'s doc comment). `frame_index` is left
+    /// alone - it only paces periodic debug logging, not panner
+    /// behavior.
     fn reset(&mut self) {
+        self.snap_pending = true;
         self.ema_initialized = false;
         self.velocity_yaw = 0.0;
         self.velocity_pitch = 0.0;
@@ -1359,6 +1386,30 @@ mod tests {
             "expected ~0.414, got {}",
             out.yaw
         );
+    }
+
+    #[test]
+    fn reset_snaps_to_the_next_target_instead_of_panning() {
+        let cal = cal();
+        let w = tight_world();
+        // Without a reset, one frame from the far side barely moves.
+        let mut slow = FieldPanner::new(30.0);
+        slow.yaw = -0.6;
+        let out = slow.decide(&w, &ctx(0, &cal));
+        assert!(out.yaw < -0.5, "no reset: still near -0.6, got {}", out.yaw);
+
+        // After a cut the very next frame is on the action.
+        let mut p = FieldPanner::new(30.0);
+        p.yaw = -0.6;
+        p.reset();
+        let out = p.decide(&w, &ctx(0, &cal));
+        assert!(
+            (out.yaw - 0.4).abs() < 0.1,
+            "after reset: expected ~0.4, got {}",
+            out.yaw
+        );
+        // ...and only once: the following frames ease as usual.
+        assert!(!p.snap_pending);
     }
 
     #[test]
