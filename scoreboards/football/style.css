@@ -103,6 +103,25 @@ body {
 }
 .team-away .team-logo { left: auto; right: -4px; }
 
+/* Logo with its own (opaque) background - see hasOpaqueBorder() in
+   scoreboard.js. A rounded white plate makes the rectangle read as a
+   deliberate badge instead of a pasted-on box. Slightly smaller than a
+   cut-out crest: a full square carries more visual weight than a shield.
+   Inset by the same amount so it stays centered on the crest slot. */
+.team-logo.on-plate {
+    --plate-inset: calc(var(--crest-size) * 0.08);
+    width: calc(var(--crest-size) * 0.84);
+    height: calc(var(--crest-size) * 0.84);
+    left: calc(-4px + var(--plate-inset));
+    object-fit: contain;
+    background: #fff;
+    border: 4px solid #fff;
+    border-radius: 22%;
+    box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35), 0 6px 16px rgba(0, 0, 0, 0.55);
+    filter: none;
+}
+.team-away .team-logo.on-plate { left: auto; right: calc(-4px + var(--plate-inset)); }
+
 /* A long name wraps onto a second line instead of widening the bar;
    scoreboard.js (fitText) shrinks the font only if two lines still
    don't fit. min-width: 0 lets the flex item shrink below its content
