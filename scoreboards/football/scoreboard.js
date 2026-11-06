@@ -147,7 +147,36 @@
     function setLogo(imgEl, logo) {
         const shown = typeof logo === "string" && logo.length > 0;
         imgEl.hidden = !shown;
-        if (shown && imgEl.src !== logo) imgEl.src = logo;
+        if (!shown || imgEl.src === logo) return;
+        imgEl.src = logo;
+        imgEl.classList.remove("on-plate");
+        imgEl.decode().then(() => {
+            if (imgEl.src !== logo) return; // superseded by a newer logo
+            imgEl.classList.toggle("on-plate", hasOpaqueBorder(imgEl));
+            window.__recoMarkDirty?.();
+        }).catch(() => {});
+    }
+
+    // A logo whose edge pixels are all opaque (any JPG, or a PNG saved
+    // with a background) can't float over the bar like a cut-out crest -
+    // its background would show as a hard rectangle. style.css puts those
+    // on a rounded plate instead (.on-plate). Samples the border of a
+    // 32x32 downscale; `logo` is always a data: URI, so the canvas is
+    // never tainted.
+    function hasOpaqueBorder(imgEl) {
+        const size = 32;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        ctx.drawImage(imgEl, 0, 0, size, size);
+        const { data } = ctx.getImageData(0, 0, size, size);
+        for (let i = 0; i < size; i++) {
+            for (const [x, y] of [[i, 0], [i, size - 1], [0, i], [size - 1, i]]) {
+                if (data[(y * size + x) * 4 + 3] < 250) return false;
+            }
+        }
+        return true;
     }
 
     // CSS var() only falls back to its second argument for a genuinely
