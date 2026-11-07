@@ -411,6 +411,38 @@ impl From<crate::output::Format> for Container {
     }
 }
 
+/// What [`VideoEncoder::finish`] is doing, reported through
+/// [`FinalizeProgress`]. Finishing a long export can take minutes (the
+/// source audio is copied in one pass at the end, and fast start rewrites
+/// the whole file), so consumers need something to show meanwhile.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FinalizeStage {
+    /// Copying the source audio into the output. The value is the share
+    /// of the video duration covered so far, `0.0..=1.0`.
+    Audio(f32),
+    /// Writing the container trailer / index. With MP4 fast start this
+    /// rewrites the whole file and is the slow part; otherwise it is short.
+    Index,
+}
+
+/// Callback invoked from the encoding thread while the output is finalized.
+///
+/// Called a few hundred times at most: audio progress is reported in
+/// steps of [`FinalizeProgress::AUDIO_STEP`].
+#[derive(Clone)]
+pub struct FinalizeProgress(pub std::sync::Arc<dyn Fn(FinalizeStage) + Send + Sync>);
+
+impl FinalizeProgress {
+    /// Minimum audio-progress change between two reports.
+    pub const AUDIO_STEP: f32 = 0.005;
+}
+
+impl std::fmt::Debug for FinalizeProgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FinalizeProgress(..)")
+    }
+}
+
 /// Configuration for the video encoder.
 #[derive(Debug, Clone, Default)]
 pub struct EncoderConfig {
@@ -516,6 +548,9 @@ pub struct EncoderConfig {
     /// for a JSON snapshot of the export/AI settings actually used, so
     /// test exports remain self-describing. `None` writes no tag.
     pub metadata_comment: Option<String>,
+    /// Progress callback for [`VideoEncoder::finish`]. `None` reports
+    /// nothing.
+    pub finalize_progress: Option<FinalizeProgress>,
 }
 
 type OpenedVideoEncoder = (
@@ -564,6 +599,8 @@ pub struct VideoEncoder {
     audio: Option<AudioPassthrough>,
     /// Secondary output context for RTMP streaming (same encoded packets).
     stream: Option<StreamOutput>,
+    /// See [`EncoderConfig::finalize_progress`].
+    finalize_progress: Option<FinalizeProgress>,
 }
 
 /// State for a secondary RTMP stream output that receives cloned packets
@@ -965,6 +1002,7 @@ impl VideoEncoder {
                         hardware_upload,
                         audio,
                         stream,
+                        finalize_progress: config.finalize_progress.clone(),
                     });
                 }
                 Err(e) => {
@@ -1417,6 +1455,11 @@ impl VideoEncoder {
         }
         // Start-time trim is expressed in the (fixed) output time base.
         let start_pts = seconds_to_pts(audio.start_time_secs, audio.output_time_base);
+        let progress = self.finalize_progress.as_ref();
+        let mut reported = 0.0_f32;
+        if let Some(cb) = progress {
+            (cb.0)(FinalizeStage::Audio(0.0));
+        }
 
         loop {
             let mut packet = ffmpeg::Packet::empty();
@@ -1596,6 +1639,17 @@ impl VideoEncoder {
                     }
 
                     packet.write_interleaved(&mut self.octx)?;
+
+                    if let Some(cb) = progress
+                        && max_pts > 0
+                    {
+                        let done =
+                            (audio.next_offset as f64 / max_pts as f64).clamp(0.0, 1.0) as f32;
+                        if done - reported >= FinalizeProgress::AUDIO_STEP {
+                            reported = done;
+                            (cb.0)(FinalizeStage::Audio(done));
+                        }
+                    }
                 }
                 Err(ffmpeg::Error::Eof) => {
                     // Current segment done; continue with the next chained one.
@@ -1931,6 +1985,9 @@ impl VideoEncoder {
         }
         self.stream = None;
 
+        if let Some(ref cb) = self.finalize_progress {
+            (cb.0)(FinalizeStage::Index);
+        }
         self.octx.write_trailer()?;
         Ok(())
     }

@@ -837,6 +837,32 @@ pub fn run_export(
         });
     });
 
+    // Finalizing a full match takes minutes (audio is copied in one pass
+    // at the end, fast start rewrites the file), so keep the status bar
+    // moving instead of leaving it frozen at the last frame.
+    let finalize_progress_weak = app_weak.clone();
+    job = job.on_finalize_progress(move |stage| {
+        use reco_io::ffmpeg::encoder::FinalizeStage;
+        let (progress, text) = match stage {
+            FinalizeStage::Audio(done) => (
+                done,
+                format!("Finalizing: copying audio {:.0}%", done * 100.0),
+            ),
+            FinalizeStage::Index if faststart => (
+                1.0,
+                "Finalizing: fast start, rewriting file (can take minutes)...".to_string(),
+            ),
+            FinalizeStage::Index => (1.0, "Finalizing: writing file index...".to_string()),
+        };
+        let weak = finalize_progress_weak.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(app) = weak.upgrade() {
+                app.set_export_progress(progress);
+                app.set_export_status_text(text.into());
+            }
+        });
+    });
+
     let telem_weak = app_weak.clone();
     job = job.on_session(move |session, _source| {
         let sink = ExportTelemetrySink { window: telem_weak };

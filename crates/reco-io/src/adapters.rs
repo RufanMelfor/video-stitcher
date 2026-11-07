@@ -574,6 +574,7 @@ pub fn create_encoder(
         container: ffmpeg::encoder::Container::default(),
         // Live capture: no second pass over the file at stop.
         faststart: false,
+        finalize_progress: None,
         gop_size: None,
         stream_url: None,
         metadata_comment: None,
