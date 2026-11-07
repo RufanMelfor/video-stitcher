@@ -901,10 +901,20 @@ impl VideoEncoder {
                         .time_base();
 
                     // Update audio output time base after write_header
-                    // (the muxer may adjust it).
+                    // (the muxer may adjust it). `segment_start_pts` is
+                    // cached in that time base, so it has to be redone
+                    // too: computed against the pre-header time base, a
+                    // start inside a later chained segment put every
+                    // packet of that segment before the start-time trim,
+                    // so the whole first keep window's audio was dropped
+                    // and everything after it played early.
                     let audio = audio.map(|mut a| {
                         if let Some(s) = octx.stream(a.output_stream_index) {
                             a.output_time_base = s.time_base();
+                            a.segment_start_pts = seconds_to_pts(
+                                a.segments[a.segment_index].start_secs,
+                                a.output_time_base,
+                            );
                         }
                         a
                     });
@@ -1237,6 +1247,8 @@ impl VideoEncoder {
             output_time_base,
             start_time_secs,
             exhausted: false,
+            // Provisional: `output_time_base` is still the pre-header
+            // one here; both are redone once `write_header` has run.
             segment_start_pts: seconds_to_pts(segment_start_secs, output_time_base),
             segments,
             segment_index: start_segment_index,
