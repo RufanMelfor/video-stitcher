@@ -551,7 +551,7 @@ impl WgpuPreprocessor {
         }
     }
 
-    /// Turn the local contrast boost (fog mode, see
+    /// Turn the local contrast boost (AI contrast boost, see
     /// [`crate::local_contrast`]) on with the given clip limit, or off with
     /// `0.0`. Values outside
     /// [`validate_clip_limit`](crate::local_contrast::validate_clip_limit)'s
@@ -563,7 +563,7 @@ impl WgpuPreprocessor {
         clip_limit: f32,
     ) {
         if let Err(e) = crate::local_contrast::validate_clip_limit(clip_limit) {
-            log::warn!("WgpuPreprocessor: {e}; fog boost off");
+            log::warn!("WgpuPreprocessor: {e}; AI contrast boost off");
             self.clahe = None;
             return;
         }
@@ -580,7 +580,7 @@ impl WgpuPreprocessor {
             return;
         }
         log::info!(
-            "WgpuPreprocessor: fog boost on (CLAHE clip {clip_limit:.1}, {}x{} tiles over {}x{})",
+            "WgpuPreprocessor: AI contrast boost on (CLAHE clip {clip_limit:.1}, {}x{} tiles over {}x{})",
             crate::local_contrast::TILES,
             crate::local_contrast::TILES,
             rect.2,
@@ -596,7 +596,7 @@ impl WgpuPreprocessor {
         ));
     }
 
-    /// The active fog-boost clip limit, `0.0` when off.
+    /// The active AI contrast boost clip limit, `0.0` when off.
     pub fn local_contrast(&self) -> f32 {
         self.clahe.as_ref().map_or(0.0, |c| c.clip_limit)
     }
@@ -780,10 +780,10 @@ mod tests {
         )
     }
 
-    /// The GPU fog boost must match the CPU reference in
+    /// The GPU AI contrast boost must match the CPU reference in
     /// [`local_contrast::apply_chw`]. Skipped when no GPU adapter exists.
     #[test]
-    fn gpu_fog_boost_matches_cpu_reference() {
+    fn gpu_ai_contrast_boost_matches_cpu_reference() {
         let Ok(gpu) = reco_core::gpu::GpuContext::new_blocking() else {
             eprintln!("skipping: no GPU adapter");
             return;

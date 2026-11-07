@@ -47,7 +47,7 @@ pub fn validate_clip_limit(clip_limit: f32) -> Result<(), String> {
     }
     if !clip_limit.is_finite() || !(MIN_CLIP_LIMIT..=MAX_CLIP_LIMIT).contains(&clip_limit) {
         return Err(format!(
-            "fog boost must be 0 (off) or between {MIN_CLIP_LIMIT} and {MAX_CLIP_LIMIT}, got {clip_limit}"
+            "AI contrast boost must be 0 (off) or between {MIN_CLIP_LIMIT} and {MAX_CLIP_LIMIT}, got {clip_limit}"
         ));
     }
     Ok(())

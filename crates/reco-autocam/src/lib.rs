@@ -64,7 +64,7 @@ pub use reco_detect::MetalYoloDetector;
 pub use reco_detect::OrtGpuDetector;
 #[cfg(feature = "tensorrt-native")]
 pub use reco_detect::TrtGpuDetector;
-/// Fog boost (CLAHE on the detector input): validation and CPU reference.
+/// AI contrast boost (CLAHE on the detector input): validation and CPU reference.
 pub use reco_detect::local_contrast;
 
 pub use goal_events::{GoalEntryDetector, GoalSide, ZoneEntryTracker};
@@ -125,11 +125,11 @@ pub struct AutocamConfig {
     /// Detector confidence threshold override. When set, replaces
     /// the default 0.10 threshold. Ball-only models need 0.25+.
     pub confidence_threshold: Option<f32>,
-    /// Fog boost: CLAHE clip limit applied to the detector input
+    /// AI contrast boost: CLAHE clip limit applied to the detector input
     /// (see [`reco_detect::local_contrast`]). `0.0` = off. Supported on the
     /// wgpu preprocessing path only; other backends log a warning and run
     /// without it.
-    pub fog_boost: f32,
+    pub ai_contrast_boost: f32,
     /// Override for [`trackers::ball::BallTracker`]'s player-anchor gate
     /// (radians). A raw ball detection is only accepted if it lies within
     /// this distance of at least one tracked player; farther detections
@@ -218,7 +218,7 @@ impl AutocamConfig {
             is_10bit: false,
             field_panner_config: None,
             confidence_threshold: None,
-            fog_boost: 0.0,
+            ai_contrast_boost: 0.0,
             player_anchor_max_rad: None,
             player_anchor_max_rad_near: None,
             ball_coast_secs: None,
@@ -287,10 +287,10 @@ impl AutocamConfig {
         self
     }
 
-    /// Set the fog boost (CLAHE clip limit on the detector input, `0.0` =
-    /// off). See [`AutocamConfig::fog_boost`].
-    pub fn with_fog_boost(mut self, clip_limit: f32) -> Self {
-        self.fog_boost = clip_limit;
+    /// Set the AI contrast boost (CLAHE clip limit on the detector input, `0.0` =
+    /// off). See [`AutocamConfig::ai_contrast_boost`].
+    pub fn with_contrast_boost(mut self, clip_limit: f32) -> Self {
+        self.ai_contrast_boost = clip_limit;
         self
     }
 }
@@ -347,10 +347,10 @@ pub fn setup_autocam(
     let is_10bit = config.is_10bit;
 
     let mut detection_active = false;
-    reco_detect::local_contrast::validate_clip_limit(config.fog_boost)?;
-    // Set by the backends that support the fog boost (wgpu preprocessing).
+    reco_detect::local_contrast::validate_clip_limit(config.ai_contrast_boost)?;
+    // Set by the backends that support the AI contrast boost (wgpu preprocessing).
     #[cfg_attr(not(feature = "ort"), allow(unused_mut))]
-    let mut fog_boost_applied = false;
+    let mut contrast_boost_applied = false;
 
     // Load class names from the model to resolve label -> class_id for directors.
     // Skip ORT session creation for non-ONNX models (.engine files,
@@ -569,8 +569,8 @@ pub fn setup_autocam(
             input_width,
             input_height,
         )
-        .with_fog_boost(config.fog_boost);
-        fog_boost_applied = true;
+        .with_contrast_boost(config.ai_contrast_boost);
+        contrast_boost_applied = true;
         let detector: Box<dyn reco_core::detect::detector::UnifiedDetector> =
             if let Some(roi) = effective_roi.clone() {
                 wrap_with_roi(Box::new(wrapper), roi)
@@ -630,10 +630,10 @@ pub fn setup_autocam(
         return Ok(true);
     }
 
-    if detection_active && config.fog_boost > 0.0 && !fog_boost_applied {
+    if detection_active && config.ai_contrast_boost > 0.0 && !contrast_boost_applied {
         log::warn!(
-            "Autocam: fog boost {:.1} requested but the active detector backend does not              support it (wgpu preprocessing only); running without it",
-            config.fog_boost
+            "Autocam: AI contrast boost {:.1} requested but the active detector backend does not              support it (wgpu preprocessing only); running without it",
+            config.ai_contrast_boost
         );
     }
 

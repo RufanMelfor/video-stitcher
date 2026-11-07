@@ -1208,9 +1208,9 @@ export component RecoApp inherits Window {
     in-out property <float> ai-debug-start-secs: 0.0;
     in-out property <float> ai-debug-end-secs: 0.0;
     in-out property <float> ai-debug-confidence-threshold: 0.10;
-    // Same as export-fog-mode / export-fog-strength, for the AI Debug tab.
-    in-out property <bool> ai-debug-fog-mode: false;
-    in-out property <float> ai-debug-fog-strength: 3.0;
+    // Same as export-contrast-boost / export-contrast-boost-strength, for the AI Debug tab.
+    in-out property <bool> ai-debug-contrast-boost: false;
+    in-out property <float> ai-debug-contrast-boost-strength: 3.0;
     in-out property <int> ai-debug-detection-interval: 1;
     in-out property <[CutRangeItem]> ai-debug-cut-ranges: [];
     // Fires on any AI Debug tab field edit, mirroring
@@ -1222,8 +1222,8 @@ export component RecoApp inherits Window {
     callback ai-debug-settings-changed();
     changed ai-debug-raw-cameras => { root.ai-debug-settings-changed(); }
     changed ai-debug-confidence-threshold => { root.ai-debug-settings-changed(); }
-    changed ai-debug-fog-mode => { root.ai-debug-settings-changed(); }
-    changed ai-debug-fog-strength => { root.ai-debug-settings-changed(); }
+    changed ai-debug-contrast-boost => { root.ai-debug-settings-changed(); }
+    changed ai-debug-contrast-boost-strength => { root.ai-debug-settings-changed(); }
     changed ai-debug-detection-interval => { root.ai-debug-settings-changed(); }
     in-out property <string> export-output-path: "";
     in-out property <int> export-width: 1920;
@@ -1282,11 +1282,11 @@ export component RecoApp inherits Window {
     // export-player-anchor-rad above. Ball tracking mode used to
     // silently force 0.25 regardless of this slider; it no longer does.
     in-out property <float> export-confidence-threshold: 0.10;
-    // Fog mode: CLAHE local contrast boost on what the AI sees (not on
-    // the exported video). Saved as one number, fog_boost = strength
+    // AI contrast boost: CLAHE local contrast boost on what the AI sees (not on
+    // the exported video). Saved as one number, ai_contrast_boost = strength
     // when on, 0 when off.
-    in-out property <bool> export-fog-mode: false;
-    in-out property <float> export-fog-strength: 3.0;
+    in-out property <bool> export-contrast-boost: false;
+    in-out property <float> export-contrast-boost-strength: 3.0;
     in-out property <bool> export-autocam-enabled: false;
     // Panner tuning (mapped onto FieldPannerConfig in export.rs). Defaults
     // mirror the validated football defaults; lookahead defaults on because
@@ -1371,8 +1371,8 @@ export component RecoApp inherits Window {
     changed export-max-player-pitch => { root.autocam-settings-changed(); }
     changed export-ball-acquire-established-frames => { root.autocam-settings-changed(); }
     changed export-confidence-threshold => { root.autocam-settings-changed(); }
-    changed export-fog-mode => { root.autocam-settings-changed(); }
-    changed export-fog-strength => { root.autocam-settings-changed(); }
+    changed export-contrast-boost => { root.autocam-settings-changed(); }
+    changed export-contrast-boost-strength => { root.autocam-settings-changed(); }
     changed export-panner-preset => { root.autocam-settings-changed(); }
     changed export-lookahead-secs => { root.autocam-settings-changed(); }
     changed export-lookahead-reduced-bit-depth => { root.autocam-settings-changed(); }
@@ -6689,19 +6689,19 @@ export component RecoApp inherits Window {
                         }
 
                         Tip {
-                            tip: "For fog or haze: boosts local contrast in the image the AI looks at, so it can still find the ball in the far, washed-out part of the pitch. The exported video is not changed. Costs a little GPU time; leave it off in clear weather, where it mainly adds noise. Saved with this match's setup.";
+                            tip: "For fog, haze, dusk or strong backlight: boosts local contrast in the image the AI looks at, so it can still find the ball where the picture is washed out. The exported video is not changed. Costs a little GPU time; leave it off in clear weather, where it mainly adds noise. Saved with this match's setup.";
                             CheckBox {
-                                text: "Fog mode";
-                                checked <=> root.export-fog-mode;
+                                text: "AI contrast boost";
+                                checked <=> root.export-contrast-boost;
                             }
                         }
 
-                        if root.export-fog-mode: LabeledSlider {
-                            label: "Fog strength";
+                        if root.export-contrast-boost: LabeledSlider {
+                            label: "Boost strength";
                             tip: "How strongly local contrast is boosted (the CLAHE clip limit). 3 is a good start. Higher finds more balls in thick fog but also more false ones (white specks, logos).";
                             minimum: 1.0;
                             maximum: 8.0;
-                            value <=> root.export-fog-strength;
+                            value <=> root.export-contrast-boost-strength;
                             decimals: 1;
                         }
 
@@ -7432,19 +7432,19 @@ export component RecoApp inherits Window {
                     }
 
                     Tip {
-                        tip: "Run the AI with the same fog boost as the Export tab's Fog mode, to check whether it finds more balls on this footage. The drawn video stays the original image; only what the AI looks at is boosted. Output files get a _fog suffix so an on/off pair can be compared side by side.";
+                        tip: "Run the AI with the same AI contrast boost as the Export tab, to check whether it finds more balls on this footage. The drawn video stays the original image; only what the AI looks at is boosted. Output files get a _boost suffix so an on/off pair can be compared side by side.";
                         CheckBox {
-                            text: "Fog mode";
-                            checked <=> root.ai-debug-fog-mode;
+                            text: "AI contrast boost";
+                            checked <=> root.ai-debug-contrast-boost;
                         }
                     }
 
-                    if root.ai-debug-fog-mode: LabeledSlider {
-                        label: "Fog strength";
+                    if root.ai-debug-contrast-boost: LabeledSlider {
+                        label: "Boost strength";
                         tip: "CLAHE clip limit, same scale as the Export tab (3 is a good start).";
                         minimum: 1.0;
                         maximum: 8.0;
-                        value <=> root.ai-debug-fog-strength;
+                        value <=> root.ai-debug-contrast-boost-strength;
                         decimals: 1;
                     }
 
