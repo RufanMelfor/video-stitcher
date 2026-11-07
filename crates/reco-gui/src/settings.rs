@@ -234,9 +234,10 @@ pub struct AiDebugSettings {
     /// Run detection every Nth frame.
     #[serde(default = "default_ai_debug_detection_interval")]
     pub detection_interval: i32,
-    /// Fog boost (CLAHE clip limit on the detector input), `0.0` = off.
-    #[serde(default)]
-    pub fog_boost: f32,
+    /// AI contrast boost (CLAHE clip limit on the detector input), `0.0` = off.
+    /// `fog_boost` is its earlier name in saved settings.
+    #[serde(default, alias = "fog_boost")]
+    pub ai_contrast_boost: f32,
 }
 
 fn default_ai_debug_cameras() -> String {
@@ -729,7 +730,7 @@ mod tests {
             cameras: "left".into(),
             confidence_threshold: 0.25,
             detection_interval: 5,
-            fog_boost: 3.0,
+            ai_contrast_boost: 3.0,
         };
         s.set_ai_debug_settings(ad);
         let json = serde_json::to_string(&s).unwrap();
@@ -822,7 +823,7 @@ mod tests {
             fov_alpha: 0.06,
             cluster_alpha: 0.05,
             confidence_threshold: 0.2,
-            fog_boost: 0.0,
+            ai_contrast_boost: 0.0,
             lookahead_reactivity: 2.5,
             model_path: None,
             enabled: None,

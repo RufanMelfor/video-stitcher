@@ -3280,34 +3280,34 @@ fn install_panic_hook() {
 /// (`do_save_calibration`) and app-level persistence (the
 /// `autocam-settings-changed` handler below) so the two never drift
 /// out of sync with each other or with the slider list in `main.slint`.
-/// The fog boost the AI Debug tab asks for (see [`fog_boost_from_ui`]).
-fn ai_debug_fog_boost_from_ui(app: &RecoApp) -> f32 {
-    if app.get_ai_debug_fog_mode() {
-        app.get_ai_debug_fog_strength()
+/// The AI contrast boost the AI Debug tab asks for (see [`contrast_boost_from_ui`]).
+fn ai_debug_contrast_boost_from_ui(app: &RecoApp) -> f32 {
+    if app.get_ai_debug_contrast_boost() {
+        app.get_ai_debug_contrast_boost_strength()
     } else {
         0.0
     }
 }
 
-/// `match_ai_debug_raw_L.mp4` -> `match_ai_debug_raw_fog3_L.mp4` when the
-/// fog boost is on, so an on/off pair of runs does not overwrite itself.
-fn add_fog_tag(name: &str, fog_boost: f32) -> String {
-    if fog_boost <= 0.0 {
+/// `match_ai_debug_raw_L.mp4` -> `match_ai_debug_raw_boost3_L.mp4` when the
+/// AI contrast boost is on, so an on/off pair of runs does not overwrite itself.
+fn add_boost_tag(name: &str, ai_contrast_boost: f32) -> String {
+    if ai_contrast_boost <= 0.0 {
         return name.to_string();
     }
-    let strength = format!("{fog_boost:.1}");
+    let strength = format!("{ai_contrast_boost:.1}");
     let tag = format!(
-        "{AI_DEBUG_RAW_SUFFIX}_fog{}_",
+        "{AI_DEBUG_RAW_SUFFIX}_boost{}_",
         strength.trim_end_matches(".0")
     );
     name.replacen(&format!("{AI_DEBUG_RAW_SUFFIX}_"), &tag, 1)
 }
 
-/// The fog boost the Export dialog asks for: the strength slider when
-/// "Fog mode" is ticked, `0.0` (off) otherwise.
-fn fog_boost_from_ui(app: &RecoApp) -> f32 {
-    if app.get_export_fog_mode() {
-        app.get_export_fog_strength()
+/// The AI contrast boost the Export dialog asks for: the strength slider when
+/// "AI contrast boost" is ticked, `0.0` (off) otherwise.
+fn contrast_boost_from_ui(app: &RecoApp) -> f32 {
+    if app.get_export_contrast_boost() {
+        app.get_export_contrast_boost_strength()
     } else {
         0.0
     }
@@ -3343,7 +3343,7 @@ fn snapshot_autocam_defaults(app: &RecoApp) -> reco_core::calibration::AutocamDe
         fov_alpha: app.get_export_fov_alpha(),
         cluster_alpha: app.get_export_cluster_alpha(),
         confidence_threshold: app.get_export_confidence_threshold(),
-        fog_boost: fog_boost_from_ui(app),
+        ai_contrast_boost: contrast_boost_from_ui(app),
         // No GUI slider yet for this one (out of scope here) - falls
         // back to FieldPannerConfig's own default so the events JSONL
         // header/calibration snapshot at least records a real value
@@ -3477,9 +3477,9 @@ fn apply_autocam_defaults(
     app.set_export_fov_alpha(ac.fov_alpha);
     app.set_export_cluster_alpha(ac.cluster_alpha);
     app.set_export_confidence_threshold(ac.confidence_threshold);
-    app.set_export_fog_mode(ac.fog_boost > 0.0);
-    if ac.fog_boost > 0.0 {
-        app.set_export_fog_strength(ac.fog_boost);
+    app.set_export_contrast_boost(ac.ai_contrast_boost > 0.0);
+    if ac.ai_contrast_boost > 0.0 {
+        app.set_export_contrast_boost_strength(ac.ai_contrast_boost);
     }
     missing_model
 }
@@ -3631,7 +3631,7 @@ fn persist_ai_debug_settings(app: &RecoApp, s: &mut AppState) {
         cameras: app.get_ai_debug_raw_cameras().to_string(),
         confidence_threshold: app.get_ai_debug_confidence_threshold(),
         detection_interval: app.get_ai_debug_detection_interval(),
-        fog_boost: ai_debug_fog_boost_from_ui(app),
+        ai_contrast_boost: ai_debug_contrast_boost_from_ui(app),
     };
     s.user_settings.set_ai_debug_settings(ad);
 }
@@ -8099,9 +8099,9 @@ fn main() -> anyhow::Result<()> {
                 app.set_ai_debug_raw_cameras(ad.cameras.clone().into());
                 app.set_ai_debug_confidence_threshold(ad.confidence_threshold);
                 app.set_ai_debug_detection_interval(ad.detection_interval);
-                app.set_ai_debug_fog_mode(ad.fog_boost > 0.0);
-                if ad.fog_boost > 0.0 {
-                    app.set_ai_debug_fog_strength(ad.fog_boost);
+                app.set_ai_debug_contrast_boost(ad.ai_contrast_boost > 0.0);
+                if ad.ai_contrast_boost > 0.0 {
+                    app.set_ai_debug_contrast_boost_strength(ad.ai_contrast_boost);
                 }
             }
             if app.get_ai_debug_end_secs() == 0.0 {
@@ -8436,7 +8436,7 @@ fn main() -> anyhow::Result<()> {
             max_player_pitch: app.get_export_max_player_pitch(),
             ball_hold_secs: app.get_export_ball_hold_secs(),
             confidence_threshold: app.get_export_confidence_threshold(),
-            fog_boost: fog_boost_from_ui(&app),
+            ai_contrast_boost: contrast_boost_from_ui(&app),
             lookahead_secs: app.get_export_lookahead_secs() as f64,
             lookahead_reduced_bit_depth: app.get_export_lookahead_reduced_bit_depth(),
             async_detect: app.get_export_async_detect(),
@@ -8674,9 +8674,9 @@ fn main() -> anyhow::Result<()> {
         } else {
             add_ai_debug_raw_suffixes(&output_str)
         };
-        let fog_boost = ai_debug_fog_boost_from_ui(&app);
-        let output_left_str = add_fog_tag(&output_left_str, fog_boost);
-        let output_right_str = add_fog_tag(&output_right_str, fog_boost);
+        let ai_contrast_boost = ai_debug_contrast_boost_from_ui(&app);
+        let output_left_str = add_boost_tag(&output_left_str, ai_contrast_boost);
+        let output_right_str = add_boost_tag(&output_right_str, ai_contrast_boost);
         log::warn!(
             "AI debug raw export requested: cameras={cameras:?} output_left={output_left_str} \
              output_right={output_right_str} (DIAGNOSTIC - raw Left/Right camera feed video(s) \
@@ -8743,7 +8743,7 @@ fn main() -> anyhow::Result<()> {
                         0,
                         0,
                     )
-                    .with_fog_boost(fog_boost);
+                    .with_contrast_boost(ai_contrast_boost);
                     (Box::new(wrapper), Some(gpu))
                 }
                 Err(e) => {
@@ -8751,9 +8751,9 @@ fn main() -> anyhow::Result<()> {
                         "AI debug raw export: GPU context init failed ({e}), falling back to \
                          CPU preprocessing (slower, same detections)"
                     );
-                    if fog_boost > 0.0 {
+                    if ai_contrast_boost > 0.0 {
                         log::warn!(
-                            "AI debug raw export: fog mode needs GPU preprocessing; running                              without it"
+                            "AI debug raw export: AI contrast boost needs GPU preprocessing; running                              without it"
                         );
                     }
                     (Box::new(detector), None)
@@ -11080,22 +11080,22 @@ mod suggested_calibration_path_tests {
 }
 
 #[cfg(test)]
-mod fog_tag_tests {
-    use super::add_fog_tag;
+mod boost_tag_tests {
+    use super::add_boost_tag;
 
     #[test]
-    fn fog_tag_only_when_on() {
+    fn boost_tag_only_when_on() {
         assert_eq!(
-            add_fog_tag("m_ai_debug_raw_L.mp4", 0.0),
+            add_boost_tag("m_ai_debug_raw_L.mp4", 0.0),
             "m_ai_debug_raw_L.mp4"
         );
         assert_eq!(
-            add_fog_tag("m_ai_debug_raw_L.mp4", 3.0),
-            "m_ai_debug_raw_fog3_L.mp4"
+            add_boost_tag("m_ai_debug_raw_L.mp4", 3.0),
+            "m_ai_debug_raw_boost3_L.mp4"
         );
         assert_eq!(
-            add_fog_tag("D:/x/m_ai_debug_raw_R.mp4", 2.5),
-            "D:/x/m_ai_debug_raw_fog2.5_R.mp4"
+            add_boost_tag("D:/x/m_ai_debug_raw_R.mp4", 2.5),
+            "D:/x/m_ai_debug_raw_boost2.5_R.mp4"
         );
     }
 }

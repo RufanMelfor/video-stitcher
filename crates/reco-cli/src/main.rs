@@ -607,12 +607,12 @@ enum Commands {
         #[arg(long = "confidence-threshold")]
         confidence_threshold: Option<f32>,
 
-        /// Fog boost: local contrast enhancement (CLAHE) of the AI
-        /// detector input, for fog or haze. The value is the clip limit:
+        /// AI contrast boost: local contrast enhancement (CLAHE) of the AI
+        /// detector input, for fog, haze, dusk or backlight. The value is the clip limit:
         /// 0 = off (default), 1-8 = on, higher is stronger (3 is a good
         /// start). Only changes what the AI sees, not the exported video.
-        #[arg(long = "fog-boost", default_value_t = 0.0)]
-        fog_boost: f32,
+        #[arg(long = "ai-contrast-boost", default_value_t = 0.0)]
+        ai_contrast_boost: f32,
     },
 
     /// DEBUG/DIAGNOSTIC ONLY - export the raw Left/Right camera feeds as
@@ -657,12 +657,12 @@ enum Commands {
         #[arg(long = "confidence-threshold")]
         confidence_threshold: Option<f32>,
 
-        /// Fog boost: local contrast enhancement (CLAHE) of the AI
-        /// detector input, for fog or haze. The value is the clip limit:
+        /// AI contrast boost: local contrast enhancement (CLAHE) of the AI
+        /// detector input, for fog, haze, dusk or backlight. The value is the clip limit:
         /// 0 = off (default), 1-8 = on, higher is stronger (3 is a good
         /// start). Only changes what the AI sees, not the exported video.
-        #[arg(long = "fog-boost", default_value_t = 0.0)]
-        fog_boost: f32,
+        #[arg(long = "ai-contrast-boost", default_value_t = 0.0)]
+        ai_contrast_boost: f32,
 
         /// Start processing at this time offset (seconds), applied to
         /// both cameras before --sync-offset.
@@ -1369,7 +1369,7 @@ fn main() -> anyhow::Result<()> {
             fov_alpha,
             cluster_alpha,
             confidence_threshold,
-            fog_boost,
+            ai_contrast_boost,
         } => stitch::run_stitch(
             stitch::StitchArgs {
                 left: &left,
@@ -1434,7 +1434,7 @@ fn main() -> anyhow::Result<()> {
                 fov_alpha,
                 cluster_alpha,
                 confidence_threshold,
-                fog_boost,
+                ai_contrast_boost,
             },
             &interrupted,
         ),
@@ -1447,7 +1447,7 @@ fn main() -> anyhow::Result<()> {
             output,
             model,
             confidence_threshold,
-            fog_boost,
+            ai_contrast_boost,
             start_time,
             end_time,
             sync_offset,
@@ -1466,7 +1466,7 @@ fn main() -> anyhow::Result<()> {
                 output: &output,
                 model_path: &model,
                 confidence_threshold,
-                fog_boost,
+                ai_contrast_boost,
                 start_time,
                 end_time,
                 sync_offset,

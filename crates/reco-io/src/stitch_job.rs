@@ -2077,7 +2077,12 @@ const AUTOCAM_LOG_FIELDS: &[AutocamLogField] = &[
         " frames",
     ),
     field("confidence_threshold", "Detection confidence", Some(2), ""),
-    field("fog_boost", "Fog mode strength (0 = off)", Some(1), ""),
+    field(
+        "ai_contrast_boost",
+        "AI contrast boost strength (0 = off)",
+        Some(1),
+        "",
+    ),
     field("preset", "Style preset", None, ""),
     field("framing", "Framing", None, ""),
     field("lock_pitch", "Pitch: Lock (horizontal-only)", None, ""),

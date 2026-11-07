@@ -843,11 +843,12 @@ pub struct AutocamDefaults {
     /// every detection, however weak").
     #[serde(default = "default_confidence_threshold")]
     pub confidence_threshold: f32,
-    /// Fog boost - see `reco_autocam::AutocamConfig::fog_boost`. CLAHE
+    /// AI contrast boost - see `reco_autocam::AutocamConfig::ai_contrast_boost`. CLAHE
     /// clip limit on the detector input; `0.0` (the default, and the
-    /// value for data saved before this existed) is off.
-    #[serde(default)]
-    pub fog_boost: f32,
+    /// value for data saved before this existed) is off. Files saved
+    /// while it was briefly called "Fog mode" use the `fog_boost` key.
+    #[serde(default, alias = "fog_boost")]
+    pub ai_contrast_boost: f32,
     /// Lookahead reactivity multiplier - see
     /// `reco_autocam::panners::FieldPannerConfig::lookahead_reactivity`.
     /// When lookahead is active, the base chase runs this many times
@@ -1857,7 +1858,7 @@ mod tests {
             fov_alpha: 0.05,
             cluster_alpha: 0.05,
             confidence_threshold: 0.3,
-            fog_boost: 3.0,
+            ai_contrast_boost: 3.0,
             lookahead_reactivity: 1.5,
             model_path: None,
             enabled: None,
@@ -1884,6 +1885,18 @@ mod tests {
     /// (ball allowed flush against the frame edge), so a plain
     /// `#[serde(default)]` would silently change the framing of every
     /// pre-existing calibration instead of leaving it alone.
+    /// Setups saved while the AI contrast boost was called "Fog mode"
+    /// still load their value.
+    #[test]
+    fn autocam_defaults_reads_old_fog_boost_key() {
+        let old = r#"{ "tracking_mode": "field", "fog_boost": 3.0 }"#;
+        let ac: AutocamDefaults = serde_json::from_str(old).unwrap();
+        assert!((ac.ai_contrast_boost - 3.0).abs() < 1e-6);
+        let missing: AutocamDefaults =
+            serde_json::from_str(r#"{ "tracking_mode": "field" }"#).unwrap();
+        assert_eq!(missing.ai_contrast_boost, 0.0);
+    }
+
     #[test]
     fn autocam_defaults_ball_frame_margin_falls_back_for_old_files() {
         let old = r#"{
