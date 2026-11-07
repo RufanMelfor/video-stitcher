@@ -39,6 +39,9 @@ pub struct WgpuPreprocessingDetector {
     input_size: reco_detect::InputSize,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Fog boost clip limit, `0.0` = off; applied to every (re)built
+    /// preprocessor. See [`Self::with_fog_boost`].
+    fog_boost: f32,
 }
 
 impl WgpuPreprocessingDetector {
@@ -65,7 +68,19 @@ impl WgpuPreprocessingDetector {
             input_size,
             device,
             queue,
+            fog_boost: 0.0,
         }
+    }
+
+    /// Enable the fog boost: CLAHE with this clip limit on the
+    /// preprocessed tensor (see [`reco_detect::local_contrast`]). `0.0`
+    /// turns it off; an out-of-range value is logged and leaves it off.
+    pub fn with_fog_boost(mut self, clip_limit: f32) -> Self {
+        self.fog_boost = clip_limit;
+        if let Some(ref mut p) = self.preprocessor {
+            p.set_local_contrast(&self.device, &self.queue, clip_limit);
+        }
+        self
     }
 
     /// Get this call's preprocessor, (re)building it if unset or if
@@ -77,13 +92,12 @@ impl WgpuPreprocessingDetector {
             None => true,
         };
         if needs_rebuild {
-            self.preprocessor = Some(WgpuPreprocessor::new(
-                &self.device,
-                &self.queue,
-                self.input_size,
-                width,
-                height,
-            ));
+            let mut p =
+                WgpuPreprocessor::new(&self.device, &self.queue, self.input_size, width, height);
+            if self.fog_boost > 0.0 {
+                p.set_local_contrast(&self.device, &self.queue, self.fog_boost);
+            }
+            self.preprocessor = Some(p);
         }
         self.preprocessor.as_ref().expect("just set")
     }

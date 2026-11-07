@@ -818,6 +818,7 @@ mod tests {
             fov_alpha: 0.06,
             cluster_alpha: 0.05,
             confidence_threshold: 0.2,
+            fog_boost: 0.0,
             lookahead_reactivity: 2.5,
             model_path: None,
             enabled: None,

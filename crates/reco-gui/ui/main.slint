@@ -1277,6 +1277,11 @@ export component RecoApp inherits Window {
     // export-player-anchor-rad above. Ball tracking mode used to
     // silently force 0.25 regardless of this slider; it no longer does.
     in-out property <float> export-confidence-threshold: 0.10;
+    // Fog mode: CLAHE local contrast boost on what the AI sees (not on
+    // the exported video). Saved as one number, fog_boost = strength
+    // when on, 0 when off.
+    in-out property <bool> export-fog-mode: false;
+    in-out property <float> export-fog-strength: 3.0;
     in-out property <bool> export-autocam-enabled: false;
     // Panner tuning (mapped onto FieldPannerConfig in export.rs). Defaults
     // mirror the validated football defaults; lookahead defaults on because
@@ -1361,6 +1366,8 @@ export component RecoApp inherits Window {
     changed export-max-player-pitch => { root.autocam-settings-changed(); }
     changed export-ball-acquire-established-frames => { root.autocam-settings-changed(); }
     changed export-confidence-threshold => { root.autocam-settings-changed(); }
+    changed export-fog-mode => { root.autocam-settings-changed(); }
+    changed export-fog-strength => { root.autocam-settings-changed(); }
     changed export-panner-preset => { root.autocam-settings-changed(); }
     changed export-lookahead-secs => { root.autocam-settings-changed(); }
     changed export-lookahead-reduced-bit-depth => { root.autocam-settings-changed(); }
@@ -6674,6 +6681,23 @@ export component RecoApp inherits Window {
                             maximum: 0.9;
                             value <=> root.export-confidence-threshold;
                             decimals: 2;
+                        }
+
+                        Tip {
+                            tip: "For fog or haze: boosts local contrast in the image the AI looks at, so it can still find the ball in the far, washed-out part of the pitch. The exported video is not changed. Costs a little GPU time; leave it off in clear weather, where it mainly adds noise. Saved with this match's setup.";
+                            CheckBox {
+                                text: "Fog mode";
+                                checked <=> root.export-fog-mode;
+                            }
+                        }
+
+                        if root.export-fog-mode: LabeledSlider {
+                            label: "Fog strength";
+                            tip: "How strongly local contrast is boosted (the CLAHE clip limit). 3 is a good start. Higher finds more balls in thick fog but also more false ones (white specks, logos).";
+                            minimum: 1.0;
+                            maximum: 8.0;
+                            value <=> root.export-fog-strength;
+                            decimals: 1;
                         }
 
                         // Style preset: sets the controls below; tweak after.

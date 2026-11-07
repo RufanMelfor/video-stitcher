@@ -26,6 +26,9 @@ pub struct AiDebugRawArgs<'a> {
     pub output: &'a str,
     pub model_path: &'a str,
     pub confidence_threshold: Option<f32>,
+    /// Fog boost (CLAHE clip limit on the detector input, `0.0` = off).
+    /// Needs the GPU preprocessing path; ignored on the CPU fallback.
+    pub fog_boost: f32,
     pub start_time: Option<f64>,
     /// Stop at this source timestamp (seconds) - see
     /// `reco_io::raw_camera_debug::RawCameraDebugConfig::end_secs`.
@@ -208,7 +211,8 @@ pub fn run_ai_debug_raw(
                     input_size,
                     0,
                     0,
-                );
+                )
+                .with_fog_boost(args.fog_boost);
                 (Box::new(wrapper), Some(gpu))
             }
             Err(e) => {
