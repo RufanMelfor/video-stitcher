@@ -2765,6 +2765,7 @@ mod tests {
             autocam_pitch_limits: None,
             scoreboard: None,
             export_defaults: None,
+            footage_stamps: crate::calibration::FootageStamps::default(),
         }
     }
 
@@ -2908,6 +2909,7 @@ mod tests {
             autocam_pitch_limits: None,
             scoreboard: None,
             export_defaults: None,
+            footage_stamps: crate::calibration::FootageStamps::default(),
         };
         let viewport = ViewportConfig {
             fov_degrees: 75.0,

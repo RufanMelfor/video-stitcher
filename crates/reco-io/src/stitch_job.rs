@@ -135,6 +135,8 @@ pub struct StitchJob {
     /// Free-form text embedded in the output container's "comment"
     /// metadata tag. See [`Self::metadata_comment`].
     metadata_comment: Option<String>,
+    /// Plain-MP4 "Fast Start" (`moov` before `mdat`). See [`Self::faststart`].
+    faststart: bool,
 }
 
 /// Configuration for optional replay recording (see
@@ -376,6 +378,7 @@ impl StitchJob {
             ai_run_config: None,
             ai_run_model_path: None,
             metadata_comment: None,
+            faststart: false,
         }
     }
 
@@ -414,6 +417,16 @@ impl StitchJob {
     /// Set the output container format.
     pub fn format(mut self, format: Format) -> Self {
         self.format = format;
+        self
+    }
+
+    /// Plain MP4 only: move the index (`moov`) to the front of the file
+    /// when it is closed, so a web player can start playback before the
+    /// whole file has downloaded. Rewrites the entire output once at the
+    /// end - minutes for a full-match export - and is not needed for
+    /// local playback or uploading. Default: `false`.
+    pub fn faststart(mut self, enabled: bool) -> Self {
+        self.faststart = enabled;
         self
     }
 
@@ -1209,6 +1222,7 @@ impl StitchJob {
             audio_cut_windows,
             pause_overlay_hold_secs,
             container: self.format.into(),
+            faststart: self.faststart,
             // 2 seconds' worth of frames: the de-facto standard keyframe
             // interval for VOD/streaming platforms (HLS/DASH segment
             // boundaries, adaptive-bitrate quality switches, and - the
@@ -1699,6 +1713,15 @@ impl StitchJob {
             describe_opt(&self.encoder_name)
         );
         let _ = writeln!(out, "Container format: {:?}", self.format);
+        let _ = writeln!(
+            out,
+            "Fast start:       {}",
+            if self.faststart {
+                "on (index moved to the front at close)"
+            } else {
+                "off"
+            }
+        );
         let _ = writeln!(
             out,
             "Resolution:       {}",

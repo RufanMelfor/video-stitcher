@@ -67,6 +67,8 @@ impl Default for StackedEncoderConfig {
                 // that explicitly opt in to fMP4 today will
                 // hit it.
                 container: Container::Matroska,
+                // Plain-MP4 only; no effect on Matroska.
+                faststart: false,
                 codec: VideoCodec::H264,
                 quality_preset: Quality::Fast,
                 encoder_name: None,

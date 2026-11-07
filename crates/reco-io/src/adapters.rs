@@ -572,6 +572,8 @@ pub fn create_encoder(
         audio_cut_windows: Vec::new(),
         pause_overlay_hold_secs: Vec::new(),
         container: ffmpeg::encoder::Container::default(),
+        // Live capture: no second pass over the file at stop.
+        faststart: false,
         gop_size: None,
         stream_url: None,
         metadata_comment: None,

@@ -1226,6 +1226,9 @@ export component RecoApp inherits Window {
     in-out property <string> export-codec: "h264";
     in-out property <[string]> available-codecs: ["h264", "hevc", "av1"];
     in-out property <string> export-quality: "balanced";
+    // Plain-MP4 "Fast Start" (index moved to the front at close); see
+    // `reco_io::StitchJob::faststart`. Persisted app-level on Start.
+    in-out property <bool> export-faststart: false;
     in-out property <float> export-blend-width: 0.05;
     in-out property <float> export-start-secs: 0.0;
     in-out property <float> export-end-secs: 0.0;
@@ -1677,6 +1680,15 @@ export component RecoApp inherits Window {
     callback changed-rig-roll(float);
     callback changed-sync-offset(int);
     callback compute-sync-offset();
+    // Export dialog banner: the setup's field ROI / sync offset were set
+    // for another recording (or never checked for this one) - typically a
+    // setup file copied from an earlier match. Empty = nothing to check.
+    // Filled from Rust (`footage_warnings_to_ui`).
+    in-out property <string> roi-footage-warning: "";
+    in-out property <string> sync-footage-warning: "";
+    // Mark the ROI / sync offset as checked for the loaded recording.
+    callback confirm-roi-footage();
+    callback confirm-sync-footage();
     callback changed-audio-window-frames(float);
     callback changed-fov(float);
     // Live calibration editing.
@@ -1819,6 +1831,11 @@ export component RecoApp inherits Window {
         root.zone-edit-mode = true;
     }
     function exit-zone-edit() {
+        // "Done Editing" on the ROI means the user has looked at it on
+        // this recording - same as the Export banner's "ROI is correct".
+        if (root.zone-edit-type == "roi" && root.has-roi) {
+            root.confirm-roi-footage();
+        }
         root.zone-edit-mode = false;
         if (root.zone-edit-auto-lens-preview) {
             root.zone-edit-auto-lens-preview = false;
@@ -6220,6 +6237,14 @@ export component RecoApp inherits Window {
                         }
                     }
 
+                    Tip {
+                        tip: "Moves the file's index to the front when the export finishes, so a web player can start playing before the whole file has downloaded. Rewrites the entire file once at the end (several minutes for a full match). Not needed for playback on a PC or for uploading to YouTube.";
+                        CheckBox {
+                            text: "Fast start (web playback)";
+                            checked <=> root.export-faststart;
+                        }
+                    }
+
                     // Processing range (start/end with sliders and manual input)
                     Tip {
                         tip: "Trims the export to a start/end time window within the loaded clip. Defaults to the full clip.";
@@ -7046,6 +7071,67 @@ export component RecoApp inherits Window {
                                     maximum: 0.3;
                                     value <=> root.export-cluster-alpha;
                                     decimals: 3;
+                                }
+                            }
+                        }
+                    }
+
+                    // Setup reused from another recording (e.g. a copied
+                    // setup file): ROI and sync offset are per match.
+                    if root.roi-footage-warning != "" || root.sync-footage-warning != "": Rectangle {
+                        background: #3a3110;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: #8a6d1a;
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 8px;
+                            Text {
+                                text: "Check before exporting";
+                                color: #ffd54f;
+                                font-size: 12px;
+                                font-weight: 600;
+                            }
+                            if root.roi-footage-warning != "": VerticalLayout {
+                                spacing: 4px;
+                                Text { text: root.roi-footage-warning; color: #e8e8e8; font-size: 11px; wrap: word-wrap; }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    alignment: start;
+                                    FlatButton {
+                                        text: "Edit ROI";
+                                        clicked => {
+                                            root.export-dialog-open = false;
+                                            root.zone-edit-type = "roi";
+                                            root.enter-zone-edit();
+                                        }
+                                    }
+                                    FlatButton {
+                                        text: "ROI is correct";
+                                        clicked => { root.confirm-roi-footage(); }
+                                    }
+                                }
+                            }
+                            if root.sync-footage-warning != "": VerticalLayout {
+                                spacing: 4px;
+                                Text { text: root.sync-footage-warning; color: #e8e8e8; font-size: 11px; wrap: word-wrap; }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    alignment: start;
+                                    FlatButton {
+                                        text: "Detect Sync Offset";
+                                        enabled: !root.detecting-sync && root.has-both-videos;
+                                        clicked => {
+                                            // Closed so the detection's
+                                            // progress window is visible.
+                                            root.export-dialog-open = false;
+                                            root.compute-sync-offset();
+                                        }
+                                    }
+                                    FlatButton {
+                                        text: "Sync offset is correct";
+                                        clicked => { root.confirm-sync-footage(); }
+                                    }
                                 }
                             }
                         }

@@ -887,6 +887,35 @@ pub struct ExportDefaults {
     pub quality: String,
 }
 
+/// Which recording the per-match parts of a setup were last set or
+/// confirmed for, so a consumer can warn when a setup is reused on new
+/// footage (e.g. copied from an earlier match) with a field ROI or sync
+/// offset that belonged to the old one.
+///
+/// Each value is an opaque recording identifier chosen by the consumer
+/// (`reco-gui` uses the first left-camera file name, which is unique per
+/// recording for action cameras). `None` means "never stamped", e.g. a
+/// setup written before this existed - a consumer should treat that as
+/// unconfirmed, not as a match.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FootageStamps {
+    /// Recording the `field_roi` was last edited or confirmed on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_roi: Option<String>,
+    /// Recording the `sync_offset` was last detected, entered or
+    /// confirmed on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_offset: Option<String>,
+}
+
+impl FootageStamps {
+    /// `true` when nothing is stamped (lets an untouched setup serialize
+    /// without the key).
+    pub fn is_empty(&self) -> bool {
+        self.field_roi.is_none() && self.sync_offset.is_none()
+    }
+}
+
 /// Manual pitch safety margin for AI tracking (world-space radians) -
 /// two horizontal lines set by dragging directly on the stitched
 /// panorama preview (`reco-gui`), where the black-wedge corner leak
@@ -1151,6 +1180,10 @@ pub struct Calibration {
     /// quality). Transitional (an export concern).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export_defaults: Option<ExportDefaults>,
+    /// Which recording the field ROI and sync offset belong to. See
+    /// [`FootageStamps`]. Transitional (a consumer/workflow concern).
+    #[serde(default, skip_serializing_if = "FootageStamps::is_empty")]
+    pub footage_stamps: FootageStamps,
 }
 
 /// Maximum calibration file size (1 MB).
@@ -1172,6 +1205,7 @@ impl Calibration {
             autocam_pitch_limits: None,
             scoreboard: None,
             export_defaults: None,
+            footage_stamps: FootageStamps::default(),
         }
     }
 
@@ -2059,12 +2093,31 @@ mod tests {
             autocam_pitch_limits: None,
             scoreboard: None,
             export_defaults: None,
+            footage_stamps: FootageStamps::default(),
         }
     }
 
     #[test]
     fn valid_calibration_passes() {
         valid_cal().validate().unwrap();
+    }
+
+    #[test]
+    fn footage_stamps_roundtrip_and_are_omitted_when_empty() {
+        let mut cal = valid_cal();
+        let json = serde_json::to_string(&cal).unwrap();
+        assert!(!json.contains("footage_stamps"));
+        let back: Calibration = serde_json::from_str(&json).unwrap();
+        assert!(back.footage_stamps.is_empty());
+
+        cal.footage_stamps.field_roi = Some("DJI_0008_D_L01.MP4".into());
+        let json = serde_json::to_string(&cal).unwrap();
+        let back: Calibration = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.footage_stamps.field_roi.as_deref(),
+            Some("DJI_0008_D_L01.MP4")
+        );
+        assert!(back.footage_stamps.sync_offset.is_none());
     }
 
     #[test]

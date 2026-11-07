@@ -315,6 +315,8 @@ pub fn run_export(
     height: u32,
     codec_str: String,
     quality_str: String,
+    // Plain-MP4 "Fast Start" - see `StitchJob::faststart`.
+    faststart: bool,
     blend: f32,
     blend_flip_direction: bool,
     multiband_blend_enabled: bool,
@@ -527,6 +529,7 @@ pub fn run_export(
     .codec(codec)
     .quality(quality)
     .format(format)
+    .faststart(faststart)
     .resolution(width, height)
     .blend_width(blend)
     .blend_flip_direction(blend_flip_direction)

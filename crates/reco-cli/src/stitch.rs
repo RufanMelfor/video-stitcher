@@ -87,6 +87,8 @@ pub struct StitchArgs<'a> {
     /// means default (plain MP4, finalized at close). `mkv` or
     /// `fmp4` for streamable tee use.
     pub container: Option<&'a str>,
+    /// `--faststart`: move the MP4 index to the front at close.
+    pub faststart: bool,
     /// Optional replay-recording output path. When `Some`, the
     /// stitch job writes a stacked-video copy of the source frames
     /// alongside the stitched output (M6.5 feature, `replay`
@@ -403,6 +405,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
             .map_err(|e: String| anyhow::anyhow!("{e} (expected mp4, fmp4, mkv, mov, or flv)"))?;
         job = job.format(fmt);
     }
+    job = job.faststart(args.faststart);
 
     // Opt-in replay recording. The builder call is all the
     // consumer needs - StitchJob owns the encoder lifecycle, the
