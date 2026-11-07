@@ -359,10 +359,22 @@ struct AppState {
     cal_rx: Option<std::sync::mpsc::Receiver<CalibrationResult>>,
     /// Receives "Refine Alignment" results from its background thread.
     refine_rx: Option<std::sync::mpsc::Receiver<Result<RefineOutput, String>>>,
-    /// Receives the result of a standalone sync-offset detection job (see
-    /// `on_compute_sync_offset`), separate from full auto-calibrate.
-    sync_offset_job:
-        Option<std::sync::mpsc::Receiver<Result<sync_offset::SyncOffsetResult, String>>>,
+    /// Receives step updates and the final result of a standalone
+    /// sync-offset detection job (see `on_compute_sync_offset`), separate
+    /// from full auto-calibrate.
+    sync_offset_job: Option<std::sync::mpsc::Receiver<sync_offset::SyncOffsetMsg>>,
+    /// Cancel flag of the in-flight `sync_offset_job`, set by the progress
+    /// window's Cancel button. A fresh flag per job, so a cancelled job
+    /// that is still finishing its current step can never cancel the next.
+    sync_offset_cancel: Arc<AtomicBool>,
+    /// When the in-flight `sync_offset_job` started, for the elapsed-time
+    /// line in its progress window.
+    sync_offset_started: Option<Instant>,
+    /// Elapsed whole seconds last pushed to the progress window, so the
+    /// render tick only touches the property when the text changes.
+    sync_offset_elapsed_shown: u64,
+    /// Every step message of the current sync-offset job, oldest first.
+    sync_offset_log: Vec<String>,
     /// Set when the in-flight `sync_offset_job` should write its result
     /// straight to `calibration_path` once it resolves, instead of
     /// waiting for an explicit Save (see the "Select Match Folder"
@@ -750,6 +762,10 @@ impl AppState {
             cal_rx: None,
             refine_rx: None,
             sync_offset_job: None,
+            sync_offset_cancel: Arc::new(AtomicBool::new(false)),
+            sync_offset_started: None,
+            sync_offset_elapsed_shown: 0,
+            sync_offset_log: Vec::new(),
             pending_sync_offset_autosave: false,
             audio_envelope_left: Vec::new(),
             audio_envelope_right: Vec::new(),
@@ -7118,6 +7134,25 @@ fn main() -> anyhow::Result<()> {
         start_sync_offset_detection(&state_ref, &app_weak);
     });
 
+    // Cancel button on the sync-offset progress window. The flag is only
+    // checked between steps, so the thread may keep running until its
+    // current step (e.g. a telemetry parse) ends - but the window closes
+    // right away and the job's eventual result is discarded.
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_cancel_sync_detection(move || {
+        let mut s = state_ref.borrow_mut();
+        s.sync_offset_cancel.store(true, Ordering::Relaxed);
+        s.sync_offset_job = None;
+        s.sync_offset_started = None;
+        s.pending_sync_offset_autosave = false;
+        if let Some(app) = app_weak.upgrade() {
+            app.set_detecting_sync(false);
+            app.set_sync_error("".into());
+            app.set_status_text("Sync-offset detection cancelled".into());
+        }
+    });
+
     // "Yes" branch of the Select-Match-Folder sync-offset prompt: same
     // detection job as the manual button, but flagged to write straight
     // to the calibration file once it resolves (see
@@ -8873,11 +8908,41 @@ fn main() -> anyhow::Result<()> {
                 return;
             }
 
-            // Poll for standalone sync-offset detection results.
-            if let Some(rx) = &s.sync_offset_job
-                && let Ok(result) = rx.try_recv()
+            // Poll the standalone sync-offset detection job: drain its step
+            // messages into the progress window, then handle the result.
+            let mut sync_done = None;
+            let mut sync_steps = Vec::new();
+            if let Some(rx) = &s.sync_offset_job {
+                while let Ok(msg) = rx.try_recv() {
+                    match msg {
+                        sync_offset::SyncOffsetMsg::Progress(text) => sync_steps.push(text),
+                        sync_offset::SyncOffsetMsg::Done(result) => {
+                            sync_done = Some(result);
+                            break;
+                        }
+                    }
+                }
+            }
+            let sync_log_changed = !sync_steps.is_empty();
+            s.sync_offset_log.extend(sync_steps);
+            if let Some(started) = s.sync_offset_started
+                && let Some(app) = app_weak.upgrade()
             {
+                if sync_log_changed {
+                    if let Some(last) = s.sync_offset_log.last() {
+                        app.set_sync_step(last.as_str().into());
+                    }
+                    sync_offset_log_to_ui(&s, &app);
+                }
+                let secs = started.elapsed().as_secs();
+                if secs != s.sync_offset_elapsed_shown {
+                    s.sync_offset_elapsed_shown = secs;
+                    app.set_sync_elapsed(format!("{secs} s").into());
+                }
+            }
+            if let Some(result) = sync_done {
                 s.sync_offset_job = None;
+                s.sync_offset_started = None;
                 if let Some(app) = app_weak.upgrade() {
                     app.set_detecting_sync(false);
                     match result {
@@ -8909,6 +8974,10 @@ fn main() -> anyhow::Result<()> {
                         Err(e) => {
                             s.pending_sync_offset_autosave = false;
                             app.set_status_text(format!("Sync-offset detection failed: {e}").into());
+                            // Keeps the progress window open (see
+                            // `sync-error` in main.slint) so the log stays
+                            // readable next to the error.
+                            app.set_sync_error(e.into());
                         }
                     }
                 }
@@ -9505,10 +9574,32 @@ fn start_sync_offset_detection(state: &Rc<RefCell<AppState>>, app_weak: &slint::
         return;
     };
     app.set_detecting_sync(true);
+    app.set_sync_error("".into());
+    app.set_sync_step("Starting".into());
+    app.set_sync_elapsed("0 s".into());
+    app.set_sync_log(slint::ModelRc::new(slint::VecModel::from(Vec::<
+        slint::SharedString,
+    >::new())));
     app.set_status_text("Detecting sync offset (IMU, falling back to audio)...".into());
 
-    let rx = sync_offset::spawn_compute_sync_offset(left, right);
-    state.borrow_mut().sync_offset_job = Some(rx);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let rx = sync_offset::spawn_compute_sync_offset(left, right, Arc::clone(&cancel));
+    let mut s = state.borrow_mut();
+    s.sync_offset_job = Some(rx);
+    s.sync_offset_cancel = cancel;
+    s.sync_offset_started = Some(Instant::now());
+    s.sync_offset_elapsed_shown = 0;
+    s.sync_offset_log.clear();
+}
+
+/// Push the sync-offset progress window's log model from `AppState`.
+fn sync_offset_log_to_ui(s: &AppState, app: &RecoApp) {
+    let lines: Vec<slint::SharedString> = s
+        .sync_offset_log
+        .iter()
+        .map(|l| l.as_str().into())
+        .collect();
+    app.set_sync_log(slint::ModelRc::new(slint::VecModel::from(lines)));
 }
 
 fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<RecoApp>) {
