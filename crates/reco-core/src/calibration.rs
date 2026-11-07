@@ -843,6 +843,11 @@ pub struct AutocamDefaults {
     /// every detection, however weak").
     #[serde(default = "default_confidence_threshold")]
     pub confidence_threshold: f32,
+    /// Fog boost - see `reco_autocam::AutocamConfig::fog_boost`. CLAHE
+    /// clip limit on the detector input; `0.0` (the default, and the
+    /// value for data saved before this existed) is off.
+    #[serde(default)]
+    pub fog_boost: f32,
     /// Lookahead reactivity multiplier - see
     /// `reco_autocam::panners::FieldPannerConfig::lookahead_reactivity`.
     /// When lookahead is active, the base chase runs this many times
@@ -1852,6 +1857,7 @@ mod tests {
             fov_alpha: 0.05,
             cluster_alpha: 0.05,
             confidence_threshold: 0.3,
+            fog_boost: 3.0,
             lookahead_reactivity: 1.5,
             model_path: None,
             enabled: None,

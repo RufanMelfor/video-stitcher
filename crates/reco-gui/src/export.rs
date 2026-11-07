@@ -176,6 +176,9 @@ pub struct AutocamUiConfig {
     /// every tracking mode; Ball mode no longer silently forces a
     /// higher floor of its own.
     pub confidence_threshold: f32,
+    /// Fog boost: CLAHE clip limit on the detector input, `0.0` = off.
+    /// See `reco_autocam::AutocamConfig::fog_boost`.
+    pub fog_boost: f32,
     /// Lookahead buffer depth in seconds (0 = off).
     pub lookahead_secs: f64,
     /// Downconvert the lookahead pool to 8-bit NV12 even for 10-bit
@@ -499,6 +502,7 @@ pub fn run_export(
                 "max_player_pitch": autocam.max_player_pitch,
                 "ball_hold_secs": autocam.ball_hold_secs,
                 "confidence_threshold": autocam.confidence_threshold,
+                "fog_boost": autocam.fog_boost,
                 "lookahead_secs": autocam.lookahead_secs,
                 "lookahead_reduced_bit_depth": autocam.lookahead_reduced_bit_depth,
                 "preset": &autocam.preset,
@@ -914,6 +918,7 @@ pub fn run_export(
                     fov_alpha: autocam.fov_alpha,
                     cluster_alpha: autocam.cluster_alpha,
                     confidence_threshold: autocam.confidence_threshold,
+                    fog_boost: autocam.fog_boost,
                     lookahead_reactivity: autocam.lookahead_reactivity,
                     model_path: None,
                     enabled: None,
@@ -996,7 +1001,8 @@ pub fn run_export(
                 .with_10bit(is_10bit)
                 .with_player_anchor_rad(ac.player_anchor_rad)
                 .with_ball_coast_secs(ac.ball_coast_secs)
-                .with_confidence_threshold(ac.confidence_threshold);
+                .with_confidence_threshold(ac.confidence_threshold)
+                .with_fog_boost(ac.fog_boost);
             // 0 is the "off" encoding everywhere this value travels
             // (slider, saved calibration, CLI flag).
             autocam_config.ball_acquire_max_dist_from_cluster =

@@ -3280,6 +3280,16 @@ fn install_panic_hook() {
 /// (`do_save_calibration`) and app-level persistence (the
 /// `autocam-settings-changed` handler below) so the two never drift
 /// out of sync with each other or with the slider list in `main.slint`.
+/// The fog boost the Export dialog asks for: the strength slider when
+/// "Fog mode" is ticked, `0.0` (off) otherwise.
+fn fog_boost_from_ui(app: &RecoApp) -> f32 {
+    if app.get_export_fog_mode() {
+        app.get_export_fog_strength()
+    } else {
+        0.0
+    }
+}
+
 fn snapshot_autocam_defaults(app: &RecoApp) -> reco_core::calibration::AutocamDefaults {
     reco_core::calibration::AutocamDefaults {
         tracking_mode: app.get_export_tracking_mode().to_string(),
@@ -3310,6 +3320,7 @@ fn snapshot_autocam_defaults(app: &RecoApp) -> reco_core::calibration::AutocamDe
         fov_alpha: app.get_export_fov_alpha(),
         cluster_alpha: app.get_export_cluster_alpha(),
         confidence_threshold: app.get_export_confidence_threshold(),
+        fog_boost: fog_boost_from_ui(app),
         // No GUI slider yet for this one (out of scope here) - falls
         // back to FieldPannerConfig's own default so the events JSONL
         // header/calibration snapshot at least records a real value
@@ -3443,6 +3454,10 @@ fn apply_autocam_defaults(
     app.set_export_fov_alpha(ac.fov_alpha);
     app.set_export_cluster_alpha(ac.cluster_alpha);
     app.set_export_confidence_threshold(ac.confidence_threshold);
+    app.set_export_fog_mode(ac.fog_boost > 0.0);
+    if ac.fog_boost > 0.0 {
+        app.set_export_fog_strength(ac.fog_boost);
+    }
     missing_model
 }
 
@@ -8393,6 +8408,7 @@ fn main() -> anyhow::Result<()> {
             max_player_pitch: app.get_export_max_player_pitch(),
             ball_hold_secs: app.get_export_ball_hold_secs(),
             confidence_threshold: app.get_export_confidence_threshold(),
+            fog_boost: fog_boost_from_ui(&app),
             lookahead_secs: app.get_export_lookahead_secs() as f64,
             lookahead_reduced_bit_depth: app.get_export_lookahead_reduced_bit_depth(),
             async_detect: app.get_export_async_detect(),

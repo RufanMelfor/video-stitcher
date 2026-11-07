@@ -160,6 +160,9 @@ pub struct StitchArgs<'a> {
     /// Detector confidence floor override `[0,1]`. See
     /// `reco_autocam::AutocamConfig::confidence_threshold`.
     pub confidence_threshold: Option<f32>,
+    /// Fog boost (CLAHE clip limit on the detector input, `0.0` = off).
+    /// See `reco_autocam::AutocamConfig::fog_boost`.
+    pub fog_boost: f32,
 }
 
 /// Run the stitch subcommand.
@@ -252,6 +255,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                 "max_player_pitch": args.max_player_pitch,
                 "ball_hold_secs": args.ball_hold_secs,
                 "confidence_threshold": args.confidence_threshold,
+                "fog_boost": args.fog_boost,
             }
         }
     })
@@ -491,6 +495,8 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         let ball_max_speed = args.ball_max_speed;
         let ball_max_pitch = pitch_ceiling(args.ball_max_pitch);
         let confidence_threshold = args.confidence_threshold;
+        let fog_boost = args.fog_boost;
+        reco_autocam::local_contrast::validate_clip_limit(fog_boost).map_err(anyhow::Error::msg)?;
         let async_detect = args.async_detect;
         let lookahead_secs = args.lookahead;
         #[cfg(feature = "minimap")]
@@ -629,6 +635,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                     fov_alpha: fp.fov_alpha,
                     cluster_alpha: fp.cluster_alpha,
                     confidence_threshold: confidence_threshold.unwrap_or(0.10),
+                    fog_boost,
                     lookahead_reactivity: fp.lookahead_reactivity,
                     model_path: None,
                     enabled: None,
@@ -662,6 +669,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
             // flag is now the only place that number comes from. See
             // `--confidence-threshold`'s help text.
             autocam_config.confidence_threshold = confidence_threshold;
+            autocam_config.fog_boost = fog_boost;
             if let Some(ref cfg) = panner_cfg {
                 autocam_config.field_panner_config = Some(cfg.clone());
             }

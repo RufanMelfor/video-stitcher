@@ -14,6 +14,7 @@
 
 pub mod detectors;
 pub mod input_size;
+pub mod local_contrast;
 #[cfg(feature = "ort")]
 pub mod ort_session;
 #[cfg(feature = "ort")]
