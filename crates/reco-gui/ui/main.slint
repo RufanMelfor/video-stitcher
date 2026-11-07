@@ -1208,6 +1208,9 @@ export component RecoApp inherits Window {
     in-out property <float> ai-debug-start-secs: 0.0;
     in-out property <float> ai-debug-end-secs: 0.0;
     in-out property <float> ai-debug-confidence-threshold: 0.10;
+    // Same as export-fog-mode / export-fog-strength, for the AI Debug tab.
+    in-out property <bool> ai-debug-fog-mode: false;
+    in-out property <float> ai-debug-fog-strength: 3.0;
     in-out property <int> ai-debug-detection-interval: 1;
     in-out property <[CutRangeItem]> ai-debug-cut-ranges: [];
     // Fires on any AI Debug tab field edit, mirroring
@@ -1219,6 +1222,8 @@ export component RecoApp inherits Window {
     callback ai-debug-settings-changed();
     changed ai-debug-raw-cameras => { root.ai-debug-settings-changed(); }
     changed ai-debug-confidence-threshold => { root.ai-debug-settings-changed(); }
+    changed ai-debug-fog-mode => { root.ai-debug-settings-changed(); }
+    changed ai-debug-fog-strength => { root.ai-debug-settings-changed(); }
     changed ai-debug-detection-interval => { root.ai-debug-settings-changed(); }
     in-out property <string> export-output-path: "";
     in-out property <int> export-width: 1920;
@@ -7424,6 +7429,23 @@ export component RecoApp inherits Window {
                         maximum: 0.9;
                         value <=> root.ai-debug-confidence-threshold;
                         decimals: 2;
+                    }
+
+                    Tip {
+                        tip: "Run the AI with the same fog boost as the Export tab's Fog mode, to check whether it finds more balls on this footage. The drawn video stays the original image; only what the AI looks at is boosted. Output files get a _fog suffix so an on/off pair can be compared side by side.";
+                        CheckBox {
+                            text: "Fog mode";
+                            checked <=> root.ai-debug-fog-mode;
+                        }
+                    }
+
+                    if root.ai-debug-fog-mode: LabeledSlider {
+                        label: "Fog strength";
+                        tip: "CLAHE clip limit, same scale as the Export tab (3 is a good start).";
+                        minimum: 1.0;
+                        maximum: 8.0;
+                        value <=> root.ai-debug-fog-strength;
+                        decimals: 1;
                     }
 
                     Rectangle { height: 10px; }
