@@ -92,6 +92,7 @@ pub struct StitchJob {
     // Callbacks
     on_progress: Option<ProgressCallback>,
     on_finalizing: Option<Box<dyn FnOnce() + Send>>,
+    on_finalize_progress: Option<crate::ffmpeg::encoder::FinalizeProgress>,
     // Vec so multiple consumers can hook the session (telemetry, autocam,
     // future dual-output). A trait-based hook system would be cleaner for
     // complex composition but Vec<FnOnce> is sufficient for now.
@@ -367,6 +368,7 @@ impl StitchJob {
             color_gamma: (None, None),
             on_progress: None,
             on_finalizing: None,
+            on_finalize_progress: None,
             session_hooks: Vec::new(),
             #[cfg(feature = "stacked-output")]
             replay_recording: None,
@@ -839,6 +841,19 @@ impl StitchJob {
         self
     }
 
+    /// Progress during encoder finalization (audio copy, container index),
+    /// which follows [`Self::on_finalizing`] and can take minutes on a full
+    /// match. Called from the export thread.
+    pub fn on_finalize_progress(
+        mut self,
+        cb: impl Fn(crate::ffmpeg::encoder::FinalizeStage) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_finalize_progress = Some(crate::ffmpeg::encoder::FinalizeProgress(
+            std::sync::Arc::new(cb),
+        ));
+        self
+    }
+
     /// Hook called after the session is created but before the frame loop.
     ///
     /// Use this to attach a detector, director, or other session configuration
@@ -1240,6 +1255,7 @@ impl StitchJob {
             gop_size: Some((fps * 2.0).round() as u32),
             stream_url: None,
             metadata_comment: self.metadata_comment.clone(),
+            finalize_progress: self.on_finalize_progress.clone(),
         };
         let encoder = crate::adapters::FfmpegFileEncoder::new(
             &self.output,
