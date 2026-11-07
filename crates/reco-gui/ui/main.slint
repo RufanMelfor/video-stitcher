@@ -1038,6 +1038,14 @@ export component RecoApp inherits Window {
     in-out property <float> fps: 0.0;
     in-out property <bool> calibrating: false;
     in-out property <bool> detecting-sync: false;
+    // Sync-offset progress window (shown while `detecting-sync`, and kept
+    // open after a failure while `sync-error` is non-empty): current step,
+    // elapsed time, and every step seen so far this run, oldest first.
+    in-out property <string> sync-step: "";
+    in-out property <string> sync-elapsed: "";
+    in-out property <[string]> sync-log: [];
+    in-out property <string> sync-error: "";
+    callback cancel-sync-detection();
     // `audio-sync-expanded` mirrors the section's collapse state into
     // Rust so `maybe_recompute_audio_envelope` only runs the (relatively
     // expensive, ffmpeg-shelling) extraction while the user can see the
@@ -5579,6 +5587,99 @@ export component RecoApp inherits Window {
                         FlatButton {
                             text: "Cancel";
                             clicked => { root.cancel-calibration(); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Sync-offset detection progress (modal) ──
+        //
+        // Same layout as the calibration popup above. No real progress
+        // fraction exists (the telemetry parse and audio extraction don't
+        // report one), so the step line plus elapsed time show it's alive.
+        // Closes by itself on success; after a failure it stays open with
+        // the error until Close.
+        if root.detecting-sync || root.sync-error != "": Rectangle {
+            background: root.bg-scrim;
+            TouchArea {}
+
+            Rectangle {
+                width: 440px;
+                height: 380px;
+                background: root.bg-surface;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: root.border-mid;
+                TouchArea {}
+
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 10px;
+
+                    HorizontalLayout {
+                        Text {
+                            text: root.sync-error != "" ? "Sync-offset detection failed" : "Detecting sync offset";
+                            color: root.text-heading;
+                            font-size: 16px;
+                            font-weight: 600;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: root.sync-elapsed;
+                            color: #888;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Text {
+                        text: root.sync-error != "" ? root.sync-error : root.sync-step;
+                        color: root.sync-error != "" ? #f28b82 : #8ab4f8;
+                        font-size: 13px;
+                        font-weight: 600;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: "IMU telemetry first, audio cross-correlation as fallback.";
+                        color: #ccc;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+
+                    Rectangle { height: 1px; background: root.border-subtle; }
+
+                    Text { text: "Log"; color: #888; font-size: 11px; }
+
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            alignment: end;
+                            spacing: 2px;
+                            for line in root.sync-log: Text {
+                                text: line;
+                                color: #999;
+                                font-size: 11px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    Rectangle { height: 1px; background: root.border-subtle; }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle { horizontal-stretch: 1; }
+                        FlatButton {
+                            text: root.sync-error != "" ? "Close" : "Cancel";
+                            clicked => {
+                                if root.sync-error != "" {
+                                    root.sync-error = "";
+                                } else {
+                                    root.cancel-sync-detection();
+                                }
+                            }
                         }
                     }
                 }
