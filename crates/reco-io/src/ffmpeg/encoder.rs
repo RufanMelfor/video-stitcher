@@ -492,6 +492,13 @@ pub struct EncoderConfig {
     /// Matroska for streamable / write-while-read workflows (e.g.,
     /// the M6.5 stacked-video replay backend).
     pub container: Container,
+    /// Plain-MP4 only: move the `moov` index in front of `mdat` when the
+    /// file is closed ("Fast Start"), so a web player can start before
+    /// the whole file has downloaded. Costs a second full pass over the
+    /// written file at close - minutes for a multi-GB match export - and
+    /// is not needed for local playback or uploading. Ignored for
+    /// fragmented MP4 and Matroska. Default (`false`): `moov` at the end.
+    pub faststart: bool,
     /// Override the encoder's group-of-pictures size (frames
     /// between keyframes). `None` leaves ffmpeg / libx264 defaults
     /// (typically 250 frames). Set a small value (e.g. 30) when
@@ -868,7 +875,8 @@ impl VideoEncoder {
                     // mid-write; plain MP4 would park the `moov`
                     // until `write_trailer` and break replay.
                     //
-                    // Plain MP4 gets `+faststart` instead: the muxer
+                    // Plain MP4 optionally gets `+faststart`
+                    // (`EncoderConfig::faststart`): the muxer
                     // still parks `moov` until `write_trailer` (same
                     // "final-file-only" behavior, no change to replay
                     // semantics), but then rewrites the file so `moov`
@@ -882,12 +890,15 @@ impl VideoEncoder {
                     // page asks for `moov` first ("Fast Start") so a
                     // player/ingest pipeline can begin before the whole
                     // file downloads; Matroska has no such atom-order
-                    // concept so it's unaffected either way.
+                    // concept so it's unaffected either way. That
+                    // second pass rewrites the whole file, though
+                    // (several minutes for a ~10 GB match export), so
+                    // it is opt-in.
                     if config.container == Container::Mp4Fragmented {
                         let mut opts = ffmpeg::Dictionary::new();
                         opts.set("movflags", "empty_moov+frag_keyframe");
                         let _ = octx.write_header_with(opts)?;
-                    } else if config.container == Container::Mp4 {
+                    } else if config.container == Container::Mp4 && config.faststart {
                         let mut opts = ffmpeg::Dictionary::new();
                         opts.set("movflags", "faststart");
                         let _ = octx.write_header_with(opts)?;

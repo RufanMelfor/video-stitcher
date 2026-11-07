@@ -165,6 +165,12 @@ pub struct GuiSettings {
     /// them every session was the whole reason they were exposed.
     #[serde(default)]
     pub pause_overlay_enabled: bool,
+    /// Export dialog's "Fast start" checkbox: move the MP4 index to the
+    /// front at close (see `reco_io::StitchJob::faststart`). Off by
+    /// default and for settings files that predate it - it only helps
+    /// web playback and costs minutes on a full-match export.
+    #[serde(default)]
+    pub export_faststart: bool,
     /// Seconds of dip-to-black in *and* back out. Composited over frames
     /// that were going to be encoded anyway, so it adds no export length.
     #[serde(default = "default_pause_overlay_fade_secs")]
@@ -307,6 +313,7 @@ impl Default for GuiSettings {
             async_detect_enabled: false,
             scoreboard_settings: None,
             pause_overlay_enabled: false,
+            export_faststart: false,
             pause_overlay_fade_secs: default_pause_overlay_fade_secs(),
             pause_overlay_hold_secs: default_pause_overlay_hold_secs(),
             minimap_enabled: false,
@@ -763,6 +770,7 @@ mod tests {
         let json = r#"{"default_codec":"h264"}"#;
         let s: GuiSettings = serde_json::from_str(json).unwrap();
         assert!(!s.pause_overlay_enabled);
+        assert!(!s.export_faststart);
         assert!((s.pause_overlay_fade_secs - 3.0).abs() < 1e-6);
         assert!((s.pause_overlay_hold_secs - 4.0).abs() < 1e-6);
     }

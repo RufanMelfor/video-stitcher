@@ -383,6 +383,10 @@ struct AppState {
     /// calibration file just created for this match - never the shared
     /// Default Calibration a normal manual detect+edit could touch.
     pending_sync_offset_autosave: bool,
+    /// Recording (see `current_footage_id`) the "setup belongs to another
+    /// recording" toast was last shown for, so reloading the same footage
+    /// doesn't repeat it. The Export dialog banner is unaffected.
+    footage_warning_shown_for: Option<String>,
     /// Left/right audio-sync waveform envelopes currently displayed,
     /// downsampled around `audio_envelope_center_secs`. Empty until the
     /// first recompute (see [`AppState::maybe_recompute_audio_envelope`]).
@@ -767,6 +771,7 @@ impl AppState {
             sync_offset_elapsed_shown: 0,
             sync_offset_log: Vec::new(),
             pending_sync_offset_autosave: false,
+            footage_warning_shown_for: None,
             audio_envelope_left: Vec::new(),
             audio_envelope_right: Vec::new(),
             audio_window_frames: AUDIO_WAVEFORM_WINDOW_FRAMES,
@@ -1884,6 +1889,67 @@ impl AppState {
         // See `apply_layout`'s comment - no auto-clamp on a calibration edit.
     }
 
+    /// Identifier of the loaded recording for
+    /// `Calibration::footage_stamps`: the first left-camera file name
+    /// (action cameras name each recording uniquely, e.g.
+    /// `DJI_20261107085815_0008_D_L01.MP4`). File name only, so moving or
+    /// renaming the match folder doesn't make a setup look foreign.
+    fn current_footage_id(&self) -> Option<String> {
+        let input = self.left_input.as_ref()?;
+        Some(
+            input
+                .first_path()
+                .file_name()?
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
+    /// Record that the field ROI was edited or confirmed on the loaded
+    /// recording. In memory only - the caller saves (ROI edits already
+    /// save on every gesture).
+    fn stamp_roi_footage(&mut self) {
+        let id = self.current_footage_id();
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.footage_stamps.field_roi = id;
+        }
+    }
+
+    /// Record that the sync offset was detected, entered or confirmed on
+    /// the loaded recording. In memory only, like the offset itself.
+    fn stamp_sync_footage(&mut self) {
+        let id = self.current_footage_id();
+        if let Some(cal) = self.calibration.as_mut() {
+            cal.footage_stamps.sync_offset = id;
+        }
+    }
+
+    /// The two "set for another recording" warnings for the Export
+    /// dialog, `(roi, sync)`; an empty string means nothing to check.
+    /// No ROI at all is not reported here - the Start Export button has
+    /// its own "No field ROI set" confirmation for that.
+    fn footage_warnings(&self) -> (String, String) {
+        let (Some(cal), Some(id)) = (self.calibration.as_ref(), self.current_footage_id()) else {
+            return (String::new(), String::new());
+        };
+        let describe = |what: &str, stamp: &Option<String>| match stamp {
+            Some(s) if *s == id => String::new(),
+            Some(s) => format!("{what} was set for another recording ({s})."),
+            None => format!("{what} has not been checked for this recording yet."),
+        };
+        let has_roi = cal
+            .field_roi
+            .as_ref()
+            .is_some_and(|r| !r.left.is_empty() || !r.right.is_empty());
+        let roi = if has_roi {
+            describe("The AI field area (ROI)", &cal.footage_stamps.field_roi)
+        } else {
+            String::new()
+        };
+        let sync = describe("The sync offset", &cal.footage_stamps.sync_offset);
+        (roi, sync)
+    }
+
     fn set_sync_offset(&mut self, frames: i32) {
         let offset = frames as i64;
         let total = self.playback.total_frames().unwrap_or(u64::MAX) as i64;
@@ -1894,6 +1960,10 @@ impl AppState {
         if let Some(cal) = self.calibration.as_mut() {
             cal.sync_offset = offset;
         }
+        // Only user actions reach here (manual Apply, Detect Sync
+        // Offset), never a plain load, so this is a real "set for this
+        // recording".
+        self.stamp_sync_footage();
         if let (Some(left), Some(right)) = (&self.left_input, &self.right_input) {
             let left = left.clone();
             let right = right.clone();
@@ -4681,6 +4751,7 @@ fn main() -> anyhow::Result<()> {
         }
         // A confirmed click-to-add is a complete gesture on its own (no
         // separate `roi_pointer_up` follows it), so save right away.
+        s.stamp_roi_footage();
         if let Err(e) = s.save_calibration() {
             log::error!("Failed to save calibration after ROI point add: {e}");
         }
@@ -4723,7 +4794,8 @@ fn main() -> anyhow::Result<()> {
 
     let state_ref = Rc::clone(&state);
     app.on_roi_pointer_up(move || {
-        let s = state_ref.borrow();
+        let mut s = state_ref.borrow_mut();
+        s.stamp_roi_footage();
         if let Err(e) = s.save_calibration() {
             log::error!("Failed to save calibration after ROI edit: {e}");
         }
@@ -4762,6 +4834,7 @@ fn main() -> anyhow::Result<()> {
             .as_ref()
             .and_then(|c| c.field_roi.as_ref())
             .is_some_and(|r| !r.left.is_empty() || !r.right.is_empty());
+        s.stamp_roi_footage();
         if let Err(e) = s.save_calibration() {
             log::error!("Failed to save calibration after ROI point delete: {e}");
         }
@@ -4824,6 +4897,7 @@ fn main() -> anyhow::Result<()> {
         if let Some(cal) = s.calibration.as_mut() {
             cal.field_roi = Some(roi);
         }
+        s.stamp_roi_footage();
         if let Err(e) = s.save_calibration() {
             log::error!("Failed to save calibration with ROI: {e}");
         }
@@ -7134,6 +7208,33 @@ fn main() -> anyhow::Result<()> {
         start_sync_offset_detection(&state_ref, &app_weak);
     });
 
+    // Export dialog banner: "ROI is correct" / "Sync offset is correct".
+    // Each confirm behaves like an edit of the same thing: ROI edits
+    // save straight away, a sync-offset change only marks the setup
+    // dirty (same as typing a new offset).
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_confirm_roi_footage(move || {
+        let mut s = state_ref.borrow_mut();
+        s.stamp_roi_footage();
+        if let Err(e) = s.save_calibration() {
+            log::error!("Failed to save setup after confirming the ROI: {e}");
+        }
+        if let Some(app) = app_weak.upgrade() {
+            footage_warnings_to_ui(&s, &app);
+        }
+    });
+    let app_weak = app.as_weak();
+    let state_ref = Rc::clone(&state);
+    app.on_confirm_sync_footage(move || {
+        let mut s = state_ref.borrow_mut();
+        s.stamp_sync_footage();
+        if let Some(app) = app_weak.upgrade() {
+            app.set_cal_dirty(true);
+            footage_warnings_to_ui(&s, &app);
+        }
+    });
+
     // Cancel button on the sync-offset progress window. The flag is only
     // checked between steps, so the thread may keep running until its
     // current step (e.g. a telemetry parse) ends - but the window closes
@@ -7914,6 +8015,8 @@ fn main() -> anyhow::Result<()> {
             // choices across sessions...
             app.set_export_codec(s.user_settings.default_codec.clone().into());
             app.set_export_quality(s.user_settings.default_quality.clone().into());
+            app.set_export_faststart(s.user_settings.export_faststart);
+            footage_warnings_to_ui(&s, &app);
             if let Some(model_path) = s.user_settings.ai_model_path.as_ref() {
                 app.set_export_model_path(model_path.to_string_lossy().to_string().into());
             }
@@ -8236,6 +8339,7 @@ fn main() -> anyhow::Result<()> {
         let height = app.get_export_height() as u32;
         let codec_str = app.get_export_codec().to_string();
         let quality_str = app.get_export_quality().to_string();
+        let faststart = app.get_export_faststart();
         let blend = app.get_blend_width();
         let blend_flip_direction = app.get_blend_flip_direction();
         let multiband_blend_enabled = app.get_multiband_blend_enabled();
@@ -8367,6 +8471,7 @@ fn main() -> anyhow::Result<()> {
         s.user_settings.default_codec = codec_str.clone();
         s.user_settings.default_quality = quality_str.clone();
         s.user_settings.default_blend_width = blend;
+        s.user_settings.export_faststart = faststart;
         s.user_settings.save();
 
         // Reset cancel flag, start a fresh channel for completion.
@@ -8416,6 +8521,7 @@ fn main() -> anyhow::Result<()> {
                 height,
                 codec_str,
                 quality_str,
+                faststart,
                 blend,
                 blend_flip_direction,
                 multiband_blend_enabled,
@@ -8950,6 +9056,7 @@ fn main() -> anyhow::Result<()> {
                             s.set_sync_offset(r.frames as i32);
                             app.set_sync_offset(r.frames as i32);
                             app.set_cal_dirty(true);
+                            footage_warnings_to_ui(&s, &app);
                             let mut status = format!(
                                 "Sync offset detected: {} frames ({})",
                                 r.frames, r.method
@@ -9592,6 +9699,38 @@ fn start_sync_offset_detection(state: &Rc<RefCell<AppState>>, app_weak: &slint::
     s.sync_offset_log.clear();
 }
 
+/// Push the Export dialog's "set for another recording" banner text.
+fn footage_warnings_to_ui(s: &AppState, app: &RecoApp) {
+    let (roi, sync) = s.footage_warnings();
+    app.set_roi_footage_warning(roi.into());
+    app.set_sync_footage_warning(sync.into());
+}
+
+/// Push the Export dialog banner and, once per recording, a toast when
+/// the loaded setup's ROI or sync offset belongs to another recording -
+/// the usual case when a setup file was copied over from an earlier
+/// match.
+fn notify_footage_warnings(s: &mut AppState, app: &RecoApp) {
+    footage_warnings_to_ui(s, app);
+    let (roi, sync) = s.footage_warnings();
+    let id = s.current_footage_id();
+    if (roi.is_empty() && sync.is_empty()) || id.is_none() || s.footage_warning_shown_for == id {
+        return;
+    }
+    s.footage_warning_shown_for = id;
+    let message = [roi, sync]
+        .into_iter()
+        .filter(|m| !m.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    s.toasts.push(
+        Severity::Warn,
+        "Check this setup",
+        format!("{message} Check it before exporting."),
+    );
+    crate::toast::sync_to_ui(&s.toasts, app);
+}
+
 /// Push the sync-offset progress window's log model from `AppState`.
 fn sync_offset_log_to_ui(s: &AppState, app: &RecoApp) {
     let lines: Vec<slint::SharedString> = s
@@ -9982,6 +10121,7 @@ fn try_init_and_update(state: &Rc<RefCell<AppState>>, app_weak: &slint::Weak<Rec
                 if let Some(cal) = s.calibration.as_ref() {
                     app.set_sync_offset(cal.sync_offset as i32);
                 }
+                notify_footage_warnings(&mut s, &app);
                 app.set_fov(clamped_fov);
                 // Manual calibration JSON does not embed lens-profile info,
                 // so clear the display (hide the lens card) and just show
@@ -10288,7 +10428,27 @@ fn handle_calibration_result(
             if let (Some(app), Some(diag)) = (app_weak.upgrade(), output.imu_diagnostics.as_ref()) {
                 app.set_imu_status_text(diag.summary().into());
             }
-            match state.init_with_calibration(output.calibration) {
+            // Auto-calibration builds a brand-new setup (lenses, topology,
+            // framing, sync offset) and knows nothing about the per-match
+            // extras the user set by hand. Carry those over from the setup
+            // being replaced - otherwise a Re-calibrate silently dropped
+            // the field ROI, goal geometry, AI pitch limits, autocam,
+            // scoreboard and export defaults, and the next save wrote
+            // them away. The ROI is in raw camera space, so it does not
+            // depend on the new geometry.
+            let mut new_cal = output.calibration;
+            if let Some(prev) = state.calibration.as_ref() {
+                new_cal.field_roi = prev.field_roi.clone();
+                new_cal.goal_geometry = prev.goal_geometry.clone();
+                new_cal.autocam_defaults = prev.autocam_defaults.clone();
+                new_cal.autocam_pitch_limits = prev.autocam_pitch_limits;
+                new_cal.scoreboard = prev.scoreboard.clone();
+                new_cal.export_defaults = prev.export_defaults.clone();
+                new_cal.footage_stamps = prev.footage_stamps.clone();
+            }
+            // The sync offset was just detected on this recording.
+            new_cal.footage_stamps.sync_offset = state.current_footage_id();
+            match state.init_with_calibration(new_cal) {
                 Ok(true) => {
                     let fps = state.playback.fps();
                     let total = state.playback.total_frames().unwrap_or(0);

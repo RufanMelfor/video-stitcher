@@ -408,6 +408,14 @@ enum Commands {
         #[arg(long)]
         container: Option<String>,
 
+        /// Plain MP4 only: move the file index (`moov`) to the front
+        /// when the export closes ("Fast Start"), so a web player can
+        /// start before the whole file is downloaded. Rewrites the whole
+        /// output once at the end (minutes for a full match); not needed
+        /// for local playback or uploading. Off by default.
+        #[arg(long)]
+        faststart: bool,
+
         /// Record pre-stitch source frames to this path as a
         /// stacked-video file for later replay or cloud upload.
         /// Requires building with `--features replay`.
@@ -1322,6 +1330,7 @@ fn main() -> anyhow::Result<()> {
             preset,
             max_bitrate,
             container,
+            faststart,
             replay,
             replay_scale,
             allow_no_tracking,
@@ -1385,6 +1394,7 @@ fn main() -> anyhow::Result<()> {
                 preset,
                 max_bitrate,
                 container: container.as_deref(),
+                faststart,
                 replay_path: replay.as_deref(),
                 replay_scale,
                 allow_no_tracking,
