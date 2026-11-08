@@ -1238,6 +1238,74 @@ export component RecoApp inherits Window {
     in-out property <float> export-start-secs: 0.0;
     in-out property <float> export-end-secs: 0.0;
     in-out property <float> clip-duration-secs: 0.0;
+    // Scrubber zoom window - UI-only session state, never persisted.
+    // Mouse wheel over the scrubber zooms around the cursor, Shift+wheel
+    // (or a horizontal trackpad swipe) pans, the "Fit" button resets.
+    // `scrub-zoom-len == 0` means not zoomed: the whole clip is visible.
+    // Everything drawn on the scrubber (slider, export range, cut bands,
+    // playhead) maps seconds through `scrub-view-start/-len`.
+    property <float> scrub-zoom-start: 0.0;
+    property <float> scrub-zoom-len: 0.0;
+    property <bool> scrub-zoomed: scrub-zoom-len > 0 && scrub-zoom-len < clip-duration-secs;
+    property <float> scrub-view-start: scrub-zoomed ? scrub-zoom-start : 0.0;
+    property <float> scrub-view-len: scrub-zoomed ? scrub-zoom-len : max(0.001, clip-duration-secs);
+    // Smallest zoom window, in seconds.
+    property <float> scrub-min-view-secs: 10.0;
+    // Scratch value for scrub-zoom().
+    property <float> scrub-new-len;
+    // Scale the zoom window by `factor` (< 1 zooms in) so that the time
+    // `anchor-secs` stays at `anchor-frac` (0..1) of the scrubber width.
+    // Zooming out to (nearly) the whole clip resets to "not zoomed".
+    function scrub-zoom(anchor-secs: float, anchor-frac: float, factor: float) {
+        if root.clip-duration-secs <= 0 {
+            return;
+        }
+        root.scrub-new-len = clamp(
+            root.scrub-view-len * factor,
+            min(root.scrub-min-view-secs, root.clip-duration-secs),
+            root.clip-duration-secs);
+        if root.scrub-new-len >= root.clip-duration-secs * 0.999 {
+            root.scrub-zoom-start = 0;
+            root.scrub-zoom-len = 0;
+        } else {
+            root.scrub-zoom-start = clamp(
+                anchor-secs - anchor-frac * root.scrub-new-len,
+                0, root.clip-duration-secs - root.scrub-new-len);
+            root.scrub-zoom-len = root.scrub-new-len;
+        }
+    }
+    // Zoom around the playhead (zoom buttons). A playhead outside the
+    // current window is centred.
+    function scrub-zoom-at-playhead(factor: float) {
+        if root.total-frames <= 0 || root.clip-duration-secs <= 0 {
+            return;
+        }
+        root.scrub-zoom(
+            root.current-frame / root.total-frames * root.clip-duration-secs,
+            (root.current-frame / root.total-frames * root.clip-duration-secs - root.scrub-view-start) / root.scrub-view-len < 0
+                || (root.current-frame / root.total-frames * root.clip-duration-secs - root.scrub-view-start) / root.scrub-view-len > 1
+                ? 0.5
+                : (root.current-frame / root.total-frames * root.clip-duration-secs - root.scrub-view-start) / root.scrub-view-len,
+            factor);
+    }
+    // New footage: always start fully zoomed out.
+    changed clip-duration-secs => {
+        root.scrub-zoom-len = 0;
+        root.scrub-zoom-start = 0;
+    }
+    // While zoomed, keep the playhead in view: when it leaves the window
+    // (playback running past the right edge, or a seek elsewhere) page
+    // the window so the playhead sits 10% in from the left.
+    changed current-frame => {
+        if root.scrub-zoomed && root.total-frames > 0 {
+            if root.current-frame < root.scrub-view-start / root.clip-duration-secs * root.total-frames
+                || root.current-frame > (root.scrub-view-start + root.scrub-view-len) / root.clip-duration-secs * root.total-frames {
+                root.scrub-zoom-start = clamp(
+                    root.current-frame / root.total-frames * root.clip-duration-secs - root.scrub-zoom-len * 0.1,
+                    0, root.clip-duration-secs - root.scrub-zoom-len);
+            }
+        }
+    }
     // Time ranges excluded from the export (e.g. a halftime pause) -
     // see `CutRangeItem`. Rust is the source of truth; drag/edit/add/
     // remove all go through the callbacks below rather than mutating
@@ -4738,6 +4806,56 @@ export component RecoApp inherits Window {
             height: 70px;
             background: root.bg-bar;
 
+            // Scrubber zoom buttons, placed in the free bar space left of
+            // the preview column (under the side panel) and vertically
+            // aligned with the scrubber row (padding-top 4px, 20px high).
+            // "-" / "+" zoom around the playhead; "All" shows the whole
+            // clip again. The mouse wheel over the scrubber does the same
+            // around the cursor. Hidden when that space is too narrow.
+            if preview-column.x >= 104px: HorizontalLayout {
+                x: preview-column.x - 96px;
+                y: 4px;
+                width: 92px;
+                height: 20px;
+                spacing: 4px;
+                alignment: end;
+
+                for btn[bi] in [
+                    { label: "All", w: 36px },
+                    { label: "-", w: 22px },
+                    { label: "+", w: 22px },
+                ]: Rectangle {
+                    property <bool> active: root.files-loaded && root.clip-duration-secs > 0
+                        && (bi == 0 ? root.scrub-zoomed
+                            : bi == 1 ? root.scrub-zoomed
+                            : root.scrub-view-len > min(root.scrub-min-view-secs, root.clip-duration-secs) * 1.001);
+                    width: btn.w;
+                    border-radius: 3px;
+                    background: !active ? #ffffff08 : zoom-btn-ta.pressed ? #ffffff40 : zoom-btn-ta.has-hover ? #ffffff30 : #ffffff18;
+                    zoom-btn-ta := TouchArea {
+                        enabled: active;
+                        mouse-cursor: active ? pointer : default;
+                        clicked => {
+                            if bi == 0 {
+                                root.scrub-zoom-start = 0;
+                                root.scrub-zoom-len = 0;
+                            } else if bi == 1 {
+                                root.scrub-zoom-at-playhead(2.0);
+                            } else {
+                                root.scrub-zoom-at-playhead(0.5);
+                            }
+                        }
+                    }
+                    Text {
+                        text: btn.label;
+                        color: active ? #ccc : #555;
+                        font-size: bi == 0 ? 10px : 13px;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+
             Rectangle {
                 x: preview-column.x;
                 width: preview-column.width;
@@ -4763,9 +4881,46 @@ export component RecoApp inherits Window {
                         horizontal-alignment: right;
                     }
 
-                    scrubber-track := Rectangle {
+                    // Outer TouchArea only handles the mouse wheel (zoom /
+                    // pan). Pointer presses and drags go to the children
+                    // (Slider, export handles, cut bands); none of them
+                    // handle scroll, so wheel events bubble up to here.
+                    // `mouse-x` still tracks the cursor while it hovers a
+                    // child, which gives the zoom anchor.
+                    scrubber-track := TouchArea {
                         horizontal-stretch: 1;
                         height: 20px;
+
+                        scroll-event(e) => {
+                            if !root.files-loaded || root.clip-duration-secs <= 0 || self.width <= 0px {
+                                return reject;
+                            }
+                            // Pan: Shift+wheel, or a horizontal trackpad swipe.
+                            if e.delta-x != 0px || e.modifiers.shift {
+                                if root.scrub-zoomed {
+                                    root.scrub-zoom-start = clamp(
+                                        root.scrub-zoom-start - (e.delta-x != 0px ? e.delta-x : e.delta-y) / self.width * root.scrub-zoom-len,
+                                        0, root.clip-duration-secs - root.scrub-zoom-len);
+                                }
+                                return accept;
+                            }
+                            // Zoom around the cursor: the time under the
+                            // mouse stays under the mouse. Same sign as the
+                            // preview zoom: positive delta-y zooms in.
+                            root.scrub-zoom(
+                                root.scrub-view-start + clamp(self.mouse-x / self.width, 0, 1) * root.scrub-view-len,
+                                clamp(self.mouse-x / self.width, 0, 1),
+                                pow(0.8, clamp(e.delta-y / 40px, -3, 3)));
+                            return accept;
+                        }
+
+                    // Clips bands/handles that fall partly outside the zoom
+                    // window (also for hit-testing, so an off-window band
+                    // can't catch clicks next to the scrubber).
+                    Rectangle {
+                        width: 100%;
+                        height: 100%;
+                        clip: true;
 
                         // Export range indicator (green tint) - visual layer
                         // only here, kept below the Slider in z-order like
@@ -4775,9 +4930,9 @@ export component RecoApp inherits Window {
                         // live here.
                         if root.export-start-secs > 0 || root.export-end-secs < root.clip-duration-secs: Rectangle {
                             property <float> start-frac: root.clip-duration-secs > 0
-                                ? root.export-start-secs / root.clip-duration-secs : 0;
+                                ? (root.export-start-secs - root.scrub-view-start) / root.scrub-view-len : 0;
                             property <float> end-frac: root.clip-duration-secs > 0
-                                ? root.export-end-secs / root.clip-duration-secs : 1.0;
+                                ? (root.export-end-secs - root.scrub-view-start) / root.scrub-view-len : 1.0;
 
                             x: parent.width * start-frac;
                             width: parent.width * (end-frac - start-frac);
@@ -4786,10 +4941,14 @@ export component RecoApp inherits Window {
                             border-radius: 2px;
                         }
 
+                        // Slider range = the zoom window in frames, so a
+                        // click or drag is as precise as the zoom level.
                         scrub-slider := Slider {
                             width: 100%;
-                            minimum: 0;
-                            maximum: root.total-frames == 0 ? 1.0 : 1.0 * root.total-frames;
+                            minimum: root.total-frames == 0 || root.clip-duration-secs <= 0 ? 0.0
+                                : root.scrub-view-start / root.clip-duration-secs * root.total-frames;
+                            maximum: root.total-frames == 0 || root.clip-duration-secs <= 0 ? 1.0
+                                : (root.scrub-view-start + root.scrub-view-len) / root.clip-duration-secs * root.total-frames;
                             value: 1.0 * root.current-frame;
                             enabled: root.files-loaded;
                             released(val) => {
@@ -4813,9 +4972,9 @@ export component RecoApp inherits Window {
                             // (unsized-on-first-layout-pass gotcha).
                             property <length> track-width: parent.width;
                             property <float> start-frac: root.clip-duration-secs > 0
-                                ? root.export-start-secs / root.clip-duration-secs : 0;
+                                ? (root.export-start-secs - root.scrub-view-start) / root.scrub-view-len : 0;
                             property <float> end-frac: root.clip-duration-secs > 0
-                                ? root.export-end-secs / root.clip-duration-secs : 1.0;
+                                ? (root.export-end-secs - root.scrub-view-start) / root.scrub-view-len : 1.0;
 
                             x: track-width * start-frac;
                             width: track-width * (end-frac - start-frac);
@@ -4833,7 +4992,7 @@ export component RecoApp inherits Window {
                                     moved => {
                                         if self.pressed && track-width > 0px {
                                             root.export-start-secs = max(0, min(
-                                                root.export-start-secs + (self.mouse-x - self.pressed-x) / track-width * root.clip-duration-secs,
+                                                root.export-start-secs + (self.mouse-x - self.pressed-x) / track-width * root.scrub-view-len,
                                                 root.export-end-secs - 0.2));
                                         }
                                     }
@@ -4849,7 +5008,7 @@ export component RecoApp inherits Window {
                                     moved => {
                                         if self.pressed && track-width > 0px {
                                             root.export-end-secs = min(root.clip-duration-secs, max(
-                                                root.export-end-secs + (self.mouse-x - self.pressed-x) / track-width * root.clip-duration-secs,
+                                                root.export-end-secs + (self.mouse-x - self.pressed-x) / track-width * root.scrub-view-len,
                                                 root.export-start-secs + 0.2));
                                         }
                                     }
@@ -4871,8 +5030,8 @@ export component RecoApp inherits Window {
                             // model/rebuild cycle on every mouse move.
                             property <float> preview-start: range.start-secs;
                             property <float> preview-end: range.end-secs;
-                            // Captured from `parent` (scrubber-track, our
-                            // direct parent) rather than a named
+                            // Captured from `parent` (the clip rectangle,
+                            // our direct parent) rather than a named
                             // cross-reference to `scrubber-track` itself -
                             // matches the export-range indicator's own
                             // `parent.width` use just above. A named
@@ -4884,9 +5043,9 @@ export component RecoApp inherits Window {
                             // user, not assumed.
                             property <length> track-width: parent.width;
                             property <float> start-frac: root.clip-duration-secs > 0
-                                ? preview-start / root.clip-duration-secs : 0;
+                                ? (preview-start - root.scrub-view-start) / root.scrub-view-len : 0;
                             property <float> end-frac: root.clip-duration-secs > 0
-                                ? preview-end / root.clip-duration-secs : 0;
+                                ? (preview-end - root.scrub-view-start) / root.scrub-view-len : 0;
 
                             x: track-width * start-frac;
                             width: max(4px, track-width * (end-frac - start-frac));
@@ -4914,7 +5073,7 @@ export component RecoApp inherits Window {
                                 moved => {
                                     if self.pressed && track-width > 0px {
                                         preview-start = max(0,
-                                            range.start-secs + (self.mouse-x - self.pressed-x) / track-width * root.clip-duration-secs);
+                                            range.start-secs + (self.mouse-x - self.pressed-x) / track-width * root.scrub-view-len);
                                         preview-end = preview-start + (range.end-secs - range.start-secs);
                                     }
                                 }
@@ -4935,7 +5094,7 @@ export component RecoApp inherits Window {
                                     moved => {
                                         if self.pressed && track-width > 0px {
                                             preview-start = max(0, min(
-                                                range.start-secs + (self.mouse-x - self.pressed-x) / track-width * root.clip-duration-secs,
+                                                range.start-secs + (self.mouse-x - self.pressed-x) / track-width * root.scrub-view-len,
                                                 preview-end - 0.2));
                                         }
                                     }
@@ -4956,7 +5115,7 @@ export component RecoApp inherits Window {
                                     moved => {
                                         if self.pressed && track-width > 0px {
                                             preview-end = min(root.clip-duration-secs, max(
-                                                range.end-secs + (self.mouse-x - self.pressed-x) / track-width * root.clip-duration-secs,
+                                                range.end-secs + (self.mouse-x - self.pressed-x) / track-width * root.scrub-view-len,
                                                 preview-start + 0.2));
                                         }
                                     }
@@ -4973,9 +5132,13 @@ export component RecoApp inherits Window {
                         // no TouchArea - mouse input reaches the Slider
                         // underneath). Same geometry as the Fluent Slider
                         // thumb (20px, x clamped to width - 20px), so it
-                        // sits exactly on top of the real one.
-                        if root.cut-ranges.length > 0: Rectangle {
+                        // sits exactly on top of the real one. Greyed out
+                        // while the playhead is outside the zoom window
+                        // (it is then parked at the nearest edge).
+                        if root.cut-ranges.length > 0 || root.scrub-zoomed: Rectangle {
                             property <float> span: scrub-slider.maximum - scrub-slider.minimum;
+                            property <bool> outside: scrub-slider.value < scrub-slider.minimum
+                                || scrub-slider.value > scrub-slider.maximum;
                             x: span > 0
                                 ? clamp((parent.width - 20px) * (scrub-slider.value - scrub-slider.minimum) / span, 0px, parent.width - 20px)
                                 : 0px;
@@ -4990,9 +5153,25 @@ export component RecoApp inherits Window {
                                 width: 12px;
                                 height: 12px;
                                 border-radius: 6px;
-                                background: Palette.accent-background;
+                                background: outside ? #808080 : Palette.accent-background;
                             }
                         }
+
+                        // Zoom overview: thin line along the bottom edge,
+                        // the bright part is the visible window within the
+                        // whole clip.
+                        if root.scrub-zoomed: Rectangle {
+                            y: parent.height - 2px;
+                            height: 2px;
+                            background: #ffffff20;
+                            Rectangle {
+                                x: parent.width * root.scrub-view-start / root.clip-duration-secs;
+                                width: max(4px, parent.width * root.scrub-view-len / root.clip-duration-secs);
+                                height: parent.height;
+                                background: #ffffffc0;
+                            }
+                        }
+                    }
                     }
 
                     Text {
