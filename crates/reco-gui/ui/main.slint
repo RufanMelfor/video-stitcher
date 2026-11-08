@@ -4786,7 +4786,7 @@ export component RecoApp inherits Window {
                             border-radius: 2px;
                         }
 
-                        Slider {
+                        scrub-slider := Slider {
                             width: 100%;
                             minimum: 0;
                             maximum: root.total-frames == 0 ? 1.0 : 1.0 * root.total-frames;
@@ -4858,10 +4858,12 @@ export component RecoApp inherits Window {
                         }
 
                         // Cut-range bands (reddish, draggable) - drawn on top
-                        // of the slider so their handles/body stay grabbable;
-                        // this deliberately shadows click-to-seek under a
-                        // band, same trade-off ordinary video editors make
-                        // for in/out markers on the scrubber.
+                        // of the slider, but only the edge handles and a thin
+                        // grip strip along the top edge take the mouse. The
+                        // rest of the band lets clicks fall through to the
+                        // Slider, so the playhead can still be grabbed or
+                        // click-seeked inside a cut range (it used to get
+                        // stuck under a band once it moved into one).
                         for range[i] in root.cut-ranges: Rectangle {
                             // Local live-drag preview - only committed to
                             // Rust (root.cut-range-update) on release, so a
@@ -4889,13 +4891,25 @@ export component RecoApp inherits Window {
                             x: track-width * start-frac;
                             width: max(4px, track-width * (end-frac - start-frac));
                             height: parent.height;
-                            background: cut-body.has-hover ? #d9503aa0 : #cc4a3380;
+                            background: cut-body.has-hover || cut-body.pressed ? #d9503aa0 : #cc4a3380;
                             border-width: 1px;
                             border-color: #ffffff40;
                             border-radius: 2px;
                             clip: false;
 
+                            // Grip strip: the only part of the band body
+                            // that moves the whole range. Brighter so it
+                            // reads as a handle.
+                            Rectangle {
+                                y: 0px;
+                                height: 6px;
+                                border-radius: 2px;
+                                background: cut-body.has-hover || cut-body.pressed ? #ffffffa0 : #ffffff40;
+                            }
+
                             cut-body := TouchArea {
+                                y: 0px;
+                                height: 6px;
                                 mouse-cursor: self.pressed ? grabbing : grab;
                                 moved => {
                                     if self.pressed && track-width > 0px {
@@ -4952,6 +4966,31 @@ export component RecoApp inherits Window {
                                         }
                                     }
                                 }
+                            }
+                        }
+
+                        // Playhead drawn above the cut bands (visual only,
+                        // no TouchArea - mouse input reaches the Slider
+                        // underneath). Same geometry as the Fluent Slider
+                        // thumb (20px, x clamped to width - 20px), so it
+                        // sits exactly on top of the real one.
+                        if root.cut-ranges.length > 0: Rectangle {
+                            property <float> span: scrub-slider.maximum - scrub-slider.minimum;
+                            x: span > 0
+                                ? clamp((parent.width - 20px) * (scrub-slider.value - scrub-slider.minimum) / span, 0px, parent.width - 20px)
+                                : 0px;
+                            y: (parent.height - 20px) / 2;
+                            width: 20px;
+                            height: 20px;
+                            border-radius: 10px;
+                            background: #454545;
+                            border-width: 1px;
+                            border-color: #ffffff30;
+                            Rectangle {
+                                width: 12px;
+                                height: 12px;
+                                border-radius: 6px;
+                                background: Palette.accent-background;
                             }
                         }
                     }
