@@ -219,17 +219,27 @@ impl StitchSession {
     /// is active and the detector actually deferred its inference call
     /// (see [`Self::run_detection_frames_maybe_async`]) - the caller
     /// resolves it later, right before the frame is consumed, via
-    /// [`Self::resolve_pending_world_state`].
+    /// [`Self::try_resolve_buffered`].
+    ///
+    /// `defer_tracking` must be true while an earlier buffered frame is
+    /// still unresolved: the frame is then returned as
+    /// [`PendingWorldState::Deferred`] instead of being tracked now, so
+    /// the stateful trackers never see a later frame before an earlier
+    /// one's detections. (Tracking it immediately fed the trackers the
+    /// detections of a frame a whole lookahead window old, flipping the
+    /// ball between its current and a stale position frame to frame.)
     pub(crate) fn detect_and_track_only(
         &mut self,
         frame: &StereoFrame,
         elapsed: std::time::Duration,
         produce_index: u64,
+        defer_tracking: bool,
     ) -> Result<super::frame_buffer::PendingWorldState, SessionError> {
         use super::frame_buffer::PendingWorldState;
 
         let mut went_async = false;
-        if self.core.detection_due(produce_index) {
+        let due = self.core.detection_due(produce_index);
+        if due {
             match frame {
                 #[cfg(target_os = "linux")]
                 StereoFrame::GpuResident {
@@ -330,6 +340,12 @@ impl StitchSession {
         if went_async {
             return Ok(PendingWorldState::Pending(produce_index));
         }
+        if defer_tracking {
+            return Ok(PendingWorldState::Deferred {
+                produce_index,
+                detections: due.then(|| self.core.last_detections().to_vec()),
+            });
+        }
         Ok(PendingWorldState::Ready(
             self.core
                 .track_only(produce_index, elapsed.as_secs_f64() * 1000.0),
@@ -426,41 +442,95 @@ impl StitchSession {
         true
     }
 
-    /// Resolve a produce index's still-[`Pending`](super::frame_buffer::PendingWorldState::Pending)
-    /// detection: block for the async worker's result (FIFO submission
-    /// order guarantees it's this exact index - see
-    /// [`crate::async_detect`]'s ordering guarantee), apply the
-    /// `finish` closure stashed by
-    /// [`Self::run_detection_frames_maybe_async`], map to panorama
-    /// coordinates, feed the tracker, and return the resulting
-    /// `WorldState` + panorama-mapped detections. Called from
-    /// `run_loop::run_panner_once` right before a frame is consumed -
-    /// never while it's still just sitting in the lookahead buffer.
-    pub(crate) fn resolve_pending_world_state(
+    /// Track one not-yet-[`Ready`](super::frame_buffer::PendingWorldState::Ready)
+    /// buffered frame, turning it `Ready` and filling its panorama-mapped
+    /// `detections`. The caller guarantees every earlier frame is already
+    /// tracked (the trackers are stateful and must see frames in order).
+    ///
+    /// - `Pending`: take the async worker's result (FIFO submission order
+    ///   guarantees it's this exact index - see [`crate::async_detect`]),
+    ///   apply the `finish` closure stashed by
+    ///   [`Self::run_detection_frames_maybe_async`], map, then track.
+    ///   With `blocking == false` and no result available yet, nothing
+    ///   changes and `false` is returned.
+    /// - `Deferred`: apply its own synchronous detections if it has any,
+    ///   else reuse the latest ones (as the synchronous path does on
+    ///   frames without a detection pass), then track.
+    ///
+    /// Returns `true` once the frame is `Ready`.
+    pub(crate) fn try_resolve_buffered(
         &mut self,
-        produce_index: u64,
-        timestamp_ms: f64,
-    ) -> (
-        crate::detect::tracker::WorldState,
-        Vec<crate::detect::director::MappedDetection>,
-    ) {
-        let raw = match self.async_detect.as_ref().and_then(|a| a.recv()) {
-            Some(result) => {
-                debug_assert_eq!(
-                    result.produce_index, produce_index,
-                    "async detect result out of order - FIFO guarantee violated"
-                );
-                result.detections
+        frame: &mut super::frame_buffer::BufferedFrame,
+        blocking: bool,
+    ) -> bool {
+        use super::frame_buffer::PendingWorldState;
+
+        let produce_index = match &mut frame.world_state {
+            PendingWorldState::Ready(_) => return true,
+            PendingWorldState::Pending(produce_index) => {
+                let produce_index = *produce_index;
+                let result = match self.async_detect.as_ref() {
+                    Some(a) if blocking => a.recv(),
+                    Some(a) => match a.try_recv() {
+                        Some(r) => Some(r),
+                        None => return false,
+                    },
+                    None => None,
+                };
+                let raw = match result {
+                    Some(result) => {
+                        debug_assert_eq!(
+                            result.produce_index, produce_index,
+                            "async detect result out of order - FIFO guarantee violated"
+                        );
+                        result.detections
+                    }
+                    None => Vec::new(), // worker unavailable/died - degrade to no detections
+                };
+                let finished = match self.pending_finishers.remove(&produce_index) {
+                    Some(finish) => finish(raw),
+                    None => raw,
+                };
+                self.core.set_detections_from_raw(finished);
+                produce_index
             }
-            None => Vec::new(), // worker unavailable/died - degrade to no detections
+            PendingWorldState::Deferred {
+                produce_index,
+                detections,
+            } => {
+                if let Some(dets) = detections.take() {
+                    self.core.last_detections = dets;
+                }
+                *produce_index
+            }
         };
-        let finished = match self.pending_finishers.remove(&produce_index) {
-            Some(finish) => finish(raw),
-            None => raw,
-        };
-        self.core.set_detections_from_raw(finished);
-        let world_state = self.core.track_only(produce_index, timestamp_ms);
-        (world_state, self.core.last_detections().to_vec())
+        let world_state = self.core.track_only(produce_index, frame.elapsed_ms);
+        frame.detections = self.core.last_detections().to_vec();
+        frame.world_state = PendingWorldState::Ready(world_state);
+        true
+    }
+
+    /// Track every buffered frame that can be tracked right now, oldest
+    /// first, without blocking: stops at the first `Pending` frame whose
+    /// async result has not arrived yet. Keeps the trackers running
+    /// ahead of the panner, so the lookahead window holds real future
+    /// world states instead of copies of the last resolved one.
+    pub(crate) fn resolve_available(&mut self, buffer: &mut super::frame_buffer::FrameBuffer) {
+        let mut latest = None;
+        for frame in buffer.frames_mut() {
+            if frame.world_state.is_ready() {
+                continue;
+            }
+            if !self.try_resolve_buffered(frame, false) {
+                break;
+            }
+            if let super::frame_buffer::PendingWorldState::Ready(ref ws) = frame.world_state {
+                latest = Some(ws.clone());
+            }
+        }
+        if let Some(ws) = latest {
+            buffer.set_last_resolved(ws);
+        }
     }
 
     /// Allocate the NVMM detection surfaces for the Jetson zero-copy path.

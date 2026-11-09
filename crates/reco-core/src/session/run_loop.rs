@@ -419,18 +419,21 @@ impl StitchSession {
             // so detection can use the staged textures.
             let vram_slot = session.copy_to_vram_pool(&frame, *produce_count)?;
 
-            let world_state = session.detect_and_track_only(&frame, elapsed, *produce_count)?;
+            // Track whatever async results have arrived first, so this
+            // frame only has to wait when an earlier one really is
+            // still in flight.
+            session.resolve_available(buffer);
+            let defer_tracking = buffer.has_unresolved();
+            let world_state =
+                session.detect_and_track_only(&frame, elapsed, *produce_count, defer_tracking)?;
             // `last_detections` only reflects *this* produce index when
-            // detection resolved synchronously - a `Pending` entry's
-            // real detections aren't known yet (still in flight on the
-            // async detect thread) and get filled in later by
-            // `run_panner_once`'s resolution step, right before this
-            // frame is actually consumed.
-            let detections = match world_state {
-                super::frame_buffer::PendingWorldState::Ready(_) => {
-                    session.core.last_detections().to_vec()
-                }
-                super::frame_buffer::PendingWorldState::Pending(_) => Vec::new(),
+            // the frame was tracked right away - a `Pending`/`Deferred`
+            // entry's detections are filled in when it is resolved
+            // (`try_resolve_buffered`).
+            let detections = if world_state.is_ready() {
+                session.core.last_detections().to_vec()
+            } else {
+                Vec::new()
             };
 
             // Detection has now read the decode slot; it is safe to hand
@@ -448,6 +451,7 @@ impl StitchSession {
             });
 
             *produce_count += 1;
+            session.resolve_available(buffer);
             Ok(true)
         };
 
@@ -495,32 +499,37 @@ impl StitchSession {
         )>,
                                panner_frame_idx: &mut u64| {
             if let Some(mut frame) = buffer.pop() {
-                // This is the resolution point for a still-`Pending`
-                // frame: it's about to be consumed by the panner, so
-                // its detections can no longer be deferred. FIFO
-                // submission order guarantees this is the async
-                // thread's next result - see
-                // `resolve_pending_world_state`'s doc comment.
-                let resolved = match frame.world_state {
-                    super::frame_buffer::PendingWorldState::Ready(ws) => ws,
-                    super::frame_buffer::PendingWorldState::Pending(produce_index) => {
-                        let (ws, detections) =
-                            session.resolve_pending_world_state(produce_index, frame.elapsed_ms);
-                        frame.detections = detections;
-                        ws
+                // Last resolution point for a frame not tracked yet: it
+                // is about to be consumed by the panner, so wait for its
+                // async result if needed. It is the oldest frame, so
+                // every earlier one is already tracked - see
+                // `try_resolve_buffered`. Only a frame resolved here is
+                // newer than the buffer's fallback; a frame that was
+                // already `Ready` may be older than what
+                // `resolve_available` has tracked since.
+                if !frame.world_state.is_ready() {
+                    session.try_resolve_buffered(&mut frame, true);
+                    if let super::frame_buffer::PendingWorldState::Ready(ref ws) = frame.world_state
+                    {
+                        buffer.set_last_resolved(ws.clone());
                     }
+                }
+                // Anything that arrived meanwhile becomes real future
+                // context for this decision.
+                session.resolve_available(buffer);
+                let super::frame_buffer::PendingWorldState::Ready(ref resolved) = frame.world_state
+                else {
+                    unreachable!("try_resolve_buffered(blocking) always leaves the frame Ready")
                 };
-                buffer.set_last_resolved(resolved.clone());
 
                 let futures = buffer.future_world_states();
                 let pose = session.core.decide_pose_with_lookahead(
-                    &resolved,
+                    resolved,
                     &futures,
                     *panner_frame_idx,
                     frame.elapsed_ms,
                 );
                 *panner_frame_idx += 1;
-                frame.world_state = super::frame_buffer::PendingWorldState::Ready(resolved);
                 pose_queue.push_back((frame, pose));
                 true
             } else {
@@ -644,7 +653,7 @@ impl StitchSession {
 
         // Any produce index still in `pending_finishers` here had its
         // async detection job submitted (`run_detection_frames_maybe_async`)
-        // but was discarded above before `resolve_pending_world_state` ever
+        // but was discarded above before `try_resolve_buffered` ever
         // consumed its result - it was still sitting in `buffer`, never
         // reached by the panner, when `frame_limit` cut this window off.
         // `async_detect`/`pending_finishers` both persist on `self` across
@@ -652,7 +661,7 @@ impl StitchSession {
         // see `reco_io::cut_range`), and each new window restarts produce
         // indices at 0, so a leftover unconsumed result sitting in the
         // async channel here would be handed to the NEXT window's
-        // `resolve_pending_world_state` calls instead of its own - silently
+        // `try_resolve_buffered` calls instead of its own - silently
         // misattributed detections in a release build (the ordering check
         // there is only a `debug_assert!`), and once enough of these draw
         // down a FIFO budget that can never be topped back up, an outright

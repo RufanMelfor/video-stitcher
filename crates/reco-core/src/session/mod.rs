@@ -199,7 +199,7 @@ pub struct StitchSession {
     /// Post-processing closures for produce indices whose detection is
     /// still in flight on `async_detect`, keyed by produce index.
     /// Applied once that index's result comes back - see
-    /// `resolve_pending_world_state` in `detection_dispatch.rs`.
+    /// `try_resolve_buffered` in `detection_dispatch.rs`.
     pub(crate) pending_finishers: std::collections::HashMap<u64, crate::detect::detector::FinishFn>,
 }
 
