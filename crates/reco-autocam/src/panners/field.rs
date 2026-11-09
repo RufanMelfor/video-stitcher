@@ -734,9 +734,25 @@ impl FieldPanner {
     /// smoothing or internal state, else the live ball, else None. Used
     /// to estimate where the action is heading for the lookahead lead, so
     /// it must mirror the framing the real target uses: the action
-    /// centroid (edge-pushed, pitch-biased) or the frame-all bbox
-    /// midpoint.
+    /// centroid (edge-pushed, pitch-biased) blended toward a live ball by
+    /// `ball_weight`, or the frame-all bbox midpoint.
+    ///
+    /// The ball blend matters most when the ball breaks away from the
+    /// players: without it the lead only saw the cluster, so a ball
+    /// heading for goal (one the detector catches only briefly) was not
+    /// anticipated at all.
     fn raw_target(&self, world: &WorldState) -> Option<(f32, f32)> {
+        let live_ball = world
+            .ball
+            .as_ref()
+            .filter(|b| !matches!(b.state, TrackState::Lost));
+        let blend_ball = |(y, p): (f32, f32)| -> (f32, f32) {
+            let w = self.config.ball_weight;
+            match live_ball {
+                Some(b) if w > 0.0 => (y * (1.0 - w) + b.yaw * w, p * (1.0 - w) + b.pitch * w),
+                _ => (y, p),
+            }
+        };
         let points = self.to_points(&world.players);
         match self.config.framing {
             FramingMode::Action => {
@@ -753,10 +769,10 @@ impl FieldPanner {
                     if total > 0.0 {
                         let cy = core.iter().map(|(y, _, c)| y * weight(*c)).sum::<f32>() / total;
                         let cp = core.iter().map(|(_, p, c)| p * weight(*c)).sum::<f32>() / total;
-                        return Some((
+                        return Some(blend_ball((
                             cy * (1.0 + self.config.edge_push),
                             cp + self.config.pitch_bias,
-                        ));
+                        )));
                     }
                 }
             }
@@ -768,11 +784,7 @@ impl FieldPanner {
                 }
             }
         }
-        world
-            .ball
-            .as_ref()
-            .filter(|b| !matches!(b.state, TrackState::Lost))
-            .map(|b| (b.yaw, b.pitch))
+        live_ball.map(|b| (b.yaw, b.pitch))
     }
 }
 
@@ -1576,6 +1588,53 @@ mod tests {
             "lead should push the aim toward the future cluster: no-lead {} vs lead {}",
             out_no.yaw,
             out_la.yaw
+        );
+    }
+
+    #[test]
+    fn lead_anticipates_ball_breaking_away_from_cluster() {
+        // Players stay put; only the ball in the future window heads off
+        // to one side (a breakaway). The lead must see it.
+        let cal = cal();
+        let players = vec![
+            player(0.0, 0.0, 1),
+            player(0.02, 0.0, 2),
+            player(-0.02, 0.0, 3),
+        ];
+        let cur = WorldState {
+            ball: Some(ball(0.0, 0.0)),
+            players: players.clone(),
+        };
+        let fut = WorldState {
+            ball: Some(ball(-0.5, 0.0)),
+            players,
+        };
+        let cfg = FieldPannerConfig {
+            lookahead_reactivity: 1.0,
+            lead_gain: 1.0,
+            dead_zone_rad: 0.0,
+            ball_weight: 0.8,
+            ..Default::default()
+        };
+        let mut no_future = FieldPanner::with_config(30.0, cfg.clone());
+        let mut with_future = FieldPanner::with_config(30.0, cfg);
+        // Same (lookahead) damping profile for both; only the future
+        // window's ball differs.
+        let mut out_no =
+            no_future.decide_with_lookahead(&cur, std::slice::from_ref(&cur), &ctx(0, &cal));
+        let mut out_la =
+            with_future.decide_with_lookahead(&cur, std::slice::from_ref(&fut), &ctx(0, &cal));
+        for i in 1..20 {
+            out_no =
+                no_future.decide_with_lookahead(&cur, std::slice::from_ref(&cur), &ctx(i, &cal));
+            out_la =
+                with_future.decide_with_lookahead(&cur, std::slice::from_ref(&fut), &ctx(i, &cal));
+        }
+        assert!(
+            out_la.yaw < out_no.yaw - 0.01,
+            "lead should anticipate the ball's future position: {} vs {}",
+            out_la.yaw,
+            out_no.yaw
         );
     }
 
