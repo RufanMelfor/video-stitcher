@@ -13,20 +13,37 @@ use crate::detect::tracker::WorldState;
 use crate::source::StereoFrame;
 
 /// A [`BufferedFrame`]'s detection/tracking state - either resolved
-/// (today's fully-synchronous behavior) or still in flight on an
-/// [`crate::async_detect::AsyncDetectThread`], resolved lazily right
-/// before the frame is actually consumed (see
-/// `run_loop::run_panner_once`'s resolution step, and
-/// `detection_dispatch::resolve_pending_world_state`).
+/// (today's fully-synchronous behavior) or waiting to be tracked.
+///
+/// The trackers are stateful, so frames must reach them in produce
+/// order. With async detect a frame whose detection is still in flight
+/// is [`Pending`](Self::Pending); every later frame is then
+/// [`Deferred`](Self::Deferred) until the earlier ones resolve, rather
+/// than tracked immediately against detections that are a whole
+/// lookahead window old. Resolution happens in order, eagerly as async
+/// results arrive and at the latest right before the panner consumes
+/// the frame - see `detection_dispatch::try_resolve_buffered` and
+/// `resolve_available`.
 #[derive(Clone)]
 pub(crate) enum PendingWorldState {
-    /// Detection already ran synchronously (async disabled, or this
-    /// frame's detector call didn't split) - the value every session
-    /// produced before async detect existed.
+    /// Tracked - the value every session produced before async detect
+    /// existed.
     Ready(WorldState),
     /// Detection submitted to the async thread under this produce
     /// index; not resolved yet.
     Pending(u64),
+    /// No async job of its own, but an earlier frame was still
+    /// unresolved at produce time, so tracking must wait for it.
+    Deferred {
+        /// Produce index (the tracker's frame index).
+        produce_index: u64,
+        /// Detections this frame produced synchronously (a due frame
+        /// whose detector call did not split), applied right before it
+        /// is tracked. `None` for a frame with no detection pass, which
+        /// reuses the latest detections exactly as the synchronous
+        /// path does.
+        detections: Option<Vec<MappedDetection>>,
+    },
 }
 
 impl PendingWorldState {
@@ -39,8 +56,13 @@ impl PendingWorldState {
     fn resolved_or(&self, fallback: &WorldState) -> WorldState {
         match self {
             PendingWorldState::Ready(ws) => ws.clone(),
-            PendingWorldState::Pending(_) => fallback.clone(),
+            PendingWorldState::Pending(_) | PendingWorldState::Deferred { .. } => fallback.clone(),
         }
+    }
+
+    /// Whether this frame has been tracked.
+    pub(crate) fn is_ready(&self) -> bool {
+        matches!(self, PendingWorldState::Ready(_))
     }
 }
 
@@ -93,6 +115,19 @@ impl FrameBuffer {
 
     pub fn len(&self) -> usize {
         self.frames.len()
+    }
+
+    /// Whether any buffered frame is still waiting to be tracked. A new
+    /// frame produced while this is true must be deferred so the
+    /// trackers keep seeing frames in produce order.
+    pub fn has_unresolved(&self) -> bool {
+        self.frames.iter().any(|f| !f.world_state.is_ready())
+    }
+
+    /// Mutable access to the buffered frames, oldest first - for the
+    /// in-order resolution pass.
+    pub fn frames_mut(&mut self) -> impl Iterator<Item = &mut BufferedFrame> {
+        self.frames.iter_mut()
     }
 
     pub fn is_full(&self) -> bool {
@@ -267,6 +302,36 @@ mod tests {
         });
         let futures = buf.future_world_states();
         assert!((futures[0].ball.as_ref().unwrap().yaw - 0.42).abs() < 1e-6);
+    }
+
+    #[test]
+    fn deferred_frame_falls_back_and_counts_as_unresolved() {
+        let mut buf = FrameBuffer::new(5);
+        buf.push(make_frame(0.1));
+        assert!(!buf.has_unresolved(), "only Ready frames");
+        let mut f = make_frame(0.0);
+        f.world_state = PendingWorldState::Deferred {
+            produce_index: 1,
+            detections: None,
+        };
+        buf.push(f);
+        assert!(buf.has_unresolved());
+        buf.set_last_resolved(WorldState {
+            ball: Some(TrackedEntity {
+                id: 0,
+                class_id: 0,
+                yaw: 0.77,
+                pitch: 0.0,
+                confidence: 0.5,
+                state: TrackState::Tracking,
+                age_frames: 1,
+                origin: crate::geometry::CameraId::Left,
+            }),
+            players: vec![],
+        });
+        let futures = buf.future_world_states();
+        assert!((futures[0].ball.as_ref().unwrap().yaw - 0.1).abs() < 1e-6);
+        assert!((futures[1].ball.as_ref().unwrap().yaw - 0.77).abs() < 1e-6);
     }
 
     #[test]
