@@ -244,6 +244,10 @@ pub struct BallTracker {
     /// Ceiling on how far (radians) a coasting position may drift from
     /// the last measurement.
     coast_carry_max_rad: f32,
+    /// Velocity (rad/tick) carried over a reacquisition that matched the
+    /// coast-carry prediction, used until the fresh history is long
+    /// enough for its own fit. See the reacquisition step in `update`.
+    inherited_velocity: Option<(f32, f32)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -281,6 +285,7 @@ impl BallTracker {
             coast_carry_tau_ticks: 0.0,
             coast_carry_window_ticks: 2,
             coast_carry_max_rad: 0.0,
+            inherited_velocity: None,
         }
     }
 
@@ -328,13 +333,17 @@ impl BallTracker {
     /// confidence detection at -0.21 came last; a least-squares fit
     /// turned the carry around and moved the ball back.
     fn fitted_line(&self, at: u64) -> Option<((f32, f32), (f32, f32))> {
-        if self.history.len() < 3 {
-            return None;
-        }
         let first = self.history.front()?.0;
         let newest = self.history.back()?.0;
-        if ((newest - first) as f32) < self.coast_carry_window_ticks as f32 / 3.0 {
-            return None;
+        if self.history.len() < 3
+            || ((newest - first) as f32) < self.coast_carry_window_ticks as f32 / 3.0
+        {
+            // Too little fresh history: fall back to a velocity carried
+            // over from before the reacquisition, through the newest fix.
+            let (vy, vp) = self.inherited_velocity?;
+            let &(t, y, p) = self.history.back()?;
+            let dt = at as f32 - t as f32;
+            return Some(((vy, vp), (y + vy * dt, p + vp * dt)));
         }
         let h: Vec<(f32, f32, f32)> = self
             .history
@@ -877,7 +886,26 @@ impl Tracker for BallTracker {
             // (or a jump the old samples cannot explain): fit fresh. A
             // short gap - one missed detection pass - keeps the history,
             // otherwise every flicker would reset the velocity.
+            //
+            // Exception: a reacquisition that lands where the carry
+            // predicted is the same run continuing, so its velocity is
+            // kept until the fresh history can be fitted on its own.
+            // Measured on a breakaway (2026-11-10): the ball was seen
+            // once more at the end of the carry, then lost for good while
+            // the attacker ran on toward the goal; restarting from zero
+            // velocity froze the ball there and the camera stopped short
+            // of the goal.
             if was_new_track || u64::from(coasted) > self.coast_carry_window_ticks {
+                self.inherited_velocity = prediction.and_then(|(py, pp, gate)| {
+                    let d = ((pos.yaw - py).powi(2) + (pos.pitch - pp).powi(2)).sqrt();
+                    if was_new_track || d > gate {
+                        return None;
+                    }
+                    self.last
+                        .as_ref()
+                        .and_then(|l| self.fitted_line(l.tick))
+                        .map(|(v, _)| v)
+                });
                 self.history.clear();
             }
             self.push_history(pos.yaw, pos.pitch);
@@ -960,6 +988,7 @@ impl Tracker for BallTracker {
                 // not jump back.
                 let carried = self.last.as_ref().map(|l| self.carried_position(l));
                 self.history.clear();
+                self.inherited_velocity = None;
                 if let Some(last) = self.last.take() {
                     let (yaw, pitch) = carried.unwrap_or((last.yaw, last.pitch));
                     log::info!(
@@ -1019,6 +1048,7 @@ impl Tracker for BallTracker {
         self.coaster.reset();
         self.last = None;
         self.history.clear();
+        self.inherited_velocity = None;
         self.current_players.clear();
         self.age_frames = 0;
         self.tick = 0;
@@ -1806,6 +1836,56 @@ mod tests {
         );
         assert_eq!(out[0].state, TrackState::Tracking);
         assert!((out[0].yaw - (last + 0.07)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn coast_carry_keeps_the_run_velocity_over_an_on_course_reacquisition() {
+        // Run, lose the ball for longer than the fit window, see it once
+        // where the carry predicted, lose it again: the second coast must
+        // keep going the same way instead of freezing on that one fix.
+        let (mut t, _) = carry_tracker_after_run(-0.004, 40);
+        let mut out = Vec::new();
+        for _ in 0..40 {
+            out = t.update(&[], 0.0);
+        }
+        let predicted = out[0].yaw;
+        let fix = predicted - 0.01;
+        let out = t.update(&[det(CameraId::Right, fix, 0.1, 0.38, 0.5, 0.5)], 0.0);
+        assert_eq!(
+            out[0].state,
+            TrackState::Tracking,
+            "on-course weak fix is accepted"
+        );
+        let mut out = Vec::new();
+        for _ in 0..30 {
+            out = t.update(&[], 0.0);
+        }
+        assert!(
+            out[0].yaw < fix - 0.03,
+            "carry continues past the reacquired fix, got {} vs {fix}",
+            out[0].yaw
+        );
+    }
+
+    #[test]
+    fn coast_carry_does_not_inherit_velocity_over_an_off_course_reacquisition() {
+        // A confident fix far off the predicted course is a new situation:
+        // no inherited velocity, the ball holds there.
+        let (mut t, last) = carry_tracker_after_run(-0.004, 40);
+        for _ in 0..40 {
+            t.update(&[], 0.0);
+        }
+        let fix = last + 0.15;
+        t.update(&[det(CameraId::Right, fix, 0.1, 0.8, 0.5, 0.5)], 0.0);
+        let mut out = Vec::new();
+        for _ in 0..30 {
+            out = t.update(&[], 0.0);
+        }
+        assert!(
+            (out[0].yaw - fix).abs() < 1e-6,
+            "holds at the fix, got {}",
+            out[0].yaw
+        );
     }
 
     #[test]
