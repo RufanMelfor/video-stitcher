@@ -257,7 +257,9 @@ pub struct FieldPannerConfig {
     /// instead: it speeds up and slows down gradually (stops are planned
     /// with a braking curve so it does not overshoot), and it starts as
     /// soon as the far end of the lookahead window leaves the dead-zone
-    /// rather than waiting for the current target to. Viewers follow a
+    /// rather than waiting for the current target to. The dead-zone only
+    /// gates the start: a moving camera comes to rest on the target, not
+    /// a dead-zone short of it. Viewers follow a
     /// steady pan easily; it is a sudden change of pan speed the eye
     /// cannot track (smooth-pursuit eye movement is acceleration
     /// limited). Measured 2026-11-10: a camera that held in its dead-zone
@@ -533,6 +535,9 @@ pub struct FieldPanner {
     /// each frame. See [`FieldPannerConfig::comfort_accel`].
     comfort_accel_per_frame: f32,
     comfort_speed_per_frame: f32,
+    /// Comfort mode: the camera has set off and aims at the target
+    /// itself until it settles (see `comfort_step`).
+    comfort_moving: bool,
     last_debug: Option<FieldPannerDebug>,
 }
 
@@ -596,6 +601,7 @@ impl FieldPanner {
             dz_target_speed_alpha: (1.0 / (DEAD_ZONE_RELEASE_SECS * fps)).clamp(1e-3, 1.0),
             comfort_accel_per_frame,
             comfort_speed_per_frame,
+            comfort_moving: false,
             last_debug: None,
         }
     }
@@ -850,10 +856,11 @@ impl FieldPanner {
     /// One comfort-mode camera step (see
     /// [`FieldPannerConfig::comfort_accel`]).
     ///
-    /// The desired velocity points at the dead-zone-softened error -
-    /// the larger of the current target's and the far lookahead
-    /// target's, so the camera sets off as soon as the play is going to
-    /// leave the dead-zone - with a magnitude on a braking curve
+    /// The camera sets off when the target, or the far end of the
+    /// lookahead window, leaves the dead-zone; it then aims at the target
+    /// itself (or further along toward where the play is heading) until
+    /// it has settled there. The desired velocity has a magnitude on a
+    /// braking curve
     /// (`sqrt(2 * brake * a * distance)`, the speed from which the camera
     /// can still stop in time) capped at the comfort speed. The actual
     /// velocity then moves toward it by at most the acceleration limit
@@ -872,23 +879,42 @@ impl FieldPanner {
         };
         let (ey, ep) = (target_yaw - self.yaw, target_pitch - self.pitch);
         let raw_mag = ey.hypot(ep);
-        let (mut cy, mut cp) = soften(ey, ep);
-        if let Some((fy, fp)) = far {
+        let (sy, sp) = soften(ey, ep);
+        let (fy, fp) = far.map_or((0.0, 0.0), |(fy, fp)| {
             let fp = if self.config.lock_pitch {
                 self.config.locked_pitch_rad
             } else {
                 fp
             };
-            let (fy, fp) = soften(fy - self.yaw, fp - self.pitch);
-            if fy.hypot(fp) > cy.hypot(cp) {
-                (cy, cp) = (fy, fp);
-            }
+            soften(fy - self.yaw, fp - self.pitch)
+        });
+        let far_out = fy.hypot(fp) > 1e-6;
+
+        // The dead-zone only decides when the camera sets off (the
+        // target, or where the play is heading, leaves it). Once moving
+        // the camera aims at the target itself, not at the dead-zone
+        // edge - otherwise it always comes to rest a dead-zone short of
+        // the play - and it holds again only after it has settled there.
+        if !self.comfort_moving && (sy.hypot(sp) > 1e-6 || far_out) {
+            self.comfort_moving = true;
+        }
+        let base_accel = self.comfort_accel_per_frame * fov_rad;
+        let speed = self.velocity_yaw.hypot(self.velocity_pitch);
+        if self.comfort_moving && raw_mag < 0.25 * dz && !far_out && speed < 2.0 * base_accel {
+            self.comfort_moving = false;
+        }
+        let (mut cy, mut cp) = if self.comfort_moving {
+            (ey, ep)
+        } else {
+            (0.0, 0.0)
+        };
+        if self.comfort_moving && fy.hypot(fp) > cy.hypot(cp) {
+            (cy, cp) = (fy, fp);
         }
 
         // The braking curve always uses the base limit: the catch-up
         // doubling below ends as soon as the target is back inside the
         // picture, and the camera must still be able to stop from there.
-        let base_accel = self.comfort_accel_per_frame * fov_rad;
         let mut accel = base_accel;
         let mut speed_cap = if self.comfort_speed_per_frame > 0.0 {
             self.comfort_speed_per_frame * fov_rad
@@ -1423,6 +1449,7 @@ impl Panner for FieldPanner {
         self.dz_target_vel_yaw = 0.0;
         self.dz_target_vel_pitch = 0.0;
         self.dz_prev_target = None;
+        self.comfort_moving = false;
     }
 }
 
@@ -1825,9 +1852,10 @@ mod tests {
             (prev_yaw, prev_v) = (out.yaw, v);
             max_yaw = max_yaw.max(out.yaw);
         }
-        // It arrives at the dead-zone edge and does not swing past it.
-        assert!((prev_yaw - 0.45).abs() < 0.02, "settled at {prev_yaw}");
-        assert!(max_yaw < 0.47, "overshoot to {max_yaw}");
+        // It arrives at the target itself (not a dead-zone short of it)
+        // and does not swing past it.
+        assert!((prev_yaw - 0.6).abs() < 0.01, "settled at {prev_yaw}");
+        assert!(max_yaw < 0.61, "overshoot to {max_yaw}");
     }
 
     #[test]
