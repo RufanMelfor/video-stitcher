@@ -561,6 +561,15 @@ enum Commands {
         #[arg(long = "ball-max-pitch")]
         ball_max_pitch: Option<f32>,
 
+        /// Keep a briefly undetected ball moving along its recent
+        /// velocity instead of freezing it where it was last seen, so
+        /// the camera keeps panning with a run the model loses for a
+        /// moment. The value is the easing time constant in seconds:
+        /// the carry slows to a stop after about twice this time and
+        /// never moves the ball more than 0.4 rad. Unset or 0 = off.
+        #[arg(long = "ball-coast-carry")]
+        ball_coast_carry: Option<f32>,
+
         /// Ignore players above this world pitch when forming the
         /// action cluster. On a rig that also sees a neighbouring
         /// field, its warm-up crowd is detected as players too and can
@@ -1364,6 +1373,7 @@ fn main() -> anyhow::Result<()> {
             ball_jump_confidence,
             ball_max_speed,
             ball_max_pitch,
+            ball_coast_carry,
             max_player_pitch,
             ball_hold_secs,
             fov_alpha,
@@ -1429,6 +1439,7 @@ fn main() -> anyhow::Result<()> {
                 ball_jump_confidence,
                 ball_max_speed,
                 ball_max_pitch,
+                ball_coast_carry,
                 max_player_pitch,
                 ball_hold_secs,
                 fov_alpha,

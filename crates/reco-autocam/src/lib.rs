@@ -205,6 +205,13 @@ pub struct AutocamConfig {
     /// match's play can. `None` accepts everything. See
     /// [`trackers::ball::BallTracker::with_max_ball_pitch`].
     pub ball_max_pitch: Option<f32>,
+    /// Coast carry time constant (seconds): while the tracker coasts a
+    /// briefly undetected ball, it keeps moving it along its recent
+    /// velocity, easing to a stop after roughly twice this time.
+    /// `None` (the default) freezes a coasting ball at its last
+    /// measurement. See
+    /// [`trackers::ball::BallTracker::with_coast_carry`].
+    pub ball_coast_carry_secs: Option<f32>,
 }
 
 impl AutocamConfig {
@@ -227,6 +234,7 @@ impl AutocamConfig {
             ball_jump_confidence: None,
             ball_max_speed_rad_per_tick: None,
             ball_max_pitch: None,
+            ball_coast_carry_secs: None,
         }
     }
 
@@ -694,6 +702,11 @@ pub fn setup_autocam(
                         config
                             .ball_max_pitch
                             .unwrap_or(crate::trackers::ball::DEFAULT_MAX_BALL_PITCH),
+                    )
+                    .with_coast_carry(
+                        config.ball_coast_carry_secs.unwrap_or(0.0) * fps,
+                        (crate::trackers::ball::COAST_CARRY_WINDOW_SECS * fps).round() as u64,
+                        crate::trackers::ball::COAST_CARRY_MAX_RAD,
                     )
                     .with_acquire_cluster_gate(
                         config.ball_acquire_max_dist_from_cluster,
