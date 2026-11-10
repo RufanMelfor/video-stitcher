@@ -1337,6 +1337,13 @@ export component RecoApp inherits Window {
     // own equivalent (kept as the slider's own literal default, same
     // convention as export-player-anchor-rad above).
     in-out property <float> export-ball-coast-secs: 0.67;
+    // Coast carry and comfort motion: on/off + value, saved as one number
+    // each (0 = off), same convention as export-contrast-boost.
+    in-out property <bool> export-coast-carry: true;
+    in-out property <float> export-coast-carry-secs: 2.0;
+    in-out property <bool> export-comfort: true;
+    in-out property <float> export-comfort-accel: 0.2;
+    in-out property <float> export-comfort-speed: 0.65;
     in-out property <float> export-ball-acquire-max-dist: 0.0;
     in-out property <float> export-ball-jump-confidence: 0.5;
     in-out property <float> export-ball-max-speed: 0.13;
@@ -1431,6 +1438,11 @@ export component RecoApp inherits Window {
     changed export-detection-interval => { root.autocam-settings-changed(); }
     changed export-player-anchor-rad => { root.autocam-settings-changed(); }
     changed export-ball-coast-secs => { root.autocam-settings-changed(); }
+    changed export-coast-carry => { root.autocam-settings-changed(); }
+    changed export-coast-carry-secs => { root.autocam-settings-changed(); }
+    changed export-comfort => { root.autocam-settings-changed(); }
+    changed export-comfort-accel => { root.autocam-settings-changed(); }
+    changed export-comfort-speed => { root.autocam-settings-changed(); }
     changed export-ball-acquire-max-dist => { root.autocam-settings-changed(); }
     changed export-ball-jump-confidence => { root.autocam-settings-changed(); }
     changed export-ball-max-speed => { root.autocam-settings-changed(); }
@@ -6828,6 +6840,24 @@ export component RecoApp inherits Window {
                             decimals: 2;
                         }
 
+                        Tip {
+                            tip: "When the AI briefly loses the ball during a run (small, far away, blurred), keep it moving in the direction it was going instead of freezing it where it was last seen. The camera then keeps panning with the run instead of stopping and having to catch up later. A detection far off the expected course is ignored unless the AI is confident about it.";
+                            CheckBox {
+                                text: "Keep a lost ball moving";
+                                checked <=> root.export-coast-carry;
+                            }
+                        }
+
+                        if root.export-coast-carry: LabeledSlider {
+                            label: "Carry time";
+                            tip: "How long a lost ball keeps rolling before it eases to a stop (it stops after roughly twice this time and never moves more than 0.4 rad). 2 s worked best on the test footage.";
+                            minimum: 0.5;
+                            maximum: 4.0;
+                            value <=> root.export-coast-carry-secs;
+                            suffix: " s";
+                            decimals: 1;
+                        }
+
                         LabeledSlider {
                             label: "Ball hold time";
                             tip: "After the tracker gives up on the ball, keep the camera pointed at its last known position for this long instead of swinging back to the players. A ball that disappears is usually just briefly undetected and comes back close to where it vanished - measured on real footage within half a frame width in 65-91% of cases - so swinging away only to return reads as the camera drifting off and coming back. Holding keeps the shot still and the camera is already in the right place when the ball returns. Works on top of \"Ball coast time\": that one decides how long the tracker keeps reporting a position, this one how long the camera keeps using the last one afterwards. Set to 0 for the old behaviour.";
@@ -7067,6 +7097,30 @@ export component RecoApp inherits Window {
                                 maximum: 0.5;
                                 value <=> root.export-dead-zone;
                                 suffix: " rad";
+                                decimals: 2;
+                            }
+
+                            Tip {
+                                tip: "Pan like a camera operator: speed up and slow down gradually, and start moving as soon as Lookahead shows the play is leaving the dead-zone instead of waiting and then swinging to catch up. The eye can follow a steady pan easily; it is sudden changes of speed it cannot keep up with. The camera may hurry when the ball is about to leave the picture. Works best with Lookahead 1.5 s.";
+                                CheckBox {
+                                    text: "Smooth camera motion";
+                                    checked <=> root.export-comfort;
+                                }
+                            }
+                            if root.export-comfort: LabeledSlider {
+                                label: "Max acceleration";
+                                tip: "How quickly the pan may speed up or slow down, in picture heights per second squared (so it feels the same at any zoom). Lower is calmer but the ball sits further off-centre during fast play. 0.2 kept the ball in the picture on all 15 test goals.";
+                                minimum: 0.05;
+                                maximum: 0.6;
+                                value <=> root.export-comfort-accel;
+                                decimals: 2;
+                            }
+                            if root.export-comfort: LabeledSlider {
+                                label: "Max pan speed";
+                                tip: "Top pan speed in picture heights per second (0.65 is about 2.5 seconds to pan one picture width). Doubled while the ball is about to leave the picture.";
+                                minimum: 0.2;
+                                maximum: 1.5;
+                                value <=> root.export-comfort-speed;
                                 decimals: 2;
                             }
                             LabeledSlider {

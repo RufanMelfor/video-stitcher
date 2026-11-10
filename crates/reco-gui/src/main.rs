@@ -1,4 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// The export run-config `serde_json::json!` literal in export.rs outgrew
+// the default macro recursion limit (128).
+#![recursion_limit = "256"]
 
 //! Reco GUI - Slint-based panoramic video stitcher.
 //!
@@ -3313,6 +3316,26 @@ fn contrast_boost_from_ui(app: &RecoApp) -> f32 {
     }
 }
 
+/// The coast-carry time the Export dialog asks for: the slider value when
+/// "Keep a lost ball moving" is ticked, `0.0` (off) otherwise.
+fn coast_carry_from_ui(app: &RecoApp) -> f32 {
+    if app.get_export_coast_carry() {
+        app.get_export_coast_carry_secs()
+    } else {
+        0.0
+    }
+}
+
+/// The comfort acceleration limit the Export dialog asks for: the slider
+/// value when "Smooth camera motion" is ticked, `0.0` (off) otherwise.
+fn comfort_accel_from_ui(app: &RecoApp) -> f32 {
+    if app.get_export_comfort() {
+        app.get_export_comfort_accel()
+    } else {
+        0.0
+    }
+}
+
 fn snapshot_autocam_defaults(app: &RecoApp) -> reco_core::calibration::AutocamDefaults {
     reco_core::calibration::AutocamDefaults {
         tracking_mode: app.get_export_tracking_mode().to_string(),
@@ -3344,6 +3367,9 @@ fn snapshot_autocam_defaults(app: &RecoApp) -> reco_core::calibration::AutocamDe
         cluster_alpha: app.get_export_cluster_alpha(),
         confidence_threshold: app.get_export_confidence_threshold(),
         ai_contrast_boost: contrast_boost_from_ui(app),
+        ball_coast_carry_secs: coast_carry_from_ui(app),
+        comfort_accel: comfort_accel_from_ui(app),
+        comfort_speed: app.get_export_comfort_speed(),
         // No GUI slider yet for this one (out of scope here) - falls
         // back to FieldPannerConfig's own default so the events JSONL
         // header/calibration snapshot at least records a real value
@@ -3480,6 +3506,17 @@ fn apply_autocam_defaults(
     app.set_export_contrast_boost(ac.ai_contrast_boost > 0.0);
     if ac.ai_contrast_boost > 0.0 {
         app.set_export_contrast_boost_strength(ac.ai_contrast_boost);
+    }
+    app.set_export_coast_carry(ac.ball_coast_carry_secs > 0.0);
+    if ac.ball_coast_carry_secs > 0.0 {
+        app.set_export_coast_carry_secs(ac.ball_coast_carry_secs);
+    }
+    app.set_export_comfort(ac.comfort_accel > 0.0);
+    if ac.comfort_accel > 0.0 {
+        app.set_export_comfort_accel(ac.comfort_accel);
+    }
+    if ac.comfort_speed > 0.0 {
+        app.set_export_comfort_speed(ac.comfort_speed);
     }
     missing_model
 }
@@ -8437,6 +8474,9 @@ fn main() -> anyhow::Result<()> {
             ball_hold_secs: app.get_export_ball_hold_secs(),
             confidence_threshold: app.get_export_confidence_threshold(),
             ai_contrast_boost: contrast_boost_from_ui(&app),
+            ball_coast_carry_secs: coast_carry_from_ui(&app),
+            comfort_accel: comfort_accel_from_ui(&app),
+            comfort_speed: app.get_export_comfort_speed(),
             lookahead_secs: app.get_export_lookahead_secs() as f64,
             lookahead_reduced_bit_depth: app.get_export_lookahead_reduced_bit_depth(),
             async_detect: app.get_export_async_detect(),

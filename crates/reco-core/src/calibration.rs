@@ -849,6 +849,23 @@ pub struct AutocamDefaults {
     /// while it was briefly called "Fog mode" use the `fog_boost` key.
     #[serde(default, alias = "fog_boost")]
     pub ai_contrast_boost: f32,
+    /// Coast carry time constant in seconds - see
+    /// `reco_autocam::AutocamConfig::ball_coast_carry_secs`. A briefly
+    /// undetected ball keeps moving along its recent velocity instead
+    /// of freezing. `0.0` (the default, and the value for data saved
+    /// before this existed) is off.
+    #[serde(default)]
+    pub ball_coast_carry_secs: f32,
+    /// Comfort motion limit, view heights per second squared - see
+    /// `reco_autocam::panners::FieldPannerConfig::comfort_accel`.
+    /// `0.0` (the default, and the value for older saved data) is off.
+    #[serde(default)]
+    pub comfort_accel: f32,
+    /// Comfort speed cap, view heights per second - see
+    /// `reco_autocam::panners::FieldPannerConfig::comfort_speed`. `0.0`
+    /// = no cap. Only used while `comfort_accel` is non-zero.
+    #[serde(default)]
+    pub comfort_speed: f32,
     /// Lookahead reactivity multiplier - see
     /// `reco_autocam::panners::FieldPannerConfig::lookahead_reactivity`.
     /// When lookahead is active, the base chase runs this many times
@@ -1859,6 +1876,9 @@ mod tests {
             cluster_alpha: 0.05,
             confidence_threshold: 0.3,
             ai_contrast_boost: 3.0,
+            ball_coast_carry_secs: 2.0,
+            comfort_accel: 0.2,
+            comfort_speed: 0.65,
             lookahead_reactivity: 1.5,
             model_path: None,
             enabled: None,
@@ -1895,6 +1915,9 @@ mod tests {
         let missing: AutocamDefaults =
             serde_json::from_str(r#"{ "tracking_mode": "field" }"#).unwrap();
         assert_eq!(missing.ai_contrast_boost, 0.0);
+        assert_eq!(missing.ball_coast_carry_secs, 0.0);
+        assert_eq!(missing.comfort_accel, 0.0);
+        assert_eq!(missing.comfort_speed, 0.0);
     }
 
     #[test]

@@ -179,6 +179,15 @@ pub struct AutocamUiConfig {
     /// AI contrast boost: CLAHE clip limit on the detector input, `0.0` = off.
     /// See `reco_autocam::AutocamConfig::ai_contrast_boost`.
     pub ai_contrast_boost: f32,
+    /// Coast carry time constant (seconds), `0.0` = off. See
+    /// `reco_autocam::AutocamConfig::ball_coast_carry_secs`.
+    pub ball_coast_carry_secs: f32,
+    /// Comfort motion limit (view heights/s^2), `0.0` = off. See
+    /// `reco_autocam::panners::FieldPannerConfig::comfort_accel`.
+    pub comfort_accel: f32,
+    /// Comfort speed cap (view heights/s), `0.0` = no cap. See
+    /// `reco_autocam::panners::FieldPannerConfig::comfort_speed`.
+    pub comfort_speed: f32,
     /// Lookahead buffer depth in seconds (0 = off).
     pub lookahead_secs: f64,
     /// Downconvert the lookahead pool to 8-bit NV12 even for 10-bit
@@ -503,6 +512,9 @@ pub fn run_export(
                 "ball_hold_secs": autocam.ball_hold_secs,
                 "confidence_threshold": autocam.confidence_threshold,
                 "ai_contrast_boost": autocam.ai_contrast_boost,
+                "ball_coast_carry_secs": autocam.ball_coast_carry_secs,
+                "comfort_accel": autocam.comfort_accel,
+                "comfort_speed": autocam.comfort_speed,
                 "lookahead_secs": autocam.lookahead_secs,
                 "lookahead_reduced_bit_depth": autocam.lookahead_reduced_bit_depth,
                 "preset": &autocam.preset,
@@ -919,6 +931,9 @@ pub fn run_export(
                     cluster_alpha: autocam.cluster_alpha,
                     confidence_threshold: autocam.confidence_threshold,
                     ai_contrast_boost: autocam.ai_contrast_boost,
+                    ball_coast_carry_secs: autocam.ball_coast_carry_secs,
+                    comfort_accel: autocam.comfort_accel,
+                    comfort_speed: autocam.comfort_speed,
                     lookahead_reactivity: autocam.lookahead_reactivity,
                     model_path: None,
                     enabled: None,
@@ -989,6 +1004,8 @@ pub fn run_export(
                     f32::INFINITY
                 },
                 ball_hold_secs: ac.ball_hold_secs,
+                comfort_accel: ac.comfort_accel,
+                comfort_speed: ac.comfort_speed,
                 // Preset is the base; the visible knobs above overlay it
                 // (they mirror the preset until the user tweaks them).
                 ..reco_autocam::panners::FieldPannerConfig::from_preset_name(&ac.preset)
@@ -1007,6 +1024,8 @@ pub fn run_export(
             // (slider, saved calibration, CLI flag).
             autocam_config.ball_acquire_max_dist_from_cluster =
                 Some(ac.ball_acquire_max_dist_from_cluster).filter(|d| *d > 0.0);
+            autocam_config.ball_coast_carry_secs =
+                Some(ac.ball_coast_carry_secs).filter(|s| s.is_finite() && *s > 0.0);
             autocam_config.ball_acquire_established_frames =
                 Some(ac.ball_acquire_established_frames as u64);
             autocam_config.ball_jump_confidence = Some(ac.ball_jump_confidence);
