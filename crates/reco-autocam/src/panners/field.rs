@@ -249,6 +249,27 @@ pub struct FieldPannerConfig {
     /// for 2 s, then had to catch up in a fast swing. `false` (the
     /// default) keeps the original behaviour.
     pub dead_zone_follow_through: bool,
+    /// Comfort motion limit: the largest pan/tilt acceleration, in view
+    /// heights (the current vertical FOV) per second squared. `0.0` (the
+    /// default) keeps the original velocity-clamped chase.
+    ///
+    /// When set, the camera moves along an acceleration-limited profile
+    /// instead: it speeds up and slows down gradually (stops are planned
+    /// with a braking curve so it does not overshoot), and it starts as
+    /// soon as the far end of the lookahead window leaves the dead-zone
+    /// rather than waiting for the current target to. Viewers follow a
+    /// steady pan easily; it is a sudden change of pan speed the eye
+    /// cannot track (smooth-pursuit eye movement is acceleration
+    /// limited). Measured 2026-11-10: a camera that held in its dead-zone
+    /// and then caught up reached 0.6 view heights/s^2 in a 1.5 s burst.
+    /// The limit is expressed relative to the FOV so a pan feels the same
+    /// at any zoom. See [`COMFORT_CATCH_UP_VIEW_HEIGHTS`] for the case
+    /// where the target is about to leave the picture.
+    pub comfort_accel: f32,
+    /// Comfort speed cap, in view heights per second, used together with
+    /// [`comfort_accel`](Self::comfort_accel). `0.0` = no cap beyond the
+    /// braking curve. Ignored while `comfort_accel` is `0.0`.
+    pub comfort_speed: f32,
     /// Framing mode: follow the action ([`FramingMode::Action`], default)
     /// or keep every player in frame ([`FramingMode::FrameAll`]).
     pub framing: FramingMode,
@@ -309,6 +330,8 @@ impl Default for FieldPannerConfig {
             lead_alpha: 0.1,
             dead_zone_rad: 0.20,
             dead_zone_follow_through: false,
+            comfort_accel: 0.0,
+            comfort_speed: 0.0,
             framing: FramingMode::Action,
             confidence_weighted: true,
             frame_all_margin_deg: 8.0,
@@ -328,6 +351,22 @@ pub const DEAD_ZONE_RELEASE_SECS: f32 = 0.5;
 /// counts as settled and re-arms its dead-zone - see
 /// [`FieldPannerConfig::dead_zone_follow_through`].
 pub const DEAD_ZONE_SETTLE_RAD_PER_SEC: f32 = 0.03;
+
+/// Comfort-mode emergency threshold: when the target is further than
+/// this many view heights from the aim (about to leave a 16:9 picture,
+/// whose half width is ~0.9 view heights) the comfort acceleration and
+/// speed limits are doubled, so the camera may hurry rather than lose
+/// the play. See [`FieldPannerConfig::comfort_accel`].
+pub const COMFORT_CATCH_UP_VIEW_HEIGHTS: f32 = 0.5;
+
+/// Comfort-mode braking: stops are planned with this fraction of the
+/// acceleration limit, so slowing down takes longer than speeding up
+/// (camera operators decelerate more gently than they accelerate).
+pub const COMFORT_BRAKE_FRACTION: f32 = 0.6;
+
+/// Fraction of the lookahead window, at its far end, averaged into the
+/// comfort-mode "where the play is going" target.
+const COMFORT_FAR_WINDOW_FRACTION: f32 = 1.0 / 3.0;
 
 /// Names accepted by [`FieldPannerConfig::from_preset_name`].
 pub const PRESET_NAMES: &[&str] = &["broadcast", "action", "frame_all"];
@@ -412,6 +451,8 @@ impl FieldPannerConfig {
         self.lookahead_reactivity = self.lookahead_reactivity.clamp(1.0, 10.0);
         self.ball_presence_decay = self.ball_presence_decay.clamp(0.0, 1.0);
         self.ball_presence_attack = self.ball_presence_attack.clamp(0.0, 1.0);
+        self.comfort_accel = finite_non_negative(self.comfort_accel);
+        self.comfort_speed = finite_non_negative(self.comfort_speed);
         if self != before {
             log::warn!(
                 "FieldPannerConfig: clamped out-of-range values to valid ranges \
@@ -420,6 +461,11 @@ impl FieldPannerConfig {
         }
         self
     }
+}
+
+/// `v` if finite and positive, else `0.0` (off).
+fn finite_non_negative(v: f32) -> f32 {
+    if v.is_finite() { v.max(0.0) } else { 0.0 }
 }
 
 /// Intermediate cluster descriptor produced by the pipeline.
@@ -482,6 +528,11 @@ pub struct FieldPanner {
     dz_target_vel_pitch: f32,
     dz_prev_target: Option<(f32, f32)>,
     dz_target_speed_alpha: f32,
+    /// Comfort limits converted to per-frame units (view heights per
+    /// frame^2 and per frame); multiplied by the current FOV in radians
+    /// each frame. See [`FieldPannerConfig::comfort_accel`].
+    comfort_accel_per_frame: f32,
+    comfort_speed_per_frame: f32,
     last_debug: Option<FieldPannerDebug>,
 }
 
@@ -509,6 +560,8 @@ impl FieldPanner {
         let current_fov = config.fov_default;
         let max_velocity = config.max_velocity_rad_per_sec / fps;
         let ball_hold_budget = (config.ball_hold_secs * fps).round().max(0.0) as u32;
+        let comfort_accel_per_frame = config.comfort_accel / (fps * fps);
+        let comfort_speed_per_frame = config.comfort_speed / fps;
         Self {
             config,
             yaw: 0.0,
@@ -541,6 +594,8 @@ impl FieldPanner {
             dz_target_vel_pitch: 0.0,
             dz_prev_target: None,
             dz_target_speed_alpha: (1.0 / (DEAD_ZONE_RELEASE_SECS * fps)).clamp(1e-3, 1.0),
+            comfort_accel_per_frame,
+            comfort_speed_per_frame,
             last_debug: None,
         }
     }
@@ -792,6 +847,77 @@ impl FieldPanner {
     /// players: without it the lead only saw the cluster, so a ball
     /// heading for goal (one the detector catches only briefly) was not
     /// anticipated at all.
+    /// One comfort-mode camera step (see
+    /// [`FieldPannerConfig::comfort_accel`]).
+    ///
+    /// The desired velocity points at the dead-zone-softened error -
+    /// the larger of the current target's and the far lookahead
+    /// target's, so the camera sets off as soon as the play is going to
+    /// leave the dead-zone - with a magnitude on a braking curve
+    /// (`sqrt(2 * brake * a * distance)`, the speed from which the camera
+    /// can still stop in time) capped at the comfort speed. The actual
+    /// velocity then moves toward it by at most the acceleration limit
+    /// per frame, so speed changes are always gradual.
+    fn comfort_step(&mut self, target_yaw: f32, target_pitch: f32, far: Option<(f32, f32)>) {
+        let fov_rad = self.current_fov.to_radians().max(1e-3);
+        let dz = self.config.dead_zone_rad;
+        let soften = |ey: f32, ep: f32| -> (f32, f32) {
+            let mag = ey.hypot(ep);
+            if dz > 0.0 && mag > 1e-6 {
+                let s = (mag - dz).max(0.0) / mag;
+                (ey * s, ep * s)
+            } else {
+                (ey, ep)
+            }
+        };
+        let (ey, ep) = (target_yaw - self.yaw, target_pitch - self.pitch);
+        let raw_mag = ey.hypot(ep);
+        let (mut cy, mut cp) = soften(ey, ep);
+        if let Some((fy, fp)) = far {
+            let fp = if self.config.lock_pitch {
+                self.config.locked_pitch_rad
+            } else {
+                fp
+            };
+            let (fy, fp) = soften(fy - self.yaw, fp - self.pitch);
+            if fy.hypot(fp) > cy.hypot(cp) {
+                (cy, cp) = (fy, fp);
+            }
+        }
+
+        // The braking curve always uses the base limit: the catch-up
+        // doubling below ends as soon as the target is back inside the
+        // picture, and the camera must still be able to stop from there.
+        let base_accel = self.comfort_accel_per_frame * fov_rad;
+        let mut accel = base_accel;
+        let mut speed_cap = if self.comfort_speed_per_frame > 0.0 {
+            self.comfort_speed_per_frame * fov_rad
+        } else {
+            f32::INFINITY
+        };
+        if raw_mag > COMFORT_CATCH_UP_VIEW_HEIGHTS * fov_rad {
+            accel *= 2.0;
+            speed_cap *= 2.0;
+        }
+
+        let mag = cy.hypot(cp);
+        let (want_y, want_p) = if mag > 1e-6 {
+            let v = (2.0 * COMFORT_BRAKE_FRACTION * base_accel * mag)
+                .sqrt()
+                .min(speed_cap);
+            (cy / mag * v, cp / mag * v)
+        } else {
+            (0.0, 0.0)
+        };
+        let (dy, dp) = (want_y - self.velocity_yaw, want_p - self.velocity_pitch);
+        let dmag = dy.hypot(dp);
+        let s = if dmag > accel { accel / dmag } else { 1.0 };
+        self.velocity_yaw += dy * s;
+        self.velocity_pitch += dp * s;
+        self.yaw += self.velocity_yaw;
+        self.pitch += self.velocity_pitch;
+    }
+
     fn raw_target(&self, world: &WorldState) -> Option<(f32, f32)> {
         let live_ball = world
             .ball
@@ -1029,6 +1155,26 @@ impl Panner for FieldPanner {
         // trend rather than jitter - a noisy lead makes the camera
         // wobble left-right. This is the only consumer of the future
         // world-states, and the reason the camera moves ahead of play.
+        //
+        // Comfort mode also needs where the play is at the far end of
+        // the window (not lead-scaled): the camera starts its gentle
+        // acceleration as soon as that leaves the dead-zone.
+        let comfort = self.config.comfort_accel > 0.0;
+        let mut far_target: Option<(f32, f32)> = None;
+        if comfort && !future.is_empty() {
+            let skip = ((future.len() as f32) * (1.0 - COMFORT_FAR_WINDOW_FRACTION)) as usize;
+            let (mut sy, mut sp, mut n) = (0.0_f32, 0.0_f32, 0u32);
+            for w in &future[skip.min(future.len() - 1)..] {
+                if let Some((y, p)) = self.raw_target(w) {
+                    sy += y;
+                    sp += p;
+                    n += 1;
+                }
+            }
+            if n > 0 {
+                far_target = Some((sy / n as f32, sp / n as f32));
+            }
+        }
         if !future.is_empty()
             && let Some((ty, tp)) = target
             && let Some((cur_y, cur_p)) = self.raw_target(world)
@@ -1078,61 +1224,65 @@ impl Panner for FieldPanner {
                 self.velocity_yaw = 0.0;
                 self.velocity_pitch = 0.0;
             }
-            let max_v = self.max_velocity * reactivity;
-            let v_alpha = (self.config.velocity_alpha * reactivity).min(1.0);
-            let mut err_yaw = target_yaw - self.yaw;
-            let mut err_pitch = target_pitch - self.pitch;
+            if comfort {
+                self.comfort_step(target_yaw, target_pitch, far_target);
+            } else {
+                let max_v = self.max_velocity * reactivity;
+                let v_alpha = (self.config.velocity_alpha * reactivity).min(1.0);
+                let mut err_yaw = target_yaw - self.yaw;
+                let mut err_pitch = target_pitch - self.pitch;
 
-            // Soft radial dead-zone: hold for sub-threshold moves, and
-            // shrink larger errors by the threshold so the camera eases
-            // in/out instead of a hard hold-then-jump.
-            let dz_full = self.config.dead_zone_rad;
-            let mut dz = dz_full;
-            if self.config.dead_zone_follow_through && dz_full > 0.0 {
-                let mag = (err_yaw * err_yaw + err_pitch * err_pitch).sqrt();
-                // Re-arm on a settled *target*, not a settled camera: a
-                // camera that has caught up with a slowly rolling ball
-                // is momentarily still, and re-arming there would let
-                // the ball walk away inside the dead-zone again.
-                if let Some((py, pp)) = self.dz_prev_target {
-                    let a = self.dz_target_speed_alpha;
-                    self.dz_target_vel_yaw += a * ((target_yaw - py) - self.dz_target_vel_yaw);
-                    self.dz_target_vel_pitch +=
-                        a * ((target_pitch - pp) - self.dz_target_vel_pitch);
+                // Soft radial dead-zone: hold for sub-threshold moves, and
+                // shrink larger errors by the threshold so the camera eases
+                // in/out instead of a hard hold-then-jump.
+                let dz_full = self.config.dead_zone_rad;
+                let mut dz = dz_full;
+                if self.config.dead_zone_follow_through && dz_full > 0.0 {
+                    let mag = (err_yaw * err_yaw + err_pitch * err_pitch).sqrt();
+                    // Re-arm on a settled *target*, not a settled camera: a
+                    // camera that has caught up with a slowly rolling ball
+                    // is momentarily still, and re-arming there would let
+                    // the ball walk away inside the dead-zone again.
+                    if let Some((py, pp)) = self.dz_prev_target {
+                        let a = self.dz_target_speed_alpha;
+                        self.dz_target_vel_yaw += a * ((target_yaw - py) - self.dz_target_vel_yaw);
+                        self.dz_target_vel_pitch +=
+                            a * ((target_pitch - pp) - self.dz_target_vel_pitch);
+                    }
+                    self.dz_prev_target = Some((target_yaw, target_pitch));
+                    let speed =
+                        (self.dz_target_vel_yaw.powi(2) + self.dz_target_vel_pitch.powi(2)).sqrt();
+                    if !self.dz_engaged && mag > dz_full {
+                        self.dz_engaged = true;
+                    }
+                    if self.dz_engaged {
+                        if mag < 0.25 * dz_full && speed < self.dz_settle_speed {
+                            self.dz_engaged = false;
+                            self.dz_scale = 1.0;
+                        } else {
+                            self.dz_scale = (self.dz_scale - self.dz_release_step).max(0.0);
+                        }
+                    }
+                    dz = dz_full * self.dz_scale;
                 }
-                self.dz_prev_target = Some((target_yaw, target_pitch));
-                let speed =
-                    (self.dz_target_vel_yaw.powi(2) + self.dz_target_vel_pitch.powi(2)).sqrt();
-                if !self.dz_engaged && mag > dz_full {
-                    self.dz_engaged = true;
-                }
-                if self.dz_engaged {
-                    if mag < 0.25 * dz_full && speed < self.dz_settle_speed {
-                        self.dz_engaged = false;
-                        self.dz_scale = 1.0;
-                    } else {
-                        self.dz_scale = (self.dz_scale - self.dz_release_step).max(0.0);
+                if dz > 0.0 {
+                    let mag = (err_yaw * err_yaw + err_pitch * err_pitch).sqrt();
+                    if mag > 1e-6 {
+                        let scale = (mag - dz).max(0.0) / mag;
+                        err_yaw *= scale;
+                        err_pitch *= scale;
                     }
                 }
-                dz = dz_full * self.dz_scale;
+
+                let desired_yaw = err_yaw.clamp(-max_v, max_v);
+                let desired_pitch = err_pitch.clamp(-max_v, max_v);
+
+                self.velocity_yaw += v_alpha * (desired_yaw - self.velocity_yaw);
+                self.velocity_pitch += v_alpha * (desired_pitch - self.velocity_pitch);
+
+                self.yaw += self.velocity_yaw;
+                self.pitch += self.velocity_pitch;
             }
-            if dz > 0.0 {
-                let mag = (err_yaw * err_yaw + err_pitch * err_pitch).sqrt();
-                if mag > 1e-6 {
-                    let scale = (mag - dz).max(0.0) / mag;
-                    err_yaw *= scale;
-                    err_pitch *= scale;
-                }
-            }
-
-            let desired_yaw = err_yaw.clamp(-max_v, max_v);
-            let desired_pitch = err_pitch.clamp(-max_v, max_v);
-
-            self.velocity_yaw += v_alpha * (desired_yaw - self.velocity_yaw);
-            self.velocity_pitch += v_alpha * (desired_pitch - self.velocity_pitch);
-
-            self.yaw += self.velocity_yaw;
-            self.pitch += self.velocity_pitch;
         }
 
         // Dynamic FOV needs the cluster spread; a ball-only target has
@@ -1633,6 +1783,99 @@ mod tests {
     /// returns how far the camera trails it at the end, then (after the
     /// ball has stopped for 4 s and then nudged 0.08 rad) the camera
     /// yaw before and after the nudge.
+    fn comfort_panner(accel: f32, speed: f32) -> FieldPanner {
+        FieldPanner::with_config(
+            30.0,
+            FieldPannerConfig {
+                dead_zone_rad: 0.15,
+                comfort_accel: accel,
+                comfort_speed: speed,
+                lead_gain: 0.0,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn ball_world(yaw: f32) -> WorldState {
+        WorldState {
+            ball: Some(ball(yaw, 0.0)),
+            players: vec![],
+        }
+    }
+
+    #[test]
+    fn comfort_mode_changes_speed_gradually_and_does_not_overshoot() {
+        let cal = cal();
+        let (accel, speed) = (0.2, 0.6);
+        let mut p = comfort_panner(accel, speed);
+        let fov_rad = FieldPannerConfig::default().fov_default.to_radians();
+        // Catch-up doubling applies: the 0.6 rad jump is past half a view.
+        let max_dv = 2.0 * accel * fov_rad / (30.0 * 30.0);
+        let max_v = 2.0 * speed * fov_rad / 30.0;
+        let (mut prev_yaw, mut prev_v, mut max_yaw) = (0.0_f32, 0.0_f32, 0.0_f32);
+        for i in 0..600 {
+            let out = p.decide(&ball_world(0.6), &ctx(i, &cal));
+            let v = out.yaw - prev_yaw;
+            assert!(
+                (v - prev_v).abs() <= max_dv * 1.001,
+                "frame {i}: dv {}",
+                v - prev_v
+            );
+            assert!(v.abs() <= max_v * 1.001, "frame {i}: v {v}");
+            (prev_yaw, prev_v) = (out.yaw, v);
+            max_yaw = max_yaw.max(out.yaw);
+        }
+        // It arrives at the dead-zone edge and does not swing past it.
+        assert!((prev_yaw - 0.45).abs() < 0.02, "settled at {prev_yaw}");
+        assert!(max_yaw < 0.47, "overshoot to {max_yaw}");
+    }
+
+    #[test]
+    fn comfort_mode_sets_off_when_the_lookahead_leaves_the_dead_zone() {
+        let cal = cal();
+        // The ball is still at the aim now, but the lookahead window shows
+        // it running 0.3 rad away within the next second.
+        let future: Vec<WorldState> = (1..=30).map(|k| ball_world(0.01 * k as f32)).collect();
+        let mut off = FieldPanner::with_config(
+            30.0,
+            FieldPannerConfig {
+                dead_zone_rad: 0.15,
+                lead_gain: 0.0,
+                ..Default::default()
+            },
+        );
+        let mut on = comfort_panner(0.2, 0.6);
+        let (mut y_off, mut y_on) = (0.0, 0.0);
+        for i in 0..15 {
+            y_off = off
+                .decide_with_lookahead(&ball_world(0.0), &future, &ctx(i, &cal))
+                .yaw;
+            y_on = on
+                .decide_with_lookahead(&ball_world(0.0), &future, &ctx(i, &cal))
+                .yaw;
+        }
+        assert!(
+            y_off.abs() < 1e-6,
+            "plain chase holds in the dead-zone, got {y_off}"
+        );
+        assert!(
+            y_on > 0.002,
+            "comfort mode should already be easing toward the run, got {y_on}"
+        );
+    }
+
+    #[test]
+    fn comfort_off_by_default_and_sanitized() {
+        assert_eq!(FieldPannerConfig::default().comfort_accel, 0.0);
+        let c = FieldPannerConfig {
+            comfort_accel: f32::NAN,
+            comfort_speed: -1.0,
+            ..Default::default()
+        }
+        .sanitized();
+        assert_eq!((c.comfort_accel, c.comfort_speed), (0.0, 0.0));
+    }
+
     fn follow_through_run(follow: bool) -> (f32, f32, f32) {
         let cal = cal();
         let mut p = FieldPanner::with_config(
