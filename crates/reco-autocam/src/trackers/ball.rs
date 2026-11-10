@@ -171,7 +171,7 @@ fn median(v: &mut [f32]) -> Option<f32> {
     }
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let m = v.len() / 2;
-    Some(if v.len() % 2 == 0 {
+    Some(if v.len().is_multiple_of(2) {
         0.5 * (v[m - 1] + v[m])
     } else {
         v[m]
