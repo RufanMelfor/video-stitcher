@@ -235,6 +235,20 @@ pub struct FieldPannerConfig {
     /// Viable because lookahead absorbs the latency a dead-zone adds.
     /// `0.0` = off.
     pub dead_zone_rad: f32,
+    /// Dead-zone follow-through: the dead-zone only decides when the
+    /// camera *starts* moving. Once the target leaves it, the dead-zone
+    /// fades out over [`DEAD_ZONE_RELEASE_SECS`] so the camera chases
+    /// the target all the way to the centre, and it re-arms only after
+    /// the camera has caught up with a settled target (target within a
+    /// quarter of the dead-zone and moving slower than [`DEAD_ZONE_SETTLE_RAD_PER_SEC`]).
+    ///
+    /// Without it the soft dead-zone shrinks every error by the full
+    /// threshold, so a steadily moving ball is trailed by exactly
+    /// `dead_zone_rad` for as long as it moves: measured on a solo
+    /// breakaway (2026-11-10) the camera sat 0.15 rad behind the ball
+    /// for 2 s, then had to catch up in a fast swing. `false` (the
+    /// default) keeps the original behaviour.
+    pub dead_zone_follow_through: bool,
     /// Framing mode: follow the action ([`FramingMode::Action`], default)
     /// or keep every player in frame ([`FramingMode::FrameAll`]).
     pub framing: FramingMode,
@@ -294,6 +308,7 @@ impl Default for FieldPannerConfig {
             lead_gain: 1.3,
             lead_alpha: 0.1,
             dead_zone_rad: 0.20,
+            dead_zone_follow_through: false,
             framing: FramingMode::Action,
             confidence_weighted: true,
             frame_all_margin_deg: 8.0,
@@ -302,6 +317,17 @@ impl Default for FieldPannerConfig {
         }
     }
 }
+
+/// Seconds over which [`FieldPannerConfig::dead_zone_follow_through`]
+/// fades the dead-zone out once the camera starts moving. A ramp rather
+/// than a switch, so the chase target does not jump by the whole
+/// dead-zone in one frame.
+pub const DEAD_ZONE_RELEASE_SECS: f32 = 0.5;
+
+/// Target speed (radians per second) below which a follow-through camera
+/// counts as settled and re-arms its dead-zone - see
+/// [`FieldPannerConfig::dead_zone_follow_through`].
+pub const DEAD_ZONE_SETTLE_RAD_PER_SEC: f32 = 0.03;
 
 /// Names accepted by [`FieldPannerConfig::from_preset_name`].
 pub const PRESET_NAMES: &[&str] = &["broadcast", "action", "frame_all"];
@@ -439,6 +465,23 @@ pub struct FieldPanner {
     /// the field from where the previous clip ended only delays the new
     /// one (it cost a goal at the start of a highlight clip).
     snap_pending: bool,
+    /// Follow-through state (see
+    /// [`FieldPannerConfig::dead_zone_follow_through`]): whether the
+    /// camera is chasing, and the fraction of the dead-zone still in
+    /// force (1.0 = full, fades to 0.0 while chasing).
+    dz_engaged: bool,
+    dz_scale: f32,
+    /// Per-frame `dz_scale` decrement and settle speed, both derived
+    /// from the source fps.
+    dz_release_step: f32,
+    dz_settle_speed: f32,
+    /// Smoothed per-frame target motion for the follow-through re-arm
+    /// test, the previous frame's target, and the EMA factor (a time
+    /// constant of [`DEAD_ZONE_RELEASE_SECS`]).
+    dz_target_vel_yaw: f32,
+    dz_target_vel_pitch: f32,
+    dz_prev_target: Option<(f32, f32)>,
+    dz_target_speed_alpha: f32,
     last_debug: Option<FieldPannerDebug>,
 }
 
@@ -490,6 +533,14 @@ impl FieldPanner {
             // default pose and has always eased in from there; only a
             // mid-run cut snaps.
             snap_pending: false,
+            dz_engaged: false,
+            dz_scale: 1.0,
+            dz_release_step: 1.0 / (DEAD_ZONE_RELEASE_SECS * fps).max(1.0),
+            dz_settle_speed: DEAD_ZONE_SETTLE_RAD_PER_SEC / fps,
+            dz_target_vel_yaw: 0.0,
+            dz_target_vel_pitch: 0.0,
+            dz_prev_target: None,
+            dz_target_speed_alpha: (1.0 / (DEAD_ZONE_RELEASE_SECS * fps)).clamp(1e-3, 1.0),
             last_debug: None,
         }
     }
@@ -1035,7 +1086,36 @@ impl Panner for FieldPanner {
             // Soft radial dead-zone: hold for sub-threshold moves, and
             // shrink larger errors by the threshold so the camera eases
             // in/out instead of a hard hold-then-jump.
-            let dz = self.config.dead_zone_rad;
+            let dz_full = self.config.dead_zone_rad;
+            let mut dz = dz_full;
+            if self.config.dead_zone_follow_through && dz_full > 0.0 {
+                let mag = (err_yaw * err_yaw + err_pitch * err_pitch).sqrt();
+                // Re-arm on a settled *target*, not a settled camera: a
+                // camera that has caught up with a slowly rolling ball
+                // is momentarily still, and re-arming there would let
+                // the ball walk away inside the dead-zone again.
+                if let Some((py, pp)) = self.dz_prev_target {
+                    let a = self.dz_target_speed_alpha;
+                    self.dz_target_vel_yaw += a * ((target_yaw - py) - self.dz_target_vel_yaw);
+                    self.dz_target_vel_pitch +=
+                        a * ((target_pitch - pp) - self.dz_target_vel_pitch);
+                }
+                self.dz_prev_target = Some((target_yaw, target_pitch));
+                let speed =
+                    (self.dz_target_vel_yaw.powi(2) + self.dz_target_vel_pitch.powi(2)).sqrt();
+                if !self.dz_engaged && mag > dz_full {
+                    self.dz_engaged = true;
+                }
+                if self.dz_engaged {
+                    if mag < 0.25 * dz_full && speed < self.dz_settle_speed {
+                        self.dz_engaged = false;
+                        self.dz_scale = 1.0;
+                    } else {
+                        self.dz_scale = (self.dz_scale - self.dz_release_step).max(0.0);
+                    }
+                }
+                dz = dz_full * self.dz_scale;
+            }
             if dz > 0.0 {
                 let mag = (err_yaw * err_yaw + err_pitch * err_pitch).sqrt();
                 if mag > 1e-6 {
@@ -1188,6 +1268,11 @@ impl Panner for FieldPanner {
         self.lead_yaw = 0.0;
         self.lead_pitch = 0.0;
         self.lookahead_active = false;
+        self.dz_engaged = false;
+        self.dz_scale = 1.0;
+        self.dz_target_vel_yaw = 0.0;
+        self.dz_target_vel_pitch = 0.0;
+        self.dz_prev_target = None;
     }
 }
 
@@ -1541,6 +1626,77 @@ mod tests {
             (out.pitch - 0.1).abs() < 0.05,
             "ball-only should converge near ball pitch 0.1, got {}",
             out.pitch
+        );
+    }
+
+    /// Ball-only panner chasing a ball that rolls at 0.1 rad/s for 8 s;
+    /// returns how far the camera trails it at the end, then (after the
+    /// ball has stopped for 4 s and then nudged 0.08 rad) the camera
+    /// yaw before and after the nudge.
+    fn follow_through_run(follow: bool) -> (f32, f32, f32) {
+        let cal = cal();
+        let mut p = FieldPanner::with_config(
+            30.0,
+            FieldPannerConfig {
+                dead_zone_rad: 0.15,
+                dead_zone_follow_through: follow,
+                ..Default::default()
+            },
+        );
+        let speed = 0.1 / 30.0;
+        let mut out = ViewportPosition::default();
+        let mut yaw = 0.0;
+        for i in 0..240 {
+            yaw = speed * i as f32;
+            let w = WorldState {
+                ball: Some(ball(yaw, 0.0)),
+                players: vec![],
+            };
+            out = p.decide(&w, &ctx(i, &cal));
+        }
+        let lag = yaw - out.yaw;
+        for i in 240..360 {
+            let w = WorldState {
+                ball: Some(ball(yaw, 0.0)),
+                players: vec![],
+            };
+            out = p.decide(&w, &ctx(i, &cal));
+        }
+        let settled = out.yaw;
+        for i in 360..450 {
+            let w = WorldState {
+                ball: Some(ball(yaw + 0.08, 0.0)),
+                players: vec![],
+            };
+            out = p.decide(&w, &ctx(i, &cal));
+        }
+        (lag, settled, out.yaw)
+    }
+
+    #[test]
+    fn dead_zone_follow_through_centres_a_moving_ball() {
+        let (lag_off, _, _) = follow_through_run(false);
+        let (lag_on, _, _) = follow_through_run(true);
+        // The plain soft dead-zone trails a steadily moving ball by the
+        // whole dead-zone; follow-through chases it to the centre.
+        assert!(
+            lag_off > 0.12,
+            "plain dead-zone should trail by ~0.15, got {lag_off}"
+        );
+        assert!(
+            lag_on < 0.05,
+            "follow-through should keep up, trailing {lag_on}"
+        );
+    }
+
+    #[test]
+    fn dead_zone_follow_through_rearms_once_the_ball_stops() {
+        // After the ball has stopped and the camera caught up, the
+        // dead-zone is back: a 0.08 rad nudge (inside 0.15) is ignored.
+        let (_, settled, after_nudge) = follow_through_run(true);
+        assert!(
+            (after_nudge - settled).abs() < 0.01,
+            "re-armed dead-zone should hold, moved {settled} -> {after_nudge}"
         );
     }
 

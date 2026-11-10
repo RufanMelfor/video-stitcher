@@ -145,6 +145,9 @@ pub struct StitchArgs<'a> {
     /// Ball detection pitch ceiling (radians). See
     /// `reco_autocam::AutocamConfig::ball_max_pitch`.
     pub ball_max_pitch: Option<f32>,
+    /// Coast carry time constant (seconds). See
+    /// `reco_autocam::AutocamConfig::ball_coast_carry_secs`.
+    pub ball_coast_carry: Option<f32>,
     /// Player pitch ceiling for the action cluster. See
     /// `reco_autocam::panners::FieldPannerConfig::max_player_pitch`.
     pub max_player_pitch: Option<f32>,
@@ -252,6 +255,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
                 "ball_jump_confidence": args.ball_jump_confidence,
                 "ball_max_speed": args.ball_max_speed,
                 "ball_max_pitch": args.ball_max_pitch,
+                "ball_coast_carry": args.ball_coast_carry,
                 "max_player_pitch": args.max_player_pitch,
                 "ball_hold_secs": args.ball_hold_secs,
                 "confidence_threshold": args.confidence_threshold,
@@ -494,6 +498,7 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
         let ball_jump_confidence = args.ball_jump_confidence;
         let ball_max_speed = args.ball_max_speed;
         let ball_max_pitch = pitch_ceiling(args.ball_max_pitch);
+        let ball_coast_carry = args.ball_coast_carry;
         let confidence_threshold = args.confidence_threshold;
         let ai_contrast_boost = args.ai_contrast_boost;
         reco_autocam::local_contrast::validate_clip_limit(ai_contrast_boost)
@@ -684,6 +689,8 @@ pub fn run_stitch(args: StitchArgs<'_>, interrupted: &Arc<AtomicBool>) -> anyhow
             autocam_config.ball_jump_confidence = ball_jump_confidence;
             autocam_config.ball_max_speed_rad_per_tick = ball_max_speed;
             autocam_config.ball_max_pitch = ball_max_pitch;
+            autocam_config.ball_coast_carry_secs =
+                ball_coast_carry.filter(|s| s.is_finite() && *s > 0.0);
             let autocam_config = if let Some(roi) = field_roi {
                 autocam_config.with_field_roi(roi)
             } else {

@@ -47,7 +47,9 @@
 //!    cross-cam).
 //! 6. **Coaster** — if no candidate survived this frame, hold the
 //!    last known position for up to `max_coast_frames` frames, then
-//!    transition to `Lost`.
+//!    transition to `Lost`. With [`BallTracker::with_coast_carry`] the
+//!    coasting position instead keeps drifting along the ball's recent
+//!    velocity, easing to a stop.
 //!
 //! # Logging
 //!
@@ -61,6 +63,8 @@
 use reco_core::detect::director::MappedDetection;
 use reco_core::detect::tracker::{TrackState, TrackedEntity, Tracker};
 use reco_core::geometry::CameraId;
+
+use std::collections::VecDeque;
 
 use crate::trackers::filters::{CoastStatus, Coaster};
 
@@ -141,6 +145,39 @@ pub const DEFAULT_ANCHOR_PITCH_NEAR: f32 = -0.05;
 /// ramp - see [`DEFAULT_ANCHOR_PITCH_NEAR`].
 pub const DEFAULT_ANCHOR_PITCH_FAR: f32 = 0.20;
 
+/// Seconds of accepted measurements the coast-carry velocity is fitted
+/// over - see [`BallTracker::with_coast_carry`]. Long enough to average
+/// out detection jitter, short enough to follow a change of direction.
+pub const COAST_CARRY_WINDOW_SECS: f32 = 1.0;
+
+/// Furthest (radians) coast-carry may move a ball away from its last
+/// measurement - see [`BallTracker::with_coast_carry`]. About a third of
+/// a typical highlight frame width; a ball undetected longer than that
+/// distance takes to cover is better held than guessed.
+pub const COAST_CARRY_MAX_RAD: f32 = 0.4;
+
+/// With coast-carry on and a velocity fitted, a detection below the
+/// jump confidence farther than this (radians, plus a margin that grows
+/// with the blind-carried distance) from the predicted position is
+/// ignored - see the prediction gate in
+/// [`BallTracker::update`](Tracker::update). Ten times the ~0.005 rad
+/// the two cameras disagree on the same ball.
+pub const COAST_CARRY_GATE_RAD: f32 = 0.05;
+
+/// Median of `v` (reorders it); `None` when empty.
+fn median(v: &mut [f32]) -> Option<f32> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let m = v.len() / 2;
+    Some(if v.len() % 2 == 0 {
+        0.5 * (v[m - 1] + v[m])
+    } else {
+        v[m]
+    })
+}
+
 /// Singleton ball tracker emitting at most one
 /// [`TrackedEntity`] per frame.
 ///
@@ -196,6 +233,17 @@ pub struct BallTracker {
     /// proven it can hold a real ball; cleared only by
     /// [`Tracker::reset`].
     peak_age_frames: u64,
+    /// Accepted measurements `(tick, yaw, pitch)` within the velocity
+    /// window, newest last - the input to the coast-carry velocity fit.
+    history: VecDeque<(u64, f32, f32)>,
+    /// Coast-carry time constant in ticks (`0.0` = off) - see
+    /// [`with_coast_carry`](Self::with_coast_carry).
+    coast_carry_tau_ticks: f32,
+    /// Ticks of history the velocity is fitted over.
+    coast_carry_window_ticks: u64,
+    /// Ceiling on how far (radians) a coasting position may drift from
+    /// the last measurement.
+    coast_carry_max_rad: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -229,6 +277,152 @@ impl BallTracker {
             max_ball_pitch: DEFAULT_MAX_BALL_PITCH,
             tick: 0,
             peak_age_frames: 0,
+            history: VecDeque::new(),
+            coast_carry_tau_ticks: 0.0,
+            coast_carry_window_ticks: 2,
+            coast_carry_max_rad: 0.0,
+        }
+    }
+
+    /// Let a coasting ball keep moving instead of freezing where it was
+    /// last seen.
+    ///
+    /// The velocity is a least-squares fit over the measurements of the
+    /// last `window_ticks` ticks. While coasting, the reported position
+    /// is `last + v * tau * (1 - exp(-k / tau))` after `k` coast ticks:
+    /// it starts at the ball's own speed and eases to a stop after
+    /// roughly `2 * tau`, never drifting more than `max_rad` from the
+    /// last measurement. `tau_ticks <= 0` turns it off (the default:
+    /// hold the last position).
+    ///
+    /// Why: a ball the model loses mid-run (small, far, blurred) keeps
+    /// rolling. Measured on a solo breakaway (2026-11-10): the ball ran
+    /// at ~0.1 rad/s, was undetected for 2 s and reappeared 0.28 rad
+    /// further on; a frozen coast gave the camera no reason to keep
+    /// panning, so it stood still and then had to swing to catch up.
+    /// A linear carry would have predicted -0.46 against the real -0.49.
+    pub fn with_coast_carry(mut self, tau_ticks: f32, window_ticks: u64, max_rad: f32) -> Self {
+        self.coast_carry_tau_ticks = if tau_ticks.is_finite() {
+            tau_ticks.max(0.0)
+        } else {
+            0.0
+        };
+        self.coast_carry_window_ticks = window_ticks.max(2);
+        self.coast_carry_max_rad = if max_rad.is_finite() {
+            max_rad.max(0.0)
+        } else {
+            0.0
+        };
+        self
+    }
+
+    /// Robust straight-line fit of the history window: per axis the
+    /// Theil-Sen estimate (median of all pairwise slopes, rad/tick) and
+    /// the line's value at tick `at`. `None` with fewer than 3 samples
+    /// or a span shorter than a third of the window (too little to tell
+    /// motion from detection noise).
+    ///
+    /// Robust on purpose: the last detection before a loss is often the
+    /// weakest and can be a different object. Measured on a breakaway
+    /// (2026-11-10): the ball ran -0.17 -> -0.27 rad, then one 0.33
+    /// confidence detection at -0.21 came last; a least-squares fit
+    /// turned the carry around and moved the ball back.
+    fn fitted_line(&self, at: u64) -> Option<((f32, f32), (f32, f32))> {
+        if self.history.len() < 3 {
+            return None;
+        }
+        let first = self.history.front()?.0;
+        let newest = self.history.back()?.0;
+        if ((newest - first) as f32) < self.coast_carry_window_ticks as f32 / 3.0 {
+            return None;
+        }
+        let h: Vec<(f32, f32, f32)> = self
+            .history
+            .iter()
+            .map(|&(t, y, p)| ((t - first) as f32, y, p))
+            .collect();
+        let mut sy = Vec::with_capacity(h.len() * (h.len() - 1) / 2);
+        let mut sp = Vec::with_capacity(sy.capacity());
+        for i in 0..h.len() {
+            for j in i + 1..h.len() {
+                let dt = h[j].0 - h[i].0;
+                if dt > 0.0 {
+                    sy.push((h[j].1 - h[i].1) / dt);
+                    sp.push((h[j].2 - h[i].2) / dt);
+                }
+            }
+        }
+        let vy = median(&mut sy)?;
+        let vp = median(&mut sp)?;
+        let mut iy: Vec<f32> = h.iter().map(|s| s.1 - vy * s.0).collect();
+        let mut ip: Vec<f32> = h.iter().map(|s| s.2 - vp * s.0).collect();
+        let t_at = at.saturating_sub(first) as f32;
+        let y_at = median(&mut iy)? + vy * t_at;
+        let p_at = median(&mut ip)? + vp * t_at;
+        Some(((vy, vp), (y_at, p_at)))
+    }
+
+    /// Where a coasting ball is reported: the last measurement, or with
+    /// coast-carry on, the fitted line at the last measurement's tick
+    /// carried along the fitted velocity.
+    fn carried_position(&self, last: &LastKnown) -> (f32, f32) {
+        let tau = self.coast_carry_tau_ticks;
+        if tau <= 0.0 {
+            return (last.yaw, last.pitch);
+        }
+        let Some(((vy, vp), (y0, p0))) = self.fitted_line(last.tick) else {
+            return (last.yaw, last.pitch);
+        };
+        let k = self.tick.saturating_sub(last.tick) as f32;
+        let travel = tau * (1.0 - (-k / tau).exp());
+        let (mut x, mut z) = (y0 + vy * travel - last.yaw, p0 + vp * travel - last.pitch);
+        let mag = (x * x + z * z).sqrt();
+        if mag > self.coast_carry_max_rad && mag > 0.0 {
+            let s = self.coast_carry_max_rad / mag;
+            x *= s;
+            z *= s;
+        }
+        (last.yaw + x, last.pitch + z)
+    }
+
+    /// Where coast-carry expects the ball this tick, or `None` when
+    /// coast-carry is off, there is no track, or the history is too
+    /// short for a velocity fit.
+    ///
+    /// Returns `(yaw, pitch, gate_rad)`: the gate starts at
+    /// [`COAST_CARRY_GATE_RAD`] and widens by half the distance the
+    /// fitted velocity covers since the last measurement, because the
+    /// longer a ball is carried blind the less certain the guess.
+    fn carry_prediction(&self) -> Option<(f32, f32, f32)> {
+        if self.coast_carry_tau_ticks <= 0.0 {
+            return None;
+        }
+        let last = self.last.as_ref()?;
+        let ((vy, vp), _) = self.fitted_line(last.tick)?;
+        let (y, p) = self.carried_position(last);
+        let k = self.tick.saturating_sub(last.tick) as f32;
+        let gate = COAST_CARRY_GATE_RAD + 0.5 * (vy * vy + vp * vp).sqrt() * k;
+        Some((y, p, gate))
+    }
+
+    /// Record an accepted measurement for the velocity fit and drop
+    /// samples older than the window. A detection re-fed unchanged on
+    /// the frames between detection passes is stored once, so the fit
+    /// weighs each real measurement equally.
+    fn push_history(&mut self, yaw: f32, pitch: f32) {
+        if self.coast_carry_tau_ticks <= 0.0 {
+            return;
+        }
+        let repeat = self
+            .history
+            .back()
+            .is_some_and(|&(_, y, p)| y == yaw && p == pitch);
+        if !repeat {
+            self.history.push_back((self.tick, yaw, pitch));
+        }
+        let cutoff = self.tick.saturating_sub(self.coast_carry_window_ticks);
+        while self.history.front().is_some_and(|h| h.0 < cutoff) {
+            self.history.pop_front();
         }
     }
 
@@ -600,6 +794,7 @@ impl Tracker for BallTracker {
         self.tick = self.tick.saturating_add(1);
         // Step 1-4: filter candidates down to survivors.
         let mut survivors: Vec<&MappedDetection> = Vec::with_capacity(detections.len());
+        let prediction = self.carry_prediction();
         for det in detections {
             if det.class_id != self.class_id {
                 continue;
@@ -636,6 +831,31 @@ impl Tracker for BallTracker {
             if self.last.is_none() && !self.passes_acquire_cluster_gate(pos.yaw, pos.pitch) {
                 continue;
             }
+            // Coast-carry prediction gate: while the track has a fitted
+            // velocity, a weak detection must lie near where the ball is
+            // expected. Measured on a breakaway (2026-11-10): with the
+            // real ball undetected, a static object 2-3x the ball's size
+            // (conf 0.33-0.39) sat 0.07 rad behind the run; nearest-to-
+            // last took it and froze the ball, so the camera stopped.
+            // A confident detection always passes, so a real change of
+            // direction is still followed.
+            if let Some((py, pp, gate)) = prediction
+                && det.confidence < self.jump_confidence
+            {
+                let d = ((pos.yaw - py).powi(2) + (pos.pitch - pp).powi(2)).sqrt();
+                if d > gate {
+                    log::trace!(
+                        "BallTracker: drop off-course weak ball - yaw={:.3} pitch={:.3} conf={:.2} is {:.3}rad from the predicted {:.3}/{:.3}",
+                        pos.yaw,
+                        pos.pitch,
+                        det.confidence,
+                        d,
+                        py,
+                        pp
+                    );
+                    continue;
+                }
+            }
             survivors.push(det);
         }
 
@@ -649,9 +869,18 @@ impl Tracker for BallTracker {
         // Step 6: lifecycle.
         if let Some(det) = best {
             let pos = det.position.expect("score() guarantees Some");
-            let was_coasting = self.coaster.frames_coasting() > 0;
+            let coasted = self.coaster.frames_coasting();
+            let was_coasting = coasted > 0;
             let was_new_track = self.last.is_none();
             self.coaster.accept_fresh();
+            // A reacquisition after a long gap may be a different ball
+            // (or a jump the old samples cannot explain): fit fresh. A
+            // short gap - one missed detection pass - keeps the history,
+            // otherwise every flicker would reset the velocity.
+            if was_new_track || u64::from(coasted) > self.coast_carry_window_ticks {
+                self.history.clear();
+            }
+            self.push_history(pos.yaw, pos.pitch);
             self.last = Some(LastKnown {
                 yaw: pos.yaw,
                 pitch: pos.pitch,
@@ -695,8 +924,11 @@ impl Tracker for BallTracker {
         match self.coaster.step_without_fresh() {
             CoastStatus::Coasting => {
                 if let Some(last) = self.last {
+                    let (yaw, pitch) = self.carried_position(&last);
                     log::trace!(
-                        "BallTracker: coasting — held yaw={:.3} pitch={:.3} ({} frames)",
+                        "BallTracker: coasting - yaw={:.3} pitch={:.3} (last seen {:.3}/{:.3}, {} frames)",
+                        yaw,
+                        pitch,
                         last.yaw,
                         last.pitch,
                         self.coaster.frames_coasting()
@@ -706,8 +938,8 @@ impl Tracker for BallTracker {
                     vec![TrackedEntity {
                         id: 0,
                         class_id: self.class_id,
-                        yaw: last.yaw,
-                        pitch: last.pitch,
+                        yaw,
+                        pitch,
                         confidence: 0.0,
                         state: TrackState::Coasting,
                         age_frames: self.age_frames,
@@ -723,7 +955,13 @@ impl Tracker for BallTracker {
                 }
             }
             CoastStatus::Lost => {
+                // Report the loss where the coast left the ball, not back
+                // at the last measurement, so a camera holding on it does
+                // not jump back.
+                let carried = self.last.as_ref().map(|l| self.carried_position(l));
+                self.history.clear();
                 if let Some(last) = self.last.take() {
+                    let (yaw, pitch) = carried.unwrap_or((last.yaw, last.pitch));
                     log::info!(
                         "BallTracker: track lost after {} coast frames (last yaw={:.3} pitch={:.3})",
                         self.coaster.frames_coasting(),
@@ -736,8 +974,8 @@ impl Tracker for BallTracker {
                     vec![TrackedEntity {
                         id: 0,
                         class_id: self.class_id,
-                        yaw: last.yaw,
-                        pitch: last.pitch,
+                        yaw,
+                        pitch,
                         confidence: 0.0,
                         state: TrackState::Lost,
                         age_frames: 0,
@@ -780,6 +1018,7 @@ impl Tracker for BallTracker {
     fn reset(&mut self) {
         self.coaster.reset();
         self.last = None;
+        self.history.clear();
         self.current_players.clear();
         self.age_frames = 0;
         self.tick = 0;
@@ -1456,6 +1695,135 @@ mod tests {
         assert!(
             (out[0].yaw - 0.05).abs() < 1e-6,
             "expected near, got {}",
+            out[0].yaw
+        );
+    }
+
+    /// Feed a ball moving `step` rad/tick in yaw for `n` ticks through a
+    /// coast-carry tracker (tau 30 ticks, window 30, cap 0.4).
+    fn carry_tracker_after_run(step: f32, n: usize) -> (BallTracker, f32) {
+        let mut t = BallTracker::new(0)
+            .with_max_coast_frames(120)
+            .with_coast_carry(30.0, 30, 0.4);
+        let mut yaw = 0.0;
+        for i in 0..n {
+            yaw = step * i as f32;
+            t.update(&[det(CameraId::Left, yaw, 0.1, 0.8, 0.5, 0.5)], 0.0);
+        }
+        (t, yaw)
+    }
+
+    #[test]
+    fn coast_without_carry_holds_the_last_position() {
+        let mut t = BallTracker::new(0).with_max_coast_frames(60);
+        for i in 0..30 {
+            t.update(
+                &[det(CameraId::Left, -0.01 * i as f32, 0.1, 0.8, 0.5, 0.5)],
+                0.0,
+            );
+        }
+        for _ in 0..20 {
+            let out = t.update(&[], 0.0);
+            assert_eq!(out[0].state, TrackState::Coasting);
+            assert!((out[0].yaw - (-0.29)).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn coast_carry_keeps_the_ball_moving_and_eases_out() {
+        let (mut t, last) = carry_tracker_after_run(-0.005, 40);
+        let mut prev = last;
+        let mut first_step = 0.0;
+        let mut last_step = 0.0;
+        for k in 0..90 {
+            let out = t.update(&[], 0.0);
+            assert_eq!(out[0].state, TrackState::Coasting);
+            let step = prev - out[0].yaw;
+            assert!(
+                step >= -1e-6,
+                "carry must keep going the same way (tick {k})"
+            );
+            if k == 1 {
+                first_step = step;
+            }
+            last_step = step;
+            prev = out[0].yaw;
+        }
+        assert!(
+            prev < last - 0.1,
+            "carried {last} -> {prev}, expected well past the last fix"
+        );
+        assert!(
+            last_step < 0.25 * first_step,
+            "carry must slow down ({first_step} -> {last_step})"
+        );
+        assert!((last - prev) <= 0.4 + 1e-4, "carry is capped at 0.4 rad");
+    }
+
+    #[test]
+    fn coast_carry_is_capped() {
+        // A fast ball (0.03 rad/tick) carried for 3 s would travel ~0.9 rad.
+        let (mut t, last) = carry_tracker_after_run(-0.03, 20);
+        let mut out = Vec::new();
+        for _ in 0..90 {
+            out = t.update(&[], 0.0);
+        }
+        assert!(
+            (last - out[0].yaw - 0.4).abs() < 1e-3,
+            "drift {}",
+            last - out[0].yaw
+        );
+    }
+
+    #[test]
+    fn coast_carry_ignores_a_weak_off_course_detection() {
+        // The 2026-11-10 breakaway: the ball runs right, the model loses
+        // it, and a weak static object behind the run is offered instead.
+        let (mut t, last) = carry_tracker_after_run(-0.004, 40);
+        let out = t.update(
+            &[det(CameraId::Right, last + 0.07, 0.1, 0.35, 0.5, 0.5)],
+            0.0,
+        );
+        assert_eq!(
+            out[0].state,
+            TrackState::Coasting,
+            "weak off-course detection must be ignored"
+        );
+        assert!(
+            out[0].yaw < last,
+            "the carry continues past the last fix, got {}",
+            out[0].yaw
+        );
+    }
+
+    #[test]
+    fn coast_carry_still_follows_a_confident_detection() {
+        // A real change of direction is detected confidently and wins.
+        let (mut t, last) = carry_tracker_after_run(-0.004, 40);
+        let out = t.update(
+            &[det(CameraId::Right, last + 0.07, 0.1, 0.8, 0.5, 0.5)],
+            0.0,
+        );
+        assert_eq!(out[0].state, TrackState::Tracking);
+        assert!((out[0].yaw - (last + 0.07)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn coast_carry_velocity_ignores_a_weak_outlier_last_fix() {
+        // Robust fit: one off-line fix inside the gate (a jittery last
+        // detection) must not turn the carry around.
+        let (mut t, last) = carry_tracker_after_run(-0.004, 40);
+        t.update(
+            &[det(CameraId::Right, last + 0.02, 0.1, 0.8, 0.5, 0.5)],
+            0.0,
+        );
+        let mut out = Vec::new();
+        for _ in 0..30 {
+            out = t.update(&[], 0.0);
+        }
+        assert!(
+            out[0].yaw < last,
+            "carry must keep the run's direction, got {} vs {last}",
             out[0].yaw
         );
     }
