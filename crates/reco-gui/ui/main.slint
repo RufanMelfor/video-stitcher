@@ -1813,6 +1813,10 @@ export component RecoApp inherits Window {
     callback changed-cal-ground-tilt-band-width(float);
     callback changed-cal-top-tilt-band-width(float);
     callback save-calibration();
+    /// Quit-with-unsaved-setup confirmation (see `on_close_requested`).
+    in-out property <bool> quit-dialog-open: false;
+    callback quit-save();
+    callback quit-discard();
     callback reset-calibration();
     // Live lens parameter editing. Fires on any of the 8 sliders per
     // camera; Rust reads the property values for the currently-selected
@@ -2284,9 +2288,13 @@ export component RecoApp inherits Window {
                         // Fills Left, Right and Setup below in one
                         // shot from a `<match>/Left/`, `<match>/Right/`
                         // folder - see `on_pick_match_folder` in main.rs.
-                        FlatButton {
-                            text: "Select Match Folder...";
-                            clicked => { root.pick-match-folder(); }
+                        Tip {
+                            tip: "Pick the match's folder. It must contain a Left and a Right subfolder with each camera's recordings. Reco fills in the Left and Right videos in one go and loads the match's setup file if there is one (otherwise a new one is prepared).";
+                            FlatButton {
+                                text: "Select Match Folder...";
+                                horizontal-stretch: 1;
+                                clicked => { root.pick-match-folder(); }
+                            }
                         }
 
                         Rectangle { height: 1px; background: root.border-subtle; }
@@ -5194,29 +5202,6 @@ export component RecoApp inherits Window {
                             }
                         }
 
-                        // Time under the mouse (also while dragging a cut
-                        // handle or the playhead), shown above the track.
-                        if scrubber-track.has-hover && root.clip-duration-secs > 0 && parent.width > 0px: Rectangle {
-                            property <float> hover-secs: clamp(
-                                root.scrub-view-start + scrubber-track.mouse-x / parent.width * root.scrub-view-len,
-                                0.0, root.clip-duration-secs);
-                            width: 64px;
-                            height: 18px;
-                            x: clamp(scrubber-track.mouse-x - self.width / 2, 0px, max(0px, parent.width - self.width));
-                            y: -22px;
-                            background: #000000d0;
-                            border-radius: 3px;
-                            border-width: 1px;
-                            border-color: #ffffff50;
-                            Text {
-                                text: root.fmt-time(parent.hover-secs);
-                                color: white;
-                                font-size: 11px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-
                         // Zoom overview: thin line along the bottom edge,
                         // the bright part is the visible window within the
                         // whole clip.
@@ -5230,6 +5215,30 @@ export component RecoApp inherits Window {
                                 height: parent.height;
                                 background: #ffffffc0;
                             }
+                        }
+                    }
+
+                    // Time under the mouse (also while dragging a cut
+                    // handle or the playhead), shown above the track. Outside the
+                    // clipping rectangle above, which would cut it off.
+                    if scrubber-track.has-hover && root.clip-duration-secs > 0 && parent.width > 0px: Rectangle {
+                        property <float> hover-secs: clamp(
+                            root.scrub-view-start + scrubber-track.mouse-x / parent.width * root.scrub-view-len,
+                            0.0, root.clip-duration-secs);
+                        width: 64px;
+                        height: 18px;
+                        x: clamp(scrubber-track.mouse-x - self.width / 2, 0px, max(0px, parent.width - self.width));
+                        y: -22px;
+                        background: #000000d0;
+                        border-radius: 3px;
+                        border-width: 1px;
+                        border-color: #ffffff50;
+                        Text {
+                            text: root.fmt-time(parent.hover-secs);
+                            color: white;
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
                         }
                     }
                     }
@@ -7905,6 +7914,50 @@ export component RecoApp inherits Window {
                 }
             }
         }
+        // ── Unsaved setup on quit (modal) ──
+        if root.quit-dialog-open: Rectangle {
+            background: root.bg-scrim;
+            TouchArea {}
+
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 460px;
+                height: 170px;
+                background: root.bg-surface;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: root.border-mid;
+                TouchArea {}
+
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 12px;
+
+                    Text {
+                        text: "Setup not saved";
+                        color: root.text-heading;
+                        font-size: 16px;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: "You have changes that are not saved to the setup file. Are you sure you want to quit without saving?";
+                        color: root.text-muted;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                        vertical-stretch: 1;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: end;
+                        FlatButton { text: "Cancel"; clicked => { root.quit-dialog-open = false; } }
+                        FlatButton { text: "Quit without saving"; clicked => { root.quit-discard(); } }
+                        FlatButton { text: "Save and quit"; primary: true; clicked => { root.quit-save(); } }
+                    }
+                }
+            }
+        }
+
         // ── Info report (modal) ──
         if root.info-dialog-open: Rectangle {
             background: root.bg-scrim;

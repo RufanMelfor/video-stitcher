@@ -9488,12 +9488,46 @@ fn main() -> anyhow::Result<()> {
     // mechanism keeps the process alive with just the orphaned debug
     // window left on screen after the main window closes.
     let state_ref = Rc::clone(&state);
+    let close_app_weak = app.as_weak();
     app.window().on_close_requested(move || {
+        // Unsaved setup edits: ask first (Save and quit / Quit without
+        // saving / Cancel) instead of silently dropping them.
+        if let Some(app) = close_app_weak.upgrade()
+            && (app.get_cal_dirty() || app.get_lens_dirty())
+        {
+            app.set_quit_dialog_open(true);
+            return slint::CloseRequestResponse::KeepWindowShown;
+        }
         if let Some(dw) = state_ref.borrow().debug_window.as_ref() {
             let _ = dw.hide();
         }
         slint::CloseRequestResponse::HideWindow
     });
+    {
+        // Both quit paths hide the debug window too, then end the loop.
+        let state_ref = Rc::clone(&state);
+        let quit_now = move || {
+            if let Some(dw) = state_ref.borrow().debug_window.as_ref() {
+                let _ = dw.hide();
+            }
+            let _ = slint::quit_event_loop();
+        };
+        let quit_discard = quit_now.clone();
+        app.on_quit_discard(move || quit_discard());
+        let save_app_weak = app.as_weak();
+        app.on_quit_save(move || {
+            if let Some(app) = save_app_weak.upgrade() {
+                app.invoke_save_calibration();
+                // Save failed (setup still dirty): stay open, the status
+                // bar carries the error.
+                if app.get_cal_dirty() || app.get_lens_dirty() {
+                    app.set_quit_dialog_open(false);
+                    return;
+                }
+            }
+            quit_now();
+        });
+    }
 
     app.run()?;
     Ok(())
