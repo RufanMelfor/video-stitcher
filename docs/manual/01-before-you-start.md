@@ -88,14 +88,19 @@ originals stay untouched.
 ## The program at a glance
 
 - **Left panel (Files):** choose the match folder or the left and right videos,
-  load or create the setup.
+  load or create the setup. The **SETUP** header at the top folds the whole
+  files part (match folder, videos, calibration buttons) away; the Stitching
+  cards below it stay visible. The folded state is remembered.
 - **Centre:** the stitched preview, with a timeline and playback controls
-  underneath.
+  underneath. Hover the timeline to see the time under the mouse (also while
+  dragging a cut handle). Next to **FRAME #** is a **SECONDS** field: click it,
+  type a time in seconds (for example `83.5`) and press Enter to jump there.
 - **Right panel:** the settings, in collapsible sections (Lens, Calibration,
   Color Mapping, Stats and more). A small **?** next to a setting explains it.
-- **Top bar:** Export, Preferences, Debug (log window), a **?** button for
-  keyboard shortcuts, and an *Update available* button when a newer release of
-  this project exists.
+- **Top bar:** Export, Preferences, Debug (log window) and a **?** button for
+  keyboard shortcuts. **Save Setup** appears next to Export while you have
+  unsaved setup changes; if you quit with unsaved changes the program asks
+  first.
 
 <!-- screenshot: the main window with the three areas labelled -->
 

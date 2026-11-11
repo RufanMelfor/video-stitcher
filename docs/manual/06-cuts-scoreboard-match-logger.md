@@ -15,7 +15,8 @@ with no gap. Use it for injuries, half-time, or a warm-up that was recorded.
 
 Add a cut in either of two ways:
 
-- **On the timeline:** drag the reddish band on the scrubber.
+- **On the timeline:** drag the reddish band on the scrubber. The time under
+  the mouse is shown above the timeline while you hover or drag.
 - **In the Export dialog:** click **+ Add cut** and type the start and end in
   seconds.
 

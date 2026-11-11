@@ -71,12 +71,11 @@ minutes once).
 ## Getting help
 
 1. Note what you did, the exact error message, and your graphics card and driver.
-2. Click **Report Bug** at the bottom right of the window. Describe what went
-   wrong; with *Include system info and logs* ticked the report holds your
-   system information, settings and logs, **never video content**. The report is
-   copied to your clipboard.
-3. Open a new issue in this project's GitHub repository and paste the report.
-   Attach the export's `.log` file if there is one.
+2. Open the **Debug** window and copy the lines around the problem. The
+   `reco-gui.log` file (see above) holds the full log; neither contains video
+   content.
+3. Open a new issue in this project's GitHub repository and paste what you
+   collected. Attach the export's `.log` file if there is one.
 
 Remember that only **Windows 11 with an NVIDIA GeForce RTX 3060 Ti** is tested.
 Problems on other setups are welcome as reports, but may not be fixable.

@@ -6,6 +6,12 @@ if you enabled it, the colour settings, the cuts and the scoreboard. Click
 
 <!-- screenshot: Export dialog, Export tab -->
 
+Only the settings scroll; **Cancel** and **Start Export** stay in a fixed bar at
+the bottom. Drag the bottom edge of the dialog to change its height, and press
+**Esc** to close it. The `.log` file written next to the export lists the
+settings in the same order as this dialog; settings that are not in the dialog
+(container, audio, seam and colour overrides) come last.
+
 ## The Export tab
 
 | Setting | What to do |
