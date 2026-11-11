@@ -1030,6 +1030,15 @@ export component RecoApp inherits Window {
     property <bool> frame-input-editing: false;
     property <bool> secs-input-editing: false;
     /// Left panel SETUP group (match folder through Stitching) open/closed.
+    /// Seconds -> "m:ss.s" (or "h:mm:ss.s" past an hour), for the
+    /// scrubber's hover time.
+    pure function fmt-time(secs: float) -> string {
+        let t = round(secs * 10) / 10;
+        let h = floor(t / 3600);
+        let m = floor((t - h * 3600) / 60);
+        let sec = t - h * 3600 - m * 60;
+        return (h > 0 ? h + ":" + (m < 10 ? "0" : "") : "") + m + ":" + (sec < 10 ? "0" : "") + sec;
+    }
     in-out property <bool> setup-group-expanded: true;
     callback setup-group-toggled(bool);
     in-out property <int> total-frames: 0;
@@ -2198,6 +2207,12 @@ export component RecoApp inherits Window {
                 // newer release; clicking opens the download page - no
                 // more auto-opening a browser tab unasked (see
                 // `open-update-page` / `update-available`'s doc comment).
+                if root.cal-dirty || root.lens-dirty: FlatButton {
+                    text: "Save Setup";
+                    primary: true;
+                    clicked => { root.save-calibration(); }
+                }
+
                 FlatButton {
                     text: "Export…";
                     enabled: root.files-loaded && !root.export-in-progress;
@@ -2405,6 +2420,8 @@ export component RecoApp inherits Window {
                             }
                         }
 
+                        }  // close SETUP group (match folder .. calibration)
+
                         // Stitching settings only appear after calibration is loaded
                         if root.files-loaded: Rectangle { height: 1px; background: root.border-subtle; }
 
@@ -2545,12 +2562,6 @@ export component RecoApp inherits Window {
                                         clicked => { root.compute-sync-offset(); }
                                     }
                                 }
-                            }
-
-                            if root.cal-dirty || root.lens-dirty: FlatButton {
-                                text: "Save Setup";
-                                primary: true;
-                                clicked => { root.save-calibration(); }
                             }
 
                             CalGroupBox {
@@ -2996,7 +3007,6 @@ export component RecoApp inherits Window {
                                     wrap: word-wrap;
                                 }
                             }
-                        }
                         }
 
                         Rectangle { height: 1px; background: root.border-subtle; }
@@ -5181,6 +5191,29 @@ export component RecoApp inherits Window {
                                 height: 12px;
                                 border-radius: 6px;
                                 background: outside ? #808080 : Palette.accent-background;
+                            }
+                        }
+
+                        // Time under the mouse (also while dragging a cut
+                        // handle or the playhead), shown above the track.
+                        if scrubber-track.has-hover && root.clip-duration-secs > 0 && parent.width > 0px: Rectangle {
+                            property <float> hover-secs: clamp(
+                                root.scrub-view-start + scrubber-track.mouse-x / parent.width * root.scrub-view-len,
+                                0.0, root.clip-duration-secs);
+                            width: 64px;
+                            height: 18px;
+                            x: clamp(scrubber-track.mouse-x - self.width / 2, 0px, max(0px, parent.width - self.width));
+                            y: -22px;
+                            background: #000000d0;
+                            border-radius: 3px;
+                            border-width: 1px;
+                            border-color: #ffffff50;
+                            Text {
+                                text: root.fmt-time(parent.hover-secs);
+                                color: white;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
                             }
                         }
 
@@ -7772,9 +7805,9 @@ export component RecoApp inherits Window {
                 // Footer: fixed, does not scroll with the parameters.
                 Rectangle { height: 1px; background: root.border-mid; }
                 Rectangle {
-                    height: footer-box.preferred-height + 24px;
+                    height: footer-box.preferred-height + 8px;
                     footer-box := VerticalLayout {
-                        padding: 12px;
+                        padding: 4px;
                         padding-left: 24px;
                         padding-right: 24px;
                         if root.export-dialog-tab == "export": VerticalLayout {
