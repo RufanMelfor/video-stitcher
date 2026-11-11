@@ -1028,6 +1028,10 @@ export component RecoApp inherits Window {
     in-out property <float> progress: 0.0;
     in-out property <int> current-frame: 0;
     property <bool> frame-input-editing: false;
+    property <bool> secs-input-editing: false;
+    /// Left panel SETUP group (match folder through Stitching) open/closed.
+    in-out property <bool> setup-group-expanded: true;
+    callback setup-group-toggled(bool);
     in-out property <int> total-frames: 0;
     in-out property <string> current-time-text: "0:00";
     property <bool> speed-input-editing: false;
@@ -1179,6 +1183,8 @@ export component RecoApp inherits Window {
 
     // Export dialog state.
     in-out property <bool> export-dialog-open: false;
+    /// Export dialog height; drag the bottom edge to change it.
+    in-out property <length> export-dialog-height: 720px;
     // Which of the dialog's two tabs is showing: "export" (the normal
     // stitched export) or "ai-debug" (the raw-camera AI debug export -
     // see that tab's own state block below). Resets to "export" every
@@ -2070,7 +2076,7 @@ export component RecoApp inherits Window {
     // Left panel (files) visibility.
     in-out property <bool> files-panel-open: false;
     // Panel widths (resizable via drag handles).
-    in-out property <length> left-panel-width: 260px;
+    in-out property <length> left-panel-width: 340px;
     // Wider than the left panel: this column holds LabeledSlider rows
     // whose up/down stepper arrows sit at the far right edge, right where
     // the ScrollView's vertical scrollbar renders - too narrow and the
@@ -2098,6 +2104,13 @@ export component RecoApp inherits Window {
             Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light;
         }
         key-pressed(event) => {
+            // Esc closes the export dialog (it is never open while an
+            // export runs - the dialog closes when the export starts).
+            if (event.text == Key.Escape && root.export-dialog-open && !root.export-in-progress) {
+                root.export-dialog-open = false;
+                root.export-error-text = "";
+                return accept;
+            }
             // Space: play/pause
             if (event.text == " ") { root.toggle-playback(); return accept; }
             // Arrow keys: pan
@@ -2185,11 +2198,6 @@ export component RecoApp inherits Window {
                 // newer release; clicking opens the download page - no
                 // more auto-opening a browser tab unasked (see
                 // `open-update-page` / `update-available`'s doc comment).
-                if root.update-available: FlatButton {
-                    text: "Update available (" + root.update-tag + ")";
-                    clicked => { root.open-update-page(); }
-                }
-
                 FlatButton {
                     text: "Export…";
                     enabled: root.files-loaded && !root.export-in-progress;
@@ -2248,6 +2256,16 @@ export component RecoApp inherits Window {
                         spacing: 8px;
                         alignment: start;
 
+                        setup-group := SectionHeader {
+                            title: "SETUP";
+                            expanded <=> root.setup-group-expanded;
+                            changed expanded => { root.setup-group-toggled(self.expanded); }
+                        }
+
+                        if root.setup-group-expanded: VerticalLayout {
+                        spacing: 8px;
+                        alignment: start;
+
                         // Fills Left, Right and Setup below in one
                         // shot from a `<match>/Left/`, `<match>/Right/`
                         // folder - see `on_pick_match_folder` in main.rs.
@@ -2303,8 +2321,6 @@ export component RecoApp inherits Window {
                         }
 
                         if root.has-both-videos || root.calibration-path != "": Rectangle { height: 1px; background: root.border-subtle; }
-
-                        if root.has-both-videos || root.calibration-path != "": Text { text: "Setup"; color: #aaa; font-size: 12px; font-weight: 600; }
 
                         if root.has-both-videos: HorizontalLayout {
                             spacing: 4px;
@@ -2400,12 +2416,11 @@ export component RecoApp inherits Window {
                             // Collapsed by default - tuned once during setup,
                             // rarely revisited afterward, and eating vertical
                             // space in a sidebar that's on screen constantly.
-                            seam-section := SectionHeader {
+                            CalGroupBox {
                                 title: "SEAM";
+                                collapsible: true;
                                 expanded: false;
-                            }
 
-                            if seam-section.expanded: CalGroupBox {
                                 LabeledSlider {
                                     tip: "Width of the feathered blend at the seam between the two cameras.";
                                     label: "Seam blend";
@@ -2480,12 +2495,11 @@ export component RecoApp inherits Window {
                             }
 
                             // Collapsed by default, same reasoning as SEAM above.
-                            rig-section := SectionHeader {
+                            CalGroupBox {
                                 title: "RIG ALIGNMENT";
+                                collapsible: true;
                                 expanded: false;
-                            }
 
-                            if rig-section.expanded: CalGroupBox {
                                 LabeledSlider {
                                     tip: "Forward/backward lean of the camera rig; straightens vertical lines at the panorama edges.";
                                     label: "Rig tilt";
@@ -2983,6 +2997,7 @@ export component RecoApp inherits Window {
                                 }
                             }
                         }
+                        }
 
                         Rectangle { height: 1px; background: root.border-subtle; }
 
@@ -3027,7 +3042,7 @@ export component RecoApp inherits Window {
                                 // checkboxes) needs; below that the panel
                                 // starts clipping its own controls rather
                                 // than just eliding filenames.
-                                root.left-panel-width = max(240px, root.left-panel-width + (self.mouse-x - self.pressed-x));
+                                root.left-panel-width = max(300px, root.left-panel-width + (self.mouse-x - self.pressed-x));
                             }
                         }
                     }
@@ -5307,6 +5322,85 @@ export component RecoApp inherits Window {
                             }
                         }
 
+                        // Seconds field next to FRAME #: same click-to-edit
+                        // swap (see the comment above FRAME #). Seconds are
+                        // measured on the same clip timeline as the scrub
+                        // bar (current-frame / total-frames * duration).
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+
+                            if !root.secs-input-editing: TouchArea {
+                                mouse-cursor: pointer;
+                                width: 70px;
+                                height: 22px;
+                                clicked => { root.secs-input-editing = true; }
+                                Rectangle {
+                                    width: 100%;
+                                    height: 100%;
+                                    background: root.bg-panel;
+                                    border-radius: 3px;
+                                    border-width: 1px;
+                                    border-color: #444;
+                                    Text {
+                                        text: root.total-frames > 0
+                                            ? round(root.current-frame / root.total-frames * root.clip-duration-secs * 100) / 100
+                                            : "0";
+                                        color: white;
+                                        font-size: 11px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        width: 100%;
+                                        height: 100%;
+                                    }
+                                }
+                            }
+                            if root.secs-input-editing: HorizontalLayout {
+                                secs-input := NumEdit {
+                                    text: root.total-frames > 0
+                                        ? round(root.current-frame / root.total-frames * root.clip-duration-secs * 100) / 100
+                                        : "0";
+                                    width: 70px;
+                                    height: 22px;
+                                    enabled: root.files-loaded && root.clip-duration-secs > 0;
+                                    num-font-size: 11px;
+                                    function commit() {
+                                        if root.clip-duration-secs > 0 {
+                                            root.seek(clamp(self.text.to-float(), 0.0, root.clip-duration-secs) / root.clip-duration-secs);
+                                        }
+                                        root.secs-input-editing = false;
+                                    }
+                                    accepted => { self.commit(); }
+                                    escaped => { root.secs-input-editing = false; }
+                                    changed has-focus => {
+                                        if !self.has-focus && root.secs-input-editing {
+                                            self.commit();
+                                        }
+                                    }
+                                }
+                                secs-focus-timer := Timer {
+                                    interval: 1ms;
+                                    running: true;
+                                    triggered => {
+                                        self.running = false;
+                                        secs-input.focus();
+                                        secs-input.select-all();
+                                    }
+                                }
+                            }
+
+                            Text {
+                                text: "SECONDS";
+                                color: #666;
+                                font-size: 8px;
+                                font-weight: 600;
+                                letter-spacing: 0.5px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                width: 70px;
+                            }
+                        }
+
                     }
 
                     // Divider between the playhead-info zone and the
@@ -5490,21 +5584,6 @@ export component RecoApp inherits Window {
                     vertical-alignment: center;
                 }
 
-                Rectangle {
-                    width: bug-btn-layout.preferred-width + 10px;
-                    height: 20px;
-                    border-radius: 3px;
-                    background: bug-touch.has-hover ? #333 : transparent;
-                    bug-btn-layout := HorizontalLayout {
-                        padding-left: 5px;
-                        padding-right: 5px;
-                        spacing: 4px;
-                        Text { text: "Report Bug"; color: #666; font-size: 10px; vertical-alignment: center; }
-                    }
-                    bug-touch := TouchArea {
-                        clicked => { root.bug-dialog-open = true; }
-                    }
-                }
             }
         }
         }  // close VerticalBox
@@ -6307,15 +6386,20 @@ export component RecoApp inherits Window {
 
             Rectangle {
                 width: 560px;
-                height: min(parent.height - 60px, 720px);
+                height: clamp(root.export-dialog-height, 360px, max(360px, parent.height - 20px));
                 background: root.bg-surface;
                 border-radius: 12px;
                 border-width: 1px;
                 border-color: root.border-mid;
+                clip: true;
 
                 TouchArea {}
 
+                VerticalLayout {
+                // Only the parameters scroll; the Cancel/Start buttons
+                // live in the footer below so they stay in view.
                 ScrollView {
+                    vertical-stretch: 1;
                     horizontal-scrollbar-policy: always-off;
 
                 VerticalBox {
@@ -7438,45 +7522,6 @@ export component RecoApp inherits Window {
                         }
                     }
 
-                    Rectangle { height: 10px; }
-
-                    HorizontalBox {
-                        spacing: 10px;
-                        padding: 0;
-
-                        Rectangle { horizontal-stretch: 1; }
-
-                        if root.export-error-text != "": Text {
-                            text: root.export-error-text;
-                            color: #e06060;
-                            font-size: 11px;
-                            wrap: word-wrap;
-                            horizontal-stretch: 1;
-                        }
-
-                        FlatButton {
-                            text: "Cancel";
-                            clicked => { root.export-dialog-open = false; root.export-error-text = ""; }
-                        }
-
-                        FlatButton {
-                            text: "Start Export";
-                            primary: true;
-                            // Block when AI tracking is on but no model is
-                            // picked - otherwise the export runs with no
-                            // tracking and no warning.
-                            enabled: root.export-output-path != ""
-                                && !(root.export-autocam-enabled && root.export-model-path == "");
-                            clicked => {
-                                if !root.has-roi {
-                                    root.pending-ai-debug-raw-export = false;
-                                    root.no-roi-warning-open = true;
-                                } else {
-                                    root.start-export();
-                                }
-                            }
-                        }
-                    }
                     }  // close "export" tab VerticalLayout
 
                     // ── AI Debug tab ──
@@ -7720,8 +7765,58 @@ export component RecoApp inherits Window {
                         decimals: 1;
                     }
 
-                    Rectangle { height: 10px; }
+                    }  // close "ai-debug" tab VerticalLayout
+                }
+                }  // close ScrollView
 
+                // Footer: fixed, does not scroll with the parameters.
+                Rectangle { height: 1px; background: root.border-mid; }
+                Rectangle {
+                    height: footer-box.preferred-height + 24px;
+                    footer-box := VerticalLayout {
+                        padding: 12px;
+                        padding-left: 24px;
+                        padding-right: 24px;
+                        if root.export-dialog-tab == "export": VerticalLayout {
+                    HorizontalBox {
+                        spacing: 10px;
+                        padding: 0;
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        if root.export-error-text != "": Text {
+                            text: root.export-error-text;
+                            color: #e06060;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                        }
+
+                        FlatButton {
+                            text: "Cancel";
+                            clicked => { root.export-dialog-open = false; root.export-error-text = ""; }
+                        }
+
+                        FlatButton {
+                            text: "Start Export";
+                            primary: true;
+                            // Block when AI tracking is on but no model is
+                            // picked - otherwise the export runs with no
+                            // tracking and no warning.
+                            enabled: root.export-output-path != ""
+                                && !(root.export-autocam-enabled && root.export-model-path == "");
+                            clicked => {
+                                if !root.has-roi {
+                                    root.pending-ai-debug-raw-export = false;
+                                    root.no-roi-warning-open = true;
+                                } else {
+                                    root.start-export();
+                                }
+                            }
+                        }
+                    }
+                        }
+                        if root.export-dialog-tab == "ai-debug": VerticalLayout {
                     HorizontalBox {
                         spacing: 10px;
                         padding: 0;
@@ -7755,9 +7850,26 @@ export component RecoApp inherits Window {
                             }
                         }
                     }
-                    }  // close "ai-debug" tab VerticalLayout
+                        }
+                    }
                 }
-                }  // close ScrollView
+                }  // close panel VerticalLayout
+
+                // Bottom edge grip: drag to change the dialog height
+                // (panel is centered, so the edge follows at half speed).
+                Rectangle {
+                    y: parent.height - 8px;
+                    height: 8px;
+                    background: dlg-resize.has-hover || dlg-resize.pressed ? #6a9fd8 : transparent;
+                    dlg-resize := TouchArea {
+                        mouse-cursor: ns-resize;
+                        moved => {
+                            if self.pressed {
+                                root.export-dialog-height = root.export-dialog-height + 2 * (self.mouse-y - self.pressed-y);
+                            }
+                        }
+                    }
+                }
             }
         }
         // ── Info report (modal) ──
@@ -8135,6 +8247,13 @@ export component DebugWindow inherits Window {
     background: #202327;
 
     in-out property <string> log-text: "";
+    property <bool> follow-tail: true;
+
+    changed log-text => {
+        if root.follow-tail {
+            log-scroll.viewport-y = min(0px, log-scroll.height - log-scroll.viewport-height);
+        }
+    }
 
     VerticalLayout {
         padding: 16px;
@@ -8157,17 +8276,28 @@ export component DebugWindow inherits Window {
             border-color: #2a2e33;
             clip: true;
 
-            ScrollView {
-                TextInput {
+            // Explicit viewport height: a wrapped TextInput does not size
+            // the ScrollView's viewport by itself, which clipped the last
+            // lines. Follows new output (tail) until the user scrolls up,
+            // resumes once they scroll back to the bottom.
+            log-scroll := ScrollView {
+                viewport-height: log-input.preferred-height + 20px;
+
+                log-input := TextInput {
                     x: 8px;
+                    y: 8px;
                     width: parent.width - 16px;
                     text: root.log-text == "" ? "(no log output yet)" : root.log-text;
-                    color: #ccc;
-                    font-size: 10px;
+                    color: #d8dbdf;
+                    font-size: 11px;
                     font-family: "Consolas";
                     read-only: true;
                     wrap: word-wrap;
                     single-line: false;
+                }
+
+                changed viewport-y => {
+                    root.follow-tail = self.viewport-y <= self.height - self.viewport-height + 4px;
                 }
             }
         }

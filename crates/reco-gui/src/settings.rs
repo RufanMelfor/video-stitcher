@@ -171,6 +171,10 @@ pub struct GuiSettings {
     /// web playback and costs minutes on a full-match export.
     #[serde(default)]
     pub export_faststart: bool,
+    /// Left panel's SETUP group (match folder through Stitching) folded
+    /// away. App-level UI state, restored on the next start.
+    #[serde(default)]
+    pub setup_group_collapsed: bool,
     /// Seconds of dip-to-black in *and* back out. Composited over frames
     /// that were going to be encoded anyway, so it adds no export length.
     #[serde(default = "default_pause_overlay_fade_secs")]
@@ -318,6 +322,7 @@ impl Default for GuiSettings {
             scoreboard_settings: None,
             pause_overlay_enabled: false,
             export_faststart: false,
+            setup_group_collapsed: false,
             pause_overlay_fade_secs: default_pause_overlay_fade_secs(),
             pause_overlay_hold_secs: default_pause_overlay_hold_secs(),
             minimap_enabled: false,
