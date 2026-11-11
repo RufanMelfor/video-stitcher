@@ -9444,6 +9444,20 @@ fn main() -> anyhow::Result<()> {
         },
     );
 
+    // SETUP group fold state: restored from settings, saved on toggle.
+    {
+        let s = state.borrow();
+        app.set_setup_group_expanded(!s.user_settings.setup_group_collapsed);
+    }
+    {
+        let state_ref = Rc::clone(&state);
+        app.on_setup_group_toggled(move |expanded| {
+            let mut s = state_ref.borrow_mut();
+            s.user_settings.setup_group_collapsed = !expanded;
+            s.user_settings.save();
+        });
+    }
+
     // Auto-open the files panel when no files are loaded so the user
     // sees the first action they need to take.
     if !app.get_files_loaded() {

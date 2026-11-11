@@ -1701,6 +1701,14 @@ impl StitchJob {
         );
 
         let _ = writeln!(out, "\n--- Output ---");
+        let _ = writeln!(
+            out,
+            "Resolution:       {}",
+            match self.resolution {
+                Some((w, h)) => format!("{w}x{h}"),
+                None => "not set (defaults to 1920x1080)".to_string(),
+            }
+        );
         let _ = writeln!(out, "Codec:            {}", self.codec);
         let _ = writeln!(
             out,
@@ -1728,7 +1736,6 @@ impl StitchJob {
             "Encoder override: {}",
             describe_opt(&self.encoder_name)
         );
-        let _ = writeln!(out, "Container format: {:?}", self.format);
         let _ = writeln!(
             out,
             "Fast start:       {}",
@@ -1738,14 +1745,94 @@ impl StitchJob {
                 "off"
             }
         );
+        let _ = writeln!(out, "\n--- Processing window ---");
         let _ = writeln!(
             out,
-            "Resolution:       {}",
-            match self.resolution {
-                Some((w, h)) => format!("{w}x{h}"),
-                None => "not set (defaults to 1920x1080)".to_string(),
+            "Start time:    {}",
+            self.start_time
+                .map_or("from the beginning".to_string(), |s| format!("{s}s"))
+        );
+        let _ = writeln!(
+            out,
+            "End time:      {}",
+            self.end_time
+                .map_or("to the end".to_string(), |s| format!("{s}s"))
+        );
+        let _ = writeln!(
+            out,
+            "Cut ranges:    {}",
+            if self.cut_ranges.is_empty() {
+                "none".to_string()
+            } else {
+                self.cut_ranges
+                    .iter()
+                    .map(|r| format!("{:.1}-{:.1}s", r.start_secs, r.end_secs))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             }
         );
+        let _ = writeln!(
+            out,
+            "Pause overlay: {}",
+            match self.pause_overlay {
+                Some((fade, hold)) if self.pause_overlay_caption.is_empty() => {
+                    format!("dip to black (no caption), fade {fade}s, hold {hold}s")
+                }
+                Some((fade, hold)) => format!(
+                    "{} card, fade {fade}s, hold {hold}s",
+                    self.pause_overlay_caption
+                ),
+                None => "disabled".to_string(),
+            }
+        );
+
+        let _ = writeln!(
+            out,
+            "Max frames:    {}",
+            self.max_frames
+                .map_or("unlimited".to_string(), |n| n.to_string())
+        );
+        let _ = writeln!(out, "\n--- Recording extras ---");
+        #[cfg(feature = "stacked-output")]
+        let _ = writeln!(
+            out,
+            "Replay recording: {}",
+            self.replay_recording
+                .as_ref()
+                .map_or("disabled".to_string(), |c| c.path.display().to_string())
+        );
+        #[cfg(not(feature = "stacked-output"))]
+        let _ = writeln!(
+            out,
+            "Replay recording: disabled (not built with stacked-output)"
+        );
+        let _ = writeln!(
+            out,
+            "Pipeline events JSONL: {}",
+            describe_path_opt(&self.events_path)
+        );
+        let _ = writeln!(out, "\n--- AI tracking / autocam ---");
+        out.push_str(&self.describe_autocam_snapshot());
+        let _ = writeln!(
+            out,
+            "Lookahead buffer: {}",
+            if self.lookahead_secs > 0.0 {
+                format!(
+                    "{:.1}s{}",
+                    self.lookahead_secs,
+                    if self.lookahead_reduced_bit_depth {
+                        " (reduced to 8-bit)"
+                    } else {
+                        ""
+                    }
+                )
+            } else {
+                "disabled".to_string()
+            }
+        );
+
+        let _ = writeln!(out, "\n--- Not in the Export dialog ---");
+        let _ = writeln!(out, "Container format: {:?}", self.format);
         let _ = writeln!(
             out,
             "Audio:            {}",
@@ -1757,7 +1844,8 @@ impl StitchJob {
             }
         );
 
-        let _ = writeln!(out, "\n--- Rendering ---");
+        let _ = writeln!(out, "Force CPU decode: {}", self.force_cpu_decode);
+
         let _ = writeln!(
             out,
             "Seam blend width:     {}",
@@ -1793,93 +1881,6 @@ impl StitchJob {
         let _ = writeln!(out, "Show seam line (debug): {}", self.show_seam_line);
         let _ = writeln!(out, "Overlap view (debug): {:?}", self.overlap_view);
 
-        let _ = writeln!(out, "\n--- Processing window ---");
-        let _ = writeln!(
-            out,
-            "Start time:    {}",
-            self.start_time
-                .map_or("from the beginning".to_string(), |s| format!("{s}s"))
-        );
-        let _ = writeln!(
-            out,
-            "End time:      {}",
-            self.end_time
-                .map_or("to the end".to_string(), |s| format!("{s}s"))
-        );
-        let _ = writeln!(
-            out,
-            "Max frames:    {}",
-            self.max_frames
-                .map_or("unlimited".to_string(), |n| n.to_string())
-        );
-        let _ = writeln!(
-            out,
-            "Cut ranges:    {}",
-            if self.cut_ranges.is_empty() {
-                "none".to_string()
-            } else {
-                self.cut_ranges
-                    .iter()
-                    .map(|r| format!("{:.1}-{:.1}s", r.start_secs, r.end_secs))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            }
-        );
-        let _ = writeln!(
-            out,
-            "Pause overlay: {}",
-            match self.pause_overlay {
-                Some((fade, hold)) if self.pause_overlay_caption.is_empty() => {
-                    format!("dip to black (no caption), fade {fade}s, hold {hold}s")
-                }
-                Some((fade, hold)) => format!(
-                    "{} card, fade {fade}s, hold {hold}s",
-                    self.pause_overlay_caption
-                ),
-                None => "disabled".to_string(),
-            }
-        );
-
-        let _ = writeln!(out, "\n--- AI tracking / autocam ---");
-        out.push_str(&self.describe_autocam_snapshot());
-        let _ = writeln!(
-            out,
-            "Lookahead buffer: {}",
-            if self.lookahead_secs > 0.0 {
-                format!(
-                    "{:.1}s{}",
-                    self.lookahead_secs,
-                    if self.lookahead_reduced_bit_depth {
-                        " (reduced to 8-bit)"
-                    } else {
-                        ""
-                    }
-                )
-            } else {
-                "disabled".to_string()
-            }
-        );
-        let _ = writeln!(out, "Force CPU decode: {}", self.force_cpu_decode);
-
-        let _ = writeln!(out, "\n--- Extras ---");
-        #[cfg(feature = "stacked-output")]
-        let _ = writeln!(
-            out,
-            "Replay recording: {}",
-            self.replay_recording
-                .as_ref()
-                .map_or("disabled".to_string(), |c| c.path.display().to_string())
-        );
-        #[cfg(not(feature = "stacked-output"))]
-        let _ = writeln!(
-            out,
-            "Replay recording: disabled (not built with stacked-output)"
-        );
-        let _ = writeln!(
-            out,
-            "Pipeline events JSONL: {}",
-            describe_path_opt(&self.events_path)
-        );
         let _ = writeln!(
             out,
             "In-process event sink: {}",
