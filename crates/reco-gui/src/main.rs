@@ -9513,7 +9513,7 @@ fn main() -> anyhow::Result<()> {
             let _ = slint::quit_event_loop();
         };
         let quit_discard = quit_now.clone();
-        app.on_quit_discard(move || quit_discard());
+        app.on_quit_discard(quit_discard);
         let save_app_weak = app.as_weak();
         app.on_quit_save(move || {
             if let Some(app) = save_app_weak.upgrade() {
