@@ -27,6 +27,8 @@ mod preview;
 mod scoreboard_import;
 mod settings;
 mod sync_offset;
+// The client is never constructed: this build has no telemetry endpoint.
+#[allow(dead_code)]
 mod telemetry_client;
 mod toast;
 mod waveform;
@@ -3948,22 +3950,12 @@ fn main() -> anyhow::Result<()> {
     let app = RecoApp::new()?;
     let state = Rc::new(RefCell::new(AppState::new()));
 
-    // Initialize opt-in telemetry if the user enabled it.
+    // This build collects no usage data. A telemetry flag carried over from
+    // an older settings file is cleared so it can never switch anything on.
     {
         let mut s = state.borrow_mut();
-        if s.user_settings.telemetry_enabled {
-            let cid = s
-                .user_settings
-                .telemetry_client_id
-                .clone()
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            log::info!("Telemetry enabled (client_id={}).", &cid[..8]);
-            let client = telemetry_client::TelemetryClient::new(cid);
-            client.app_open();
-            s.telemetry = Some(client);
-        } else {
-            log::info!("Telemetry disabled (opt-in via Preferences).");
-        }
+        s.user_settings.telemetry_enabled = false;
+        log::info!("No usage data is collected or sent.");
     }
 
     let (ai_status, ai_available) = ai_capability_summary();
@@ -3988,7 +3980,7 @@ fn main() -> anyhow::Result<()> {
             .map(|h| format!(" ({h})"))
             .unwrap_or_default()
     );
-    log::info!("Reco GUI {version}");
+    log::info!("RECO Panopitch {version}");
     app.set_version(version.into());
 
     {
@@ -5443,24 +5435,8 @@ fn main() -> anyhow::Result<()> {
         s.user_settings.dark_mode = dark;
         app.set_dark_mode(dark);
 
-        let telemetry_wanted = app.get_prefs_telemetry_enabled();
-        s.user_settings.telemetry_enabled = telemetry_wanted;
-        if telemetry_wanted && s.telemetry.is_none() {
-            let cid = s
-                .user_settings
-                .telemetry_client_id
-                .clone()
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            log::info!("Telemetry enabled by user (client_id={}).", &cid[..8]);
-            let client = telemetry_client::TelemetryClient::new(cid);
-            client.app_open();
-            s.telemetry = Some(client);
-        } else if !telemetry_wanted {
-            if s.telemetry.is_some() {
-                log::info!("Telemetry disabled by user.");
-            }
-            s.telemetry = None;
-        }
+        s.user_settings.telemetry_enabled = false;
+        s.telemetry = None;
         s.user_settings.save();
     });
 
