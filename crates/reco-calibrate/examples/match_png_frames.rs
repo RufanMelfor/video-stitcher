@@ -3,10 +3,10 @@
 //! `examples/dump_points.rs` needs the source *videos*, which aren't always
 //! available (multi-GB match recordings live on a separate drive). This
 //! harness runs the same pipeline from the already-extracted raw frame PNGs
-//! that `resources/export_synced_frames.py` produces - e.g. the committed
-//! pairs under `resources/test-data/frames/` - so the far-field cross-check
-//! in `examples/fit_ground_tilt_manual.rs` (`--matched-points`) can run from
-//! data that ships with the repo (FRICTION.md point 20).
+//! that `resources/export_synced_frames.py` produces from your own recording
+//! (frame pairs are not shipped with the repo), so the far-field cross-check
+//! in `examples/fit_ground_tilt_manual.rs` (`--matched-points`) can run
+//! without the source videos (FRICTION.md point 20).
 //!
 //! Pairs are discovered by filename: every `frame<N>_left.png` is matched
 //! with the `frame<M>_right.png` that follows it in numeric order (the
