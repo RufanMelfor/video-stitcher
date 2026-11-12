@@ -19,7 +19,7 @@ Slint on wgpu 28 drives its own render loop; reco-gui sources panorama frames vi
 cargo build --release -p reco-gui
 cargo build --release -p reco-gui --features tensorrt-native   # Jetson desktop
 cargo build --release -p reco-gui --features profiling         # tracing
-./target/release/reco-gui
+./target/release/reco-panopitch
 ```
 
 ## License note

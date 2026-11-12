@@ -212,13 +212,13 @@ cargo build --release
 
 **Windows runtime note:** the FFmpeg DLLs (`avcodec-61.dll`, `avdevice-61.dll`,
 `avfilter-10.dll`, `avformat-61.dll`, `avutil-59.dll`, `postproc-58.dll`,
-`swresample-5.dll`, `swscale-8.dll`) are required next to `reco-gui.exe` /
+`swresample-5.dll`, `swscale-8.dll`) are required next to `reco-panopitch.exe` /
 `reco-cli.exe` at run time, not only at link time. `cargo build` does not copy
 them into `target/debug` or `target/release` automatically, so running a
 freshly built exe straight from `target/` without copying these DLLs next to
 it fails with `avformat-61.dll was not found` (or a similar message) at startup. Copy
 them from `$FFMPEG_DIR/bin` (or from an existing packaged release, e.g.
-`reco-gui-vX.Y.Z-windows-x86_64/`) into the same folder as the exe.
+`reco-panopitch-vX.Y.Z-windows-x86_64/`) into the same folder as the exe.
 
 ### Feature flags
 

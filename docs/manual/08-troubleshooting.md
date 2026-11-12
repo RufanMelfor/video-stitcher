@@ -7,7 +7,7 @@ where to look. If nothing here helps, see *Getting help* at the end.
 
 | What you see | What is going on | What to do |
 |---|---|---|
-| A message that `avformat-61.dll` (or another FFmpeg `.dll`) **was not found** | The FFmpeg DLLs must sit **next to** `reco-gui.exe`, also when you run a build you made yourself. | Copy all FFmpeg DLLs from the FFmpeg `bin` folder (or from a release package) into the same folder as `reco-gui.exe`. |
+| A message that `avformat-61.dll` (or another FFmpeg `.dll`) **was not found** | The FFmpeg DLLs must sit **next to** `reco-panopitch.exe`, also when you run a build you made yourself. | Copy all FFmpeg DLLs from the FFmpeg `bin` folder (or from a release package) into the same folder as `reco-panopitch.exe`. |
 | A video will not load | Unsupported type, or the folder layout is wrong. | Use `mp4`, `mov`, `avi` or `mkv`. For a match folder you need `Left` and `Right` subfolders with the videos in them ([chapter 2](02-cameras-and-footage.md)). The message says which folder is missing or empty. |
 | The two videos are refused | The cameras recorded at different frame rates. | Record both cameras at the same frame rate. A difference of up to half a frame per second (such as 29.97 and 30) is accepted. |
 | *"calibration is no longer supported"*, or an error when loading a setup | The file was made by another version of the program or by the original Reco. | Run **Auto Calibrate** again. Setup files are not guaranteed to work between this program and upstream Reco. |
@@ -63,7 +63,7 @@ minutes once).
 ## Where to find logs
 
 - **Debug** button in the top bar opens a window with the log.
-- On Windows the program also writes **`reco-gui.log`** next to the program file.
+- On Windows the program also writes **`reco-panopitch.log`** next to the program file.
 - Every export writes a **`.log` file** next to the video with the same name.
 - The settings folder is `%APPDATA%\panopitch\`. If you want to reset the
   program to a clean state, close it and rename that folder.
@@ -72,7 +72,7 @@ minutes once).
 
 1. Note what you did, the exact error message, and your graphics card and driver.
 2. Open the **Debug** window and copy the lines around the problem. The
-   `reco-gui.log` file (see above) holds the full log; neither contains video
+   `reco-panopitch.log` file (see above) holds the full log; neither contains video
    content.
 3. Open a new issue in this project's GitHub repository and paste what you
    collected. Attach the export's `.log` file if there is one.

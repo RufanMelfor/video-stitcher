@@ -26,7 +26,7 @@ fn main() {
 /// would ship - plus a `CARGO_MANIFEST_DIR`-relative dev fallback, but that
 /// fallback is deliberately `debug_assertions`-only (a release binary
 /// shouldn't leak the build machine's source path). Without this copy step,
-/// a locally-built *release* reco-gui.exe finds no scoreboard packages at
+/// a locally-built *release* reco-panopitch.exe finds no scoreboard packages at
 /// all - reproduces the packaged-install layout locally instead of
 /// special-casing debug vs. release discovery.
 fn bundle_scoreboards() {

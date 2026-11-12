@@ -6,24 +6,31 @@
 
 Every setting below is shown in the app with a **?** badge that displays the
 same text. Defaults are the values the app starts with before any saved
-setup or preference overrides them. A blank default means the value is
-filled in by the app (for example from the loaded setup). Picking a
+calibration or preference overrides them. A blank default means the value is
+filled in by the app (for example from the loaded calibration). Picking a
 **Style preset** in the AI Tracking section overwrites the framing sliders,
 so their defaults only apply until you pick one.
 
-## Seam
+## Setup
+
+| Setting | Range | Default | What it does |
+|---|---|---|---|
+| Select Match Folder... |  |  | Pick the match's folder. It must contain a Left and a Right subfolder with each camera's recordings. Reco fills in the Left and Right videos in one go and loads the match's setup file if there is one (otherwise a new one is prepared). |
+| Info |  |  | Details of both videos (codec, resolution, bit depth, bitrate, audio, recording time), the lenses' field of view and, with a setup, how many degrees the cameras overlap. Can be copied to the clipboard. |
+
+### Seam
 
 | Setting | Range | Default | What it does |
 |---|---|---|---|
 | Seam blend | 0 to 0.3 | 0.05 | Width of the feathered blend at the seam between the two cameras. |
 | Flip blend direction (left over right) |  | off | Which camera fades in over the other at the seam. Off (default): right fades over a fixed left. On: left fades over a fixed right. Doesn't move the seam itself. |
-| Multi-band blend |  | on (new setups) | Spatial (multi-band) blend: blurs low frequencies over a wide band and keeps high frequencies over a narrow band, instead of a single crossfade. Lets the seam blend read as wider without doubling fine detail (ball, player edges, field lines) - but costs 10 render passes instead of 1. |
+| Multi-band blend |  | off | Spatial (multi-band) blend: blurs low frequencies over a wide band and keeps high frequencies over a narrow band, instead of a single crossfade. Lets the seam blend read as wider without doubling fine detail (ball, player edges, field lines) - but costs 10 render passes instead of 1. |
 | Show seam line |  | off | Draws a thin red line at the exact geometric seam position, independent of how wide the seam blend is. Purely a visual aid for tuning Seam position and Flip blend direction - doesn't affect the render otherwise. |
 | Overlap view |  |  | Calibration aid, preview only (never in an export). Right over left / Left over right: shows that camera semi-transparently on the other camera's side of the seam - where the calibration is right, lines and goals line up; where it's off, you see them doubled. Difference: shows how much the two cameras differ wherever both see the same spot - near black = aligned, bright edges = misaligned. Both: both ghosts at once across the whole overlap - lines that cross the seam at an angle point to a roll error. Judge on far-away things (far touchline, goals); close to the cameras some doubling is normal (parallax). |
 | Overlap opacity | 0.0 to 1.0 | 0.5 | Ghost: how strongly the other camera shows through. Difference: how much of the difference image replaces the normal picture. |
 | Seam position | -0.3 to 0.3 | 0.0 | Moves the seam left/right by hand, independent of calibration - safe to drag freely, unlike Intersect (which can open a black gap if pushed too far). Or drag directly on the preview while Show seam line is on. |
 
-## Rig Alignment
+### Rig Alignment
 
 | Setting | Range | Default | What it does |
 |---|---|---|---|
@@ -40,12 +47,13 @@ so their defaults only apply until you pick one.
 
 | Setting | Range | Default | What it does |
 |---|---|---|---|
+| Open design… |  |  | Open a scoreboard design from a folder (the one holding its manifest.json). It is added to the list, selected, remembered for next time and saved in the setup. A design with the same id as a built-in one replaces it. |
 | Auto-cut lead-in + pauses |  | off | Adds cut ranges for the dead time before kickoff and any logged pause, keeping the seconds of context set below at each boundary. Only from period_start(1)/pause_start/pause_end events actually in the log - won't guess at a break you forgot to mark with Pause. Doesn't touch cut ranges you added or edited by hand. |
 | Pause cut |  |  | Seconds of play kept around every cut-out pause: before it, so the incident that stopped play is still in the export, and after it, so the restart is not cut into. |
 | Match trim |  |  | Seconds kept outside the match itself: lead-in before kickoff, and how long the export keeps running past the final whistle. These two move the export start/end time, not a cut range. |
 | Highlights only (goals) |  | off | Export only the goals: one clip per logged goal, spliced together. Sets the export start, end and cut ranges for you, and renames the output so it cannot overwrite the full match. Turning this on turns auto-cut off - it already excludes everything that is not a goal. |
 | Goal clip |  |  | How much of each goal to keep. The lead reaches back further than the trail on purpose: the goal is logged after the ball is in, so the build-up sits before the logged moment while only the celebration follows it. |
-| Fade to black between clips | 0 and up | 0.5 s | Fade to black between two goal clips instead of a hard cut: the picture fades out at the end of one clip and back in at the start of the next, over this many seconds each way. It adds no screen time and shows no caption. 0 = hard cut. |
+| s fade to black between clips |  |  | Fade to black between two goal clips instead of a hard cut: the picture fades out at the end of one clip and back in at the start of the next, over this many seconds each way. It adds no screen time and shows no caption. 0 = hard cut. |
 
 ## Audio Sync Waveform
 
@@ -108,7 +116,7 @@ so their defaults only apply until you pick one.
 
 | Setting | Range | Default | What it does |
 |---|---|---|---|
-| Overlap fit (sky + grass) |  | on (new setups) | Measures both cameras at exactly the same spots next to the seam - from the sky down to the near touchline - and fits a brightness + contrast correction per color channel, so sky and grass can both match (the classic auto match compares a different piece of the field per camera and can only shift the average). When on, the band width / grid / max offset settings and Auto gamma below are not used. |
+| Overlap fit (sky + grass) |  | off | Measures both cameras at exactly the same spots next to the seam - from the sky down to the near touchline - and fits a brightness + contrast correction per color channel, so sky and grass can both match (the classic auto match compares a different piece of the field per camera and can only shift the average). When on, the band width / grid / max offset settings and Auto gamma below are not used. |
 
 ### Manual Gamma (Before Auto Match)
 
@@ -151,7 +159,7 @@ so their defaults only apply until you pick one.
 | Setting | Range | Default | What it does |
 |---|---|---|---|
 | Dehaze | 0.0 to 0.8 | 0.0 | Removes the grey veil of fog or haze from the far side of the pitch, the stand and the background, bringing back their colour and contrast. The near field is left as it is: the effect grows with distance from the camera. The fog colour is measured from the sky, so it needs some sky in view to start. 0.35-0.5 suits a misty day; higher brings up compression noise in the distance. 0.0 (default) disables it - no GPU cost. GPU-only. Updates live and is saved in the setup. |
-| Keep brightness | 0.0 to 1.0 | 0.5 | Shown when Dehaze is above 0. How much of the brightness the fog removal takes away is given back. Thick fog: set it high (around 1.0), otherwise the picture gets too dark. Thin fog: set it low (around 0.0), because giving brightness back there makes the picture look milky. 0.5 (default) is in between. Updates live and is saved in the setup. |
+| Keep brightness | 0.0 to 1.0 | 0.5 | How much of the brightness the fog removal takes away is given back. Thick fog: set it high (around 1.0), otherwise the picture gets too dark. Thin fog: set it low (around 0.0), because giving brightness back there makes the picture look milky. 0.5 (default) is in between. Updates live and is saved in the setup. |
 
 ### Sharpening
 
@@ -236,6 +244,7 @@ so their defaults only apply until you pick one.
 | Resolution |  |  | Output resolution for the stitched video. Independent of the source cameras' resolution. |
 | Codec |  |  | Video codec for the export. Falls back automatically (hardware -> software) if a specific encoder can't be opened on this machine - check the Debug log for which one was actually used. |
 | Quality |  |  | Encoder quality preset - trades encode speed and file size for visual quality. The numbers are the target and peak bitrate the hardware (NVENC) encoder uses for the chosen codec and resolution; the software fallback encoders are quality-based (CRF) and have no fixed bitrate. |
+| Fast start (web playback) |  | off | Moves the file's index to the front when the export finishes, so a web player can start playing before the whole file has downloaded. Rewrites the entire file once at the end (several minutes for a full match). Not needed for playback on a PC or for uploading to YouTube. |
 | Processing range |  |  | Trims the export to a start/end time window within the loaded clip. Defaults to the full clip. |
 | Start (s) |  |  | Export start time, in seconds from the beginning of the clip. |
 | End (s) |  |  | Export end time, in seconds from the beginning of the clip. |
@@ -244,6 +253,10 @@ so their defaults only apply until you pick one.
 | Fade |  |  | Fade: how long the dip to black and back takes. It is drawn over footage that was going to be encoded anyway, so it adds no length to the export. Black: how long the picture stays fully black on "PAUZE" - the only part that lengthens the export, and the number to raise if a pause should read as a real break. |
 | Record replay (stacked raw input for re-stitching) |  | off | Also saves the raw pre-stitch source frames (stacked side-by-side) to a separate file alongside the export, for later re-stitching without re-decoding the originals. |
 | Save AI debug events (.jsonl for visualize_detections.py) |  | off | Writes every detection, filter decision, and pan decision to a .jsonl file next to the export, for offline analysis with visualize_detections.py. |
+| Pitch minimap (needs AI Tracking + minimap.json) |  | off | Draws a top-down pitch map with players, referee and ball in the bottom corner of the export. Needs AI Tracking (below) and a minimap.json file next to the setup file, which sets the field size and where the field corners are in the camera images. |
+| Corner |  |  | Which corner of the video the pitch minimap is drawn in. |
+| Minimap size (share of video width) | 0.05 to 0.6 | 0.25 | How wide the minimap is, as a share of the video width. 0.25 is a quarter of the width. |
+| Gap to the edge (share of video height) | 0.0 to 0.2 | 0.02 | Space between the minimap and the edges of the video, as a share of the video height. 0 puts it right against the corner. |
 
 ### AI tracking
 
@@ -254,6 +267,8 @@ so their defaults only apply until you pick one.
 | Detect every N frames |  |  | Runs AI detection every Nth frame; frames in between reuse the last detection. Higher = cheaper but staler positions during fast action. |
 | Ball anchor range | 0.1 to 0.8 | 0.20 | Before the panner ever sees a ball position, the ball tracker itself requires a raw detection to be within this distance of at least one tracked player - farther detections are dropped as likely false positives (crowd, background). This runs ahead of Ball reach below, so a genuine isolated ball (e.g. a breakaway) can be silently discarded here even with Ball reach raised. Widen it if the panner never even coasts onto a real, far-from-the-pack ball. |
 | Ball coast time | 0.2 to 15.0 | 0.67 | A ball leaving the field ROI looks identical to the tracker as "no detection this frame" - the ROI filter drops it before the tracker ever sees it. A ball already being tracked keeps holding its last known position for up to this long before the track is declared lost, same as any other brief detection gap - long enough to bridge a throw-in or a ball briefly rolling out of bounds and being brought back. A ball never tracked in the first place (e.g. a kid's ball just outside the pitch) never starts this countdown, so raising it doesn't make the panner more likely to trigger on that. |
+| Keep a lost ball moving |  | on | When the AI briefly loses the ball during a run (small, far away, blurred), keep it moving in the direction it was going instead of freezing it where it was last seen. The camera then keeps panning with the run instead of stopping and having to catch up later. A detection far off the expected course is ignored unless the AI is confident about it. |
+| Carry time | 0.5 to 4.0 | 2.0 | How long a lost ball keeps rolling before it eases to a stop (it stops after roughly twice this time and never moves more than 0.4 rad). 2 s worked best on the test footage. |
 | Ball hold time | 0.0 to 15.0 | 0.0 | After the tracker gives up on the ball, keep the camera pointed at its last known position for this long instead of swinging back to the players. A ball that disappears is usually just briefly undetected and comes back close to where it vanished - measured on real footage within half a frame width in 65-91% of cases - so swinging away only to return reads as the camera drifting off and coming back. Holding keeps the shot still and the camera is already in the right place when the ball returns. Works on top of "Ball coast time": that one decides how long the tracker keeps reporting a position, this one how long the camera keeps using the last one afterwards. Set to 0 for the old behaviour. |
 | Ball max speed | 0.0 to 0.5 | 0.13 | Stops the camera jumping to a different ball - a warm-up or neighbouring-pitch ball that is detected just as confidently as your own. A real ball cannot cross the pitch between two frames, so any "move" faster than this is treated as a different ball and ignored. Measured on real footage this removed every rapid back-and-forth flip between two balls. The allowance grows while the ball is missing, so a ball that was genuinely lost for a moment can still be picked up again anywhere. Lower = stricter. Set to 0 to switch the check off. |
 | Player height limit | 0.0 to 0.6 | 0.0 | Ignores people higher up in the picture than your own pitch reaches, when the camera decides where the action is. If a neighbouring field is in view, everyone warming up over there is detected as a player too and can easily outnumber your match - on the test footage 94% of all detected people were on the other field, so the camera followed THAT group and your own ball was only in frame 16% of the time. Cutting them out moved the camera from 47 to 13 degrees off your ball. Set to 0 to count everyone. Use an AI Debug export to see where your own far touchline sits. |
@@ -262,6 +277,8 @@ so their defaults only apply until you pick one.
 | Ball acquire range | 0.0 to 3.0 | 0.0 | Guards against locking onto a ball that isn't part of this match - a warm-up or neighbouring-pitch ball that drifts into the field ROI. "Ball anchor range" can't catch that on its own, because the kids playing with that ball are tracked people too, so the ball looks properly anchored. This limits how far from the main group of players a brand-new ball track may START. It never restricts a ball that is already being tracked: a breakaway, a long clearance or a goal kick still gets followed anywhere, and a coasting ball still holds the aim. Set to 0 to switch the whole check off. |
 | Ball acquire arm delay | 0 to 300 | 45 | How many tracked frames the ball must be held before "Ball acquire range" starts applying. Until then any acquisition is allowed, so the first ball of the match - a kickoff, always from the centre circle - is never blocked. After the tracker has proven it can hold the real ball this long, a brand-new track appearing far from everyone is far more likely to be somebody else's ball. Only matters when "Ball acquire range" is above 0. |
 | Detection confidence | 0.05 to 0.9 | 0.10 | A raw detection - person, ball, or referee - below this score never reaches the tracker at all. Raise it if a weak, noisy detection (e.g. a stray low-confidence "ball" on background clutter) visibly yanks the camera; lower it if the model is missing a real but faint detection. Applies to every class and every tracking mode alike - Ball tracking mode no longer silently uses a higher floor of its own. |
+| AI contrast boost |  | off | For fog, haze, dusk or strong backlight: boosts local contrast in the image the AI looks at, so it can still find the ball where the picture is washed out. The exported video is not changed. Costs a little GPU time; leave it off in clear weather, where it mainly adds noise. Saved with this match's setup. |
+| Boost strength | 1.0 to 8.0 | 3.0 | How strongly local contrast is boosted (the CLAHE clip limit). 3 is a good start. Higher finds more balls in thick fog but also more false ones (white specks, logos). |
 | Style preset |  |  | One-shot preset that overwrites every slider below (framing, cluster mode, lock-pitch, bandwidth, dead-zone, ball weight, FOV) with tuned defaults for that style. You can still tweak any slider afterward. |
 | Framing |  |  | Action: aims at the (optionally confidence-weighted) player cluster, with ball pull and dynamic zoom. Frame all: aims at the geometric center of every player, zoomed to fit the whole team. |
 | Lock (horizontal-only) |  | off | Holds the camera's tilt fixed and pans left/right only. Off by default - the camera follows the action's vertical position too. |
@@ -277,6 +294,9 @@ so their defaults only apply until you pick one.
 | Ball weight | 0.0 to 1.0 | 0.20 | How strongly the ball pulls the aim away from the player cluster (Action framing only) - scaled by ball confidence and distance from the cluster. Forced to 1.0 in Ball tracking mode. |
 | Cluster bandwidth | 0.1 to 0.6 | 0.30 | Radius used by Density cluster mode to group nearby players. Wider pulls a looser formation into one cluster; narrower isolates a tight core. No effect in Trimmed mean mode. |
 | Dead-zone | 0.0 to 0.5 | 0.20 | Camera holds still while the target stays within this radius; larger errors ease in beyond it instead of snapping. Removes micro-wobble on static play - relies on Lookahead to absorb the added latency. |
+| Smooth camera motion |  | on | Pan like a camera operator: speed up and slow down gradually, and start moving as soon as Lookahead shows the play is leaving the dead-zone instead of waiting and then swinging to catch up. The eye can follow a steady pan easily; it is sudden changes of speed it cannot keep up with. The camera may hurry when the ball is about to leave the picture. Works best with Lookahead 1.5 s. |
+| Max acceleration | 0.05 to 0.6 | 0.2 | How quickly the pan may speed up or slow down, in picture heights per second squared (so it feels the same at any zoom). Lower is calmer but the ball sits further off-centre during fast play. 0.2 kept the ball in the picture on all 15 test goals. |
+| Max pan speed | 0.2 to 1.5 | 0.65 | Top pan speed in picture heights per second (0.65 is about 2.5 seconds to pan one picture width). Doubled while the ball is about to leave the picture. |
 | Ball reach | 0.0 to 1.5 | 0.5 | How far the ball may stray from the player cluster and still pull the aim (Action framing only). Beyond this the ball is treated as off-the-action - a stray detection or the far goal - and ignored. Raise it if the camera won't follow a real ball that's broken away from the pack, e.g. into a corner. |
 | Field of view (degrees) |  |  | Bounds for the panner's continuously-varying zoom, recomputed every frame from cluster spread and framing. Default is just the starting FOV before any players are detected. |
 | Ball margin | 0.0 to 15.0 | 3.0 | How much room is kept between the ball and the edge of the frame. The zoom widens until the ball sits at least this far inside the picture, so it is never flush against the border. Larger keeps more air around the ball (the camera zooms out sooner); smaller lets it drift closer to the edge. This only sets a floor on the zoom - it never pans the camera - and Wide above still caps it, so a ball far outside the Wide field of view leaves frame regardless. |
@@ -298,3 +318,5 @@ so their defaults only apply until you pick one.
 | Cut ranges |  |  | Excludes a time range from this diagnostic, splicing what remains back together with no gap. |
 | Detect every N frames |  |  | Runs AI detection every Nth frame; frames in between reuse the last detection. Higher = cheaper but staler positions during fast action. Detection on two full-resolution raw feeds is this tool's dominant cost, so this is its biggest throughput lever. |
 | Detection confidence | 0.05 to 0.9 | 0.10 | A raw detection - person, ball, or referee - below this score is not drawn. |
+| AI contrast boost |  | off | Run the AI with the same AI contrast boost as the Export tab, to check whether it finds more balls on this footage. The drawn video stays the original image; only what the AI looks at is boosted. Output files get a _boost suffix so an on/off pair can be compared side by side. |
+| Boost strength | 1.0 to 8.0 | 3.0 | CLAHE clip limit, same scale as the Export tab (3 is a good start). |

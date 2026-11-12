@@ -159,7 +159,7 @@ setup says both cameras see and the lens profiles. On a rig whose cameras are
 84.0 degrees apart in the CAD drawing, the report shows 84.4 to 84.5 degrees, so
 expect them to be accurate to about half a degree. A setup with a poor alignment
 gives poorer angles. **Copy to clipboard** copies the whole report, for example
-to share it on the forum.
+to share it in the GitHub Discussions.
 
 ## Choosing the moment
 

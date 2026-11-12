@@ -52,7 +52,7 @@ Everything runs on your own computer. Your video never leaves it.
 
 Release packages will be published on the **Releases** page of this project's
 GitHub repository. Download the Windows zip, unpack it into a folder of your
-choice and start `reco-gui.exe`. The package already contains the FFmpeg and
+choice and start `reco-panopitch.exe`. The package already contains the FFmpeg and
 AI runtime files it needs. Keep all the files together in the same folder.
 
 ### Option B: build it yourself
@@ -60,7 +60,7 @@ AI runtime files it needs. Keep all the files together in the same folder.
 If no package is available for your setup, build from source. The instructions
 are in the main [README](../../README.md#building) (Rust 1.92 or newer, FFmpeg
 development libraries and clang). On Windows the FFmpeg DLLs must sit **next to
-the program** (`reco-gui.exe`) when you run it, not only when you build it.
+the program** (`reco-panopitch.exe`) when you run it, not only when you build it.
 Copy them from your FFmpeg `bin` folder.
 
 ### Do not mix with upstream Reco
@@ -74,7 +74,7 @@ originals stay untouched.
 
 ## First start
 
-1. Start `reco-gui.exe`. You see the welcome text with three steps: add the left
+1. Start `reco-panopitch.exe`. You see the welcome text with three steps: add the left
    and right videos, calibrate (or load a setup), then preview, adjust and
    export.
 2. Open **Preferences** (the gear button in the top bar). It is worth setting

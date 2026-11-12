@@ -3221,21 +3221,21 @@ fn init_tracing() {
 
 /// Platform-appropriate log file path.
 ///
-/// - Windows: next to executable (`reco-gui.log`)
-/// - macOS: `~/Library/Logs/reco-gui.log`
-/// - Linux: `~/.local/state/panopitch/reco-gui.log` (XDG_STATE_HOME)
+/// - Windows: next to executable (`reco-panopitch.log`)
+/// - macOS: `~/Library/Logs/reco-panopitch.log`
+/// - Linux: `~/.local/state/panopitch/reco-panopitch.log` (XDG_STATE_HOME)
 fn log_file_path() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "windows")]
     {
         std::env::current_exe()
             .ok()
-            .and_then(|p| p.parent().map(|d| d.join("reco-gui.log")))
+            .and_then(|p| p.parent().map(|d| d.join("reco-panopitch.log")))
     }
     #[cfg(target_os = "macos")]
     {
         std::env::var("HOME")
             .ok()
-            .map(|h| std::path::PathBuf::from(h).join("Library/Logs/reco-gui.log"))
+            .map(|h| std::path::PathBuf::from(h).join("Library/Logs/reco-panopitch.log"))
     }
     #[cfg(target_os = "linux")]
     {
@@ -3247,7 +3247,7 @@ fn log_file_path() -> Option<std::path::PathBuf> {
                     .ok()
                     .map(|h| std::path::PathBuf::from(h).join(".local/state"))
             })
-            .map(|d| d.join("panopitch/reco-gui.log"))
+            .map(|d| d.join("panopitch/reco-panopitch.log"))
     }
 }
 

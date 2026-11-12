@@ -9,7 +9,7 @@ repository.workspace = true
 description = "Slint-based GUI for Reco panoramic video stitcher"
 
 [[bin]]
-name = "reco-gui"
+name = "reco-panopitch"
 path = "src/main.rs"
 
 [features]
