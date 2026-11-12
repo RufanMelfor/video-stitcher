@@ -30,7 +30,7 @@ since this fork diverged.
 
 ## What this fork adds
 
-This is a modified version of [reco-project/video-stitcher](https://github.com/reco-project/video-stitcher)
+RECO Panopitch 1.0.0-beta.1 is based on reco v0.5.4 plus our own additions. It is a modified version of [reco-project/video-stitcher](https://github.com/reco-project/video-stitcher)
 (AGPL-3.0). It diverged at upstream's v0.5.x line (July 2026); later upstream
 fixes up to v0.5.4 were ported by hand. Roughly 350 commits and 80k added lines
 sit on top of upstream, covering the items below. Features marked *(PR)* are
