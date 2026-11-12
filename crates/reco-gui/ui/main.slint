@@ -960,7 +960,7 @@ component SegmentList inherits Rectangle {
 }
 
 export component RecoApp inherits Window {
-    title: "Reco Video Stitcher";
+    title: "RECO Panopitch";
     icon: @image-url("assets/icon.png");
     preferred-width: 1280px;
     preferred-height: 820px;
@@ -3080,7 +3080,7 @@ export component RecoApp inherits Window {
                     spacing: 12px;
 
                     Text {
-                        text: "Reco Video Stitcher";
+                        text: "RECO Panopitch";
                         color: #555;
                         font-size: 20px;
                         font-weight: 600;
@@ -6308,12 +6308,8 @@ export component RecoApp inherits Window {
 
                     Text { text: "Privacy"; color: root.text-body; font-size: 12px; font-weight: 600; }
 
-                    CheckBox {
-                        text: "Send anonymous usage data (opt-in)";
-                        checked <=> root.prefs-telemetry-enabled;
-                    }
                     Text {
-                        text: "Helps improve Reco. Shares system info and performance data.";
+                        text: "No usage data is collected or sent. The only network request is a check for a newer release on GitHub.";
                         color: #666;
                         font-size: 10px;
                         wrap: word-wrap;

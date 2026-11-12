@@ -1,4 +1,4 @@
-# Contributing to Reco Video Stitcher
+# Contributing to RECO Panopitch
 
 Thank you for your interest in contributing! This document covers the process for contributing code, reporting issues, and the legal terms.
 

@@ -10,7 +10,9 @@ use serde::Serialize;
 use std::sync::mpsc;
 use std::thread;
 
-const ENDPOINT: &str = "https://telemetry-ingestion-204135919265.us-central1.run.app/telemetry";
+/// No collection endpoint is configured in this build, so events are
+/// accepted and dropped; nothing is sent over the network.
+const ENDPOINT: Option<&str> = None;
 const APP_NAME: &str = "video-stitcher";
 
 #[derive(Serialize)]
@@ -83,6 +85,9 @@ impl TelemetryClient {
                 .build()
                 .new_agent();
             while let Ok(event) = rx.recv() {
+                let Some(endpoint) = ENDPOINT else {
+                    continue;
+                };
                 let batch = Batch {
                     schema_version: 1,
                     client_id: cid.clone(),
@@ -104,7 +109,7 @@ impl TelemetryClient {
                 };
 
                 match agent
-                    .post(ENDPOINT)
+                    .post(endpoint)
                     .header("Content-Type", "application/json")
                     .send(json.as_str())
                 {
@@ -152,15 +157,6 @@ impl TelemetryClient {
                 "fps": fps,
                 "decoder": decoder,
                 "sync_offset": sync_offset,
-            })),
-        );
-    }
-
-    pub fn bug_report(&self, report: &str) {
-        self.send(
-            "bug_report",
-            Some(serde_json::json!({
-                "report": &report[..report.len().min(1800)],
             })),
         );
     }

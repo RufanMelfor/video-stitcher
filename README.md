@@ -1,8 +1,7 @@
-# Reco Video Stitcher
+# RECO Panopitch
 
 **Open-source GPU-accelerated panoramic sports camera software. Desktop App with AI tracking, CLI, and OBS Plugin.**
 
-[![CI](https://github.com/reco-project/video-stitcher/actions/workflows/rust.yml/badge.svg)](https://github.com/reco-project/video-stitcher/actions)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 
 Stitch two camera feeds into a seamless panoramic sports view with AI-powered automatic camera control. No subscriptions, no vendor lock-in. Ships as a CLI, a Slint-based desktop app, and an OBS Studio source plugin that all consume the same Rust engine.
@@ -15,6 +14,9 @@ Stitch two camera feeds into a seamless panoramic sports view with AI-powered au
 - **Automatic calibration** - AKAZE feature matching with IMU / audio cross-correlation for temporal sync, Gyroflow lens profiles
 - **Live production** - *(upstream code, untested in this fork)* GStreamer camera ingest (Linux / Jetson CSI), push-based `StitchCore::submit_frame_*` for OBS and live streams, replay ring buffer, stacked-video pack/unpack
 - **Platforms** - **Windows 11 + NVIDIA (RTX 3060 Ti) is the only tested combination.** The Linux, macOS, Jetson and OBS code paths come from upstream and have not been run in this fork, and **`reco-core` currently does not compile on Linux or macOS** (a Windows-only function is not gated, found by CI on 2026-10-21). Other changes made here also affect every platform (Skia renderer, patched `vendor/` crates). See [Tested hardware](#tested-hardware).
+
+> **Do not install an upstream reco build over this one.** Settings and
+> calibration files are not interchangeable between the two.
 
 ## Tested hardware
 
@@ -257,7 +259,7 @@ cargo run --release -p reco-cli --features profiling -- \
 
 ## Privacy
 
-Reco collects no usage data, sends no telemetry, and makes no network requests except those you explicitly configure (RTMP streaming, etc.). All performance statistics shown in the Stats panel are computed locally in memory and never leave your machine.
+RECO Panopitch collects no usage data and sends no telemetry. The only network request it makes on its own is one anonymous GET to the GitHub releases API at startup to check for a newer version, plus those you explicitly configure (RTMP streaming, etc.). Bug reports are copied to your clipboard; nothing is uploaded. All performance statistics shown in the Stats panel are computed locally in memory and never leave your machine.
 
 ## Acknowledgements
 
@@ -295,7 +297,7 @@ Questions about commercial licensing can be directed to the project maintainer; 
 
 ## Community
 
-- [Website](https://www.reco-project.org) - Landing page
-- [Forum](https://forum.reco-project.org) - Questions, showcase, feature requests
-- [Issues](https://github.com/reco-project/video-stitcher/issues) - Bug reports + feature tracking
+- [Issues](https://github.com/RufanMelfor/video-stitcher/issues) - Bug reports + feature tracking
+- [Discussions](https://github.com/RufanMelfor/video-stitcher/discussions) - Questions, showcase, feature requests
+- [Upstream project](https://www.reco-project.org) - reco-project, the original this fork is based on
 - [v1 archive](https://github.com/reco-project/video-stitcher-v1) - Legacy Electron / Python version (predecessor to this Rust rewrite)

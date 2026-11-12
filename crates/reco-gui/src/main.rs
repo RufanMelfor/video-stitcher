@@ -4116,9 +4116,9 @@ fn main() -> anyhow::Result<()> {
         std::thread::spawn(move || {
             let current = env!("CARGO_PKG_VERSION");
             let resp = ureq::get(
-                "https://api.github.com/repos/reco-project/video-stitcher/releases/latest",
+                "https://api.github.com/repos/RufanMelfor/video-stitcher/releases/latest",
             )
-            .header("User-Agent", "reco-gui")
+            .header("User-Agent", "reco-panopitch")
             .call();
             if let Ok(mut resp) = resp
                 && let Ok(body) = resp.body_mut().read_to_string()
@@ -5493,11 +5493,11 @@ fn main() -> anyhow::Result<()> {
     });
 
     app.on_open_website(|| {
-        let _ = open::that("https://github.com/reco-project/video-stitcher");
+        let _ = open::that("https://github.com/RufanMelfor/video-stitcher");
     });
 
     app.on_open_forum(|| {
-        let _ = open::that("https://forum.reco-project.org/");
+        let _ = open::that("https://github.com/RufanMelfor/video-stitcher/discussions");
     });
 
     // User-initiated now (toolbar button, see `update-available` in
@@ -5509,7 +5509,7 @@ fn main() -> anyhow::Result<()> {
             return;
         };
         let tag = app.get_update_tag();
-        let url = format!("https://github.com/reco-project/video-stitcher/releases/tag/{tag}");
+        let url = format!("https://github.com/RufanMelfor/video-stitcher/releases/tag/{tag}");
         let _ = open::that(&url);
     });
 
@@ -9001,19 +9001,8 @@ fn main() -> anyhow::Result<()> {
             )
         };
 
-        // Always try to send via telemetry (even without opt-in -
-        // bug reports are an explicit user action, not passive tracking).
-        let cid = s
-            .user_settings
-            .telemetry_client_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let client = s.telemetry.get_or_insert_with(|| {
-            log::info!("Creating one-shot telemetry client for bug report");
-            telemetry_client::TelemetryClient::new(cid)
-        });
-        client.bug_report(&report);
-
+        // The report never leaves the machine: it goes to the clipboard and
+        // the user pastes it into a GitHub issue themselves.
         // Save contact for next time
         if !contact_str.trim().is_empty() {
             s.user_settings
@@ -9026,8 +9015,8 @@ fn main() -> anyhow::Result<()> {
 
         s.toasts.push(
             crate::toast::Severity::Info,
-            "Report sent",
-            "Thank you! Your report has been sent to the developer.",
+            "Report copied",
+            "The report is on your clipboard. Paste it into a new GitHub issue.",
         );
 
         if let Some(app) = app_weak.upgrade() {

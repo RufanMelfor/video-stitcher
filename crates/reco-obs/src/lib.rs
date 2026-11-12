@@ -17,7 +17,7 @@
 //! Tier 1 shipped 2026-04-18 (PR #267): async-frame ingestion from upstream
 //! OBS sources, BGRA input path, interactive pan / zoom via mouse + keyboard,
 //! optional stacked-video replay recording. See
-//! [`FRICTION.md`](https://github.com/reco-project/video-stitcher/blob/main/crates/reco-obs/FRICTION.md)
+//! [`FRICTION.md`](https://github.com/RufanMelfor/video-stitcher/blob/main/crates/reco-obs/FRICTION.md)
 //! for active consumer pain points.
 //!
 //! ## Known limitations
