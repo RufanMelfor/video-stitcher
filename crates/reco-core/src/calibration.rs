@@ -39,6 +39,15 @@ fn default_schema_version() -> u32 {
     SCHEMA_VERSION
 }
 
+/// Product name written into the `generator` field of every calibration
+/// this program saves. Files naming a different generator are refused.
+const GENERATOR_NAME: &str = "RECO Panopitch";
+
+/// The `generator` string for this build, e.g. `RECO Panopitch 1.0.0-beta.1`.
+fn current_generator() -> String {
+    format!("{GENERATOR_NAME} {}", env!("CARGO_PKG_VERSION"))
+}
+
 /// Errors produced by [`Calibration::validate`].
 #[derive(Debug, Clone, Error)]
 pub enum CalibrationError {
@@ -1169,6 +1178,12 @@ pub struct Calibration {
     /// rejects versions this build does not understand.
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    /// Program that wrote the file (`RECO Panopitch <version>`). Absent in
+    /// files saved before this field existed; set on load, so a re-saved
+    /// file always carries it. Files naming a different program are
+    /// rejected by [`Calibration::from_file`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generator: Option<String>,
     /// Per-source optical models, one per camera (index 0 = left, 1 = right for
     /// the L-shape). `Vec` so N-camera rigs need no shape change.
     pub lenses: Vec<Lens>,
@@ -1218,6 +1233,7 @@ impl Calibration {
     pub fn new(lenses: Vec<Lens>, topology: Topology, framing: Framing) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
+            generator: Some(current_generator()),
             lenses,
             topology,
             framing,
@@ -1265,6 +1281,16 @@ impl Calibration {
             if obj.contains_key("left_uniforms") || obj.contains_key("params") {
                 return Err(CalibrationLoadError::LegacyMatchFormat);
             }
+            // Written by another program (for example upstream Reco):
+            // setup files are not interchangeable, so say so up front
+            // instead of failing on some arbitrary field later.
+            if let Some(generator) = obj.get("generator").and_then(|g| g.as_str())
+                && !generator.starts_with(GENERATOR_NAME)
+            {
+                return Err(CalibrationLoadError::ForeignGenerator {
+                    generator: generator.to_owned(),
+                });
+            }
             // A current-format document carrying stray legacy keys would
             // otherwise parse cleanly with the real fields silently
             // defaulted to zero (serde ignores unknown keys) - the seam
@@ -1286,7 +1312,8 @@ impl Calibration {
                 });
             }
         }
-        let cal: Self = serde_json::from_value(value)?;
+        let mut cal: Self = serde_json::from_value(value)?;
+        cal.generator = Some(current_generator());
         // Fail loud on files from a newer reco rather than silently
         // misreading fields a future schema revision may have reshaped.
         if cal.schema_version != SCHEMA_VERSION {
@@ -1360,7 +1387,9 @@ pub enum CalibrationLoadError {
         max: u64,
     },
     /// JSON parse error.
-    #[error("invalid calibration JSON: {0}")]
+    #[error(
+        "invalid calibration JSON: {0}. If this file was made by another          program (for example upstream Reco) it cannot be used here;          re-run Auto Calibrate"
+    )]
     Parse(#[from] serde_json::Error),
     /// A legacy "match" format calibration was detected. That pre-versioning
     /// wire shape (`left_uniforms`/`cameraAxisOffset`) is no longer
@@ -1394,6 +1423,14 @@ pub enum CalibrationLoadError {
     UnsupportedSchemaVersion {
         /// The `schema_version` the file declared.
         found: u32,
+    },
+    /// The file was written by a different program.
+    #[error(
+        "this file was not made by {GENERATOR_NAME} (made by: {generator});          setup files are not interchangeable with other programs,          re-run Auto Calibrate"
+    )]
+    ForeignGenerator {
+        /// The `generator` string the file declared.
+        generator: String,
     },
     /// Calibration values are invalid.
     #[error(transparent)]
@@ -2085,6 +2122,7 @@ mod tests {
         };
         Calibration {
             schema_version: SCHEMA_VERSION,
+            generator: None,
             lenses: vec![lens(), lens()],
             topology: Topology {
                 intersect: 0.5,
@@ -2277,6 +2315,43 @@ mod tests {
             matches!(err, CalibrationLoadError::LegacyMatchFormat),
             "expected LegacyMatchFormat, got {err:?}"
         );
+    }
+
+    #[test]
+    fn saved_calibration_names_its_generator() {
+        let base = valid_cal();
+        let cal = Calibration::new(base.lenses, base.topology, base.framing);
+        assert!(
+            cal.to_json_pretty()
+                .contains("\"generator\": \"RECO Panopitch ")
+        );
+    }
+
+    #[test]
+    fn foreign_generator_is_rejected_with_clear_error() {
+        let cal = valid_cal();
+        let mut v: serde_json::Value = serde_json::from_str(&cal.to_json_pretty()).unwrap();
+        v["generator"] = serde_json::json!("Reco 0.5.4");
+        let path = std::env::temp_dir().join(format!("reco_foreign_{}.json", std::process::id()));
+        std::fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+        let err = Calibration::from_file(&path).unwrap_err();
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            matches!(err, CalibrationLoadError::ForeignGenerator { ref generator } if generator == "Reco 0.5.4"),
+            "expected ForeignGenerator, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn file_without_generator_loads_and_gets_ours() {
+        let cal = valid_cal();
+        let mut v: serde_json::Value = serde_json::from_str(&cal.to_json_pretty()).unwrap();
+        v.as_object_mut().unwrap().remove("generator");
+        let path = std::env::temp_dir().join(format!("reco_nogen_{}.json", std::process::id()));
+        std::fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+        let loaded = Calibration::from_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(loaded.generator, Some(current_generator()));
     }
 
     #[test]

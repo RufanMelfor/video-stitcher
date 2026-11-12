@@ -2715,6 +2715,7 @@ mod tests {
         };
         Calibration {
             schema_version: 1,
+            generator: None,
             lenses: vec![lens.clone(), lens],
             topology: crate::calibration::Topology {
                 intersect: 0.54,
@@ -2859,6 +2860,7 @@ mod tests {
         };
         let cal = Calibration {
             schema_version: 1,
+            generator: None,
             lenses: vec![lens.clone(), lens],
             topology: crate::calibration::Topology {
                 intersect: 0.656978189945221,
