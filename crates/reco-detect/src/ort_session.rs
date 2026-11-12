@@ -170,18 +170,18 @@ fn model_cache_key(model_path: &Path) -> String {
 
 /// Return a persistent cache directory for model engine/compilation caches.
 ///
-/// Resolves to `{platform_cache_dir}/reco/{subdir}`:
-/// - Linux: `~/.cache/reco/{subdir}`
-/// - macOS: `~/Library/Caches/reco/{subdir}`
-/// - Windows: `{FOLDERID_LocalAppData}/reco/{subdir}`
+/// Resolves to `{platform_cache_dir}/panopitch/{subdir}`:
+/// - Linux: `~/.cache/panopitch/{subdir}`
+/// - macOS: `~/Library/Caches/panopitch/{subdir}`
+/// - Windows: `{FOLDERID_LocalAppData}/panopitch/{subdir}`
 ///
-/// Falls back to `{temp_dir}/reco/{subdir}` if the platform cache directory
+/// Falls back to `{temp_dir}/panopitch/{subdir}` if the platform cache directory
 /// is unavailable. Creates the directory (with 0o700 permissions on Unix)
 /// if it does not already exist.
 #[cfg(any(feature = "tensorrt", feature = "coreml"))]
 pub fn reco_cache_dir(subdir: &str) -> PathBuf {
     let base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
-    let dir = base.join("reco").join(subdir);
+    let dir = base.join("panopitch").join(subdir);
 
     // create_dir_all is a no-op if the directory already exists, avoiding
     // the TOCTOU race of checking exists() then creating.

@@ -3223,7 +3223,7 @@ fn init_tracing() {
 ///
 /// - Windows: next to executable (`reco-gui.log`)
 /// - macOS: `~/Library/Logs/reco-gui.log`
-/// - Linux: `~/.local/state/reco/reco-gui.log` (XDG_STATE_HOME)
+/// - Linux: `~/.local/state/panopitch/reco-gui.log` (XDG_STATE_HOME)
 fn log_file_path() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "windows")]
     {
@@ -3247,7 +3247,7 @@ fn log_file_path() -> Option<std::path::PathBuf> {
                     .ok()
                     .map(|h| std::path::PathBuf::from(h).join(".local/state"))
             })
-            .map(|d| d.join("reco/reco-gui.log"))
+            .map(|d| d.join("panopitch/reco-gui.log"))
     }
 }
 

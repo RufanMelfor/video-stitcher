@@ -6,8 +6,8 @@
 //! platform's standard config directory, so one consumer's preferences
 //! never leak into another's:
 //!
-//! - Linux: `$XDG_CONFIG_HOME/reco/{namespace}.json` (default `~/.config/reco/`)
-//! - macOS: `~/Library/Application Support/reco/{namespace}.json`
+//! - Linux: `$XDG_CONFIG_HOME/panopitch/{namespace}.json` (default `~/.config/panopitch/`)
+//! - macOS: `~/Library/Application Support/panopitch/{namespace}.json`
 //! - Windows: `%APPDATA%\reco\{namespace}.json`
 //!
 //! This module is domain-agnostic: reco-io doesn't know what a "default
@@ -98,7 +98,8 @@ impl From<serde_json::Error> for SettingsError {
 /// Directory under which reco settings files are stored.
 ///
 /// Resolves to the platform-standard user-config location with a
-/// `reco/` subfolder appended. Honors the `RECO_CONFIG_DIR`
+/// `panopitch/` subfolder appended (settings from a legacy `reco/` folder
+/// are copied over once, originals untouched). Honors the `RECO_CONFIG_DIR`
 /// environment variable to override (used by tests and power users).
 ///
 /// Returns [`SettingsError::NoConfigDir`] if the platform lookup fails
@@ -107,8 +108,50 @@ pub fn config_dir() -> Result<PathBuf, SettingsError> {
     if let Some(override_path) = std::env::var_os("RECO_CONFIG_DIR") {
         return Ok(PathBuf::from(override_path));
     }
-    let dirs = directories::ProjectDirs::from("", "", "reco").ok_or(SettingsError::NoConfigDir)?;
-    Ok(dirs.config_dir().to_path_buf())
+    let dirs =
+        directories::ProjectDirs::from("", "", "panopitch").ok_or(SettingsError::NoConfigDir)?;
+    let new_dir = dirs.config_dir().to_path_buf();
+    if !new_dir.exists()
+        && let Some(legacy) = directories::ProjectDirs::from("", "", "reco")
+    {
+        migrate_legacy_dir(legacy.config_dir(), &new_dir);
+    }
+    Ok(new_dir)
+}
+
+/// Copy the legacy settings folder to `new_dir` if it exists. Never
+/// modifies or deletes the source; failures are logged and the app starts
+/// with default settings instead.
+fn migrate_legacy_dir(legacy: &std::path::Path, new_dir: &std::path::Path) {
+    if !legacy.is_dir() {
+        return;
+    }
+    match copy_dir_recursive(legacy, new_dir) {
+        Ok(()) => log::info!(
+            "Copied settings from {} to {}",
+            legacy.display(),
+            new_dir.display()
+        ),
+        Err(e) => log::warn!(
+            "Could not copy settings from {} to {}: {e}",
+            legacy.display(),
+            new_dir.display()
+        ),
+    }
+}
+
+fn copy_dir_recursive(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
 }
 
 /// Strict namespace validation.
@@ -346,6 +389,31 @@ mod tests {
             // SAFETY: see ConfigDirOverride::new.
             unsafe { std::env::remove_var("RECO_CONFIG_DIR") };
         }
+    }
+
+    #[test]
+    fn migrate_legacy_dir_copies_and_keeps_source() {
+        let src = tempdir().unwrap();
+        let dst = tempdir().unwrap();
+        std::fs::write(src.path().join("gui.json"), "{\"a\":1}").unwrap();
+        std::fs::create_dir(src.path().join("sub")).unwrap();
+        std::fs::write(src.path().join("sub").join("x.json"), "x").unwrap();
+        let target = dst.path().join("panopitch");
+        migrate_legacy_dir(src.path(), &target);
+        assert_eq!(
+            std::fs::read_to_string(target.join("gui.json")).unwrap(),
+            "{\"a\":1}"
+        );
+        assert!(target.join("sub").join("x.json").is_file());
+        assert!(src.path().join("gui.json").is_file());
+    }
+
+    #[test]
+    fn migrate_legacy_dir_missing_source_is_noop() {
+        let dst = tempdir().unwrap();
+        let target = dst.path().join("panopitch");
+        migrate_legacy_dir(&dst.path().join("nope"), &target);
+        assert!(!target.exists());
     }
 
     #[test]

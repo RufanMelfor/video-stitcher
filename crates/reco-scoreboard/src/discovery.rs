@@ -55,6 +55,8 @@ pub fn default_scoreboard_roots() -> Vec<PathBuf> {
         roots.push(bin_dir.join("../Resources/scoreboards"));
     }
     if let Some(data_dir) = platform_data_dir() {
+        roots.push(data_dir.join("panopitch/scoreboards"));
+        // Scoreboards installed for upstream Reco stay usable (read-only).
         roots.push(data_dir.join("reco/scoreboards"));
     }
     #[cfg(debug_assertions)]
