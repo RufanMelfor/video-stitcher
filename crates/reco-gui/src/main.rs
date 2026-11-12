@@ -10575,6 +10575,22 @@ fn handle_calibration_result(
                 new_cal.scoreboard = prev.scoreboard.clone();
                 new_cal.export_defaults = prev.export_defaults.clone();
                 new_cal.footage_stamps = prev.footage_stamps.clone();
+            } else {
+                // First calibration of this session: start from the
+                // shipped Football preset (AI tracking tuning, color
+                // grade, sharpening, scoreboard style, export defaults).
+                // It carries no camera data, so the stitch itself is
+                // exactly what Auto Calibrate measured.
+                reco_core::preset::football().apply_to(&mut new_cal, true);
+                log::info!("Applied the Football preset to the new setup");
+                state.toasts.push(
+                    Severity::Info,
+                    "Football preset applied",
+                    "AI tracking, color grade, sharpening and export defaults were set to the Football preset. Change them in the panels as needed.",
+                );
+                if let Some(app) = app_weak.upgrade() {
+                    crate::toast::sync_to_ui(&state.toasts, &app);
+                }
             }
             // The sync offset was just detected on this recording.
             new_cal.footage_stamps.sync_offset = state.current_footage_id();

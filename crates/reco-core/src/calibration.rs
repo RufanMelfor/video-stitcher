@@ -1696,7 +1696,7 @@ fn validate_framing(f: &Framing) -> Result<(), CalibrationError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn sample_json() -> &'static str {
@@ -2109,7 +2109,7 @@ mod tests {
         assert!((sb.logo_size_px - 34.0).abs() < 1e-9);
     }
 
-    fn valid_cal() -> Calibration {
+    pub(crate) fn valid_cal() -> Calibration {
         let lens = || Lens {
             width: 1920,
             height: 1080,

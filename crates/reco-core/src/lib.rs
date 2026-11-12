@@ -101,6 +101,7 @@ pub mod interop;
 pub mod lens;
 #[cfg(all(target_os = "linux", feature = "gpu"))]
 pub mod nvbuf_transform;
+pub mod preset;
 pub mod projection;
 pub mod render;
 #[cfg(feature = "gpu")]
