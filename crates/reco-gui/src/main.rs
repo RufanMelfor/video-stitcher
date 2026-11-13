@@ -580,100 +580,6 @@ fn ai_capability_summary() -> (String, bool) {
 
 use crate::export::ExportOutcome;
 
-fn build_bug_report(state: &AppState, app_weak: &slint::Weak<RecoApp>) -> String {
-    let gpu = state
-        .bridge
-        .as_ref()
-        .map(|b| {
-            let g = b.engine().gpu();
-            format!("{} ({:?})", g.gpu_name(), g.backend_name())
-        })
-        .unwrap_or_else(|| "no GPU context".into());
-
-    let version = format!(
-        "v{}{}",
-        env!("CARGO_PKG_VERSION"),
-        option_env!("GIT_HASH")
-            .filter(|h| !h.is_empty())
-            .map(|h| format!(" ({h})"))
-            .unwrap_or_default()
-    );
-
-    let os = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
-    let (ai_status, _) = ai_capability_summary();
-
-    let mut report = format!(
-        "## Environment\n\
-         - Reco {version}\n\
-         - OS: {os}\n\
-         - GPU: {gpu}\n\
-         - {ai_status}\n"
-    );
-
-    // Telemetry snapshot if available
-    if let Some(app) = app_weak.upgrade() {
-        let fps_avg = app.get_telem_fps_avg();
-        let fps_recent = app.get_telem_fps_recent();
-        let total_ms = app.get_telem_total_ms();
-        let bottleneck = app.get_telem_bottleneck().to_string();
-        if fps_avg > 0.0 || total_ms > 0.0 {
-            report.push_str(&format!(
-                "\n## Performance\n\
-                 - FPS: {fps_avg:.0} avg / {fps_recent:.0} recent\n\
-                 - Frame time: {total_ms:.1} ms\n"
-            ));
-            if !bottleneck.is_empty() {
-                report.push_str(&format!("- Bottleneck: {bottleneck}\n"));
-            }
-        }
-
-        let cal_confidence = app.get_telem_cal_confidence();
-        let cal_matches = app.get_telem_cal_matches();
-        if cal_matches > 0 {
-            let reproj = app.get_telem_cal_reproj_err();
-            report.push_str(&format!(
-                "\n## Calibration\n\
-                 - Confidence: {:.0}%\n\
-                 - Matches: {cal_matches}\n\
-                 - Reprojection error: {reproj:.4}\n",
-                cal_confidence * 100.0
-            ));
-        }
-    }
-
-    // Redact file paths
-    if let Some(cal) = &state.calibration_path {
-        let name = cal.file_name().unwrap_or_default().to_string_lossy();
-        report.push_str(&format!("\n## Files\n- Setup: {name}\n"));
-    }
-
-    report.push_str(
-        "\n## Description\n\
-         <!-- What happened? What did you expect? -->\n\n\
-         ## Steps to reproduce\n\
-         <!-- 1. ... 2. ... 3. ... -->\n",
-    );
-
-    if let Some(log_path) = log_file_path()
-        && let Ok(contents) = std::fs::read_to_string(&log_path)
-    {
-        let lines: Vec<&str> = contents.lines().collect();
-        let tail = if lines.len() > 200 {
-            &lines[lines.len() - 200..]
-        } else {
-            &lines
-        };
-        report.push_str("\n## Log (last 200 lines)\n```\n");
-        for line in tail {
-            report.push_str(line);
-            report.push('\n');
-        }
-        report.push_str("```\n");
-    }
-
-    report
-}
-
 struct RecordingFrame {
     data: Vec<u8>,
     width: u32,
@@ -3226,6 +3132,10 @@ fn init_tracing() {
 /// - Windows: next to executable (`reco-panopitch.log`)
 /// - macOS: `~/Library/Logs/reco-panopitch.log`
 /// - Linux: `~/.local/state/panopitch/reco-panopitch.log` (XDG_STATE_HOME)
+///
+/// Only release builds write a log file (debug builds log to stderr), so
+/// debug builds see this function as unused.
+#[cfg_attr(debug_assertions, allow(dead_code))]
 fn log_file_path() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "windows")]
     {
@@ -8954,57 +8864,6 @@ fn main() -> anyhow::Result<()> {
         let folder = path.parent().unwrap_or(&path);
         if let Err(e) = open::that(folder) {
             log::error!("Failed to open folder: {e}");
-        }
-    });
-
-    let state_ref = Rc::clone(&state);
-    let app_weak = app.as_weak();
-    app.on_submit_bug_report(move |user_message, contact, include_logs| {
-        let mut s = state_ref.borrow_mut();
-        let msg = user_message.to_string();
-        let contact_str = contact.to_string();
-
-        let report = if include_logs {
-            let sys_report = build_bug_report(&s, &app_weak);
-            format!(
-                "## User description\n{msg}\n\n## Contact\n{}\n\n{sys_report}",
-                if contact_str.trim().is_empty() {
-                    "(not provided)"
-                } else {
-                    contact_str.trim()
-                }
-            )
-        } else {
-            format!(
-                "## User description\n{msg}\n\n## Contact\n{}",
-                if contact_str.trim().is_empty() {
-                    "(not provided)"
-                } else {
-                    contact_str.trim()
-                }
-            )
-        };
-
-        // The report never leaves the machine: it goes to the clipboard and
-        // the user pastes it into a GitHub issue themselves.
-        // Save contact for next time
-        if !contact_str.trim().is_empty() {
-            s.user_settings
-                .telemetry_client_id
-                .get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
-            s.user_settings.save();
-        }
-
-        let _ = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(report));
-
-        s.toasts.push(
-            crate::toast::Severity::Info,
-            "Report copied",
-            "The report is on your clipboard. Paste it into a new GitHub issue.",
-        );
-
-        if let Some(app) = app_weak.upgrade() {
-            crate::toast::sync_to_ui(&s.toasts, &app);
         }
     });
 

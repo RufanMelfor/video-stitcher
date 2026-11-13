@@ -2008,8 +2008,6 @@ export component RecoApp inherits Window {
     // Populate the visible panner controls from a named preset.
     callback apply-panner-preset(string);
     callback cancel-export();
-    callback submit-bug-report(string, string, bool);
-    in-out property <bool> bug-dialog-open: false;
     // Confirmation shown when Start Export is clicked with no field ROI set -
     // export still works without one, but AI framing/tracking degrades badly,
     // so this catches the common "forgot to set it" mistake before a long
@@ -2033,7 +2031,6 @@ export component RecoApp inherits Window {
     // file once it resolves.
     in-out property <bool> match-folder-sync-prompt-open: false;
     callback detect-match-folder-sync-offset();
-    in-out property <string> bug-user-contact: "";
     callback show-in-folder(string);
     callback toggle-recording(string, string);
     callback pick-recording-folder();
@@ -6343,73 +6340,6 @@ export component RecoApp inherits Window {
                     }
                 }
                 }  // close ScrollView
-            }
-        }
-
-        // ── Bug report dialog ──
-        if root.bug-dialog-open: Rectangle {
-            background: root.bg-scrim;
-            TouchArea { clicked => { root.bug-dialog-open = false; } }
-
-            Rectangle {
-                width: 500px;
-                height: min(parent.height - 60px, 420px);
-                background: root.bg-surface;
-                border-radius: 12px;
-                border-width: 1px;
-                border-color: root.border-mid;
-                TouchArea {}
-
-                VerticalLayout {
-                    padding: 24px;
-                    spacing: 14px;
-
-                    Text { text: "Report a Bug"; color: root.text-heading; font-size: 18px; font-weight: 600; }
-
-                    Text {
-                        text: "Tell us what happened. Your system info (GPU, OS, settings) will be included to help us fix the issue faster.";
-                        color: root.text-muted;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                    }
-
-                    Text { text: "What went wrong?"; color: root.text-body; font-size: 12px; }
-                    bug-msg := LineEdit {
-                        placeholder-text: "e.g. The video freezes when I click Export";
-                    }
-
-                    Text { text: "How can we reach you? (optional)"; color: root.text-body; font-size: 12px; }
-                    bug-contact := LineEdit {
-                        text <=> root.bug-user-contact;
-                        placeholder-text: "Forum username or email";
-                    }
-
-                    bug-share-logs := CheckBox {
-                        text: "Include system info and logs";
-                        checked: true;
-                    }
-                    Text {
-                        text: "Shares GPU model, OS, performance stats, and logs. No video content is sent.";
-                        color: root.text-dim;
-                        font-size: 10px;
-                        wrap: word-wrap;
-                    }
-
-                    HorizontalLayout {
-                        spacing: 8px;
-                        alignment: end;
-                        FlatButton { text: "Cancel"; clicked => { root.bug-dialog-open = false; } }
-                        FlatButton {
-                            text: "Send Report";
-                            primary: true;
-                            enabled: bug-msg.text != "";
-                            clicked => {
-                                root.submit-bug-report(bug-msg.text, bug-contact.text, bug-share-logs.checked);
-                                root.bug-dialog-open = false;
-                            }
-                        }
-                    }
-                }
             }
         }
 
