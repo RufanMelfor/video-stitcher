@@ -72,6 +72,15 @@ footage disagrees with:
 Do a **short test export first** (a minute or two, set with *Processing range*)
 and watch it before you export the whole match.
 
+**The first AI export is slow to start.** On a TensorRT build, the program
+builds an optimised engine for your GPU the first time you export with AI
+tracking, and again after you change the AI model or update the GPU driver.
+This can take several minutes during which the progress bar shows no frames
+and the status reads *Initializing*. The program has not hung: wait. The
+result is saved in the `trt-cache` folder (see
+[troubleshooting](08-troubleshooting.md#tensorrt-cache-tensorrt-builds-only)),
+so later exports start quickly.
+
 ## Reading what the AI did: the AI Debug export
 
 When the camera misbehaves you need to see what the AI actually saw. The **AI

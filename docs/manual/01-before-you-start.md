@@ -84,6 +84,9 @@ originals stay untouched.
    - **Default codec** and **Default quality** for exports.
    - **Default setup**: see [chapter 3](03-calibration.md#re-using-a-setup).
 3. Dark or light theme is also set there.
+4. Your first export with AI tracking takes several minutes longer to start,
+   because the program builds an optimised engine for your GPU once. This is
+   normal; see [chapter 5](05-ai-tracking.md#a-good-first-export).
 
 ## The program at a glance
 

@@ -8563,7 +8563,15 @@ fn main() -> anyhow::Result<()> {
         app.set_export_progress(0.0);
         app.set_export_frames_done(0);
         app.set_export_frames_total(0);
-        app.set_export_status_text("Initializing…".into());
+        // The first AI export builds a TensorRT engine for this GPU, which
+        // can take several minutes with no frame progress. Say so, or it
+        // looks like the program hung.
+        let init_status = if autocam.enabled {
+            "Initializing… the first AI export can take several minutes while the GPU engine is built (once)"
+        } else {
+            "Initializing…"
+        };
+        app.set_export_status_text(init_status.into());
         app.set_export_dialog_open(false);
 
         let app_weak_bg = app_weak.clone();
