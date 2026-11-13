@@ -2064,3 +2064,34 @@ instead of guessing at it, and to verify the solution against both
 poses at once. Until that exists, further candidate-testing is not
 worth the time.
 
+
+## Plumb-line lens refinement: no stitch gain (2026-11-13)
+
+Question: does a per-camera lens fit (k1-k4, fx, cx, cy) from straight world
+lines, independent of the other camera, reduce the seam mismatch that remains
+after Auto Calibrate + refine? Tool: `examples/fit_lens_lines.rs` (edge chains,
+ray-plane residual, trimmed Nelder-Mead, two-fold validation by chain id).
+Footage: DJI Action 6 street scene, 3840x2880, ~100 straight windows per camera.
+
+- The Gyroflow profile already straightens lines to ~0.9 px (left) / ~1.2 px
+  (right) trimmed RMS at full resolution.
+- A fit improves held-out chains consistently but only by 5-8 %
+  (0.81->0.77, 0.99->0.95 left; 1.03->0.94, 1.31->1.23 right), mostly near the
+  frame edge. The full fit moves fx by +1.3 % / +2.7 %, which straight lines
+  barely determine (fx trades against k1).
+- Stitch check with `seam_alignment --refine` on held-out frames (objective,
+  higher is better): original profile 0.278, refined again 0.299, plumb-line
+  lenses (k-only or full) 0.04-0.08, even when started from the already refined
+  rig. Far-field vertical disparity went from ~1 px to 8-9 px.
+- Scan of the right lens focal scale with everything else fixed
+  (-1, -0.5, -0.25, 0, +0.25, +0.5, +1 %): objective 0.045, 0.132, 0.217,
+  0.278, 0.247, 0.187, 0.045. The two cameras share the same focal length to
+  about 0.1 %, so the identical profile is right for this pair.
+- Conclusion: the lens model is not the limiting factor for this rig. The
+  remaining mismatch at the top and bottom of the seam is parallax (178 mm
+  baseline) and the narrowing of the overlap, not lens error. Do not wire a
+  per-camera lens fit into Auto Calibrate on this evidence. A measured
+  per-camera profile (checkerboard) is still untested.
+- Caveat: one scene, one frame per camera, 65-100 straight windows, few near the
+  edge. A larger sample might find more, but the focal-scale scan argues against
+  a large focal difference.
