@@ -201,24 +201,24 @@ fn gaussian_blur(src: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
     k.iter_mut().for_each(|v| *v /= s);
     let mut tmp = vec![0f32; w * h];
     tmp.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        for x in 0..w {
+        for (x, cell) in row.iter_mut().enumerate() {
             let mut a = 0.0;
             for (i, kv) in k.iter().enumerate() {
                 let xx = (x as i32 + i as i32 - rad).clamp(0, w as i32 - 1) as usize;
                 a += src[y * w + xx] * kv;
             }
-            row[x] = a;
+            *cell = a;
         }
     });
     let mut out = vec![0f32; w * h];
     out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        for x in 0..w {
+        for (x, cell) in row.iter_mut().enumerate() {
             let mut a = 0.0;
             for (i, kv) in k.iter().enumerate() {
                 let yy = (y as i32 + i as i32 - rad).clamp(0, h as i32 - 1) as usize;
                 a += tmp[yy * w + x] * kv;
             }
-            row[x] = a;
+            *cell = a;
         }
     });
     out
@@ -370,10 +370,10 @@ fn trace_chains(e: &Edges) -> Vec<Vec<usize>> {
                 Some((px, py)) => *nb
                     .iter()
                     .max_by(|a, b| {
-                        let da = (a.1 .0 * px + a.1 .1 * py) as f32
-                            / ((a.1 .0 * a.1 .0 + a.1 .1 * a.1 .1) as f32).sqrt();
-                        let db = (b.1 .0 * px + b.1 .1 * py) as f32
-                            / ((b.1 .0 * b.1 .0 + b.1 .1 * b.1 .1) as f32).sqrt();
+                        let da = (a.1.0 * px + a.1.1 * py) as f32
+                            / ((a.1.0 * a.1.0 + a.1.1 * a.1.1) as f32).sqrt();
+                        let db = (b.1.0 * px + b.1.1 * py) as f32
+                            / ((b.1.0 * b.1.0 + b.1.1 * b.1.1) as f32).sqrt();
                         da.partial_cmp(&db).unwrap()
                     })
                     .unwrap(),
