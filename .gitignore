@@ -44,3 +44,10 @@ calibration_adjusted.json
 # Generated HTML reading copies of docs/*.md (run docs/build_html.py)
 docs/panner-nl.html
 docs/panner-en.html
+
+# Real match frames (recognisable people): local only, never commit
+/resources/test-data/frames/
+/resources/test-data/ground_tilt_check/
+
+# Real names, e-mails and LAN IPs for the public-release filter: local only
+/docs/internal/public-release/private/
