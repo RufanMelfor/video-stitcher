@@ -76,7 +76,8 @@ and watch it before you export the whole match.
 
 **The first AI export is slow to start.** On a TensorRT build, the program
 builds an optimised engine for your GPU the first time you export with AI
-tracking, and again after you change the AI model or update the GPU driver.
+tracking, again when you use a different AI model, and possibly after a GPU or
+TensorRT change.
 This can take several minutes during which the progress bar shows no frames
 and the status reads *Initializing*. The program has not hung: wait. The
 result is saved in the `trt-cache` folder (see

@@ -39,6 +39,7 @@ please report what you find (see [chapter 8](08-troubleshooting.md)).
 | A Windows 11 PC | The only tested system. |
 | An NVIDIA graphics card with **8 GB of video memory or more** | Stitching and AI run on the GPU. With less memory you need a shorter lookahead and, for 10-bit footage, the *Reduce lookahead memory* option (see [chapter 7](07-exporting.md)). |
 | An up-to-date NVIDIA driver | Hardware decoding and encoding rely on it. |
+| The Microsoft Visual C++ Redistributable 2015-2022 (x64) | The program is built with Visual C++ and needs its runtime. Most PCs already have it; the release zip does not include it. |
 | NVIDIA **CUDA Toolkit, TensorRT and cuDNN** | Only for AI tracking with the release package (a TensorRT build). They are not included in the zip; see *Installing* below. Tested with CUDA 13.2, TensorRT 10.16.1 and cuDNN 9.24. |
 | Two cameras with the same resolution and frame rate | The program refuses inputs whose frame rates differ. |
 | **Google Chrome or Chromium**, installed | Only if you use the scoreboard overlay (it is drawn by a browser). |
@@ -62,7 +63,8 @@ for AI tracking you must install the NVIDIA **CUDA Toolkit**, **TensorRT** and
 **cuDNN** yourself and add their `bin` folders to your `PATH`, then restart the
 program. It was built and tested with CUDA 13.2, TensorRT 10.16.1 and cuDNN
 9.24; other versions are untested. Read the notes at the top of the release page
-too. Stitching without AI tracking does not need these libraries.
+too. Stitching without AI tracking should not need these libraries (the program does not load
+them at start-up), but this was not tested on a PC without them.
 
 ### Option B: build it yourself
 
