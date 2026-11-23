@@ -64,7 +64,9 @@ calibration persistence on top. Licensed under the same AGPL-3.0.
 
 ## Other dependencies
 
-Built on FFmpeg (the CI downloads BtbN's GPL builds), wgpu, Slint with its
+Built on FFmpeg (the Windows release ships BtbN's GPL shared build
+`n7.1.5-12-g1fdbca85aa`; source: commit `1fdbca85aa` of the 7.1 branch at
+https://git.ffmpeg.org/ffmpeg.git), wgpu, Slint with its
 Skia renderer, ONNX Runtime, NVIDIA TensorRT and CUDA, GStreamer, the
 `headless_chrome` crate and many more crates; see `Cargo.lock`. Crates under
 `vendor/` are patched copies of wgpu, wgpu-core, wgpu-hal, naga, serde,
