@@ -395,6 +395,7 @@ impl VramPool {
     /// `--lookahead 0`) is currently required, not just a VRAM-budget
     /// fallback as the CLI/GUI help text previously implied - see
     /// `docs/ai-panner-tuning.md`'s "Lookahead" note.
+    #[cfg(target_os = "windows")]
     pub fn copy_from_d3d11(
         &self,
         gpu: &crate::gpu::GpuContext,

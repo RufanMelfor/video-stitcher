@@ -45,6 +45,16 @@ tracing-log = "0.2"
 strip = true
 lto = "thin"
 
+# Do not strip build-time artifacts (proc-macro dylibs, build scripts and
+# their deps). On recent macOS a stripped proc-macro dylib (e.g.
+# slint-macros) is refused by dyld ("mis-aligned LINKEDIT string pool"),
+# failing the build with "can't find crate for slint_macros". These
+# artifacts are never shipped, so this costs nothing on Windows/Linux;
+# the final binaries are still stripped by `strip = true` above.
+# Upstream report: RufanMelfor/video-stitcher#1 (item 4).
+[profile.release.build-override]
+strip = "none"
+
 # Fix khronos_api 3.1.0 build.rs bug on Windows: build script uses current_dir()
 # which is not guaranteed to be the package root. Replaced with CARGO_MANIFEST_DIR.
 [patch.crates-io]

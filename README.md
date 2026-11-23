@@ -13,7 +13,7 @@ Stitch two camera feeds into a seamless panoramic sports view with AI-powered au
 - **AI ball + player tracking** - YOLO detection on ONNX (CPU / CUDA / CoreML / NCNN) or native TensorRT `.engine`, with anticipatory lookahead smoothing and density-peak player clustering
 - **Automatic calibration** - AKAZE feature matching with IMU / audio cross-correlation for temporal sync, Gyroflow lens profiles
 - **Live production** - *(upstream code, untested in this fork)* GStreamer camera ingest (Linux / Jetson CSI), push-based `StitchCore::submit_frame_*` for OBS and live streams, replay ring buffer, stacked-video pack/unpack
-- **Platforms** - **Windows 11 + NVIDIA (RTX 3060 Ti) is the only tested combination.** The Linux, macOS, Jetson and OBS code paths come from upstream and have not been run in this fork, and **`reco-core` currently does not compile on Linux or macOS** (a Windows-only function is not gated, found by CI on 2026-10-21). Other changes made here also affect every platform (Skia renderer, patched `vendor/` crates). See [Tested hardware](#tested-hardware).
+- **Platforms** - **Windows 11 + NVIDIA (RTX 3060 Ti) is the only tested combination.** The Linux, macOS, Jetson and OBS code paths come from upstream and have not been run in this fork, and they have not been built in CI recently. The known compile breaks on Linux/macOS (an ungated Windows-only function in `reco-core`, found by CI on 2026-10-21, and the Metal detector in `reco-detect`) have been fixed, but not yet verified on a real Linux or macOS machine. A community member reports the GUI starting on macOS (Apple Silicon, M4 Pro) with these fixes, see [issue #1](https://github.com/RufanMelfor/video-stitcher/issues/1). Other changes made here also affect every platform (Skia renderer, patched `vendor/` crates). See [Tested hardware](#tested-hardware).
 
 > **Do not install an upstream reco build over this one.** Settings and
 > calibration files are not interchangeable between the two.
@@ -202,8 +202,12 @@ sudo apt install libavcodec-dev libavformat-dev libavutil-dev \
     libswscale-dev libavdevice-dev libavfilter-dev libswresample-dev \
     pkg-config clang
 
-# macOS (Homebrew)
-brew install ffmpeg pkg-config
+# macOS (Homebrew). Use FFmpeg 7: current Homebrew `ffmpeg` is 9.x, which
+# ffmpeg-next 8.1 does not compile against.
+brew install ffmpeg@7 pkg-config
+export PKG_CONFIG_PATH="$(brew --prefix ffmpeg@7)/lib/pkgconfig:$PKG_CONFIG_PATH"
+# Optional: build a RECO Panopitch.app bundle (see scripts/build-macos-app.sh)
+# ./scripts/build-macos-app.sh
 
 # Windows: FFmpeg 7.x binaries + LLVM/Clang, set FFMPEG_DIR env var
 

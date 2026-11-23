@@ -108,8 +108,20 @@ impl MetalYoloDetector {
             (InferenceBackend::CoreMlNative(coreml), input_size, labels)
         } else {
             // ORT with CoreML EP fallback (uses shared session builder).
-            let (session, input_size, labels) =
+            let (session, model_input, labels) =
                 crate::ort_session::create_ort_session(path, labels)?;
+            // The Metal preprocess shader and the `[1, 3, sz, sz]` tensor
+            // in `run_inference` are still square-only. Refuse a
+            // non-square model rather than silently using one dimension
+            // for both (same policy as `OrtGpuDetector`).
+            if !model_input.is_square() {
+                return Err(format!(
+                    "MetalYoloDetector requires a square model input, got {model_input}. \
+                     Non-square models are supported on the wgpu/TensorRT path."
+                )
+                .into());
+            }
+            let input_size = model_input.width;
             (
                 InferenceBackend::OrtSession {
                     session,
