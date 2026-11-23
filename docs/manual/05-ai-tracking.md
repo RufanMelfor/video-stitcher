@@ -53,21 +53,23 @@ chooses what the camera aims at:
 
 ## A good first export
 
-Start with these values from the tuning guide, then change only what your
-footage disagrees with:
+Start with these values, then change only what your footage disagrees with.
+They are the same values the built-in Football preset applies after your first
+Auto Calibrate (see [chapter 3](03-calibration.md#what-is-in-a-setup-file-and-the-starting-preset)),
+so you normally do not need to type them in:
 
 | Setting | Start with |
 |---|---|
 | Tracking mode | Field |
 | Detect every N frames | 3 |
-| Detection confidence | 0.10 to 0.20 |
+| Detection confidence | 0.20 |
 | Style preset / Framing | action |
-| Lookahead | 0.5 s |
+| Lookahead | 0.5 s (0.52) |
 | Reduce lookahead memory (8-bit) | **on** for 10-bit footage |
 | Ball coast time / Ball hold time | 8 s each |
 | Cluster mode (Advanced panner) | Trimmed mean |
-| Ball weight | 0.5 to 0.6 |
-| Dead zone | 0.05 to 0.08 |
+| Ball weight | 0.8 |
+| Dead zone | 0.15 |
 
 Do a **short test export first** (a minute or two, set with *Processing range*)
 and watch it before you export the whole match.

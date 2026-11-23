@@ -137,6 +137,81 @@ when you are happy. Everything in the setup (alignment, lens, colour
 settings, AI defaults, export defaults, scoreboard settings) is stored in the one
 file and restored when you load it again.
 
+## What is in a setup file, and the starting preset
+
+A setup file mixes two kinds of information:
+
+- **Your rig.** The lenses, how the two cameras sit relative to each other and
+  where the seam runs, the framing, the sync offset, the field area, the goals
+  and the AI pitch limits. These are only correct for the cameras that filmed
+  the match. A setup file from someone else's rig will not stitch your footage
+  properly, so always run **Auto Calibrate** on your own.
+- **Your preferences.** The AI tracking settings, colour and sharpening, the
+  scoreboard style and timing, and the export defaults (size, codec, quality).
+  These describe how you like the result to look and are not tied to a camera.
+
+File paths (the AI model, scoreboard logos and the match logger file) are also
+stored in the setup, but they only point to files on your own computer.
+
+**Football starting preset.** So that you do not start from empty settings, the
+program has a built-in *Football* preset. It is applied once, when you run
+**Auto Calibrate** and no setup is loaded yet. You will see the notice
+*Football preset applied*. It sets:
+
+- the AI tracking settings (framing, smoothing, ball behaviour, detection
+  confidence),
+- the colour grade, sharpening and dehaze,
+- the scoreboard style and timing (the scoreboard itself stays off until you
+  switch it on),
+- the export defaults (2560x1440, HEVC, balanced quality).
+
+These are the exact values, taken from a setup that was tested on a full match
+(names as shown in the program):
+
+| Group | Setting | Value |
+|---|---|---|
+| AI tracking | Tracking mode | Field |
+| | Style preset / Framing | action / action |
+| | Detect every N frames | 3 |
+| | Detection confidence | 0.20 |
+| | Lookahead (smoothness) | 0.52 s (8-bit lookahead memory on) |
+| | Cluster mode | Trimmed mean |
+| | Ball weight | 0.80 |
+| | Cluster bandwidth | 0.35 rad |
+| | Dead zone | 0.15 rad |
+| | Ball anchor range | 0.50 rad |
+| | Ball reach | 1.00 rad |
+| | Ball margin | 5.0 deg |
+| | Ball coast time / Ball hold time | 8 s / 8 s |
+| | Ball max speed | 0.13 rad/frame |
+| | Ball jump confidence | 0.50 |
+| | Ball acquire arm delay | 45 frames |
+| | Field of view: Tight / Default / Wide | 30 / 50 / 65 deg |
+| | Smoothing speed: Zoom / Aim | 0.04 / 0.25 |
+| | Lock (horizontal-only) | off |
+| | AI contrast boost | 0 (off) |
+| Image | Colour matching | on |
+| | Brightness / Saturation / Gamma | 1.00 / 1.15 / 1.05 |
+| | Sharpen amount / radius | 0.84 / 1.0 |
+| | Dehaze | 0.1 |
+| Scoreboard | Scoreboard | off (package: football) |
+| | Font / Banner colour / Logo size | Segoe UI / Black / 34 px |
+| | Auto-cut from the match logger | on |
+| | Cut margins (lead / trail) | 2 s / 2 s |
+| | Kickoff lead / Match end trail | 2 s / 5 s |
+| | Highlights lead / trail / fade | 15 s / 5 s / 1 s |
+| Export | Size, codec, quality | 2560x1440, HEVC, balanced |
+
+A few more smoothing values have no slider of their own and are set to the same
+tested numbers.
+
+The preset never touches anything about your cameras: the stitch is exactly what
+Auto Calibrate measured, and the field area, goals, AI pitch limits and file
+paths stay empty. It is only a starting point, tuned on one rig, so adjust the
+values in the panels to your footage and save the setup. When you
+**Re-calibrate** an existing setup, your own AI, scoreboard and export settings
+are kept and the preset is not applied again.
+
 ## Info
 
 The **Info** button next to *Refine Alignment* opens a report about the
