@@ -89,7 +89,12 @@ pub fn probe_execution_providers() -> AiProbeResult {
         {
             let result: Result<(), String> = match Session::builder() {
                 Ok(b) => b
-                    .with_execution_providers([ort::ep::TensorRT::default().build()])
+                    // `error_on_failure`: by default ort only logs a failed
+                    // registration and returns Ok, which made a missing
+                    // provider DLL look like a working TensorRT EP.
+                    .with_execution_providers([ort::ep::TensorRT::default()
+                        .build()
+                        .error_on_failure()])
                     .map(|_| ())
                     .map_err(|e| e.to_string()),
                 Err(e) => Err(e.to_string()),
@@ -108,7 +113,7 @@ pub fn probe_execution_providers() -> AiProbeResult {
         {
             let result: Result<(), String> = match Session::builder() {
                 Ok(b) => b
-                    .with_execution_providers([ort::ep::CUDA::default().build()])
+                    .with_execution_providers([ort::ep::CUDA::default().build().error_on_failure()])
                     .map(|_| ())
                     .map_err(|e| e.to_string()),
                 Err(e) => Err(e.to_string()),

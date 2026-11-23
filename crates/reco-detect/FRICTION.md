@@ -85,10 +85,15 @@ visible reason. Observed on the first zip (2 starts, both with the error
 above); the fixed zip registered TensorRT and exported 2733 frames at
 16.12 fps.
 
-**Not fixed, nothing worked around:** `probe.rs` and `ort_session.rs`
-should build the EP with `.error_on_failure()` (so `Err` reaches the
-existing `errors` list / `e.recover()` path), or otherwise check which
-providers were actually registered. `reco-gui` then needs no change: its
-status line already prints `probe.errors`. Untested: whether
-`.error_on_failure()` behaves the same for the TensorRT EP when only the
-NVIDIA libraries (not the provider DLL) are missing.
+**Fixed 2026-11-23:** `probe.rs` and `ort_session.rs` now build the
+TensorRT and CUDA EPs with `.error_on_failure()`, so a failed registration
+returns `Err` (probe: goes into `errors` and TensorRT drops out of
+`providers`; session: the existing warn + `recover()` fallback runs).
+`reco-gui` needed no change, its status line already prints `probe.errors`.
+Checked with a throwaway example: with the provider DLLs next to the exe
+the probe returns `["TensorRT", "DirectML", "CPU"]`; with the exe alone
+(like the broken first zip) it returns `["DirectML", "CPU"]` plus the
+`TensorRT: ... Error loading ...onnxruntime_providers_shared.dll` error.
+Not done: DirectML and CoreML EPs still use the default (silent) mode, and
+the case where only the NVIDIA libraries (not the provider DLL) are missing
+was not tried.

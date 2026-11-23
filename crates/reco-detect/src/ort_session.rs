@@ -275,7 +275,11 @@ pub fn create_ort_session(
             // configured - would need deeper investigation (IoBinding
             // with pinned buffers instead of a fresh Vec<f32> per call
             // is the likely real fix) before trying again.
-            .build()])
+            .build()
+            // Without this ort only logs a failed registration and returns
+            // Ok, so "enabled" below would be logged for a TensorRT EP
+            // that never loaded (missing provider DLL / NVIDIA libs).
+            .error_on_failure()])
         {
             Ok(b) => {
                 log::info!("ORT: TensorRT execution provider enabled");
@@ -292,7 +296,9 @@ pub fn create_ort_session(
     // Also tried after TensorRT as a fallback when TRT engine build fails.
     #[cfg(feature = "cuda")]
     let mut builder = {
-        match builder.with_execution_providers([ort::ep::CUDA::default().build()]) {
+        match builder
+            .with_execution_providers([ort::ep::CUDA::default().build().error_on_failure()])
+        {
             Ok(b) => {
                 log::info!("ORT: CUDA execution provider enabled");
                 b
