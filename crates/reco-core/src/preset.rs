@@ -229,7 +229,8 @@ mod tests {
         let mut cal = bare_calibration();
         football().apply_to(&mut cal, true);
         assert!((cal.topology.color_grade_saturation - 1.15).abs() < 1e-6);
-        assert_eq!(cal.topology.dehaze_strength, 0.0);
+        assert!((cal.topology.dehaze_strength - 0.1).abs() < 1e-6);
+        assert!((cal.topology.sharpen_amount - 0.8359375).abs() < 1e-6);
     }
 
     #[test]
