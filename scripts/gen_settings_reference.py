@@ -159,8 +159,24 @@ def collect(src: str):
             group = t.group(1)
         section_at[i] = (section, group)
 
-    for n, i in enumerate(tip_lines):
-        nxt = tip_lines[n + 1] if n + 1 < len(tip_lines) else end
+    # Blocks that only exist in builds with an optional cargo feature (the
+    # pitch minimap) are hidden in the release build, so they are left out of
+    # the reference instead of documenting controls a user cannot see.
+    hidden = set()
+    for i in range(start, end):
+        if re.search(r"if root\.minimap-built", lines[i]):
+            depth, j = 0, i
+            while j < end:
+                depth += lines[j].count("{") - lines[j].count("}")
+                hidden.add(j)
+                if depth <= 0 and "{" in "".join(lines[i : j + 1]):
+                    break
+                j += 1
+    all_tips = tip_lines  # block limits still use every tip, hidden or not
+    tip_lines = [i for i in tip_lines if i not in hidden]
+
+    for i in tip_lines:
+        nxt = next((t for t in all_tips if t > i), end)
         tip = TIP_RE.search(lines[i]).group(1)
         # The tip sits inside the widget (or `Tip { ... }` wrapper) it
         # describes, so only read up to the end of that enclosing block.

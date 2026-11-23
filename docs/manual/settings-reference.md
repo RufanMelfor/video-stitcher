@@ -253,10 +253,6 @@ so their defaults only apply until you pick one.
 | Fade |  |  | Fade: how long the dip to black and back takes. It is drawn over footage that was going to be encoded anyway, so it adds no length to the export. Black: how long the picture stays fully black on "PAUZE" - the only part that lengthens the export, and the number to raise if a pause should read as a real break. |
 | Record replay (stacked raw input for re-stitching) |  | off | Also saves the raw pre-stitch source frames (stacked side-by-side) to a separate file alongside the export, for later re-stitching without re-decoding the originals. |
 | Save AI debug events (.jsonl for visualize_detections.py) |  | off | Writes every detection, filter decision, and pan decision to a .jsonl file next to the export, for offline analysis with visualize_detections.py. |
-| Pitch minimap (needs AI Tracking + minimap.json) |  | off | Draws a top-down pitch map with players, referee and ball in the bottom corner of the export. Needs AI Tracking (below) and a minimap.json file next to the setup file, which sets the field size and where the field corners are in the camera images. |
-| Corner |  |  | Which corner of the video the pitch minimap is drawn in. |
-| Minimap size (share of video width) | 0.05 to 0.6 | 0.25 | How wide the minimap is, as a share of the video width. 0.25 is a quarter of the width. |
-| Gap to the edge (share of video height) | 0.0 to 0.2 | 0.02 | Space between the minimap and the edges of the video, as a share of the video height. 0 puts it right against the corner. |
 
 ### AI tracking
 

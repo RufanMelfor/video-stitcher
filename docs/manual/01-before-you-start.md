@@ -39,6 +39,7 @@ please report what you find (see [chapter 8](08-troubleshooting.md)).
 | A Windows 11 PC | The only tested system. |
 | An NVIDIA graphics card with **8 GB of video memory or more** | Stitching and AI run on the GPU. With less memory you need a shorter lookahead and, for 10-bit footage, the *Reduce lookahead memory* option (see [chapter 7](07-exporting.md)). |
 | An up-to-date NVIDIA driver | Hardware decoding and encoding rely on it. |
+| NVIDIA **CUDA Toolkit, TensorRT and cuDNN** | Only for AI tracking with the release package (a TensorRT build). They are not included in the zip; see *Installing* below. Tested with CUDA 13.2, TensorRT 10.16.1 and cuDNN 9.24. |
 | Two cameras with the same resolution and frame rate | The program refuses inputs whose frame rates differ. |
 | **Google Chrome or Chromium**, installed | Only if you use the scoreboard overlay (it is drawn by a browser). |
 | An AI model file (ONNX) | Only if you use AI tracking. A football model is published on Hugging Face as `Dura-S/reco-yolo26s-football`. |
@@ -50,10 +51,18 @@ Everything runs on your own computer. Your video never leaves it.
 
 ### Option A: a release package
 
-Release packages will be published on the **Releases** page of this project's
-GitHub repository. Download the Windows zip, unpack it into a folder of your
-choice and start `reco-panopitch.exe`. The package already contains the FFmpeg and
-AI runtime files it needs. Keep all the files together in the same folder.
+Release packages are on the **Releases** page of this project's GitHub
+repository (https://github.com/RufanMelfor/video-stitcher/releases). Download
+the Windows zip, unpack it into a folder of your choice and start
+`reco-panopitch.exe`. Keep all the files together in the same folder.
+
+The package contains the FFmpeg, ONNX Runtime and DirectML files it needs. It
+does **not** contain the NVIDIA libraries. The release is a TensorRT build, so
+for AI tracking you must install the NVIDIA **CUDA Toolkit**, **TensorRT** and
+**cuDNN** yourself and add their `bin` folders to your `PATH`, then restart the
+program. It was built and tested with CUDA 13.2, TensorRT 10.16.1 and cuDNN
+9.24; other versions are untested. Read the notes at the top of the release page
+too. Stitching without AI tracking does not need these libraries.
 
 ### Option B: build it yourself
 

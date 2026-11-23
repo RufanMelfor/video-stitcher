@@ -169,8 +169,8 @@ LIBVA_MESSAGING_LEVEL=2 ./target/release/reco stitch left.mp4 right.mp4 -c match
 
 ## Architecture
 
-Eleven Rust crates (upstream's nine plus `reco-scoreboard` and `reco-stitch-img`; the
-deprecated `rig-calib` prototype is not counted). Strict dependency direction keeps the
+Twelve Rust crates (upstream's nine plus `reco-scoreboard`, `reco-stitch-img` and
+`reco-minimap`; the deprecated `rig-calib` prototype is not counted). Strict dependency direction keeps the
 engine reusable as a library.
 
 ```
@@ -185,6 +185,7 @@ reco-gui         Slint desktop consumer with wgpu preview + export UI.
 reco-obs         OBS Studio source plugin (async-frame ingestion, BGRA, interactive pan/zoom).
 reco-scoreboard  HTML scoreboard package discovery + offscreen runtime (from upstream PR #474, B. Zelter).
 reco-stitch-img  Standalone GPU image stitcher for pipeline benchmarking.
+reco-minimap     Top-down pitch minimap from AI detections (tracker from B. Zelter's reco-minimap). Source only: optional `minimap` feature of reco-gui, off by default, NOT in the Windows release.
 ```
 
 **Dependency direction:** consumers (`cli` / `gui` / `obs`) depend on the four library crates (`autocam`, `calibrate`, `detect`, `io`); all four depend on `reco-core`. `reco-control` is consumed by `cli` / `gui` / `obs`.
@@ -272,7 +273,8 @@ This fork exists because of other people's work. Thank you:
   logging, responsive file dialogs, concat seeking) and **zzswanny**
   (frame_all GUI options) for their upstream contributions.
 - **Bjorn Zelter** ([@wendibus](https://github.com/wendibus)): the HTML scoreboard
-  system (`reco-scoreboard`, `scoreboards/`, upstream PR #474), which we ported.
+  system (`reco-scoreboard`, `scoreboards/`, upstream PR #474), which we ported, and
+  the player tracker in `reco-minimap`, taken from his `reco-minimap` repository.
 - **[Gyroflow](https://github.com/gyroflow/gyroflow)** and **Adrian Eddy**:
   the architecture that inspired our GPU interop, the CC0 lens-profile database
   and the `telemetry-parser` crate used for IMU data.

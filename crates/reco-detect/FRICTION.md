@@ -89,7 +89,11 @@ above); the fixed zip registered TensorRT and exported 2733 frames at
 TensorRT and CUDA EPs with `.error_on_failure()`, so a failed registration
 returns `Err` (probe: goes into `errors` and TensorRT drops out of
 `providers`; session: the existing warn + `recover()` fallback runs).
-`reco-gui` needed no change, its status line already prints `probe.errors`.
+`reco-gui` was not changed. Its status line (`ai_capability_summary`) only
+prints `probe.errors` when NO provider is available at all; with TensorRT
+missing it now reads "AI: DirectML (CPU path ...)" instead of claiming
+TensorRT, but the TensorRT error text itself is only in the log. Showing
+the first of `probe.errors` in that status line is still open.
 Checked with a throwaway example: with the provider DLLs next to the exe
 the probe returns `["TensorRT", "DirectML", "CPU"]`; with the exe alone
 (like the broken first zip) it returns `["DirectML", "CPU"]` plus the
