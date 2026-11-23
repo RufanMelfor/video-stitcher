@@ -50,3 +50,45 @@ content hash or its path, not letting TensorRT derive the key from the
 graph alone. Until that lands, clear the cache by hand after any model
 swap during active training/export iteration rather than trusting a
 zero-detection run to mean the model itself is bad.
+
+## A TensorRT EP that fails to load is reported as enabled (silent fallback)
+
+**Symptom (found 2026-11-23, release zip v1.0.0-beta.1):** the first
+Windows release zip shipped without `onnxruntime_providers_shared.dll`
+and the other provider DLLs. `reco-panopitch.log` then showed, in this
+order:
+
+```
+ERROR ort::ep: An error occurred when attempting to register `TensorrtExecutionProvider`: ... Error loading ...\onnxruntime_providers_shared.dll which is missing (126)
+WARN  ort::ep: No execution providers from session options registered successfully; may fall back to CPU.
+INFO  reco_panopitch: AI: TensorRT, DirectML, CPU (hardware decode + inference)
+```
+
+The app start-up status line claims TensorRT is available, and nothing in
+the UI says otherwise. The only trace is the ERROR/WARN lines in the log.
+`ort_session.rs` has the same blind spot: it logs "ORT: TensorRT
+execution provider enabled" right after `with_execution_providers`
+returns `Ok`.
+
+**Root cause:** in ort 2.0.0-rc.12 `SessionBuilder::with_execution_providers`
+returns `Ok` when an EP fails to register at runtime; the failure is only
+logged (`ort/src/ep/mod.rs`, "may fall back to CPU") unless the EP is
+built with `.error_on_failure()`. So both `probe_execution_providers`
+(`probe.rs`, which `reco-gui` shows via `ai_capability_summary`) and
+`create_ort_session` treat a failed registration as success. The probe's
+doc comment promises exactly the opposite ("will report TensorRT as
+unavailable if the TensorRT shared libraries are not installed").
+
+**Impact:** a user without the NVIDIA libraries (CUDA, TensorRT, cuDNN)
+on PATH, or with a missing provider DLL, gets slower inference with no
+visible reason. Observed on the first zip (2 starts, both with the error
+above); the fixed zip registered TensorRT and exported 2733 frames at
+16.12 fps.
+
+**Not fixed, nothing worked around:** `probe.rs` and `ort_session.rs`
+should build the EP with `.error_on_failure()` (so `Err` reaches the
+existing `errors` list / `e.recover()` path), or otherwise check which
+providers were actually registered. `reco-gui` then needs no change: its
+status line already prints `probe.errors`. Untested: whether
+`.error_on_failure()` behaves the same for the TensorRT EP when only the
+NVIDIA libraries (not the provider DLL) are missing.
