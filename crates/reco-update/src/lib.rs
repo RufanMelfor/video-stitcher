@@ -431,20 +431,89 @@ fi
 rm -f "$0"
 "#;
 
+/// Windows installer, run by Windows PowerShell 5.1 (present on every
+/// Windows 10/11) via `-EncodedCommand`, so no script file is written and
+/// execution policies (which only apply to script files) do not block it.
+///
+/// It waits on a process handle (`WaitForExit`), not on `tasklist | find`:
+/// that pipeline hung forever when the app was started from PowerShell,
+/// and a substring match on the PID could also match an unrelated process.
+/// Every step has a bound, and a failure is shown to the user in a dialog
+/// with the log path instead of failing silently.
 #[cfg(windows)]
-const WINDOWS_SCRIPT: &str = r#"@echo off
-:wait
-tasklist /FI "PID eq %RECO_PID%" 2>NUL | find "%RECO_PID%" >NUL
-if not errorlevel 1 (
-  ping -n 2 127.0.0.1 >NUL
-  goto wait
-)
-robocopy "%RECO_NEW%" "%RECO_ROOT%" /E /IS /IT /R:60 /W:1 /NFL /NDL /NJH /NJS /NP >NUL
-if errorlevel 8 exit /b 1
-rmdir /S /Q "%RECO_STAGING%"
-if not defined RECO_NO_LAUNCH start "" "%RECO_EXE%"
-del "%~f0"
+const WINDOWS_SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$log = $env:RECO_LOG
+function Write-Log([string]$m) {
+  Add-Content -LiteralPath $log -Encoding UTF8 -Value ('{0:HH:mm:ss} {1}' -f (Get-Date), $m)
+}
+function Stop-Failed([string]$m) {
+  Write-Log "FAILED: $m"
+  if (-not $env:RECO_NO_DIALOG) {
+    try {
+      $text = "RECO Panopitch could not install the update.`n`n$m`n`nDetails: $log"
+      (New-Object -ComObject WScript.Shell).Popup($text, 0, 'RECO Panopitch update', 16) | Out-Null
+    } catch {}
+  }
+  exit 1
+}
+try {
+  Write-Log "waiting for process $env:RECO_PID to exit"
+  $wait = 120
+  if ($env:RECO_WAIT_SECONDS) { $wait = [int]$env:RECO_WAIT_SECONDS }
+  $p = Get-Process -Id ([int]$env:RECO_PID) -ErrorAction SilentlyContinue
+  if ($p -and -not $p.WaitForExit($wait * 1000)) {
+    Stop-Failed "The app did not close within $wait seconds. Nothing was changed; close it and try the update again."
+  }
+  Write-Log "copying '$env:RECO_NEW' -> '$env:RECO_ROOT'"
+  $out = & robocopy.exe $env:RECO_NEW $env:RECO_ROOT /E /IS /IT /R:30 /W:1 /NP /NJH /NJS /NDL 2>&1
+  $rc = $LASTEXITCODE
+  Write-Log (($out | Out-String).Trim())
+  if ($rc -ge 8) {
+    Stop-Failed "Copying the new files failed (robocopy exit code $rc). The install may be incomplete: download the release again from GitHub."
+  }
+  Remove-Item -LiteralPath $env:RECO_STAGING -Recurse -Force -ErrorAction SilentlyContinue
+  Write-Log 'update installed'
+  if (-not $env:RECO_NO_LAUNCH) {
+    Start-Process -FilePath $env:RECO_EXE -WorkingDirectory $env:RECO_ROOT
+  }
+} catch {
+  Stop-Failed $_.Exception.Message
+}
 "#;
+
+/// `powershell.exe -EncodedCommand` takes base64 of the UTF-16LE script.
+#[cfg(any(windows, test))]
+fn encode_powershell_command(script: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Full path of Windows PowerShell 5.1, so a `powershell.exe` earlier on
+/// `PATH` is never picked up.
+#[cfg(windows)]
+fn windows_powershell() -> PathBuf {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+    PathBuf::from(root).join("System32\\WindowsPowerShell\\v1.0\\powershell.exe")
+}
 
 /// Start the detached installer. Call `std::process::exit`/quit the event
 /// loop right after this returns `Ok`.
@@ -499,24 +568,32 @@ pub fn spawn_installer(target: &InstallTarget, new_root: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        // CREATE_NO_WINDOW alone (not with DETACHED_PROCESS): PowerShell
+        // gets a hidden console that robocopy then shares, so no console
+        // window flashes up. CREATE_NEW_PROCESS_GROUP keeps a Ctrl+C in
+        // the terminal that ran `reco update` from killing the installer.
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let script = script_dir.join(format!("reco-update-{pid}.cmd"));
-        std::fs::write(&script, WINDOWS_SCRIPT.replace('\n', "\r\n"))?;
-        let mut cmd = std::process::Command::new("cmd");
+        let log = script_dir.join(format!("reco-update-{pid}.log"));
+        let mut cmd = std::process::Command::new(windows_powershell());
         if !target.relaunch {
             cmd.env("RECO_NO_LAUNCH", "1");
         }
-        cmd.arg("/C")
-            .arg(&script)
+        cmd.args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
+            .arg(encode_powershell_command(WINDOWS_SCRIPT))
             .env("RECO_PID", &pid)
             .env("RECO_ROOT", &target.root)
             .env("RECO_NEW", new_root)
             .env("RECO_STAGING", &staging)
             .env("RECO_EXE", &target.exe)
-            .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+            .env("RECO_LOG", &log)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
             .spawn()
             .context("start installer")?;
+        log::info!("update installer started, log: {}", log.display());
     }
     Ok(())
 }
@@ -708,6 +785,126 @@ mod tests {
             "mine"
         );
         assert!(!stg.exists());
+    }
+
+    #[test]
+    fn powershell_encoding_is_base64_of_utf16le() {
+        // Reference values from [Convert]::ToBase64String(
+        // [Text.Encoding]::Unicode.GetBytes(...)) in PowerShell.
+        assert_eq!(encode_powershell_command(""), "");
+        assert_eq!(encode_powershell_command("A"), "QQA=");
+        assert_eq!(encode_powershell_command("ab"), "YQBiAA==");
+        assert_eq!(encode_powershell_command("abc"), "YQBiAGMA");
+        assert_eq!(encode_powershell_command("é"), "6QA=");
+    }
+
+    /// Runs the real installer script the way `spawn_installer` does,
+    /// but waits for it. Returns its exit code. `pid` is the process the
+    /// script waits for (a non-existent one means no waiting).
+    #[cfg(windows)]
+    fn run_windows_script_for(
+        pid: u32,
+        root: &Path,
+        new: &Path,
+        staging: &Path,
+        log: &Path,
+    ) -> i32 {
+        std::process::Command::new(windows_powershell())
+            .args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
+            .arg(encode_powershell_command(WINDOWS_SCRIPT))
+            .env("RECO_PID", pid.to_string())
+            .env("RECO_WAIT_SECONDS", "1")
+            .env("RECO_ROOT", root)
+            .env("RECO_NEW", new)
+            .env("RECO_STAGING", staging)
+            .env("RECO_EXE", root.join("app.exe"))
+            .env("RECO_LOG", log)
+            .env("RECO_NO_LAUNCH", "1")
+            .env("RECO_NO_DIALOG", "1")
+            .status()
+            .unwrap()
+            .code()
+            .unwrap()
+    }
+
+    #[cfg(windows)]
+    fn run_windows_script(root: &Path, new: &Path, staging: &Path, log: &Path) -> i32 {
+        run_windows_script_for(999_999_999, root, new, staging, log)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_script_gives_up_when_the_app_does_not_exit() {
+        let d = tempfile::tempdir().unwrap();
+        let (root, new) = (d.path().join("inst"), d.path().join("new"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(root.join("app.exe"), "old").unwrap();
+        std::fs::write(new.join("app.exe"), "new").unwrap();
+        let log = d.path().join("u.log");
+        // This test process stays alive, so the 1 s wait must time out.
+        let code = run_windows_script_for(std::process::id(), &root, &new, &new, &log);
+        assert_eq!(code, 1);
+        assert_eq!(
+            std::fs::read_to_string(root.join("app.exe")).unwrap(),
+            "old"
+        );
+        assert!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .contains("did not close")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_script_overlays_and_keeps_user_files() {
+        let d = tempfile::tempdir().unwrap();
+        let (root, stg) = (d.path().join("inst dir"), d.path().join("stg"));
+        let new = stg.join("top folder");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(new.join("sub")).unwrap();
+        std::fs::write(root.join("app.exe"), "old").unwrap();
+        std::fs::write(root.join("my-setup.json"), "mine").unwrap();
+        std::fs::write(new.join("app.exe"), "new").unwrap();
+        std::fs::write(new.join("sub").join("x.dll"), "dll").unwrap();
+        let log = d.path().join("u.log");
+        assert_eq!(run_windows_script(&root, &new, &stg, &log), 0);
+        assert_eq!(
+            std::fs::read_to_string(root.join("app.exe")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("sub").join("x.dll")).unwrap(),
+            "dll"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("my-setup.json")).unwrap(),
+            "mine"
+        );
+        assert!(!stg.exists(), "staging removed");
+        assert!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .contains("update installed")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_script_reports_a_failed_copy() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("inst");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("app.exe"), "old").unwrap();
+        let missing = d.path().join("missing");
+        let log = d.path().join("u.log");
+        assert_eq!(run_windows_script(&root, &missing, &missing, &log), 1);
+        assert_eq!(
+            std::fs::read_to_string(root.join("app.exe")).unwrap(),
+            "old"
+        );
+        assert!(std::fs::read_to_string(&log).unwrap().contains("FAILED"));
     }
 
     #[cfg(not(target_os = "macos"))]
