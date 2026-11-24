@@ -507,6 +507,24 @@ fn encode_powershell_command(script: &str) -> String {
     out
 }
 
+/// Strip the verbatim prefix `std::fs::canonicalize` adds on Windows:
+/// `\\?\D:\x` -> `D:\x`, `\\?\UNC\server\share\x` -> `\\server\share\x`.
+/// Other paths are returned unchanged. Tools such as robocopy do not
+/// accept verbatim paths.
+#[cfg(any(windows, test))]
+fn plain_windows_path(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\")
+        && rest.as_bytes().get(1) == Some(&b':')
+    {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 /// Full path of Windows PowerShell 5.1, so a `powershell.exe` earlier on
 /// `PATH` is never picked up.
 #[cfg(windows)]
@@ -579,14 +597,17 @@ pub fn spawn_installer(target: &InstallTarget, new_root: &Path) -> Result<()> {
         if !target.relaunch {
             cmd.env("RECO_NO_LAUNCH", "1");
         }
+        // `install_target` canonicalizes, which yields `\\?\` paths on
+        // Windows; robocopy rejects those (ERROR 123), so hand the
+        // script plain paths.
         cmd.args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
             .arg(encode_powershell_command(WINDOWS_SCRIPT))
             .env("RECO_PID", &pid)
-            .env("RECO_ROOT", &target.root)
-            .env("RECO_NEW", new_root)
-            .env("RECO_STAGING", &staging)
-            .env("RECO_EXE", &target.exe)
-            .env("RECO_LOG", &log)
+            .env("RECO_ROOT", plain_windows_path(&target.root))
+            .env("RECO_NEW", plain_windows_path(new_root))
+            .env("RECO_STAGING", plain_windows_path(&staging))
+            .env("RECO_EXE", plain_windows_path(&target.exe))
+            .env("RECO_LOG", plain_windows_path(&log))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -785,6 +806,44 @@ mod tests {
             "mine"
         );
         assert!(!stg.exists());
+    }
+
+    #[test]
+    fn verbatim_windows_paths_are_made_plain() {
+        let p = |s: &str| plain_windows_path(Path::new(s));
+        assert_eq!(p(r"\\?\D:\CLAUDE\x y"), PathBuf::from(r"D:\CLAUDE\x y"));
+        assert_eq!(p(r"\\?\UNC\srv\share\a"), PathBuf::from(r"\\srv\share\a"));
+        assert_eq!(p(r"D:\plain"), PathBuf::from(r"D:\plain"));
+        // A verbatim path that is not a drive path stays as it is.
+        assert_eq!(p(r"\\?\Volume{x}\a"), PathBuf::from(r"\\?\Volume{x}\a"));
+    }
+
+    /// The real failure from the GUI test: canonicalized (verbatim)
+    /// paths reach robocopy. Goes through `plain_windows_path` like
+    /// `spawn_installer` does.
+    #[cfg(windows)]
+    #[test]
+    fn windows_script_handles_canonicalized_paths() {
+        let d = tempfile::tempdir().unwrap();
+        let (root, stg) = (d.path().join("inst"), d.path().join("stg"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&stg).unwrap();
+        std::fs::write(root.join("app.exe"), "old").unwrap();
+        std::fs::write(stg.join("app.exe"), "new").unwrap();
+        let (root_c, stg_c) = (root.canonicalize().unwrap(), stg.canonicalize().unwrap());
+        assert!(root_c.to_string_lossy().starts_with(r"\\?\"));
+        let log = d.path().join("u.log");
+        let code = run_windows_script(
+            &plain_windows_path(&root_c),
+            &plain_windows_path(&stg_c),
+            &plain_windows_path(&stg_c),
+            &log,
+        );
+        assert_eq!(code, 0, "{}", std::fs::read_to_string(&log).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(root.join("app.exe")).unwrap(),
+            "new"
+        );
     }
 
     #[test]
