@@ -237,6 +237,12 @@ impl StitchSession {
     ) -> Result<super::frame_buffer::PendingWorldState, SessionError> {
         use super::frame_buffer::PendingWorldState;
 
+        // Only the Linux/Windows GPU-resident arms can go async; on other
+        // platforms every arm detects synchronously and this stays false.
+        #[cfg_attr(
+            not(any(target_os = "linux", target_os = "windows")),
+            allow(unused_mut)
+        )]
         let mut went_async = false;
         let due = self.core.detection_due(produce_index);
         if due {
@@ -373,6 +379,7 @@ impl StitchSession {
     /// still call this - a plain `&mut self` method here would conflict
     /// with that unrelated borrow even though the two never touch the
     /// same fields.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn run_detection_frames_maybe_async(
         core: &mut crate::core::StitchCore,
         async_detect: Option<&crate::async_detect::AsyncDetectThread>,

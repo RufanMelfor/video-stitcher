@@ -231,7 +231,11 @@ pub(crate) fn greedy_nms(mut dets: Vec<Detection>, iou_thresh: f32) -> Vec<Detec
 /// same 3840x2880 camera frames, only the GPU preprocessing call that
 /// consumes `crop_x0`/`scale` differs (NPP `npp_resize_c3`'s `src_roi`
 /// for TRT, the PTX kernel's `crop_x0` param for ORT).
+///
+/// Neither backend exists on macOS (the Metal detector runs whole-frame),
+/// so these tile helpers are only reached from tests there.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 pub(crate) struct TileGeom {
     pub(crate) crop_x0: u32,
     pub(crate) crop_w: u32,
@@ -249,6 +253,7 @@ impl TileGeom {
     /// 3840x2880 camera frames (crop_size=2880=frame_h) but asserted
     /// rather than silently mis-cropped if a future frame size breaks
     /// that assumption.
+    #[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
     pub(crate) fn build_pair(frame_w: u32, frame_h: u32, input_size: u32) -> (TileGeom, TileGeom) {
         let crop_size = frame_h;
         debug_assert!(
@@ -280,6 +285,7 @@ impl TileGeom {
 /// Everything downstream (`RoiFilteredDetector`, `map_detections_to_panorama`)
 /// assumes `Detection` coordinates are already full-camera-frame-normalized
 /// - this must run before a tile's detections reach any consumer.
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 pub(crate) fn remap_tile_to_frame(mut d: Detection, tile: TileGeom, frame_w: u32) -> Detection {
     let frame_w = frame_w as f32;
     let crop_x0 = tile.crop_x0 as f32;
@@ -304,6 +310,7 @@ pub(crate) fn remap_tile_to_frame(mut d: Detection, tile: TileGeom, frame_w: u32
 /// than a merge bug. Splitting by class keeps cross-tile dedup working
 /// (a second view of one object always carries the same `class_id`)
 /// while letting different classes overlap freely.
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 pub(crate) fn merge_tile_detections(left: Vec<Detection>, right: Vec<Detection>) -> Vec<Detection> {
     let mut all = left;
     all.extend(right);

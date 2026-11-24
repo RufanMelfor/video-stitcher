@@ -19,7 +19,6 @@ use crate::metal_compute::MetalPreprocessPipeline;
 use reco_core::detect::detector::{Detection, DetectorError, DetectorFrame, UnifiedDetector};
 use reco_core::geometry::CameraId;
 use reco_core::gpu::GpuContext;
-use reco_core::interop::metal::CVPixelBufferRef;
 
 use super::postprocess;
 
@@ -53,7 +52,6 @@ pub struct MetalYoloDetector {
     gpu: GpuContext,
     backend: InferenceBackend,
     preprocess: MetalPreprocessPipeline,
-    input_size: u32,
     confidence_threshold: f32,
     labels: Vec<String>,
     // Pre-computed letterbox parameters (constant for fixed frame dimensions).
@@ -163,7 +161,6 @@ impl MetalYoloDetector {
             gpu: gpu.clone(),
             backend,
             preprocess,
-            input_size,
             confidence_threshold,
             labels,
             scale,
