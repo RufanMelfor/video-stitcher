@@ -64,6 +64,12 @@ calibration persistence on top. Licensed under the same AGPL-3.0.
 
 ## Other dependencies
 
+The macOS app bundle ships FFmpeg 7.1.x built by `scripts/build-ffmpeg-macos.sh`
+(GPL, `--enable-gpl`), with x264 (GPL-2.0-or-later, VideoLAN, statically
+linked) and SVT-AV1 (BSD-3-Clause-Clear + AOM patent license, statically
+linked); sources are fetched by that script from ffmpeg.org, code.videolan.org
+and gitlab.com/AOMediaCodec/SVT-AV1.
+
 Built on FFmpeg (the Windows release ships BtbN's GPL shared build
 `n7.1.5-12-g1fdbca85aa`; source: commit `1fdbca85aa` of the 7.1 branch at
 https://git.ffmpeg.org/ffmpeg.git), wgpu, Slint with its

@@ -63,6 +63,7 @@ anyhow = "1"
 arboard = "3"
 open = "5"
 ureq = "3"
+reco-update = { path = "../reco-update" }
 uuid = { version = "1", features = ["v4"] }
 serde_json = "1"
 tracing = { workspace = true }

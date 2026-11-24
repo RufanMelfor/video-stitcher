@@ -96,6 +96,12 @@ pub struct GuiSettings {
     #[serde(default = "default_dark_mode")]
     pub dark_mode: bool,
 
+    /// Check GitHub for a newer release on startup (the only network
+    /// request the app makes). Default true; installing is always a
+    /// manual click on the toolbar button.
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
+
     /// Full segment chain for the left camera video last used (in
     /// temporal order). Restores a multi-segment selection (e.g. DJI's
     /// auto-split 4GB recordings) across an app restart - `recent_left`
@@ -254,6 +260,10 @@ fn default_ai_debug_detection_interval() -> i32 {
     1
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_dark_mode() -> bool {
     true
 }
@@ -313,6 +323,7 @@ impl Default for GuiSettings {
             telemetry_enabled: false,
             telemetry_client_id: None,
             dark_mode: true,
+            auto_check_updates: true,
             last_left_segments: Vec::new(),
             last_right_segments: Vec::new(),
             autocam_defaults: None,
