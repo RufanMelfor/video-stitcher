@@ -1789,10 +1789,16 @@ fn main() -> anyhow::Result<()> {
         Commands::Update { check, prerelease } => {
             let current = env!("CARGO_PKG_VERSION");
             let Some(rel) = reco_update::check(current, prerelease)? else {
-                println!("reco {current} is up to date ({}).", reco_update::platform());
+                println!(
+                    "reco {current} is up to date ({}).",
+                    reco_update::platform()
+                );
                 return Ok(());
             };
-            println!("Update available: {current} -> {} ({})", rel.tag, rel.page_url);
+            println!(
+                "Update available: {current} -> {} ({})",
+                rel.tag, rel.page_url
+            );
             if check {
                 println!("Run `reco update` to install it.");
                 return Ok(());

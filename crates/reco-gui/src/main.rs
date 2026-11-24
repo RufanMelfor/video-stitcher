@@ -4020,8 +4020,8 @@ fn main() -> anyhow::Result<()> {
     let update_result: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     if state.borrow().user_settings.auto_check_updates {
         let result = Arc::clone(&update_result);
-        std::thread::spawn(move || {
-            match reco_update::check(env!("CARGO_PKG_VERSION"), false) {
+        std::thread::spawn(
+            move || match reco_update::check(env!("CARGO_PKG_VERSION"), false) {
                 Ok(Some(rel)) => {
                     log::info!(
                         "Update available: {} -> {}",
@@ -4033,8 +4033,8 @@ fn main() -> anyhow::Result<()> {
                 }
                 Ok(None) => log::debug!("No update available"),
                 Err(e) => log::debug!("Update check failed: {e:#}"),
-            }
-        });
+            },
+        );
     }
 
     let mut codecs: Vec<slint::SharedString> = Vec::new();

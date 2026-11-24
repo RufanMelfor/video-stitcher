@@ -72,9 +72,7 @@ fn is_trusted_url(url: &str) -> bool {
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
     let host = host.split('@').next_back().unwrap_or("");
     let host = host.split(':').next().unwrap_or("");
-    host == "github.com"
-        || host == "api.github.com"
-        || host.ends_with(".githubusercontent.com")
+    host == "github.com" || host == "api.github.com" || host.ends_with(".githubusercontent.com")
 }
 
 fn agent() -> ureq::Agent {
@@ -122,7 +120,9 @@ pub fn pick_release(
         if r["prerelease"].as_bool().unwrap_or(false) && !allow_pre {
             continue;
         }
-        let Some(tag) = r["tag_name"].as_str() else { continue };
+        let Some(tag) = r["tag_name"].as_str() else {
+            continue;
+        };
         let Ok(version) = Version::parse(tag.trim_start_matches('v')) else {
             continue;
         };
@@ -138,7 +138,9 @@ pub fn pick_release(
         };
         let zip_name = zip["name"].as_str().unwrap_or_default().to_string();
         let sha_name = format!("{zip_name}.sha256");
-        let Some(sha) = find(&|n| n == sha_name) else { continue };
+        let Some(sha) = find(&|n| n == sha_name) else {
+            continue;
+        };
         let (Some(zip_url), Some(sha_url)) = (
             zip["browser_download_url"].as_str(),
             sha["browser_download_url"].as_str(),
@@ -171,7 +173,10 @@ pub fn check(current_version: &str, include_prerelease: bool) -> Result<Option<R
         .with_context(|| format!("bad current version {current_version:?}"))?;
     let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=30");
     let mut resp = get(&url)?;
-    let body = resp.body_mut().read_to_string().context("read release list")?;
+    let body = resp
+        .body_mut()
+        .read_to_string()
+        .context("read release list")?;
     let json: serde_json::Value = serde_json::from_str(&body).context("parse release list")?;
     Ok(pick_release(&json, &current, include_prerelease))
 }
@@ -192,7 +197,10 @@ pub fn download(
 ) -> Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let mut sha_resp = get(&release.sha_url)?;
-    let sha_text = sha_resp.body_mut().read_to_string().context("read checksum")?;
+    let sha_text = sha_resp
+        .body_mut()
+        .read_to_string()
+        .context("read checksum")?;
     let expected = parse_sha256(&sha_text).ok_or_else(|| anyhow!("malformed checksum file"))?;
 
     let resp = get(&release.asset_url)?;
@@ -260,9 +268,14 @@ pub struct InstallTarget {
 /// release page.
 pub fn install_target() -> Result<InstallTarget> {
     let exe = std::env::current_exe()?.canonicalize()?;
-    let dir = exe.parent().ok_or_else(|| anyhow!("exe has no parent"))?.to_path_buf();
+    let dir = exe
+        .parent()
+        .ok_or_else(|| anyhow!("exe has no parent"))?
+        .to_path_buf();
     if exe.components().any(|c| c.as_os_str() == "target")
-        && exe.components().any(|c| c.as_os_str() == "release" || c.as_os_str() == "debug")
+        && exe
+            .components()
+            .any(|c| c.as_os_str() == "release" || c.as_os_str() == "debug")
     {
         bail!("running from a cargo target directory (development build)");
     }
@@ -284,16 +297,27 @@ pub fn install_target() -> Result<InstallTarget> {
         root.clone()
     };
     let probe = probe_dir.join(format!(".reco-update-probe-{}", std::process::id()));
-    std::fs::write(&probe, b"")
-        .map_err(|e| anyhow!("{} is not writable ({e}); update manually", probe_dir.display()))?;
+    std::fs::write(&probe, b"").map_err(|e| {
+        anyhow!(
+            "{} is not writable ({e}); update manually",
+            probe_dir.display()
+        )
+    })?;
     let _ = std::fs::remove_file(&probe);
-    Ok(InstallTarget { root, exe, relaunch: true })
+    Ok(InstallTarget {
+        root,
+        exe,
+        relaunch: true,
+    })
 }
 
 /// Unpack `zip` next to the install and return the directory whose
 /// contents/bundle will replace it.
 pub fn stage(zip: &Path, target: &InstallTarget) -> Result<PathBuf> {
-    let parent = target.root.parent().ok_or_else(|| anyhow!("root has no parent"))?;
+    let parent = target
+        .root
+        .parent()
+        .ok_or_else(|| anyhow!("root has no parent"))?;
     let staging = parent.join(".reco-update-staging");
     if staging.exists() {
         std::fs::remove_dir_all(&staging)?;
@@ -316,14 +340,19 @@ pub fn stage(zip: &Path, target: &InstallTarget) -> Result<PathBuf> {
         dest
     } else {
         // Flatten a single top-level folder.
-        let entries: Vec<_> = std::fs::read_dir(&staging)?.filter_map(|e| e.ok()).collect();
+        let entries: Vec<_> = std::fs::read_dir(&staging)?
+            .filter_map(|e| e.ok())
+            .collect();
         if entries.len() == 1 && entries[0].path().is_dir() {
             entries[0].path()
         } else {
             staging
         }
     };
-    let exe_name = target.exe.file_name().ok_or_else(|| anyhow!("exe has no name"))?;
+    let exe_name = target
+        .exe
+        .file_name()
+        .ok_or_else(|| anyhow!("exe has no name"))?;
     let expected = if cfg!(target_os = "macos") {
         new_root.join("Contents/MacOS").join(exe_name)
     } else {
@@ -424,7 +453,9 @@ pub fn spawn_installer(target: &InstallTarget, new_root: &Path) -> Result<()> {
     // or on Windows/Linux the staging folder (the parent when a single
     // top-level folder was flattened).
     let staging = if !cfg!(target_os = "macos")
-        && new_root.file_name().is_none_or(|n| n != ".reco-update-staging")
+        && new_root
+            .file_name()
+            .is_none_or(|n| n != ".reco-update-staging")
     {
         new_root.parent().unwrap_or(new_root).to_path_buf()
     } else {
@@ -446,7 +477,14 @@ pub fn spawn_installer(target: &InstallTarget, new_root: &Path) -> Result<()> {
         }
         cmd.arg(&script)
             .env("RECO_PID", &pid)
-            .env("RECO_MODE", if cfg!(target_os = "macos") { "bundle" } else { "dir" })
+            .env(
+                "RECO_MODE",
+                if cfg!(target_os = "macos") {
+                    "bundle"
+                } else {
+                    "dir"
+                },
+            )
             .env("RECO_ROOT", &target.root)
             .env("RECO_NEW", new_root)
             .env("RECO_STAGING", &staging)
@@ -511,7 +549,10 @@ mod tests {
     fn prerelease_user_sees_newer_prerelease() {
         let all = json!([full("v1.0.0-beta.2", true), full("v1.0.0-beta.1", true)]);
         let cur = Version::parse("1.0.0-beta.1").unwrap();
-        assert_eq!(pick_release(&all, &cur, false).unwrap().tag, "v1.0.0-beta.2");
+        assert_eq!(
+            pick_release(&all, &cur, false).unwrap().tag,
+            "v1.0.0-beta.2"
+        );
     }
 
     #[test]
@@ -569,7 +610,10 @@ mod tests {
     fn sha256_parsing() {
         let h = "a".repeat(64);
         assert_eq!(parse_sha256(&format!("{h}  file.zip\n")), Some(h.clone()));
-        assert_eq!(parse_sha256(&format!("{}\n", h.to_uppercase())), Some(h.clone()));
+        assert_eq!(
+            parse_sha256(&format!("{}\n", h.to_uppercase())),
+            Some(h.clone())
+        );
         assert_eq!(parse_sha256(&format!("{h} *file.zip")), Some(h));
         assert_eq!(parse_sha256("nothex"), None);
         assert_eq!(parse_sha256(""), None);
@@ -638,7 +682,12 @@ mod tests {
         let root = d.path().join("A.app");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("v"), "old").unwrap();
-        run_script("bundle", &root, &d.path().join("missing.app"), &d.path().join("x"));
+        run_script(
+            "bundle",
+            &root,
+            &d.path().join("missing.app"),
+            &d.path().join("x"),
+        );
         assert_eq!(std::fs::read_to_string(root.join("v")).unwrap(), "old");
     }
 
@@ -654,7 +703,10 @@ mod tests {
         std::fs::write(stg.join("app"), "new").unwrap();
         run_script("dir", &root, &stg, &stg);
         assert_eq!(std::fs::read_to_string(root.join("app")).unwrap(), "new");
-        assert_eq!(std::fs::read_to_string(root.join("my-setup.json")).unwrap(), "mine");
+        assert_eq!(
+            std::fs::read_to_string(root.join("my-setup.json")).unwrap(),
+            "mine"
+        );
         assert!(!stg.exists());
     }
 
