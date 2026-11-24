@@ -51,6 +51,7 @@ profiling = ["reco-core/profiling", "reco-io/profiling", "reco-calibrate/profili
 
 [dependencies]
 reco-core = { path = "../reco-core" }
+reco-update = { path = "../reco-update" }
 reco-control = { path = "../reco-control" }
 reco-io = { path = "../reco-io", features = ["ffmpeg"] }
 # default-features = false so autocam's own default (ort) doesn't

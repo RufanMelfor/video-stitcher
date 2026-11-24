@@ -1086,6 +1086,14 @@ export component RecoApp inherits Window {
     in-out property <bool> update-available: false;
     in-out property <string> update-tag: "";
     callback open-update-page();
+    // Download + verify + install the update, then restart (see
+    // `reco-update`). `update-status` replaces the button label while
+    // working / after a failure; `update-failed` turns the button into a
+    // link to the release page.
+    in-out property <bool> update-busy: false;
+    in-out property <bool> update-failed: false;
+    in-out property <string> update-status: "";
+    callback install-update();
     in-out property <bool> has-both-videos: left-path != "" && right-path != "";
     in-out property <bool> has-roi: false;
     in-out property <[float]> roi-points-x: [];
@@ -1991,6 +1999,7 @@ export component RecoApp inherits Window {
     callback open-forum();
     in-out property <bool> prefs-telemetry-enabled: false;
     in-out property <bool> prefs-dark-mode: true;
+    in-out property <bool> prefs-auto-check-updates: true;
     // Export dialog actions.
     callback open-export-dialog();
     callback pick-export-output();
@@ -2208,6 +2217,15 @@ export component RecoApp inherits Window {
                 // newer release; clicking opens the download page - no
                 // more auto-opening a browser tab unasked (see
                 // `open-update-page` / `update-available`'s doc comment).
+                if root.update-available: FlatButton {
+                    text: root.update-status != "" ? root.update-status : "Update to " + root.update-tag;
+                    primary: true;
+                    enabled: !root.update-busy;
+                    clicked => {
+                        if root.update-failed { root.open-update-page(); } else { root.install-update(); }
+                    }
+                }
+
                 if root.cal-dirty || root.lens-dirty: FlatButton {
                     text: "Save Setup";
                     primary: true;
@@ -6310,6 +6328,14 @@ export component RecoApp inherits Window {
                     Rectangle { height: 1px; background: root.border-subtle; }
 
                     Text { text: "Privacy"; color: root.text-body; font-size: 12px; font-weight: 600; }
+
+                    Tip {
+                        tip: "Look for a newer release on GitHub when the app starts. Installing an update always needs a click on the toolbar button.";
+                        CheckBox {
+                            text: "Check for updates on startup";
+                            checked <=> root.prefs-auto-check-updates;
+                        }
+                    }
 
                     Text {
                         text: "No usage data is collected or sent. The only network request is a check for a newer release on GitHub.";

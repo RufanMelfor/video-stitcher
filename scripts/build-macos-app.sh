@@ -5,6 +5,7 @@
 # assembles:
 #
 #   RECO Panopitch.app/Contents/
+#     Frameworks/                   bundled FFmpeg dylibs (self-built, see build-ffmpeg-macos.sh)
 #     Info.plist
 #     MacOS/reco-panopitch          GUI (bundle executable)
 #     MacOS/reco                    CLI
@@ -18,10 +19,11 @@
 #   - lens profiles (resources/profiles.cbor.gz) are embedded at compile
 #     time, so resources/ is not copied.
 #
-# Requirements: Xcode command line tools (codesign, plutil), Rust, and
-# FFmpeg 7 via Homebrew (current Homebrew `ffmpeg` is 9.x, which
-# ffmpeg-next 8.1 does not compile against):
-#   brew install ffmpeg@7 pkg-config
+# Requirements: Xcode command line tools (codesign, plutil), Rust, cmake and
+# pkg-config (brew install cmake pkg-config). FFmpeg 7 is built from source
+# on first run (scripts/build-ffmpeg-macos.sh, a few minutes) because
+# Homebrew's ffmpeg is 9.x (too new for ffmpeg-next 8.1), and Homebrew's
+# ffmpeg@7 is not relocatable.
 #
 # Usage:
 #   scripts/build-macos-app.sh [--skip-build] [--out DIR] [-- <extra cargo args>]
@@ -65,16 +67,27 @@ for tool in cargo codesign plutil; do
     command -v "$tool" >/dev/null || die "'$tool' not found in PATH"
 done
 
-# Point pkg-config at Homebrew's ffmpeg@7 unless the caller already did.
-if [[ "${PKG_CONFIG_PATH:-}" != *ffmpeg@7* ]]; then
-    if command -v brew >/dev/null && brew --prefix ffmpeg@7 >/dev/null 2>&1; then
-        ff7="$(brew --prefix ffmpeg@7)"
-        export PKG_CONFIG_PATH="$ff7/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-        echo "Using FFmpeg 7 from $ff7"
-    else
-        echo "warning: ffmpeg@7 not found via Homebrew; build may fail against FFmpeg 9.x" >&2
+# FFmpeg: use our self-built, relocatable FFmpeg 7 (scripts/build-ffmpeg-macos.sh)
+# so the app runs on a Mac without Homebrew and on macOS 12+. Set
+# FFMPEG_PREFIX to use a different build, or HOMEBREW_FFMPEG=1 to link
+# Homebrew's ffmpeg@7 for a quick local-only build (not relocatable).
+if [[ "${HOMEBREW_FFMPEG:-0}" == "1" ]]; then
+    ff7="$(brew --prefix ffmpeg@7)"
+    export PKG_CONFIG_PATH="$ff7/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    ffmpeg_prefix=""
+    echo "Using Homebrew FFmpeg 7 (app will NOT run without Homebrew)"
+else
+    ffmpeg_prefix="${FFMPEG_PREFIX:-$repo_root/target/ffmpeg-macos}"
+    if [[ ! -f "$ffmpeg_prefix/lib/pkgconfig/libavcodec.pc" ]]; then
+        [[ -z "${FFMPEG_PREFIX:-}" ]] || die "FFMPEG_PREFIX=$FFMPEG_PREFIX has no libavcodec.pc"
+        "$repo_root/scripts/build-ffmpeg-macos.sh"
     fi
+    export PKG_CONFIG_LIBDIR="$ffmpeg_prefix/lib/pkgconfig"
+    unset PKG_CONFIG_PATH
+    echo "Using FFmpeg from $ffmpeg_prefix"
 fi
+# Keep every object (Rust and C) on the same minimum macOS as FFmpeg.
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.0}"
 
 target_args=()
 if [[ -n "${CARGO_TARGET:-}" ]]; then
@@ -86,9 +99,14 @@ fi
 
 if [[ $skip_build -eq 0 ]]; then
     echo "Building $GUI_BIN and $CLI_BIN (release)..."
+    # coreml: ONNX Runtime CoreML execution provider (GPU / Neural Engine)
+    # for AI ball tracking. NO_COREML=1 falls back to CPU inference.
+    coreml_features=(--features reco-gui/coreml,reco-cli/coreml)
+    [[ "${NO_COREML:-0}" == "1" ]] && coreml_features=()
     cargo build --release ${target_args[@]+"${target_args[@]}"} \
         -p reco-gui --bin "$GUI_BIN" \
         -p reco-cli --bin "$CLI_BIN" \
+        ${coreml_features[@]+"${coreml_features[@]}"} \
         ${cargo_extra[@]+"${cargo_extra[@]}"}
 fi
 
@@ -116,6 +134,11 @@ if [[ -n "${ORT_LIB:-}" ]]; then
     echo "Bundled ONNX Runtime from $ORT_LIB"
 fi
 
+if [[ -n "$ffmpeg_prefix" ]]; then
+    python3 "$repo_root/scripts/bundle-macos-dylibs.py" "$app/Contents/Frameworks" "$ffmpeg_prefix" \
+        "$app/Contents/MacOS/$GUI_BIN" "$app/Contents/MacOS/$CLI_BIN"
+fi
+
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -136,7 +159,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>CFBundleVersion</key>
     <string>$short_version</string>
     <key>LSMinimumSystemVersion</key>
-    <string>12.0</string>
+    <string>$MACOSX_DEPLOYMENT_TARGET</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>LSApplicationCategoryType</key>
@@ -149,11 +172,22 @@ plutil -lint "$app/Contents/Info.plist" >/dev/null || die "generated Info.plist 
 # Ad-hoc signature (no Developer ID): enough to run locally on Apple
 # Silicon. Sign nested code first, then the bundle.
 echo "Ad-hoc signing..."
-for f in "$app/Contents/MacOS/"*; do
-    codesign --force --sign - "$f"
+for f in "$app/Contents/Frameworks/"* "$app/Contents/MacOS/"*; do
+    [[ -e "$f" ]] && codesign --force --sign - "$f"
 done
 codesign --force --sign - "$app"
 codesign --verify --verbose=2 "$app"
+
+# Release archive in the layout reco-update expects:
+#   reco-panopitch-v<version>-macos-aarch64.zip (+ .sha256)
+if [[ "${MAKE_ZIP:-1}" == "1" ]]; then
+    arch="$(uname -m)"; [[ "$arch" == "arm64" ]] && arch="aarch64"
+    zip_name="reco-panopitch-v$version-macos-$arch.zip"
+    rm -f "$out_dir/$zip_name" "$out_dir/$zip_name.sha256"
+    ditto -c -k --keepParent "$app" "$out_dir/$zip_name"
+    (cd "$out_dir" && shasum -a 256 "$zip_name" > "$zip_name.sha256")
+    echo "Release archive: $out_dir/$zip_name"
+fi
 
 echo
 echo "Done: $app"

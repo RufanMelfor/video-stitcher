@@ -148,6 +148,18 @@ struct Cli {
 // is irrelevant.
 #[allow(clippy::large_enum_variant)]
 enum Commands {
+    /// Check GitHub for a newer release and install it. The running
+    /// install is replaced right after this command exits.
+    Update {
+        /// Only report whether an update exists; don't install it.
+        #[arg(long)]
+        check: bool,
+
+        /// Also consider pre-releases (beta/rc) when running a stable build.
+        #[arg(long)]
+        prerelease: bool,
+    },
+
     /// Stitch two video files into a panoramic output.
     Stitch {
         /// Path to the left camera video file.
@@ -1773,6 +1785,41 @@ fn main() -> anyhow::Result<()> {
             debug_dir.as_deref(),
             &output,
         ),
+
+        Commands::Update { check, prerelease } => {
+            let current = env!("CARGO_PKG_VERSION");
+            let Some(rel) = reco_update::check(current, prerelease)? else {
+                println!("reco {current} is up to date ({}).", reco_update::platform());
+                return Ok(());
+            };
+            println!("Update available: {current} -> {} ({})", rel.tag, rel.page_url);
+            if check {
+                println!("Run `reco update` to install it.");
+                return Ok(());
+            }
+            let mut target = reco_update::install_target()?;
+            target.relaunch = false;
+            let dir = std::env::temp_dir().join("reco-update-download");
+            let mut last = 101;
+            let zip = reco_update::download(&rel, &dir, &mut |done, total| {
+                if total > 0 {
+                    let pct = done * 100 / total;
+                    if pct != last {
+                        last = pct;
+                        eprint!("\rDownloading {pct}%");
+                    }
+                }
+            })?;
+            eprintln!();
+            let new_root = reco_update::stage(&zip, &target)?;
+            let _ = std::fs::remove_file(&zip);
+            reco_update::spawn_installer(&target, &new_root)?;
+            println!(
+                "Update to {} is ready and is being installed now. Start the app again afterwards.",
+                rel.tag
+            );
+            Ok(())
+        }
 
         Commands::Info => {
             let gpu = reco_core::gpu::GpuContext::new_blocking()?;

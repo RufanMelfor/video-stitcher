@@ -9,7 +9,7 @@ Stitch two camera feeds into a seamless panoramic sports view with AI-powered au
 ## Features
 
 - **GPU-first pipeline** - Real-time stitching via wgpu 28 (Vulkan / Metal / DX12). Upstream reports 500+ fps for stitching alone on modern desktop GPUs; on the tested RTX 3060 Ti a full export with AI tracking runs at roughly 18-31 fps (see `docs/async-detect-benchmark-v054.md`)
-- **Zero-copy decode** - Windows: D3D11VA (NVIDIA tested). NVDEC on Linux and VideoToolbox on macOS are upstream code, **untested in this fork**
+- **Zero-copy decode** - Windows: D3D11VA (NVIDIA tested). macOS: VideoToolbox + Metal zero-copy decode, Metal stitching and VideoToolbox hardware encoding verified on Apple Silicon (M4 Pro, synthetic clips). NVDEC on Linux is upstream code, **untested in this fork**
 - **AI ball + player tracking** - YOLO detection on ONNX (CPU / CUDA / CoreML / NCNN) or native TensorRT `.engine`, with anticipatory lookahead smoothing and density-peak player clustering
 - **Automatic calibration** - AKAZE feature matching with IMU / audio cross-correlation for temporal sync, Gyroflow lens profiles
 - **Live production** - *(upstream code, untested in this fork)* GStreamer camera ingest (Linux / Jetson CSI), push-based `StitchCore::submit_frame_*` for OBS and live streams, replay ring buffer, stacked-video pack/unpack
@@ -192,6 +192,32 @@ reco-minimap     Top-down pitch minimap from AI detections (tracker from B. Zelt
 
 Push-based is the canonical ingestion path: consumers call `StitchCore::submit_frame_yuv` / `submit_frame_bgra` per frame. Batch file processing (`StitchSession::run`) is a thin pull-adapter on top.
 
+## Updating
+
+The GUI checks GitHub for a newer release on startup (switch it off in
+Preferences, the only network request the app makes). When one exists for
+your platform an **Update to vX** button appears in the toolbar. Clicking it
+downloads the release zip, verifies its SHA-256, unpacks it next to the
+install and restarts into the new version; settings are kept. `reco update`
+does the same from the command line (`reco update --check` only looks). A
+development build (`cargo run`) or an install in a read-only folder opens the
+release page instead.
+
+Releases must follow this asset convention (one zip + checksum per platform):
+
+```text
+reco-panopitch-<tag>-windows-x86_64.zip   (+ .zip.sha256)
+reco-panopitch-<tag>-macos-aarch64.zip    (+ .zip.sha256)   <- scripts/build-macos-app.sh
+reco-panopitch-<tag>-linux-x86_64.zip     (+ .zip.sha256)
+```
+
+The macOS zip holds `RECO Panopitch.app`; Windows/Linux zips hold the install
+folder (optionally inside one top-level folder). Builds that must not replace
+each other can set `RECO_RELEASE_VARIANT=cpu` at compile time, which makes
+them look for `...-<platform>-cpu.zip`. A release without a matching asset
+and checksum is never offered. Pre-releases are offered to users already on a
+pre-release (or with `reco update --prerelease`).
+
 ## Building
 
 Prerequisites: Rust **1.92+** (workspace MSRV), FFmpeg development libraries, pkg-config, clang.
@@ -202,12 +228,16 @@ sudo apt install libavcodec-dev libavformat-dev libavutil-dev \
     libswscale-dev libavdevice-dev libavfilter-dev libswresample-dev \
     pkg-config clang
 
-# macOS (Homebrew). Use FFmpeg 7: current Homebrew `ffmpeg` is 9.x, which
-# ffmpeg-next 8.1 does not compile against.
-brew install ffmpeg@7 pkg-config
-export PKG_CONFIG_PATH="$(brew --prefix ffmpeg@7)/lib/pkgconfig:$PKG_CONFIG_PATH"
-# Optional: build a RECO Panopitch.app bundle (see scripts/build-macos-app.sh)
-# ./scripts/build-macos-app.sh
+# macOS (Apple Silicon): one script builds everything, including a
+# self-contained FFmpeg 7 (current Homebrew `ffmpeg` is 9.x, which
+# ffmpeg-next 8.1 does not compile against, and Homebrew's ffmpeg@7 is not
+# relocatable). Result: target/macos-app/RECO Panopitch.app plus a release
+# zip. The app needs nothing from Homebrew and runs on macOS 12+.
+xcode-select --install          # compiler, codesign (once)
+brew install cmake pkg-config   # build-time only
+./scripts/build-macos-app.sh    # first run also builds FFmpeg (~10 min)
+# Quick local build against Homebrew's ffmpeg@7 instead (not relocatable):
+#   brew install ffmpeg@7 && HOMEBREW_FFMPEG=1 ./scripts/build-macos-app.sh
 
 # Windows: FFmpeg 7.x binaries + LLVM/Clang, set FFMPEG_DIR env var
 

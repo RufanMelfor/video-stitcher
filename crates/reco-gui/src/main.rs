@@ -33,6 +33,9 @@ mod telemetry_client;
 mod toast;
 mod waveform;
 
+/// Release found by the background check; read by the toolbar button.
+static PENDING_UPDATE: Mutex<Option<reco_update::Release>> = Mutex::new(None);
+
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -4010,37 +4013,26 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Check for updates in the background.
-    // Stores result in an Arc<Mutex> that the timer tick reads once.
+    // Check for updates in the background (opt-out in Preferences).
+    // The tag goes through an Arc<Mutex> that the timer tick reads once;
+    // the full release (asset URLs) is kept in `PENDING_UPDATE` for the
+    // toolbar button's `install-update` handler.
     let update_result: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    {
+    if state.borrow().user_settings.auto_check_updates {
         let result = Arc::clone(&update_result);
         std::thread::spawn(move || {
-            let current = env!("CARGO_PKG_VERSION");
-            let resp = ureq::get(
-                "https://api.github.com/repos/RufanMelfor/video-stitcher/releases/latest",
-            )
-            .header("User-Agent", "reco-panopitch")
-            .call();
-            if let Ok(mut resp) = resp
-                && let Ok(body) = resp.body_mut().read_to_string()
-                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
-                && let Some(tag) = json["tag_name"].as_str()
-            {
-                let latest = tag.trim_start_matches('v');
-                let parse_ver = |s: &str| -> Option<Vec<u64>> {
-                    s.split(&['.', '-'][..])
-                        .take(3)
-                        .map(|p| p.parse().ok())
-                        .collect()
-                };
-                let is_newer = parse_ver(latest)
-                    .zip(parse_ver(current))
-                    .is_some_and(|(l, c)| l > c);
-                if is_newer {
-                    log::info!("Update available: {current} -> {latest}");
-                    *result.lock().unwrap() = Some(tag.to_string());
+            match reco_update::check(env!("CARGO_PKG_VERSION"), false) {
+                Ok(Some(rel)) => {
+                    log::info!(
+                        "Update available: {} -> {}",
+                        env!("CARGO_PKG_VERSION"),
+                        rel.version
+                    );
+                    *result.lock().unwrap() = Some(rel.tag.clone());
+                    *PENDING_UPDATE.lock().unwrap() = Some(rel);
                 }
+                Ok(None) => log::debug!("No update available"),
+                Err(e) => log::debug!("Update check failed: {e:#}"),
             }
         });
     }
@@ -5308,6 +5300,7 @@ fn main() -> anyhow::Result<()> {
         );
         app.set_prefs_telemetry_enabled(s.user_settings.telemetry_enabled);
         app.set_prefs_dark_mode(s.user_settings.dark_mode);
+        app.set_prefs_auto_check_updates(s.user_settings.auto_check_updates);
         app.set_prefs_dialog_open(true);
     });
 
@@ -5343,6 +5336,7 @@ fn main() -> anyhow::Result<()> {
         };
         let dark = app.get_prefs_dark_mode();
         s.user_settings.dark_mode = dark;
+        s.user_settings.auto_check_updates = app.get_prefs_auto_check_updates();
         app.set_dark_mode(dark);
 
         s.user_settings.telemetry_enabled = false;
@@ -5386,17 +5380,94 @@ fn main() -> anyhow::Result<()> {
         let _ = open::that("https://github.com/RufanMelfor/video-stitcher/discussions");
     });
 
-    // User-initiated now (toolbar button, see `update-available` in
-    // main.slint) rather than an automatic browser-open the moment the
-    // background version check finds a newer release.
+    // Fallback / manual path: open the release page in the browser.
     let app_weak = app.as_weak();
     app.on_open_update_page(move || {
         let Some(app) = app_weak.upgrade() else {
             return;
         };
-        let tag = app.get_update_tag();
-        let url = format!("https://github.com/RufanMelfor/video-stitcher/releases/tag/{tag}");
+        let url = match PENDING_UPDATE.lock().unwrap().as_ref() {
+            Some(rel) => rel.page_url.clone(),
+            None => format!(
+                "https://github.com/RufanMelfor/video-stitcher/releases/tag/{}",
+                app.get_update_tag()
+            ),
+        };
         let _ = open::that(&url);
+    });
+
+    // Toolbar button: download, verify the checksum, unpack next to the
+    // install, then hand over to a detached script that swaps the files
+    // after this process exits and relaunches the app.
+    let app_weak = app.as_weak();
+    app.on_install_update(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        if app.get_update_busy() {
+            return;
+        }
+        if app.get_export_in_progress() {
+            app.set_update_status("Finish the export first".into());
+            return;
+        }
+        if app.get_cal_dirty() || app.get_lens_dirty() {
+            app.set_update_status("Save Setup first".into());
+            return;
+        }
+        let Some(rel) = PENDING_UPDATE.lock().unwrap().clone() else {
+            return;
+        };
+        // Dev build or read-only install: cannot replace itself.
+        let target = match reco_update::install_target() {
+            Ok(t) => t,
+            Err(e) => {
+                log::info!("Self-update unavailable ({e:#}); opening release page");
+                let _ = open::that(&rel.page_url);
+                return;
+            }
+        };
+        app.set_update_busy(true);
+        app.set_update_failed(false);
+        app.set_update_status("Downloading 0%".into());
+        let weak = app.as_weak();
+        std::thread::spawn(move || {
+            let dir = std::env::temp_dir().join("reco-update-download");
+            let mut last_pct = 0u64;
+            let progress_weak = weak.clone();
+            let result = reco_update::download(&rel, &dir, &mut |done, total| {
+                let pct = if total > 0 { done * 100 / total } else { 0 };
+                if pct != last_pct {
+                    last_pct = pct;
+                    let _ = progress_weak.upgrade_in_event_loop(move |a| {
+                        a.set_update_status(format!("Downloading {pct}%").into());
+                    });
+                }
+            })
+            .and_then(|zip| {
+                let _ = weak.upgrade_in_event_loop(|a| a.set_update_status("Installing...".into()));
+                let staged = reco_update::stage(&zip, &target);
+                let _ = std::fs::remove_file(&zip);
+                staged
+            })
+            .and_then(|new_root| reco_update::spawn_installer(&target, &new_root));
+            match result {
+                Ok(()) => {
+                    log::info!("Update {} staged; restarting", rel.tag);
+                    let _ = slint::invoke_from_event_loop(|| {
+                        let _ = slint::quit_event_loop();
+                    });
+                }
+                Err(e) => {
+                    log::error!("Update failed: {e:#}");
+                    let _ = weak.upgrade_in_event_loop(|a| {
+                        a.set_update_busy(false);
+                        a.set_update_failed(true);
+                        a.set_update_status("Update failed - open download page".into());
+                    });
+                }
+            }
+        });
     });
 
     let app_weak = app.as_weak();
@@ -8912,7 +8983,7 @@ fn main() -> anyhow::Result<()> {
                         s.toasts.push_with_ttl(
                             Severity::Info,
                             format!("Update available: {tag}"),
-                            "Click \"Update available\" in the toolbar to open the download page.",
+                            "Click the \"Update to ...\" button in the toolbar to download and install it.",
                             Duration::from_secs(30),
                         );
                         log::info!("Toast pushed for update {tag}");
