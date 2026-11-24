@@ -43,7 +43,7 @@ fn default_schema_version() -> u32 {
 /// this program saves. Files naming a different generator are refused.
 const GENERATOR_NAME: &str = "RECO Panopitch";
 
-/// The `generator` string for this build, e.g. `RECO Panopitch 1.0.0-beta.1`.
+/// The `generator` string for this build, e.g. `RECO Panopitch 1.0.0-beta.2`.
 fn current_generator() -> String {
     format!("{GENERATOR_NAME} {}", env!("CARGO_PKG_VERSION"))
 }

@@ -234,6 +234,12 @@ so their defaults only apply until you pick one.
 |---|---|---|---|
 | Dark mode |  | on | Switch the app between dark and light theme. |
 
+### Privacy
+
+| Setting | Range | Default | What it does |
+|---|---|---|---|
+| Check for updates on startup |  | on | Look for a newer release on GitHub when the app starts. Installing an update always needs a click on the toolbar button. |
+
 ## Export dialog
 
 ### Export tab

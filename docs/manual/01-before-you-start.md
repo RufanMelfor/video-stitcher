@@ -83,6 +83,30 @@ expect setup files to move between the two. When you first start RECO
 Panopitch it copies your existing Reco settings into its own folder; the
 originals stay untouched.
 
+### Updates
+
+When the program starts it asks GitHub whether a newer release exists. That
+is the only network request it makes; switch it off in Preferences with
+**Check for updates on startup**. When a newer version is found, an
+**Update to v...** button appears in the toolbar. Nothing is installed until
+you click it.
+
+Clicking it downloads the release zip, checks its SHA-256 checksum, closes
+the program, replaces the files in the program folder and starts the new
+version. Your settings and setup files are kept: they are not stored in the
+program folder. Finish a running export and save your setup first; the button
+asks you to.
+
+- If the program folder is not writable (for example under
+  `C:\Program Files`), the button opens the download page instead.
+- If the download or the checksum fails, the button changes to **Update
+  failed - open download page**. Nothing has been changed yet.
+- If replacing the files fails after the program has closed, a message names
+  a log file in your `%TEMP%` folder. Download the release from GitHub and
+  unpack it by hand.
+- Version 1.0.0-beta.1 does not have this button yet. Update from it once by
+  hand; from 1.0.0-beta.2 on, the button does it for you.
+
 ## First start
 
 1. Start `reco-panopitch.exe`. You see the welcome text with three steps: add the left

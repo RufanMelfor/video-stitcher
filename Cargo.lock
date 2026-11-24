@@ -5645,7 +5645,7 @@ dependencies = [
 
 [[package]]
 name = "reco-autocam"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "log",
  "reco-core",
@@ -5658,7 +5658,7 @@ dependencies = [
 
 [[package]]
 name = "reco-calibrate"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "approx",
  "argmin",
@@ -5689,7 +5689,7 @@ dependencies = [
 
 [[package]]
 name = "reco-cli"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -5714,7 +5714,7 @@ dependencies = [
 
 [[package]]
 name = "reco-control"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "log",
  "reco-core",
@@ -5727,7 +5727,7 @@ dependencies = [
 
 [[package]]
 name = "reco-core"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "ab_glyph",
  "approx",
@@ -5757,7 +5757,7 @@ dependencies = [
 
 [[package]]
 name = "reco-detect"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "block2 0.6.2",
  "bytemuck",
@@ -5780,7 +5780,7 @@ dependencies = [
 
 [[package]]
 name = "reco-gui"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5812,7 +5812,7 @@ dependencies = [
 
 [[package]]
 name = "reco-io"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "directories",
  "ffmpeg-next",
@@ -5831,7 +5831,7 @@ dependencies = [
 
 [[package]]
 name = "reco-minimap"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "log",
  "reco-core",
@@ -5842,7 +5842,7 @@ dependencies = [
 
 [[package]]
 name = "reco-obs"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "bindgen",
  "cc",
@@ -5859,7 +5859,7 @@ dependencies = [
 
 [[package]]
 name = "reco-scoreboard"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "anyhow",
  "getrandom 0.4.2",
@@ -5890,7 +5890,7 @@ dependencies = [
 
 [[package]]
 name = "reco-update"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "anyhow",
  "log",
